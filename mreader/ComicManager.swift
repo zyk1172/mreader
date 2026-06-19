@@ -64,7 +64,6 @@ class ComicManager {
 
     nonisolated struct ScannedChapter: Sendable {
         let title: String
-        let workTitle: String
         let chapterType: ChapterType
         let path: String
         let importResult: ImportResult
@@ -745,7 +744,6 @@ class ComicManager {
         }
 
         let chapterTitle = url.deletingPathExtension().lastPathComponent
-        let workTitle = normalizedWorkTitle(from: chapterTitle)
         let coverPath = cacheCoverImage(from: summary.first, cacheKey: url.path)
         let result = ImportResult(
             title: chapterTitle,
@@ -764,7 +762,6 @@ class ComicManager {
 
         return ScannedChapter(
             title: chapterTitle,
-            workTitle: workTitle,
             chapterType: chapterType,
             path: url.path,
             importResult: result
@@ -793,23 +790,6 @@ class ComicManager {
     nonisolated private static func isArchiveOrDocument(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         return supportedArchiveExtensions.contains(ext) || supportedDocumentExtensions.contains(ext)
-    }
-
-    nonisolated private static func normalizedWorkTitle(from chapterTitle: String) -> String {
-        var title = chapterTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let patterns = [
-            #"[\s._-]*[\[\(（【]?\d{1,4}[\]\)）】]?$"#,
-            #"[\s._-]*(第\s*)?\d{1,4}\s*[话話章节卷部集]$"#,
-            #"[\s._-]*(chapter|chap|ch|vol|volume)\s*\d{1,4}$"#
-        ]
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                let range = NSRange(title.startIndex..<title.endIndex, in: title)
-                title = regex.stringByReplacingMatches(in: title, options: [], range: range, withTemplate: "")
-                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-_. ")))
-            }
-        }
-        return title.isEmpty ? chapterTitle : title
     }
 
     nonisolated private static func cacheCoverImage(from sourceURL: URL?, cacheKey: String) -> String? {
@@ -867,34 +847,22 @@ class ComicManager {
             return SeriesFolderScan(series: [], directComic: directComic, archiveCount: 0, folderChapterCount: 1)
         }
 
-        let grouped = Dictionary(grouping: chapters) { chapter in
-            chapter.workTitle
-        }
-        var scannedSeries: [ScannedSeries] = []
-        for (workTitle, groupedChapters) in grouped {
-            let sortedChapters = groupedChapters.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-            let chapterList = sortedChapters.map { chapter in
-                "\(chapter.title)[\(chapter.chapterType.rawValue)]"
-            }.joined(separator: " | ")
-            logger.info("scan-series-folder folder=\(seriesURL.lastPathComponent, privacy: .public) work=\(workTitle, privacy: .public) chapters=\(chapterList, privacy: .public)")
-            let seriesLibraryPath: String
-            if grouped.count == 1 {
-                seriesLibraryPath = seriesURL.path
-            } else {
-                seriesLibraryPath = seriesURL.appendingPathComponent(workTitle, isDirectory: true).path
-            }
-            let comicResults = sortedChapters.map { chapter in
-                chapter.importResult
-            }
-            scannedSeries.append(ScannedSeries(
-                title: workTitle,
-                libraryPath: seriesLibraryPath,
-                comics: comicResults
-            ))
-        }
-        scannedSeries.sort { lhs, rhs in
+        let sortedChapters = chapters.sorted { lhs, rhs in
             lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
+        let chapterList = sortedChapters.map { chapter in
+            "\(chapter.title)[\(chapter.chapterType.rawValue)]"
+        }.joined(separator: " | ")
+        logger.info("scan-series-folder folder=\(seriesURL.lastPathComponent, privacy: .public) chapters=\(chapterList, privacy: .public)")
+        let scannedSeries = [
+            ScannedSeries(
+                title: seriesURL.lastPathComponent,
+                libraryPath: seriesURL.path,
+                comics: sortedChapters.map { chapter in
+                    chapter.importResult
+                }
+            )
+        ]
 
         return SeriesFolderScan(
             series: scannedSeries,
