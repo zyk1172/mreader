@@ -11,7 +11,7 @@ final class LocalWebServer: ObservableObject {
     private var onUpload: ((URL) -> Void)?
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
-    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "rar", "cbr", "7z", "pdf", "jpg", "jpeg", "png", "webp", "heic", "heif"]
+    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "rar", "cbr", "7z", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
 
     func start(onUpload: @escaping (URL) -> Void) {
         self.onUpload = onUpload
@@ -234,7 +234,7 @@ final class LocalWebServer: ObservableObject {
         <h1>MReader 网页导入</h1>
         <p>选择 ZIP、CBZ 或包含图片的压缩包上传。上传完成后 app 会自动加入书架。</p>
         <form method="post" action="/upload" enctype="multipart/form-data">
-        <input name="file" type="file" accept=".zip,.cbz,.rar,.cbr,.7z,.pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" required>
+        <input name="file" type="file" accept=".zip,.cbz,.rar,.cbr,.7z,.pdf,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
         <button type="submit">上传到 MReader</button>
         </form>
         </main></body></html>

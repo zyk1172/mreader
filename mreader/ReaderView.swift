@@ -966,7 +966,12 @@ struct LocalImageView: View {
         }
 
         let loadedImage = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            let source: CGImageSource?
+            if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
+                source = CGImageSourceCreateWithData(data as CFData, nil)
+            } else {
+                source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            }
             guard let source else { return nil }
             let options: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
