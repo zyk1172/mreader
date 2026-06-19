@@ -17,6 +17,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
     var sourceTypeRaw: String
     var sourceURL: String?
     var smbPath: String?
+    var chapterTypeRaw: String?
+    var chapterPath: String?
     var seriesID: UUID?
     var currentPageIndex: Int
     var lastReadAt: Date
@@ -33,7 +35,7 @@ struct ComicBook: Identifiable, Codable, Hashable {
         ComicSourceType(rawValue: sourceTypeRaw) ?? .local
     }
 
-    init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, smbPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, lastReadAt: Date = Date(), isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen") {
+    init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, smbPath: String? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, lastReadAt: Date = Date(), isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen") {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -44,6 +46,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
         self.sourceTypeRaw = sourceTypeRaw
         self.sourceURL = sourceURL
         self.smbPath = smbPath
+        self.chapterTypeRaw = chapterTypeRaw
+        self.chapterPath = chapterPath
         self.seriesID = seriesID
         self.currentPageIndex = currentPageIndex
         self.lastReadAt = lastReadAt
@@ -69,6 +73,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
         sourceTypeRaw = try container.decodeIfPresent(String.self, forKey: .sourceTypeRaw) ?? ComicSourceType.local.rawValue
         sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
         smbPath = try container.decodeIfPresent(String.self, forKey: .smbPath)
+        chapterTypeRaw = try container.decodeIfPresent(String.self, forKey: .chapterTypeRaw)
+        chapterPath = try container.decodeIfPresent(String.self, forKey: .chapterPath)
         seriesID = try container.decodeIfPresent(UUID.self, forKey: .seriesID)
         currentPageIndex = try container.decodeIfPresent(Int.self, forKey: .currentPageIndex) ?? 0
         lastReadAt = try container.decodeIfPresent(Date.self, forKey: .lastReadAt) ?? Date()

@@ -26,6 +26,8 @@ class ComicManager {
         let sourceTypeRaw: String
         let sourceURL: String?
         let smbPath: String?
+        let chapterTypeRaw: String?
+        let chapterPath: String?
 
         init(
             title: String,
@@ -36,7 +38,9 @@ class ComicManager {
             libraryPath: String,
             sourceTypeRaw: String = ComicSourceType.local.rawValue,
             sourceURL: String? = nil,
-            smbPath: String? = nil
+            smbPath: String? = nil,
+            chapterTypeRaw: String? = nil,
+            chapterPath: String? = nil
         ) {
             self.title = title
             self.pagesCount = pagesCount
@@ -47,7 +51,23 @@ class ComicManager {
             self.sourceTypeRaw = sourceTypeRaw
             self.sourceURL = sourceURL
             self.smbPath = smbPath
+            self.chapterTypeRaw = chapterTypeRaw
+            self.chapterPath = chapterPath
         }
+    }
+
+    nonisolated enum ChapterType: String, Sendable {
+        case archive
+        case folder
+        case pdf
+    }
+
+    nonisolated struct ScannedChapter: Sendable {
+        let title: String
+        let workTitle: String
+        let chapterType: ChapterType
+        let path: String
+        let importResult: ImportResult
     }
 
     nonisolated struct ScannedSeries: Sendable {
@@ -85,7 +105,13 @@ class ComicManager {
             let url = try resolveBookmark(bookmarkData)
             let didStart = url.startAccessingSecurityScopedResource()
             logMemory("load-pages-start \(url.lastPathComponent)")
-            let sortedURLs = getAllImages(from: url)
+            guard let pageSourceURL = pageSourceURL(for: url) else {
+                if didStart {
+                    url.stopAccessingSecurityScopedResource()
+                }
+                return nil
+            }
+            let sortedURLs = getAllImages(from: pageSourceURL)
                 .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
             let pages = sortedURLs.enumerated().map { ComicPage(index: $0, url: $1) }
             logMemory("load-pages-end \(url.lastPathComponent) count=\(pages.count)")
@@ -99,18 +125,7 @@ class ComicManager {
     }
 
     nonisolated static func loadTemporaryPages(from sourceURL: URL) -> LoadResult? {
-        let ext = sourceURL.pathExtension.lowercased()
-        let pageSourceURL: URL
-
-        if ext == "zip" || ext == "cbz" {
-            guard let extractedURL = unzipArchive(sourceURL) else { return nil }
-            pageSourceURL = extractedURL
-        } else if ext == "pdf" {
-            guard let extractedURL = extractImagesFromPDFSynchronously(sourceURL) else { return nil }
-            pageSourceURL = extractedURL
-        } else {
-            pageSourceURL = sourceURL
-        }
+        guard let pageSourceURL = pageSourceURL(for: sourceURL) else { return nil }
 
         logMemory("load-temporary-pages-start \(sourceURL.lastPathComponent)")
         let sortedURLs = getAllImages(from: pageSourceURL)
@@ -206,7 +221,9 @@ class ComicManager {
                 bookmarkData: bookmark,
                 coverImagePath: summary.first?.path,
                 fileSize: folderSize(destinationFolder),
-                libraryPath: destinationFolder.path
+                libraryPath: destinationFolder.path,
+                chapterTypeRaw: ChapterType.folder.rawValue,
+                chapterPath: destinationFolder.path
             )
         }
         return nil
@@ -230,39 +247,41 @@ class ComicManager {
         var comics: [ImportResult] = []
         var series: [ScannedSeries] = []
         logMemory("scan-start root=\(libraryRoot.lastPathComponent) children=\(children.count)")
+        var archiveCount = 0
+        var folderChapterCount = 0
         for batchStart in stride(from: 0, to: children.count, by: scanBatchSize) {
             let batchEnd = min(batchStart + scanBatchSize, children.count)
             autoreleasepool {
                 for child in children[batchStart..<batchEnd] {
-                    let ext = child.pathExtension.lowercased()
-                    if ext == "zip" || ext == "cbz" {
-                        if let imported = importArchiveAlreadyInLibrary(child) {
-                            comics.append(imported)
-                        }
-                        continue
-                    }
-
-                    if ext == "pdf" {
-                        if let imported = importPDFAlreadyInLibrary(child) {
-                            comics.append(imported)
-                        }
-                        continue
-                    }
-
-                    if isDirectory(child), hasDirectImages(in: child), let result = importResultForLocalFolder(child) {
-                        comics.append(result)
-                        continue
-                    }
-
                     if isDirectory(child) {
-                        let childComics = scanSeriesFolder(child)
-                        if !childComics.isEmpty {
-                            series.append(ScannedSeries(title: child.lastPathComponent, libraryPath: child.path, comics: childComics))
+                        let detected = scanSeriesFolder(child)
+                        archiveCount += detected.archiveCount
+                        folderChapterCount += detected.folderChapterCount
+                        if !detected.series.isEmpty {
+                            series.append(contentsOf: detected.series)
+                        } else if let directComic = detected.directComic {
+                            comics.append(directComic)
                         }
+                        continue
+                    }
+
+                    if isArchiveOrDocument(child) {
+                        archiveCount += 1
+                    }
+                    if let chapter = makeChapter(from: child) {
+                        if chapter.chapterType == .folder {
+                            folderChapterCount += 1
+                        }
+                        comics.append(chapter.importResult)
                     }
                 }
             }
             logMemory("scan-batch \(batchEnd)/\(children.count)")
+        }
+        logger.info("scan-summary archives=\(archiveCount, privacy: .public) folderChapters=\(folderChapterCount, privacy: .public) mergedComics=\(series.count + comics.count, privacy: .public)")
+        for scannedSeries in series {
+            let chapterList = scannedSeries.comics.map(\.title).joined(separator: " | ")
+            logger.info("scan-comic title=\(scannedSeries.title, privacy: .public) chapters=\(chapterList, privacy: .public)")
         }
         return LibraryScanResult(
             comics: comics.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending },
@@ -383,7 +402,9 @@ class ComicManager {
             bookmarkData: bookmark,
             coverImagePath: summary.first?.path,
             fileSize: folderSize(targetFolder),
-            libraryPath: targetFolder.path
+            libraryPath: targetFolder.path,
+            chapterTypeRaw: ChapterType.folder.rawValue,
+            chapterPath: targetFolder.path
         )
     }
 
@@ -455,7 +476,9 @@ class ComicManager {
             bookmarkData: bookmark,
             coverImagePath: summary.first?.path,
             fileSize: folderSize(folderURL),
-            libraryPath: folderURL.path
+            libraryPath: folderURL.path,
+            chapterTypeRaw: ChapterType.folder.rawValue,
+            chapterPath: folderURL.path
         )
     }
 
@@ -658,6 +681,8 @@ class ComicManager {
     }
 
     nonisolated private static let supportedImageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "heic", "heif"]
+    nonisolated private static let supportedArchiveExtensions: Set<String> = ["zip", "cbz", "rar", "cbr", "7z"]
+    nonisolated private static let supportedDocumentExtensions: Set<String> = ["pdf"]
 
     nonisolated private static func isInsideLocalLibrary(_ url: URL) -> Bool {
         guard let libraryRoot = selectedLibraryRootURL() else { return false }
@@ -683,30 +708,200 @@ class ComicManager {
         }
         return contents.contains { child in
             let ext = child.pathExtension.lowercased()
-            return isDirectory(child) || ["zip", "cbz", "pdf", "7z"].contains(ext)
+            return isDirectory(child) || supportedArchiveExtensions.contains(ext) || supportedDocumentExtensions.contains(ext)
         }
     }
 
-    nonisolated private static func scanSeriesFolder(_ seriesURL: URL) -> [ImportResult] {
-        guard let children = try? FileManager.default.contentsOfDirectory(at: seriesURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
-            return []
+    nonisolated private static func makeChapter(from url: URL) -> ScannedChapter? {
+        let ext = url.pathExtension.lowercased()
+        let chapterType: ChapterType
+        let pageSourceURL: URL
+
+        if isDirectory(url) {
+            guard hasDirectImages(in: url) else { return nil }
+            chapterType = .folder
+            pageSourceURL = url
+        } else if ext == "pdf" {
+            guard let extractedURL = extractImagesFromPDFSynchronously(url) else { return nil }
+            chapterType = .pdf
+            pageSourceURL = extractedURL
+        } else if supportedArchiveExtensions.contains(ext) {
+            guard canReadArchiveExtension(ext), let extractedURL = unzipArchive(url) else {
+                logger.warning("scan-unsupported-archive path=\(url.lastPathComponent, privacy: .public) ext=\(ext, privacy: .public)")
+                return nil
+            }
+            chapterType = .archive
+            pageSourceURL = extractedURL
+        } else {
+            return nil
         }
-        var results: [ImportResult] = []
-        for child in children {
-            let ext = child.pathExtension.lowercased()
-            if ext == "zip" || ext == "cbz" {
-                if let imported = importArchiveAlreadyInLibrary(child) {
-                    results.append(imported)
-                }
-            } else if ext == "pdf" {
-                if let imported = importPDFAlreadyInLibrary(child) {
-                    results.append(imported)
-                }
-            } else if isDirectory(child), let result = importResultForLocalFolder(child) {
-                results.append(result)
+
+        let summary = imageSummary(from: pageSourceURL)
+        guard summary.count > 0, let bookmark = createBookmark(for: url) else {
+            if pageSourceURL != url {
+                try? FileManager.default.removeItem(at: pageSourceURL)
+            }
+            return nil
+        }
+
+        let chapterTitle = url.deletingPathExtension().lastPathComponent
+        let workTitle = normalizedWorkTitle(from: chapterTitle)
+        let coverPath = cacheCoverImage(from: summary.first, cacheKey: url.path)
+        let result = ImportResult(
+            title: chapterTitle,
+            pagesCount: summary.count,
+            bookmarkData: bookmark,
+            coverImagePath: coverPath ?? summary.first?.path,
+            fileSize: folderSize(url),
+            libraryPath: url.path,
+            chapterTypeRaw: chapterType.rawValue,
+            chapterPath: url.path
+        )
+
+        if pageSourceURL != url {
+            try? FileManager.default.removeItem(at: pageSourceURL)
+        }
+
+        return ScannedChapter(
+            title: chapterTitle,
+            workTitle: workTitle,
+            chapterType: chapterType,
+            path: url.path,
+            importResult: result
+        )
+    }
+
+    nonisolated private static func pageSourceURL(for sourceURL: URL) -> URL? {
+        let ext = sourceURL.pathExtension.lowercased()
+        if ext == "pdf" {
+            return extractImagesFromPDFSynchronously(sourceURL)
+        }
+        if supportedArchiveExtensions.contains(ext) {
+            guard canReadArchiveExtension(ext) else {
+                logger.warning("load-unsupported-archive path=\(sourceURL.lastPathComponent, privacy: .public) ext=\(ext, privacy: .public)")
+                return nil
+            }
+            return unzipArchive(sourceURL)
+        }
+        return sourceURL
+    }
+
+    nonisolated private static func canReadArchiveExtension(_ ext: String) -> Bool {
+        ext == "zip" || ext == "cbz"
+    }
+
+    nonisolated private static func isArchiveOrDocument(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return supportedArchiveExtensions.contains(ext) || supportedDocumentExtensions.contains(ext)
+    }
+
+    nonisolated private static func normalizedWorkTitle(from chapterTitle: String) -> String {
+        var title = chapterTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"[\s._-]*[\[\(（【]?\d{1,4}[\]\)）】]?$"#,
+            #"[\s._-]*(第\s*)?\d{1,4}\s*[话話章节卷部集]$"#,
+            #"[\s._-]*(chapter|chap|ch|vol|volume)\s*\d{1,4}$"#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let range = NSRange(title.startIndex..<title.endIndex, in: title)
+                title = regex.stringByReplacingMatches(in: title, options: [], range: range, withTemplate: "")
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-_. ")))
             }
         }
-        return results.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return title.isEmpty ? chapterTitle : title
+    }
+
+    nonisolated private static func cacheCoverImage(from sourceURL: URL?, cacheKey: String) -> String? {
+        guard let sourceURL else { return nil }
+        let destination = coverCacheURL(cacheKey: cacheKey)
+        do {
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                return destination.path
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            return destination.path
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated private static func coverCacheURL(cacheKey: String) -> URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let encoded = Data(cacheKey.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return caches.appendingPathComponent("MReaderCoverCache", isDirectory: true)
+            .appendingPathComponent(encoded + ".jpg")
+    }
+
+    nonisolated private struct SeriesFolderScan {
+        let series: [ScannedSeries]
+        let directComic: ImportResult?
+        let archiveCount: Int
+        let folderChapterCount: Int
+    }
+
+    nonisolated private static func scanSeriesFolder(_ seriesURL: URL) -> SeriesFolderScan {
+        guard let children = try? FileManager.default.contentsOfDirectory(at: seriesURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return SeriesFolderScan(series: [], directComic: nil, archiveCount: 0, folderChapterCount: 0)
+        }
+        var chapters: [ScannedChapter] = []
+        var archiveCount = 0
+        var folderChapterCount = 0
+        for child in children {
+            if isArchiveOrDocument(child) {
+                archiveCount += 1
+            }
+            guard let chapter = makeChapter(from: child) else { continue }
+            chapters.append(chapter)
+            if chapter.chapterType == .folder {
+                folderChapterCount += 1
+            }
+        }
+
+        if chapters.isEmpty, hasDirectImages(in: seriesURL), let directComic = importResultForLocalFolder(seriesURL) {
+            return SeriesFolderScan(series: [], directComic: directComic, archiveCount: 0, folderChapterCount: 1)
+        }
+
+        let grouped = Dictionary(grouping: chapters) { chapter in
+            chapter.workTitle
+        }
+        var scannedSeries: [ScannedSeries] = []
+        for (workTitle, groupedChapters) in grouped {
+            let sortedChapters = groupedChapters.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            let chapterList = sortedChapters.map { chapter in
+                "\(chapter.title)[\(chapter.chapterType.rawValue)]"
+            }.joined(separator: " | ")
+            logger.info("scan-series-folder folder=\(seriesURL.lastPathComponent, privacy: .public) work=\(workTitle, privacy: .public) chapters=\(chapterList, privacy: .public)")
+            let seriesLibraryPath: String
+            if grouped.count == 1 {
+                seriesLibraryPath = seriesURL.path
+            } else {
+                seriesLibraryPath = seriesURL.appendingPathComponent(workTitle, isDirectory: true).path
+            }
+            let comicResults = sortedChapters.map { chapter in
+                chapter.importResult
+            }
+            scannedSeries.append(ScannedSeries(
+                title: workTitle,
+                libraryPath: seriesLibraryPath,
+                comics: comicResults
+            ))
+        }
+        scannedSeries.sort { lhs, rhs in
+            lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+
+        return SeriesFolderScan(
+            series: scannedSeries,
+            directComic: nil,
+            archiveCount: archiveCount,
+            folderChapterCount: folderChapterCount
+        )
     }
 
     func stopAccessing() {

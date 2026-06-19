@@ -54,6 +54,8 @@ final class ComicLibraryStore: ObservableObject {
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
             smbPath: result.smbPath,
+            chapterTypeRaw: result.chapterTypeRaw,
+            chapterPath: result.chapterPath,
             seriesID: seriesID
         )
         add(comic)
@@ -349,6 +351,14 @@ final class ComicLibraryStore: ObservableObject {
                 comics[index].smbPath = result.smbPath
                 changed = true
             }
+            if comics[index].chapterTypeRaw != result.chapterTypeRaw {
+                comics[index].chapterTypeRaw = result.chapterTypeRaw
+                changed = true
+            }
+            if comics[index].chapterPath != result.chapterPath {
+                comics[index].chapterPath = result.chapterPath
+                changed = true
+            }
             return changed
         }
 
@@ -362,6 +372,8 @@ final class ComicLibraryStore: ObservableObject {
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
             smbPath: result.smbPath,
+            chapterTypeRaw: result.chapterTypeRaw,
+            chapterPath: result.chapterPath,
             seriesID: seriesID
         ))
         return true
