@@ -1016,7 +1016,7 @@ struct ContentView: View {
             await MainActor.run {
                 if importedCount == 0 && failedCount > 0 {
                     HapticManager.shared.play(.error)
-                    importError = failureReason?.isEmpty == false ? failureReason! : "没有找到可读取的图片，或压缩包/PDF 解析失败。当前可直接读取 ZIP、CBZ、PDF 和图片文件夹；RAR、CBR、7z 会被识别但需要后续接入解压库才能阅读。"
+                    importError = failureReason?.isEmpty == false ? failureReason! : "没有找到可读取的图片，或压缩包/PDF 解析失败。当前可直接读取 ZIP、CBZ、7z、PDF 和图片文件夹；RAR、CBR 暂未支持。"
                 } else if failedCount > 0 {
                     HapticManager.shared.play(.warning)
                     importError = "已导入 \(importedCount) 个项目，\(failedCount) 个项目失败。失败项目可能不包含可读取图片或压缩包已损坏。"

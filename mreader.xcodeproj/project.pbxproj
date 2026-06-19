@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		788190C32FE2F100007BDA15 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 788190C42FE2F100007BDA15 /* ZIPFoundation */; };
+		788190C72FE50000007BDA15 /* SWCompression in Frameworks */ = {isa = PBXBuildFile; productRef = 788190C82FE50000007BDA15 /* SWCompression */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				788190C32FE2F100007BDA15 /* ZIPFoundation in Frameworks */,
+				788190C72FE50000007BDA15 /* SWCompression in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 			name = mreader;
 			packageProductDependencies = (
 				788190C42FE2F100007BDA15 /* ZIPFoundation */,
+				788190C82FE50000007BDA15 /* SWCompression */,
 			);
 			productName = mreader;
 			productReference = 788190972FE2DAA6007BDA15 /* mreader.app */;
@@ -203,6 +206,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				788190C92FE50000007BDA15 /* XCRemoteSwiftPackageReference "SWCompression" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 788190982FE2DAA6007BDA15 /* Products */;
@@ -605,6 +609,14 @@
 				minimumVersion = 0.9.0;
 			};
 		};
+		788190C92FE50000007BDA15 /* XCRemoteSwiftPackageReference "SWCompression" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tsolomko/SWCompression.git";
+			requirement = {
+				kind = revision;
+				revision = 3fb11070dca1eab78a4ff53ee4f7c617eb97efa8;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -612,6 +624,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
 			productName = ZIPFoundation;
+		};
+		788190C82FE50000007BDA15 /* SWCompression */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 788190C92FE50000007BDA15 /* XCRemoteSwiftPackageReference "SWCompression" */;
+			productName = SWCompression;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

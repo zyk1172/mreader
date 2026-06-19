@@ -1,4 +1,5 @@
 import PDFKit
+import SWCompression
 import SwiftUI
 import ZIPFoundation
 import os
@@ -86,33 +87,42 @@ class ComicManager {
         let pages: [ComicPage]
     }
 
-    nonisolated struct ZipImageEntry: Sendable {
-        let path: String
-        let encodingRawValue: UInt?
+    nonisolated enum ArchiveFormat: String, Sendable {
+        case zip
+        case sevenZip
     }
 
-    nonisolated enum ZipReadError: LocalizedError {
+    nonisolated struct ArchiveImageEntry: Sendable {
+        let path: String
+        let encodingRawValue: UInt?
+        let format: ArchiveFormat
+    }
+
+    nonisolated enum ArchiveReadError: LocalizedError {
         case damagedArchive
         case noImages
         case unsupportedArchive
         case memoryLimit
         case permissionDenied
         case encodingFailed
+        case archiveTooLarge
 
         var errorDescription: String? {
             switch self {
             case .damagedArchive:
-                return "ZIP 文件损坏或不是有效 ZIP"
+                return "压缩包损坏或不是有效格式"
             case .noImages:
-                return "ZIP 内没有找到图片"
+                return "压缩包内没有找到图片"
             case .unsupportedArchive:
-                return "当前只支持 ZIP/CBZ，RAR/CBR/7z 需要接入解压库"
+                return "当前已支持 ZIP/CBZ/7z；RAR/CBR 暂无稳定 iOS 解压库支持"
             case .memoryLimit:
                 return "图片过大，可能导致内存不足"
             case .permissionDenied:
                 return "没有权限读取该文件"
             case .encodingFailed:
-                return "ZIP 文件名编码解析失败"
+                return "压缩包文件名编码解析失败"
+            case .archiveTooLarge:
+                return "7z 文件过大，当前版本为避免内存暴涨未加载"
             }
         }
     }
@@ -122,6 +132,7 @@ class ComicManager {
     nonisolated private static let logger = Logger(subsystem: "MReader", category: "LibraryIO")
     nonisolated private static let archivePageScheme = "mreader-zip-page"
     nonisolated private static let maxArchiveImageBytes: UInt64 = 120 * 1024 * 1024
+    nonisolated private static let maxSevenZipArchiveBytes: UInt64 = 600 * 1024 * 1024
 
     func loadFrom(bookmarkData: Data) -> Bool {
         stopAccessing()
@@ -137,16 +148,16 @@ class ComicManager {
             let url = try resolveBookmark(bookmarkData)
             let didStart = url.startAccessingSecurityScopedResource()
             logMemory("load-pages-start \(url.lastPathComponent)")
-            if isReadableZipArchive(url) {
+            if isReadableArchive(url) {
                 do {
-                    let entries = try zipImageEntries(in: url)
+                    let entries = try archiveImageEntries(in: url)
                     let pages = entries.enumerated().map { index, entry in
                         ComicPage(index: index, url: archivePageURL(archiveURL: url, entry: entry, index: index))
                     }
                     logMemory("load-pages-end \(url.lastPathComponent) count=\(pages.count)")
                     return pages.isEmpty ? nil : LoadResult(url: url, didStartSecurityScope: didStart, pages: pages)
                 } catch {
-                    logger.error("load-zip-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                    logger.error("load-archive-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                     if didStart {
                         url.stopAccessingSecurityScopedResource()
                     }
@@ -173,16 +184,16 @@ class ComicManager {
     }
 
     nonisolated static func loadTemporaryPages(from sourceURL: URL) -> LoadResult? {
-        if isReadableZipArchive(sourceURL) {
+        if isReadableArchive(sourceURL) {
             do {
-                let entries = try zipImageEntries(in: sourceURL)
+                let entries = try archiveImageEntries(in: sourceURL)
                 let pages = entries.enumerated().map { index, entry in
                     ComicPage(index: index, url: archivePageURL(archiveURL: sourceURL, entry: entry, index: index))
                 }
                 logMemory("load-temporary-pages-end \(sourceURL.lastPathComponent) count=\(pages.count)")
                 return pages.isEmpty ? nil : LoadResult(url: sourceURL, didStartSecurityScope: false, pages: pages)
             } catch {
-                logger.error("load-temporary-zip-failed path=\(sourceURL.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                logger.error("load-temporary-archive-failed path=\(sourceURL.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 return nil
             }
         }
@@ -226,14 +237,14 @@ class ComicManager {
 
         let ext = url.pathExtension.lowercased()
 
-        if isReadableZipArchive(url) {
-            return importZipArchiveReference(url: url, destinationRoot: destinationRoot)
+        if isReadableArchive(url) {
+            return importArchiveReference(url: url, destinationRoot: destinationRoot)
         }
 
         let imageSourceURL: URL
         var temporaryExtractionURL: URL?
 
-        if ["rar", "cbr", "7z"].contains(ext) {
+        if ["rar", "cbr"].contains(ext) {
             return nil
         } else if ext == "pdf" {
             guard let extractedURL = await extractImagesFromPDF(url) else {
@@ -390,9 +401,9 @@ class ComicManager {
         }
     }
 
-    nonisolated private static func importZipArchiveReference(url: URL, destinationRoot: URL?) -> ImportResult? {
+    nonisolated private static func importArchiveReference(url: URL, destinationRoot: URL?) -> ImportResult? {
         do {
-            let entries = try zipImageEntries(in: url)
+            let entries = try archiveImageEntries(in: url)
             guard let firstEntry = entries.first else { return nil }
 
             let destinationURL: URL
@@ -407,7 +418,12 @@ class ComicManager {
 
             let bookmark = createBookmark(for: destinationURL)
             guard let bookmark else { return nil }
-            let coverData = try? zipImageData(archiveURL: destinationURL, entryPath: firstEntry.path, encodingRawValue: firstEntry.encodingRawValue)
+            let coverData = try? archiveImageData(
+                archiveURL: destinationURL,
+                entryPath: firstEntry.path,
+                encodingRawValue: firstEntry.encodingRawValue,
+                format: firstEntry.format
+            )
             let coverPath = cacheCoverData(coverData, cacheKey: destinationURL.path + "#" + firstEntry.path)
             return ImportResult(
                 title: destinationURL.deletingPathExtension().lastPathComponent,
@@ -420,7 +436,7 @@ class ComicManager {
                 chapterPath: destinationURL.path
             )
         } catch {
-            logger.error("import-zip-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            logger.error("import-archive-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -824,7 +840,7 @@ class ComicManager {
                 logger.warning("scan-unsupported-archive path=\(url.lastPathComponent, privacy: .public) ext=\(ext, privacy: .public)")
                 return nil
             }
-            guard let imported = importZipArchiveReference(url: url, destinationRoot: nil) else { return nil }
+            guard let imported = importArchiveReference(url: url, destinationRoot: nil) else { return nil }
             return ScannedChapter(
                 title: url.deletingPathExtension().lastPathComponent,
                 chapterType: .archive,
@@ -888,10 +904,10 @@ class ComicManager {
     }
 
     nonisolated static func imageData(forArchivePageURL url: URL) -> Data? {
-        guard let (archiveURL, entryPath, encodingRawValue) = archivePageComponents(from: url) else {
+        guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url) else {
             return nil
         }
-        return try? zipImageData(archiveURL: archiveURL, entryPath: entryPath, encodingRawValue: encodingRawValue)
+        return try? archiveImageData(archiveURL: archiveURL, entryPath: entryPath, encodingRawValue: encodingRawValue, format: format)
     }
 
     nonisolated static func zipImportFailureReason(for url: URL) -> String {
@@ -899,14 +915,14 @@ class ComicManager {
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
 
         let ext = url.pathExtension.lowercased()
-        guard isReadableZipArchive(url) else {
-            if ["rar", "cbr", "7z"].contains(ext) {
-                return ZipReadError.unsupportedArchive.localizedDescription
+        guard isReadableArchive(url) else {
+            if ["rar", "cbr"].contains(ext) {
+                return ArchiveReadError.unsupportedArchive.localizedDescription
             }
             return "不支持的文件类型"
         }
         do {
-            _ = try zipImageEntries(in: url)
+            _ = try archiveImageEntries(in: url)
             return ""
         } catch {
             return error.localizedDescription
@@ -914,27 +930,49 @@ class ComicManager {
     }
 
     nonisolated private static func canReadArchiveExtension(_ ext: String) -> Bool {
-        ext == "zip" || ext == "cbz"
+        ext == "zip" || ext == "cbz" || ext == "7z"
     }
 
-    nonisolated private static func isReadableZipArchive(_ url: URL) -> Bool {
+    nonisolated private static func isReadableArchive(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == "zip" || ext == "cbz"
+        return canReadArchiveExtension(ext)
     }
 
-    nonisolated private static func zipImageEntries(in archiveURL: URL) throws -> [ZipImageEntry] {
+    nonisolated private static func archiveImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
+        switch archiveFormat(for: archiveURL) {
+        case .zip:
+            return try zipImageEntries(in: archiveURL)
+        case .sevenZip:
+            return try sevenZipImageEntries(in: archiveURL)
+        }
+    }
+
+    nonisolated private static func archiveImageData(archiveURL: URL, entryPath: String, encodingRawValue: UInt?, format: ArchiveFormat) throws -> Data {
+        switch format {
+        case .zip:
+            return try zipImageData(archiveURL: archiveURL, entryPath: entryPath, encodingRawValue: encodingRawValue)
+        case .sevenZip:
+            return try sevenZipImageData(archiveURL: archiveURL, entryPath: entryPath)
+        }
+    }
+
+    nonisolated private static func archiveFormat(for archiveURL: URL) -> ArchiveFormat {
+        archiveURL.pathExtension.lowercased() == "7z" ? .sevenZip : .zip
+    }
+
+    nonisolated private static func zipImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
         guard FileManager.default.isReadableFile(atPath: archiveURL.path) else {
-            throw ZipReadError.permissionDenied
+            throw ArchiveReadError.permissionDenied
         }
 
         var lastError: Error?
         for encoding in zipPathEncodings() {
             do {
                 let archive = try Archive(url: archiveURL, accessMode: .read, pathEncoding: encoding)
-                let entries = archive.compactMap { entry -> ZipImageEntry? in
+                let entries = archive.compactMap { entry -> ArchiveImageEntry? in
                     let path = encoding.map { entry.path(using: $0) } ?? entry.path
-                    guard entry.type == .file, isValidZipImagePath(path) else { return nil }
-                    return ZipImageEntry(path: path, encodingRawValue: encoding?.rawValue)
+                    guard entry.type == .file, isValidArchiveImagePath(path) else { return nil }
+                    return ArchiveImageEntry(path: path, encodingRawValue: encoding?.rawValue, format: .zip)
                 }
                 .sorted { lhs, rhs in
                     lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
@@ -949,9 +987,9 @@ class ComicManager {
         }
 
         if lastError != nil {
-            throw ZipReadError.damagedArchive
+            throw ArchiveReadError.damagedArchive
         }
-        throw ZipReadError.noImages
+        throw ArchiveReadError.noImages
     }
 
     nonisolated private static func zipImageData(archiveURL: URL, entryPath: String, encodingRawValue: UInt?) throws -> Data {
@@ -961,10 +999,10 @@ class ComicManager {
             let path = encoding.map { entry.path(using: $0) } ?? entry.path
             return path == entryPath
         }) else {
-            throw ZipReadError.encodingFailed
+            throw ArchiveReadError.encodingFailed
         }
         guard entry.uncompressedSize <= maxArchiveImageBytes else {
-            throw ZipReadError.memoryLimit
+            throw ArchiveReadError.memoryLimit
         }
         var data = Data()
         data.reserveCapacity(Int(min(entry.uncompressedSize, UInt64(Int.max))))
@@ -974,11 +1012,75 @@ class ComicManager {
             }
             return data
         } catch {
-            throw ZipReadError.damagedArchive
+            throw ArchiveReadError.damagedArchive
         }
     }
 
-    nonisolated private static func isValidZipImagePath(_ path: String) -> Bool {
+    nonisolated private static func sevenZipImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
+        guard FileManager.default.isReadableFile(atPath: archiveURL.path) else {
+            throw ArchiveReadError.permissionDenied
+        }
+
+        let container = try sevenZipContainerData(for: archiveURL)
+        let infos: [SevenZipEntryInfo]
+        do {
+            infos = try SevenZipContainer.info(container: container)
+        } catch {
+            throw ArchiveReadError.damagedArchive
+        }
+
+        let entries = infos.compactMap { info -> ArchiveImageEntry? in
+            let name = info.name
+            guard info.type == .regular, isValidArchiveImagePath(name) else { return nil }
+            if let size = info.size, UInt64(size) > maxArchiveImageBytes {
+                return nil
+            }
+            return ArchiveImageEntry(path: name, encodingRawValue: nil, format: .sevenZip)
+        }
+        .sorted { lhs, rhs in
+            lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+        }
+
+        if entries.isEmpty {
+            throw ArchiveReadError.noImages
+        }
+        logger.info("7z-list path=\(archiveURL.lastPathComponent, privacy: .public) images=\(entries.count, privacy: .public)")
+        return entries
+    }
+
+    nonisolated private static func sevenZipImageData(archiveURL: URL, entryPath: String) throws -> Data {
+        let container = try sevenZipContainerData(for: archiveURL)
+        let entries: [SevenZipEntry]
+        do {
+            entries = try SevenZipContainer.open(container: container)
+        } catch {
+            throw ArchiveReadError.damagedArchive
+        }
+        guard let entry = entries.first(where: { $0.info.name == entryPath }) else {
+            throw ArchiveReadError.encodingFailed
+        }
+        guard let data = entry.data else {
+            throw ArchiveReadError.damagedArchive
+        }
+        guard UInt64(data.count) <= maxArchiveImageBytes else {
+            throw ArchiveReadError.memoryLimit
+        }
+        return data
+    }
+
+    nonisolated private static func sevenZipContainerData(for archiveURL: URL) throws -> Data {
+        let values = try archiveURL.resourceValues(forKeys: [.fileSizeKey])
+        if let fileSize = values.fileSize, UInt64(fileSize) > maxSevenZipArchiveBytes {
+            throw ArchiveReadError.archiveTooLarge
+        }
+        do {
+            return try Data(contentsOf: archiveURL, options: .mappedIfSafe)
+        } catch {
+            throw ArchiveReadError.permissionDenied
+        }
+    }
+
+    nonisolated private static func isValidArchiveImagePath(_ path: String) -> Bool {
         let normalizedPath = path.replacingOccurrences(of: "\\", with: "/")
         let components = normalizedPath.split(separator: "/").map(String.init)
         guard let fileName = components.last, !fileName.isEmpty else { return false }
@@ -1003,13 +1105,14 @@ class ComicManager {
         return encodings
     }
 
-    nonisolated private static func archivePageURL(archiveURL: URL, entry: ZipImageEntry, index: Int) -> URL {
+    nonisolated private static func archivePageURL(archiveURL: URL, entry: ArchiveImageEntry, index: Int) -> URL {
         var components = URLComponents()
         components.scheme = archivePageScheme
         components.host = "page"
         var queryItems = [
             URLQueryItem(name: "archive", value: base64URLEncoded(archiveURL.path)),
             URLQueryItem(name: "entry", value: base64URLEncoded(entry.path)),
+            URLQueryItem(name: "format", value: entry.format.rawValue),
             URLQueryItem(name: "index", value: "\(index)")
         ]
         if let encodingRawValue = entry.encodingRawValue {
@@ -1019,7 +1122,7 @@ class ComicManager {
         return components.url ?? URL(fileURLWithPath: archiveURL.path)
     }
 
-    nonisolated private static func archivePageComponents(from url: URL) -> (URL, String, UInt?)? {
+    nonisolated private static func archivePageComponents(from url: URL) -> (URL, String, UInt?, ArchiveFormat)? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let items = components.queryItems ?? []
         guard let archiveValue = items.first(where: { $0.name == "archive" })?.value,
@@ -1029,7 +1132,9 @@ class ComicManager {
             return nil
         }
         let encodingRawValue = items.first(where: { $0.name == "encoding" })?.value.flatMap(UInt.init)
-        return (URL(fileURLWithPath: archivePath), entryPath, encodingRawValue)
+        let formatValue = items.first(where: { $0.name == "format" })?.value
+        let format = formatValue.flatMap(ArchiveFormat.init(rawValue:)) ?? archiveFormat(for: URL(fileURLWithPath: archivePath))
+        return (URL(fileURLWithPath: archivePath), entryPath, encodingRawValue, format)
     }
 
     nonisolated private static func base64URLEncoded(_ value: String) -> String {
