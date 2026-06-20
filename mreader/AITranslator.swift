@@ -18,6 +18,20 @@ struct TextBlock: Identifiable {
 }
 
 class AITranslator {
+    nonisolated static let defaultTranslationPromptTemplate = """
+    你是一个漫画对白翻译助手。请只翻译我提供的 OCR 文本，不要续写、总结、评价或添加剧情。
+    请保持原文的语气、称呼、人物关系、情绪和漫画对白的自然口语感。
+    如果原文有断句、气泡顺序或拟声词，请尽量保留对应结构。
+    不要记录、记忆、推断用户身份，也不要输出与翻译无关的内容。
+    如果文本包含成人、暴力、敏感或私人内容，只进行中性、准确翻译，不要扩写、润色成更露骨内容，也不要添加新的细节。
+    请将以下文本翻译为：{targetLanguage}
+
+    OCR 文本：
+    {ocrText}
+
+    输出要求：
+    只输出翻译结果。
+    """
     
     // 1. 使用 Apple 原生 Vision 框架进行 OCR 识别 (极低内存占用，全本地执行)
     static func recognizeText(in image: UIImage) async throws -> [TextBlock] {
@@ -69,10 +83,11 @@ class AITranslator {
     }
     
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String = "中文") async throws -> String {
+    static func translate(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String = "中文", promptTemplate: String = defaultTranslationPromptTemplate) async throws -> String {
         guard !apiKey.isEmpty else { return "未配置 API Key" }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "未配置模型" }
         guard let url = chatCompletionsURL(from: baseURL) else { return "接口地址无效" }
+        let prompt = renderPrompt(template: promptTemplate, text: text, targetLanguage: targetLanguage)
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -82,8 +97,8 @@ class AITranslator {
         let body: [String: Any] = [
             "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
             "messages": [
-                ["role": "system", "content": "你是一个专业的二次元漫画翻译。请将以下台词翻译成\(targetLanguage)，保持口语化。仅输出翻译结果，不要多余解释。"],
-                ["role": "user", "content": text]
+                ["role": "system", "content": "你是一个只输出翻译结果的漫画对白翻译助手。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。"],
+                ["role": "user", "content": prompt]
             ],
             "temperature": 0.3
         ]
@@ -123,5 +138,12 @@ class AITranslator {
 
         let withoutTrailingSlash = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         return URL(string: "\(withoutTrailingSlash)/chat/completions")
+    }
+
+    private static func renderPrompt(template: String, text: String, targetLanguage: String) -> String {
+        let usableTemplate = template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultTranslationPromptTemplate : template
+        return usableTemplate
+            .replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
+            .replacingOccurrences(of: "{ocrText}", with: text)
     }
 }

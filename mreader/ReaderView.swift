@@ -984,6 +984,7 @@ struct LocalImageView: View {
     @AppStorage("openai_api_key") private var apiKey = ""
     @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
     @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
+    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
 
     private var canTranslate: Bool {
         isOCREnabled && isAITranslationEnabled
@@ -1279,8 +1280,9 @@ struct LocalImageView: View {
 	                        let base = baseURL
 	                        let model = modelName
                             let target = targetLanguage
+                            let prompt = translationPromptTemplate
 	                        group.addTask {
-	                            let translated = try? await AITranslator.translate(text: text, apiKey: key, baseURL: base, model: model, targetLanguage: target)
+                                let translated = try? await AITranslator.translate(text: text, apiKey: key, baseURL: base, model: model, targetLanguage: target, promptTemplate: prompt)
 	                            return (i, translated ?? "翻译失败")
 	                        }
                     }

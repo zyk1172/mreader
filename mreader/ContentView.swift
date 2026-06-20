@@ -36,6 +36,7 @@ nonisolated struct MReaderSettingsBackup: Codable {
     var openAIBaseURL: String
     var openAIModel: String
     var translationTargetLanguage: String
+    var translationPromptTemplate: String?
     var isHapticFeedbackEnabled: Bool
 }
 
@@ -95,6 +96,7 @@ struct ContentView: View {
     @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
     @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
     @AppStorage("translation_target_language") private var translationTargetLanguage = "中文"
+    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
     @AppStorage(HapticSettings.isEnabledKey) private var isHapticFeedbackEnabled = true
     @Namespace private var seriesAnimationNamespace
 
@@ -739,6 +741,25 @@ struct ContentView: View {
             TextField("模型", text: $modelName)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("翻译 Prompt 模板")
+                    Spacer()
+                    Button("恢复默认") {
+                        translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+                    }
+                    .buttonStyle(.bordered)
+                }
+                TextEditor(text: $translationPromptTemplate)
+                    .font(.footnote.monospaced())
+                    .frame(minHeight: 220)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text("可用占位符：{targetLanguage}、{ocrText}")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -1081,6 +1102,7 @@ struct ContentView: View {
             openAIBaseURL: baseURL,
             openAIModel: modelName,
             translationTargetLanguage: translationTargetLanguage,
+            translationPromptTemplate: translationPromptTemplate,
             isHapticFeedbackEnabled: isHapticFeedbackEnabled
         )
     }
@@ -1100,6 +1122,7 @@ struct ContentView: View {
             baseURL = backup.openAIBaseURL
             modelName = backup.openAIModel
             translationTargetLanguage = backup.translationTargetLanguage
+            translationPromptTemplate = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
             library.syncLocalLibrary()
             HapticManager.shared.play(.success)
