@@ -90,6 +90,7 @@ struct ReaderView: View {
     @State private var translateRequestID = UUID()
     @State private var pageTurnDirection = 1
     @State private var autoHideControlsWorkItem: DispatchWorkItem?
+    @State private var didRestoreScrollPosition = false
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -183,24 +184,36 @@ struct ReaderView: View {
                 .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
                 .ignoresSafeArea()
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(manager.pages) { page in
-                            LocalImageView(
-                                url: page.url,
-                                isOCREnabled: comic.isOCREnabled,
-                                isAITranslationEnabled: comic.isAITranslationEnabled,
-                                isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
-                                translateRequestID: translateRequestID,
-                                targetLanguage: translationTargetLanguage,
-                                imageFitMode: .fitWidth,
-                                onPreviousPage: previousPage,
-                                onNextPage: nextPage,
-                                onToggleControls: toggleControls
-                            )
-                            .frame(maxWidth: .infinity)
-                            .onAppear { currentPageIndex = page.index }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(manager.pages) { page in
+                                LocalImageView(
+                                    url: page.url,
+                                    isOCREnabled: comic.isOCREnabled,
+                                    isAITranslationEnabled: comic.isAITranslationEnabled,
+                                    isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+                                    translateRequestID: translateRequestID,
+                                    targetLanguage: translationTargetLanguage,
+                                    imageFitMode: .fitWidth,
+                                    onPreviousPage: previousPage,
+                                    onNextPage: nextPage,
+                                    onToggleControls: toggleControls
+                                )
+                                .frame(maxWidth: .infinity)
+                                .id(page.index)
+                                .onAppear {
+                                    guard didRestoreScrollPosition || page.index == currentPageIndex else { return }
+                                    currentPageIndex = page.index
+                                }
+                            }
                         }
+                    }
+                    .onAppear {
+                        restoreScrollPosition(proxy)
+                    }
+                    .onChange(of: comic.readingModeRaw) { _, _ in
+                        restoreScrollPosition(proxy)
                     }
                 }
                 .ignoresSafeArea()
@@ -485,6 +498,16 @@ struct ReaderView: View {
         autoHideControlsWorkItem = nil
         withAnimation(.easeInOut(duration: 0.18)) {
             showControls = false
+        }
+    }
+
+    private func restoreScrollPosition(_ proxy: ScrollViewProxy) {
+        guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
+        let targetIndex = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
+        didRestoreScrollPosition = false
+        DispatchQueue.main.async {
+            proxy.scrollTo(targetIndex, anchor: .top)
+            didRestoreScrollPosition = true
         }
     }
 }
