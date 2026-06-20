@@ -209,6 +209,7 @@ struct ReaderView: View {
                                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                                     isOCRMagnificationVisible: isOCRMagnificationActive && page.index == currentPageIndex,
                                     ocrTextScale: comic.ocrTextScale,
+                                    isRightToLeftReading: readingDirection == .rightToLeft,
                                     targetLanguage: translationTargetLanguage,
                                     imageFitMode: .fitWidth,
                                     onPreviousPage: previousPage,
@@ -712,6 +713,7 @@ struct AnimatedPageReader: View {
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
             ocrTextScale: comic.ocrTextScale,
+            isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
             onPreviousPage: previousPage,
@@ -811,6 +813,7 @@ struct DoublePageReader: View {
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
             ocrTextScale: comic.ocrTextScale,
+            isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
             onPreviousPage: previousSpread,
@@ -961,6 +964,7 @@ struct LocalImageView: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let ocrTextScale: Double
+    let isRightToLeftReading: Bool
     let targetLanguage: String
     let imageFitMode: ImageFitMode
     let onPreviousPage: () -> Void
@@ -1247,7 +1251,7 @@ struct LocalImageView: View {
 
         Task {
             do {
-                let blocks = try await AITranslator.recognizeText(in: image)
+                let blocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
                 await MainActor.run {
                     self.ocrTextBlocks = blocks
                     self.isRecognizingOCR = false
@@ -1269,7 +1273,7 @@ struct LocalImageView: View {
         Task {
             do {
                 // 步骤一：本地执行 Apple Vision OCR
-                let blocks = try await AITranslator.recognizeText(in: image)
+                let blocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
                 await MainActor.run { self.textBlocks = blocks } // 先显示个框（可选）
                 
                 // 步骤二：并发向大模型请求翻译 (由于有多个气泡，使用并发组加速)

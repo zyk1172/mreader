@@ -34,7 +34,32 @@ class AITranslator {
     """
     
     // 1. 使用 Apple 原生 Vision 框架进行 OCR 识别 (极低内存占用，全本地执行)
-    static func recognizeText(in image: UIImage) async throws -> [TextBlock] {
+    static func recognizeText(in image: UIImage, isRightToLeft: Bool = false) async throws -> [TextBlock] {
+        let languagePasses = [
+            ["ja-JP", "zh-Hans", "zh-Hant", "ko-KR", "en-US"],
+            ["zh-Hans", "zh-Hant", "en-US"],
+            ["ja-JP", "en-US"],
+            ["en-US"]
+        ]
+
+        var lastError: Error?
+        for languages in languagePasses {
+            do {
+                let blocks = try await recognizeText(in: image, languages: languages, isRightToLeft: isRightToLeft)
+                if !blocks.isEmpty {
+                    return blocks
+                }
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError {
+            throw lastError
+        }
+        return []
+    }
+
+    private static func recognizeText(in image: UIImage, languages: [String], isRightToLeft: Bool) async throws -> [TextBlock] {
         return try await withCheckedThrowingContinuation { continuation in
             guard let cgImage = image.cgImage else {
                 continuation.resume(returning: [])
@@ -64,14 +89,14 @@ class AITranslator {
                         blocks.append(TextBlock(text: topCandidate.string, boundingBox: swiftUIRect))
                     }
                 }
-                continuation.resume(returning: blocks)
+                continuation.resume(returning: sortedTextBlocks(blocks, isRightToLeft: isRightToLeft))
             }
             
             // 专为漫画阅读设置高精度
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            // 支持日文、繁体中文、英文
-            request.recognitionLanguages = ["ja-JP", "zh-Hant", "en-US"]
+            request.usesLanguageCorrection = false
+            request.minimumTextHeight = 0.008
+            request.recognitionLanguages = supportedRecognitionLanguages(from: languages, request: request)
             
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {
@@ -145,5 +170,39 @@ class AITranslator {
         return usableTemplate
             .replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
             .replacingOccurrences(of: "{ocrText}", with: text)
+    }
+
+    private static func supportedRecognitionLanguages(from preferredLanguages: [String], request: VNRecognizeTextRequest) -> [String] {
+        let supported = (try? request.supportedRecognitionLanguages()) ?? preferredLanguages
+        let filtered = preferredLanguages.filter { supported.contains($0) }
+        return filtered.isEmpty ? preferredLanguages : filtered
+    }
+
+    private static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
+        let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard validBlocks.count > 1 else { return validBlocks }
+
+        let verticalCount = validBlocks.filter { block in
+            block.boundingBox.height > block.boundingBox.width * 1.35
+        }.count
+        let isMostlyVertical = verticalCount > validBlocks.count / 2
+
+        if isMostlyVertical {
+            return validBlocks.sorted { lhs, rhs in
+                let columnDistance = abs(lhs.boundingBox.midX - rhs.boundingBox.midX)
+                if columnDistance > 0.045 {
+                    return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX
+                }
+                return lhs.boundingBox.midY < rhs.boundingBox.midY
+            }
+        }
+
+        return validBlocks.sorted { lhs, rhs in
+            let rowDistance = abs(lhs.boundingBox.midY - rhs.boundingBox.midY)
+            if rowDistance > 0.035 {
+                return lhs.boundingBox.midY < rhs.boundingBox.midY
+            }
+            return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX
+        }
     }
 }
