@@ -31,6 +31,8 @@ final class ComicLibraryStore: ObservableObject {
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
+            merged.ocrTextScale = existing.ocrTextScale
             merged.readingDirectionRaw = existing.readingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw

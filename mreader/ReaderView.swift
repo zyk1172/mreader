@@ -88,9 +88,13 @@ struct ReaderView: View {
     @State private var showComicSettings = false
     @State private var hasOpened = false
     @State private var translateRequestID = UUID()
+    @State private var ocrMagnifyRequestID = UUID()
+    @State private var isOCRMagnificationVisible = false
     @State private var pageTurnDirection = 1
     @State private var autoHideControlsWorkItem: DispatchWorkItem?
     @State private var didRestoreScrollPosition = false
+    @State private var jumpPageText = ""
+    @State private var scrollJumpRequestID = UUID()
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -106,6 +110,10 @@ struct ReaderView: View {
 
     private var imageFitMode: ImageFitMode {
         ImageFitMode(rawValue: comic.imageFitModeRaw) ?? .fitScreen
+    }
+
+    private var isOCRMagnificationActive: Bool {
+        comic.isOCREnabled && (isOCRMagnificationVisible || comic.isAutoOCRMagnificationEnabled)
     }
 
     private var readingModeRaw: Binding<String> {
@@ -163,6 +171,8 @@ struct ReaderView: View {
                     imageFitMode: imageFitMode,
                     comic: comic,
                     translateRequestID: translateRequestID,
+                    ocrMagnifyRequestID: ocrMagnifyRequestID,
+                    isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: translationTargetLanguage,
                     onToggleControls: toggleControls
                 )
@@ -178,6 +188,8 @@ struct ReaderView: View {
                     imageFitMode: imageFitMode,
                     comic: comic,
                     translateRequestID: translateRequestID,
+                    ocrMagnifyRequestID: ocrMagnifyRequestID,
+                    isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: translationTargetLanguage,
                     onToggleControls: toggleControls
                 )
@@ -194,6 +206,9 @@ struct ReaderView: View {
                                     isAITranslationEnabled: comic.isAITranslationEnabled,
                                     isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
                                     translateRequestID: translateRequestID,
+                                    ocrMagnifyRequestID: ocrMagnifyRequestID,
+                                    isOCRMagnificationVisible: isOCRMagnificationActive && page.index == currentPageIndex,
+                                    ocrTextScale: comic.ocrTextScale,
                                     targetLanguage: translationTargetLanguage,
                                     imageFitMode: .fitWidth,
                                     onPreviousPage: previousPage,
@@ -215,6 +230,9 @@ struct ReaderView: View {
                     .onChange(of: comic.readingModeRaw) { _, _ in
                         restoreScrollPosition(proxy)
                     }
+                    .onChange(of: scrollJumpRequestID) { _, _ in
+                        restoreScrollPosition(proxy)
+                    }
                 }
                 .ignoresSafeArea()
             }
@@ -225,11 +243,34 @@ struct ReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
 
-            if showControls && comic.isOCREnabled && comic.isAITranslationEnabled {
+            if showControls && comic.isOCREnabled {
                 VStack {
                     Spacer()
-                    HStack {
+                    HStack(spacing: 10) {
                         Spacer()
+                        Button {
+                            HapticManager.shared.play(.light)
+                            isOCRMagnificationVisible.toggle()
+                            if isOCRMagnificationVisible {
+                                ocrMagnifyRequestID = UUID()
+                            }
+                            scheduleAutoHideControls()
+                        } label: {
+                            Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(.white.opacity(0.22), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("OCR文字放大")
+
+                        if comic.isAITranslationEnabled {
                         Button {
                             HapticManager.shared.play(.light)
                             translateRequestID = UUID()
@@ -248,9 +289,10 @@ struct ReaderView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("AI翻译")
-                        .padding(.trailing, 18)
-                        .padding(.bottom, 18)
+                        }
                     }
+                    .padding(.trailing, 18)
+                    .padding(.bottom, 18)
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
             }
@@ -385,6 +427,24 @@ struct ReaderView: View {
                         set: { newValue in updateComic { $0.isOCREnabled = newValue } }
                     ))
 
+                    Toggle("自动文字放大", isOn: Binding(
+                        get: { comic.isAutoOCRMagnificationEnabled },
+                        set: { newValue in updateComic { $0.isAutoOCRMagnificationEnabled = newValue } }
+                    ))
+                    .disabled(!comic.isOCREnabled)
+
+                    HStack {
+                        Text("文字放大倍数")
+                        Slider(value: Binding(
+                            get: { comic.ocrTextScale },
+                            set: { newValue in updateComic { $0.ocrTextScale = newValue } }
+                        ), in: 1.2...4.0, step: 0.1)
+                        Text(String(format: "%.1fx", comic.ocrTextScale))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .disabled(!comic.isOCREnabled)
+
                     Toggle("AI 翻译", isOn: Binding(
                         get: { comic.isAITranslationEnabled },
                         set: { newValue in updateComic { $0.isAITranslationEnabled = newValue } }
@@ -404,6 +464,20 @@ struct ReaderView: View {
                         Text("简体中文").tag("简体中文")
                         Text("繁体中文").tag("繁体中文")
                     }
+                }
+
+                Section(header: Text("跳转")) {
+                    HStack {
+                        TextField("页码", text: $jumpPageText)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(.roundedBorder)
+                        Button("跳转") {
+                            jumpToPage()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Text("当前 \(currentPageIndex + 1) / \(manager.pages.count)")
+                        .foregroundStyle(.secondary)
                 }
 
                 Section(header: Text("阅读")) {
@@ -446,10 +520,28 @@ struct ReaderView: View {
     private func updateComic(_ mutate: (inout ComicBook) -> Void) {
         HapticManager.shared.play(.light)
         mutate(&comic)
+        if !comic.isOCREnabled {
+            comic.isAutoOCRMagnificationEnabled = false
+            isOCRMagnificationVisible = false
+        }
         if !comic.isOCREnabled || !comic.isAITranslationEnabled {
             comic.isAutoTranslationEnabled = false
         }
         onComicUpdate(comic)
+    }
+
+    private func jumpToPage() {
+        let pageNumber = Int(jumpPageText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        guard pageNumber > 0 else {
+            HapticManager.shared.play(.warning)
+            return
+        }
+        let targetIndex = min(max(pageNumber - 1, 0), max(0, manager.pages.count - 1))
+        HapticManager.shared.play(.medium)
+        currentPageIndex = targetIndex
+        scrollJumpRequestID = UUID()
+        jumpPageText = ""
+        showComicSettings = false
     }
 
     private func previousPage() {
@@ -523,6 +615,8 @@ struct AnimatedPageReader: View {
     let imageFitMode: ImageFitMode
     let comic: ComicBook
     let translateRequestID: UUID
+    let ocrMagnifyRequestID: UUID
+    let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onToggleControls: () -> Void
 
@@ -615,6 +709,9 @@ struct AnimatedPageReader: View {
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
             translateRequestID: translateRequestID,
+            ocrMagnifyRequestID: ocrMagnifyRequestID,
+            isOCRMagnificationVisible: isOCRMagnificationVisible,
+            ocrTextScale: comic.ocrTextScale,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
             onPreviousPage: previousPage,
@@ -653,6 +750,8 @@ struct DoublePageReader: View {
     let imageFitMode: ImageFitMode
     let comic: ComicBook
     let translateRequestID: UUID
+    let ocrMagnifyRequestID: UUID
+    let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onToggleControls: () -> Void
 
@@ -709,6 +808,9 @@ struct DoublePageReader: View {
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
             translateRequestID: translateRequestID,
+            ocrMagnifyRequestID: ocrMagnifyRequestID,
+            isOCRMagnificationVisible: isOCRMagnificationVisible,
+            ocrTextScale: comic.ocrTextScale,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
             onPreviousPage: previousSpread,
@@ -856,6 +958,9 @@ struct LocalImageView: View {
     let isAITranslationEnabled: Bool
     let isAutoTranslationEnabled: Bool
     let translateRequestID: UUID
+    let ocrMagnifyRequestID: UUID
+    let isOCRMagnificationVisible: Bool
+    let ocrTextScale: Double
     let targetLanguage: String
     let imageFitMode: ImageFitMode
     let onPreviousPage: () -> Void
@@ -873,7 +978,9 @@ struct LocalImageView: View {
     
     // AI 相关的状态
     @State private var textBlocks: [TextBlock] = []
+    @State private var ocrTextBlocks: [TextBlock] = []
     @State private var isTranslating = false
+    @State private var isRecognizingOCR = false
     @AppStorage("openai_api_key") private var apiKey = ""
     @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
     @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
@@ -890,26 +997,9 @@ struct LocalImageView: View {
                     // 核心逻辑：直接在图片上层按比例渲染文本气泡
                     .overlay(
                         GeometryReader { geo in
-                            if canTranslate {
-                                ForEach(textBlocks) { block in
-                                    if let translation = block.translation {
-                                        Text(translation)
-                                            .font(.system(size: 14, weight: .medium))
-                                            .padding(4)
-                                            .background(Color.white.opacity(0.95)) // 漫画气泡背景
-                                            .foregroundColor(.black)
-                                            .cornerRadius(8)
-                                            // 转换为绝对坐标
-                                            .frame(
-                                                width: block.boundingBox.width * geo.size.width + 10,
-                                                height: block.boundingBox.height * geo.size.height + 10
-                                            )
-                                            .position(
-                                                x: block.boundingBox.midX * geo.size.width,
-                                                y: block.boundingBox.midY * geo.size.height
-                                            )
-                                    }
-                                }
+                            ZStack {
+                                translationOverlay(in: geo.size)
+                                ocrMagnificationOverlay(in: geo.size)
                             }
                         }
                     )
@@ -940,9 +1030,24 @@ struct LocalImageView: View {
         .onChange(of: translateRequestID) { _, _ in
             startTranslation()
         }
+        .onChange(of: ocrMagnifyRequestID) { _, _ in
+            startOCRMagnification()
+        }
+        .onChange(of: isOCRMagnificationVisible) { _, newValue in
+            if newValue {
+                startOCRMagnification()
+            } else {
+                ocrTextBlocks.removeAll()
+            }
+        }
         .onChange(of: isAutoTranslationEnabled) { _, newValue in
             guard newValue else { return }
             startTranslation()
+        }
+        .onChange(of: isOCREnabled) { _, newValue in
+            if !newValue {
+                ocrTextBlocks.removeAll()
+            }
         }
         .onChange(of: canTranslate) { _, newValue in
             if !newValue {
@@ -975,12 +1080,60 @@ struct LocalImageView: View {
         }
     }
 
+    @ViewBuilder
+    private func translationOverlay(in size: CGSize) -> some View {
+        if canTranslate {
+            ForEach(textBlocks) { block in
+                if let translation = block.translation {
+                    let rect = overlayRect(for: block, in: size, scaleMultiplier: 1)
+                    Text(translation)
+                        .font(.system(size: 14, weight: .medium))
+                        .padding(4)
+                        .background(Color.white.opacity(0.95))
+                        .foregroundColor(.black)
+                        .cornerRadius(8)
+                        .frame(width: rect.size.width + 10, height: rect.size.height + 10)
+                        .position(x: rect.midX, y: rect.midY)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ocrMagnificationOverlay(in size: CGSize) -> some View {
+        if isOCRMagnificationVisible {
+            ForEach(ocrTextBlocks) { block in
+                let rect = overlayRect(for: block, in: size, scaleMultiplier: CGFloat(ocrTextScale))
+                Text(block.text)
+                    .font(.system(size: ocrFontSize(for: block, in: size), weight: .semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.55)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.92))
+                    .foregroundColor(.black)
+                    .cornerRadius(6)
+                    .frame(width: rect.size.width, height: rect.size.height)
+                    .position(x: rect.midX, y: rect.midY)
+            }
+        }
+    }
+
+    private func overlayRect(for block: TextBlock, in size: CGSize, scaleMultiplier: CGFloat) -> CGRect {
+        let width = max(block.boundingBox.width * size.width * scaleMultiplier, 44)
+        let height = max(block.boundingBox.height * size.height * scaleMultiplier, 24)
+        let x = block.boundingBox.midX * size.width
+        let y = block.boundingBox.midY * size.height
+        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+    }
+
     private func loadImage() async {
         await MainActor.run {
             isLoadingImage = true
             loadFailed = false
             uiImage = nil
             textBlocks.removeAll()
+            ocrTextBlocks.removeAll()
             scale = 1
             lastScale = 1
             offset = .zero
@@ -1014,6 +1167,9 @@ struct LocalImageView: View {
         }
         if isAutoTranslationEnabled {
             await MainActor.run { startTranslation() }
+        }
+        if isOCRMagnificationVisible {
+            await MainActor.run { startOCRMagnification() }
         }
     }
 
@@ -1076,6 +1232,32 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem = workItem
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
             }
+    }
+
+    private func ocrFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
+        let blockHeight = max(block.boundingBox.height * size.height, 10)
+        let scaled = blockHeight * CGFloat(ocrTextScale) * 0.78
+        return min(max(scaled, 15), 42)
+    }
+
+    private func startOCRMagnification() {
+        guard isOCREnabled, isOCRMagnificationVisible, !isRecognizingOCR, let image = uiImage else { return }
+        isRecognizingOCR = true
+
+        Task {
+            do {
+                let blocks = try await AITranslator.recognizeText(in: image)
+                await MainActor.run {
+                    self.ocrTextBlocks = blocks
+                    self.isRecognizingOCR = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.ocrTextBlocks.removeAll()
+                    self.isRecognizingOCR = false
+                }
+            }
+        }
     }
     
     // 触发 AI 流程

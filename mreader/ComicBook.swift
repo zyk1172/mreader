@@ -26,6 +26,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
     var isOCREnabled: Bool
     var isAITranslationEnabled: Bool
     var isAutoTranslationEnabled: Bool
+    var isAutoOCRMagnificationEnabled: Bool
+    var ocrTextScale: Double
     var readingDirectionRaw: String
     var readingModeRaw: String
     var pageTurnAnimationRaw: String
@@ -35,7 +37,7 @@ struct ComicBook: Identifiable, Codable, Hashable {
         ComicSourceType(rawValue: sourceTypeRaw) ?? .local
     }
 
-    init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, smbPath: String? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, lastReadAt: Date = Date(), isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen") {
+    init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, smbPath: String? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, lastReadAt: Date = Date(), isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 2.2, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen") {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -55,6 +57,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
         self.isOCREnabled = isOCREnabled
         self.isAITranslationEnabled = isAITranslationEnabled
         self.isAutoTranslationEnabled = isAutoTranslationEnabled
+        self.isAutoOCRMagnificationEnabled = isAutoOCRMagnificationEnabled
+        self.ocrTextScale = ocrTextScale
         self.readingDirectionRaw = readingDirectionRaw
         self.readingModeRaw = readingModeRaw
         self.pageTurnAnimationRaw = pageTurnAnimationRaw
@@ -82,6 +86,8 @@ struct ComicBook: Identifiable, Codable, Hashable {
         isOCREnabled = try container.decodeIfPresent(Bool.self, forKey: .isOCREnabled) ?? true
         isAITranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAITranslationEnabled) ?? true
         isAutoTranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoTranslationEnabled) ?? false
+        isAutoOCRMagnificationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoOCRMagnificationEnabled) ?? false
+        ocrTextScale = try container.decodeIfPresent(Double.self, forKey: .ocrTextScale) ?? 2.2
         readingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .readingDirectionRaw) ?? "leftToRight"
         readingModeRaw = try container.decodeIfPresent(String.self, forKey: .readingModeRaw) ?? "horizontalPage"
         pageTurnAnimationRaw = try container.decodeIfPresent(String.self, forKey: .pageTurnAnimationRaw) ?? "slide"
