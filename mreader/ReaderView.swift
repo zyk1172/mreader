@@ -198,6 +198,7 @@ struct ReaderView: View {
     @State private var didRestoreScrollPosition = false
     @State private var jumpPageText = ""
     @State private var scrollJumpRequestID = UUID()
+    @State private var didRecordReaderOpen = false
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -443,6 +444,7 @@ struct ReaderView: View {
         }
         .onAppear {
             hasOpened = true
+            recordReaderOpenIfNeeded()
             preloadPages(around: currentPageIndex)
         }
         .onDisappear { autoHideControlsWorkItem?.cancel() }
@@ -653,6 +655,16 @@ struct ReaderView: View {
         scrollJumpRequestID = UUID()
         jumpPageText = ""
         showComicSettings = false
+    }
+
+    private func recordReaderOpenIfNeeded() {
+        guard !didRecordReaderOpen else { return }
+        didRecordReaderOpen = true
+        let clampedValue = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
+        comic.currentPageIndex = clampedValue
+        comic.lastReadAt = Date()
+        onComicUpdate(comic)
+        onProgressChange(clampedValue)
     }
 
     private func preloadPages(around index: Int) {
