@@ -100,8 +100,8 @@ private final class ReaderImageCache {
     private var loadingURLs: Set<URL> = []
 
     private init() {
-        cache.countLimit = 14
-        cache.totalCostLimit = 180 * 1024 * 1024
+        cache.countLimit = 10
+        cache.totalCostLimit = 130 * 1024 * 1024
     }
 
     func cachedImage(for url: URL) -> UIImage? {
@@ -122,7 +122,13 @@ private final class ReaderImageCache {
     }
 
     func preload(_ urls: [URL]) {
-        for url in urls where cachedImage(for: url) == nil && !loadingURLs.contains(url) {
+        let availableSlots = max(0, 2 - loadingURLs.count)
+        guard availableSlots > 0 else { return }
+        let candidates = urls
+            .filter { cachedImage(for: $0) == nil && !loadingURLs.contains($0) }
+            .prefix(availableSlots)
+
+        for url in candidates {
             loadingURLs.insert(url)
             Task.detached(priority: .utility) { [weak self] in
                 let image = decodeReaderImage(from: url)
@@ -767,6 +773,7 @@ struct ContinuousScrollReader: View {
     @State private var pageFrames: [Int: CGRect] = [:]
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
+    @State private var visiblePageUpdateWorkItem: DispatchWorkItem?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -820,7 +827,7 @@ struct ContinuousScrollReader: View {
             }
             .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                 pageFrames = frames
-                updateCurrentPageFromVisibleFrames()
+                scheduleVisiblePageUpdate()
             }
         }
     }
@@ -856,9 +863,18 @@ struct ContinuousScrollReader: View {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 didRestorePosition = true
-                updateCurrentPageFromVisibleFrames()
+                scheduleVisiblePageUpdate(delay: 0.05)
             }
         }
+    }
+
+    private func scheduleVisiblePageUpdate(delay: TimeInterval = 0.12) {
+        visiblePageUpdateWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            updateCurrentPageFromVisibleFrames()
+        }
+        visiblePageUpdateWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func updateCurrentPageFromVisibleFrames() {
