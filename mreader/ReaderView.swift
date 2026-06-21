@@ -92,6 +92,86 @@ enum ScrollSpeed: String, CaseIterable {
     }
 }
 
+@MainActor
+private final class ReaderImageCache {
+    static let shared = ReaderImageCache()
+
+    private let cache = NSCache<NSURL, UIImage>()
+    private var loadingURLs: Set<URL> = []
+
+    private init() {
+        cache.countLimit = 14
+        cache.totalCostLimit = 180 * 1024 * 1024
+    }
+
+    func cachedImage(for url: URL) -> UIImage? {
+        cache.object(forKey: url as NSURL)
+    }
+
+    func loadImage(for url: URL) async -> UIImage? {
+        if let cached = cachedImage(for: url) {
+            return cached
+        }
+        let image = await Task.detached(priority: .userInitiated) {
+            decodeReaderImage(from: url)
+        }.value
+        if let image {
+            cache.setObject(image, forKey: url as NSURL, cost: image.cacheCost)
+        }
+        return image
+    }
+
+    func preload(_ urls: [URL]) {
+        for url in urls where cachedImage(for: url) == nil && !loadingURLs.contains(url) {
+            loadingURLs.insert(url)
+            Task.detached(priority: .utility) { [weak self] in
+                let image = decodeReaderImage(from: url)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.loadingURLs.remove(url)
+                    if let image {
+                        self.cache.setObject(image, forKey: url as NSURL, cost: image.cacheCost)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func decodedImage(from url: URL) -> UIImage? {
+        decodeReaderImage(from: url)
+    }
+}
+
+private extension UIImage {
+    var cacheCost: Int {
+        guard let cgImage else { return 1 }
+        return cgImage.bytesPerRow * cgImage.height
+    }
+}
+
+private func decodeReaderImage(from url: URL) -> UIImage? {
+    autoreleasepool {
+        let source: CGImageSource?
+        if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
+            source = CGImageSourceCreateWithData(data as CFData, nil)
+        } else {
+            source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        }
+        guard let source else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: true,
+            kCGImageSourceThumbnailMaxPixelSize: 4096.0
+        ]
+        if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return UIImage(cgImage: cgImage)
+        }
+        return UIImage(contentsOfFile: url.path)
+    }
+}
+
 struct ReaderView: View {
     var manager: ComicManager
     @State private var comic: ComicBook
@@ -355,7 +435,10 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
-        .onAppear { hasOpened = true }
+        .onAppear {
+            hasOpened = true
+            preloadPages(around: currentPageIndex)
+        }
         .onDisappear { autoHideControlsWorkItem?.cancel() }
         .statusBar(hidden: !showControls)
         .onChange(of: currentPageIndex) { oldValue, newValue in
@@ -371,6 +454,7 @@ struct ReaderView: View {
             comic.lastReadAt = Date()
             onComicUpdate(comic)
             onProgressChange(clampedValue)
+            preloadPages(around: clampedValue)
         }
     }
 
@@ -563,6 +647,16 @@ struct ReaderView: View {
         scrollJumpRequestID = UUID()
         jumpPageText = ""
         showComicSettings = false
+    }
+
+    private func preloadPages(around index: Int) {
+        guard !manager.pages.isEmpty else { return }
+        let preferredIndices = [index, index + 1, index + 2, index - 1]
+        let urls = preferredIndices.compactMap { pageIndex -> URL? in
+            guard manager.pages.indices.contains(pageIndex) else { return nil }
+            return manager.pages[pageIndex].url
+        }
+        ReaderImageCache.shared.preload(urls)
     }
 
     private func previousPage() {
@@ -1341,6 +1435,28 @@ struct LocalImageView: View {
     }
 
     private func loadImage() async {
+        if let cachedImage = ReaderImageCache.shared.cachedImage(for: url) {
+            await MainActor.run {
+                isLoadingImage = false
+                loadFailed = false
+                uiImage = cachedImage
+                textBlocks.removeAll()
+                ocrTextBlocks.removeAll()
+                scale = 1
+                lastScale = 1
+                offset = .zero
+                pendingSingleTapWorkItem?.cancel()
+                pendingSingleTapWorkItem = nil
+            }
+            if isAutoTranslationEnabled {
+                await MainActor.run { startTranslation() }
+            }
+            if isOCRMagnificationVisible {
+                await MainActor.run { startOCRMagnification() }
+            }
+            return
+        }
+
         await MainActor.run {
             isLoadingImage = true
             loadFailed = false
@@ -1354,25 +1470,7 @@ struct LocalImageView: View {
             pendingSingleTapWorkItem = nil
         }
 
-        let loadedImage = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            let source: CGImageSource?
-            if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
-                source = CGImageSourceCreateWithData(data as CFData, nil)
-            } else {
-                source = CGImageSourceCreateWithURL(url as CFURL, nil)
-            }
-            guard let source else { return nil }
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: false,
-                kCGImageSourceThumbnailMaxPixelSize: 4096.0
-            ]
-            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
-                return UIImage(cgImage: cgImage)
-            }
-            return UIImage(contentsOfFile: url.path)
-        }.value
+        let loadedImage = await ReaderImageCache.shared.loadImage(for: url)
         await MainActor.run {
             self.uiImage = loadedImage
             self.loadFailed = loadedImage == nil
