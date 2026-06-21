@@ -75,6 +75,23 @@ enum ImageFitMode: String, CaseIterable {
     case original
 }
 
+enum ScrollSpeed: String, CaseIterable {
+    case slow
+    case standard
+    case fast
+
+    var screenStepRatio: CGFloat {
+        switch self {
+        case .slow:
+            return 0.45
+        case .standard:
+            return 0.65
+        case .fast:
+            return 0.8
+        }
+    }
+}
+
 struct ReaderView: View {
     var manager: ComicManager
     @State private var comic: ComicBook
@@ -112,6 +129,10 @@ struct ReaderView: View {
         ImageFitMode(rawValue: comic.imageFitModeRaw) ?? .fitScreen
     }
 
+    private var scrollSpeed: ScrollSpeed {
+        ScrollSpeed(rawValue: comic.scrollSpeedRaw) ?? .standard
+    }
+
     private var isOCRMagnificationActive: Bool {
         comic.isOCREnabled && (isOCRMagnificationVisible || comic.isAutoOCRMagnificationEnabled)
     }
@@ -127,6 +148,13 @@ struct ReaderView: View {
         Binding(
             get: { comic.readingDirectionRaw },
             set: { newValue in updateComic { $0.readingDirectionRaw = newValue } }
+        )
+    }
+
+    private var scrollSpeedRaw: Binding<String> {
+        Binding(
+            get: { comic.scrollSpeedRaw },
+            set: { newValue in updateComic { $0.scrollSpeedRaw = newValue } }
         )
     }
 
@@ -196,45 +224,19 @@ struct ReaderView: View {
                 .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
                 .ignoresSafeArea()
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(manager.pages) { page in
-                                LocalImageView(
-                                    url: page.url,
-                                    isOCREnabled: comic.isOCREnabled,
-                                    isAITranslationEnabled: comic.isAITranslationEnabled,
-                                    isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
-                                    translateRequestID: translateRequestID,
-                                    ocrMagnifyRequestID: ocrMagnifyRequestID,
-                                    isOCRMagnificationVisible: isOCRMagnificationActive && page.index == currentPageIndex,
-                                    ocrTextScale: comic.ocrTextScale,
-                                    isRightToLeftReading: readingDirection == .rightToLeft,
-                                    targetLanguage: translationTargetLanguage,
-                                    imageFitMode: .fitWidth,
-                                    onPreviousPage: previousPage,
-                                    onNextPage: nextPage,
-                                    onToggleControls: toggleControls
-                                )
-                                .frame(maxWidth: .infinity)
-                                .id(page.index)
-                                .onAppear {
-                                    guard didRestoreScrollPosition || page.index == currentPageIndex else { return }
-                                    currentPageIndex = page.index
-                                }
-                            }
-                        }
-                    }
-                    .onAppear {
-                        restoreScrollPosition(proxy)
-                    }
-                    .onChange(of: comic.readingModeRaw) { _, _ in
-                        restoreScrollPosition(proxy)
-                    }
-                    .onChange(of: scrollJumpRequestID) { _, _ in
-                        restoreScrollPosition(proxy)
-                    }
-                }
+                ContinuousScrollReader(
+                    pages: manager.pages,
+                    currentPageIndex: $currentPageIndex,
+                    readingMode: readingMode,
+                    scrollSpeed: scrollSpeed,
+                    comic: comic,
+                    translateRequestID: translateRequestID,
+                    ocrMagnifyRequestID: ocrMagnifyRequestID,
+                    isOCRMagnificationVisible: isOCRMagnificationActive,
+                    targetLanguage: translationTargetLanguage,
+                    scrollJumpRequestID: scrollJumpRequestID,
+                    onToggleControls: toggleControls
+                )
                 .ignoresSafeArea()
             }
 
@@ -446,6 +448,18 @@ struct ReaderView: View {
                     }
                     .disabled(!comic.isOCREnabled)
 
+                    HStack {
+                        Text("忽略边缘区域")
+                        Slider(value: Binding(
+                            get: { comic.ocrSafeAreaInset },
+                            set: { newValue in updateComic { $0.ocrSafeAreaInset = newValue } }
+                        ), in: 0...0.2, step: 0.01)
+                        Text("\(Int(comic.ocrSafeAreaInset * 100))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .disabled(!comic.isOCREnabled)
+
                     Toggle("AI 翻译", isOn: Binding(
                         get: { comic.isAITranslationEnabled },
                         set: { newValue in updateComic { $0.isAITranslationEnabled = newValue } }
@@ -507,6 +521,12 @@ struct ReaderView: View {
                         Label("适应宽度", systemImage: "arrow.left.and.right").tag(ImageFitMode.fitWidth.rawValue)
                         Label("适应高度", systemImage: "arrow.up.and.down").tag(ImageFitMode.fitHeight.rawValue)
                         Label("原始尺寸", systemImage: "1.magnifyingglass").tag(ImageFitMode.original.rawValue)
+                    }
+
+                    Picker("滚动速度", selection: scrollSpeedRaw) {
+                        Label("慢", systemImage: "tortoise").tag(ScrollSpeed.slow.rawValue)
+                        Label("标准", systemImage: "circle").tag(ScrollSpeed.standard.rawValue)
+                        Label("快", systemImage: "hare").tag(ScrollSpeed.fast.rawValue)
                     }
                 }
             }
@@ -594,18 +614,174 @@ struct ReaderView: View {
         }
     }
 
-    private func restoreScrollPosition(_ proxy: ScrollViewProxy) {
-        guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
-        let targetIndex = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
-        didRestoreScrollPosition = false
+}
+
+// MARK: - 支持 AI 的图片加载器
+private struct PageFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
+private struct ScrollViewAccessor: UIViewRepresentable {
+    let onResolve: (UIScrollView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
         DispatchQueue.main.async {
-            proxy.scrollTo(targetIndex, anchor: .top)
-            didRestoreScrollPosition = true
+            if let scrollView = view.enclosingScrollView {
+                onResolve(scrollView)
+            }
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            if let scrollView = uiView.enclosingScrollView {
+                onResolve(scrollView)
+            }
         }
     }
 }
 
-// MARK: - 支持 AI 的图片加载器
+private extension UIView {
+    var enclosingScrollView: UIScrollView? {
+        if let scrollView = self as? UIScrollView {
+            return scrollView
+        }
+        return superview?.enclosingScrollView
+    }
+}
+
+struct ContinuousScrollReader: View {
+    let pages: [ComicPage]
+    @Binding var currentPageIndex: Int
+    let readingMode: ReadingMode
+    let scrollSpeed: ScrollSpeed
+    let comic: ComicBook
+    let translateRequestID: UUID
+    let ocrMagnifyRequestID: UUID
+    let isOCRMagnificationVisible: Bool
+    let targetLanguage: String
+    let scrollJumpRequestID: UUID
+    let onToggleControls: () -> Void
+
+    @State private var scrollView: UIScrollView?
+    @State private var pageFrames: [Int: CGRect] = [:]
+    @State private var didRestorePosition = false
+    @State private var lastStepTime = Date.distantPast
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(pages) { page in
+                        LocalImageView(
+                            url: page.url,
+                            isOCREnabled: comic.isOCREnabled,
+                            isAITranslationEnabled: comic.isAITranslationEnabled,
+                            isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+                            translateRequestID: translateRequestID,
+                            ocrMagnifyRequestID: ocrMagnifyRequestID,
+                            isOCRMagnificationVisible: isOCRMagnificationVisible && page.index == currentPageIndex,
+                            ocrTextScale: comic.ocrTextScale,
+                            ocrSafeAreaInset: comic.ocrSafeAreaInset,
+                            isRightToLeftReading: comic.readingDirectionRaw == ReadingDirection.rightToLeft.rawValue,
+                            targetLanguage: targetLanguage,
+                            imageFitMode: .fitWidth,
+                            onPreviousPage: { stepScroll(-1) },
+                            onNextPage: { stepScroll(1) },
+                            onToggleControls: onToggleControls
+                        )
+                        .frame(maxWidth: .infinity)
+                        .id(page.index)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: PageFramePreferenceKey.self,
+                                    value: [page.index: geo.frame(in: .named("continuousScroll"))]
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+            .coordinateSpace(name: "continuousScroll")
+            .background(ScrollViewAccessor { resolvedScrollView in
+                if scrollView !== resolvedScrollView {
+                    scrollView = resolvedScrollView
+                }
+            })
+            .onAppear {
+                restoreScrollPosition(proxy, animated: false)
+            }
+            .onChange(of: readingMode) { _, _ in
+                restoreScrollPosition(proxy, animated: false)
+            }
+            .onChange(of: scrollJumpRequestID) { _, _ in
+                restoreScrollPosition(proxy, animated: true)
+            }
+            .onPreferenceChange(PageFramePreferenceKey.self) { frames in
+                pageFrames = frames
+                updateCurrentPageFromVisibleFrames()
+            }
+        }
+    }
+
+    private func stepScroll(_ direction: Int) {
+        guard let scrollView else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastStepTime) > 0.24 else { return }
+        lastStepTime = now
+
+        HapticManager.shared.play(.light)
+        let visibleHeight = max(scrollView.bounds.height - scrollView.adjustedContentInset.top - scrollView.adjustedContentInset.bottom, 1)
+        let distance = min(visibleHeight * scrollSpeed.screenStepRatio, visibleHeight * 0.8)
+        let maxOffsetY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+        let minOffsetY = -scrollView.adjustedContentInset.top
+        let targetY = min(max(scrollView.contentOffset.y + CGFloat(direction) * distance, minOffsetY), maxOffsetY)
+
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
+            scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: false)
+        } completion: { _ in
+            updateCurrentPageFromVisibleFrames()
+        }
+    }
+
+    private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
+        let targetIndex = min(max(currentPageIndex, 0), max(0, pages.count - 1))
+        didRestorePosition = false
+        DispatchQueue.main.async {
+            let animation = animated ? Animation.easeInOut(duration: 0.3) : nil
+            withAnimation(animation) {
+                proxy.scrollTo(targetIndex, anchor: .top)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                didRestorePosition = true
+                updateCurrentPageFromVisibleFrames()
+            }
+        }
+    }
+
+    private func updateCurrentPageFromVisibleFrames() {
+        guard didRestorePosition, let scrollView else { return }
+        let viewport = CGRect(origin: .zero, size: scrollView.bounds.size)
+        let visible = pageFrames.compactMap { index, frame -> (Int, CGFloat)? in
+            let overlap = frame.intersection(viewport)
+            guard !overlap.isNull, overlap.height > 1 else { return nil }
+            return (index, overlap.height)
+        }
+        guard let best = visible.max(by: { $0.1 < $1.1 }) else { return }
+        if currentPageIndex != best.0 {
+            currentPageIndex = best.0
+        }
+    }
+}
+
 struct AnimatedPageReader: View {
     let pages: [ComicPage]
     @Binding var currentPageIndex: Int
@@ -649,7 +825,8 @@ struct AnimatedPageReader: View {
                         state = readingMode == .verticalPage ? value.translation.height : value.translation.width
                     }
                     .onEnded { value in
-                        let threshold: CGFloat = 70
+                        let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
+                        let threshold = max(axisLength * 0.2, 72)
                         let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
                         let logicalDelta = readingMode == .verticalPage ? rawDelta : (isRTL ? rawDelta : -rawDelta)
                         if logicalDelta > threshold {
@@ -713,6 +890,7 @@ struct AnimatedPageReader: View {
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
             ocrTextScale: comic.ocrTextScale,
+            ocrSafeAreaInset: comic.ocrSafeAreaInset,
             isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
@@ -792,10 +970,11 @@ struct DoublePageReader: View {
                         state = value.translation.width
                     }
                     .onEnded { value in
+                        let threshold = max(geo.size.width * 0.2, 72)
                         let logicalDelta = isRTL ? value.translation.width : -value.translation.width
-                        if logicalDelta > 70 {
+                        if logicalDelta > threshold {
                             nextSpread()
-                        } else if logicalDelta < -70 {
+                        } else if logicalDelta < -threshold {
                             previousSpread()
                         }
                     }
@@ -813,6 +992,7 @@ struct DoublePageReader: View {
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
             ocrTextScale: comic.ocrTextScale,
+            ocrSafeAreaInset: comic.ocrSafeAreaInset,
             isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
@@ -964,6 +1144,7 @@ struct LocalImageView: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let ocrTextScale: Double
+    let ocrSafeAreaInset: Double
     let isRightToLeftReading: Bool
     let targetLanguage: String
     let imageFitMode: ImageFitMode
@@ -1090,14 +1271,19 @@ struct LocalImageView: View {
         if canTranslate {
             ForEach(textBlocks) { block in
                 if let translation = block.translation {
-                    let rect = overlayRect(for: block, in: size, scaleMultiplier: 1)
+                    let rect = translationBubbleRect(for: block, in: size)
                     Text(translation)
-                        .font(.system(size: 14, weight: .medium))
-                        .padding(4)
-                        .background(Color.white.opacity(0.95))
+                        .font(.system(size: translationFontSize(for: block, in: size), weight: .medium))
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.94))
                         .foregroundColor(.black)
                         .cornerRadius(8)
-                        .frame(width: rect.size.width + 10, height: rect.size.height + 10)
+                        .shadow(color: .black.opacity(0.16), radius: 3, x: 0, y: 1)
+                        .frame(width: rect.width)
                         .position(x: rect.midX, y: rect.midY)
                 }
             }
@@ -1108,17 +1294,19 @@ struct LocalImageView: View {
     private func ocrMagnificationOverlay(in size: CGSize) -> some View {
         if isOCRMagnificationVisible {
             ForEach(ocrTextBlocks) { block in
-                let rect = overlayRect(for: block, in: size, scaleMultiplier: CGFloat(ocrTextScale))
+                let rect = ocrBubbleRect(for: block, in: size)
                 Text(block.text)
                     .font(.system(size: ocrFontSize(for: block, in: size), weight: .semibold))
-                    .lineLimit(2)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
                     .minimumScaleFactor(0.55)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(Color.white.opacity(0.92))
                     .foregroundColor(.black)
                     .cornerRadius(6)
-                    .frame(width: rect.size.width, height: rect.size.height)
+                    .frame(width: rect.size.width)
                     .position(x: rect.midX, y: rect.midY)
             }
         }
@@ -1130,6 +1318,26 @@ struct LocalImageView: View {
         let x = block.boundingBox.midX * size.width
         let y = block.boundingBox.midY * size.height
         return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+    }
+
+    private func translationBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
+        let original = overlayRect(for: block, in: size, scaleMultiplier: 1)
+        let safeMargin: CGFloat = 12
+        let maxWidth = max(120, min(size.width - safeMargin * 2, 280))
+        let width = min(max(original.width * 1.75, 96), maxWidth)
+        let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
+        let y = min(max(original.midY, safeMargin + 18), size.height - safeMargin - 18)
+        return CGRect(x: x - width / 2, y: y - 18, width: width, height: 36)
+    }
+
+    private func ocrBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
+        let original = overlayRect(for: block, in: size, scaleMultiplier: CGFloat(ocrTextScale))
+        let safeMargin: CGFloat = 12
+        let maxWidth = max(100, size.width - safeMargin * 2)
+        let width = min(max(original.width, 72), maxWidth)
+        let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
+        let y = min(max(original.midY, safeMargin + 18), size.height - safeMargin - 18)
+        return CGRect(x: x - width / 2, y: y - 18, width: width, height: 36)
     }
 
     private func loadImage() async {
@@ -1245,13 +1453,28 @@ struct LocalImageView: View {
         return min(max(scaled, 15), 42)
     }
 
+    private func translationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
+        let blockHeight = max(block.boundingBox.height * size.height, 10)
+        return min(max(blockHeight * 0.58, 13), 18)
+    }
+
+    private func preparedTextBlocks(from blocks: [TextBlock]) -> [TextBlock] {
+        let filtered = AITranslator.filteredMangaTextBlocks(
+            blocks,
+            safeAreaInset: ocrSafeAreaInset,
+            isRightToLeft: isRightToLeftReading
+        )
+        return AITranslator.groupedMangaTextBlocks(filtered, isRightToLeft: isRightToLeftReading)
+    }
+
     private func startOCRMagnification() {
         guard isOCREnabled, isOCRMagnificationVisible, !isRecognizingOCR, let image = uiImage else { return }
         isRecognizingOCR = true
 
         Task {
             do {
-                let blocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
+                let recognizedBlocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
+                let blocks = preparedTextBlocks(from: recognizedBlocks)
                 await MainActor.run {
                     self.ocrTextBlocks = blocks
                     self.isRecognizingOCR = false
@@ -1273,7 +1496,8 @@ struct LocalImageView: View {
         Task {
             do {
                 // 步骤一：本地执行 Apple Vision OCR
-                let blocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
+                let recognizedBlocks = try await AITranslator.recognizeText(in: image, isRightToLeft: isRightToLeftReading)
+                let blocks = preparedTextBlocks(from: recognizedBlocks)
                 await MainActor.run { self.textBlocks = blocks } // 先显示个框（可选）
                 
                 // 步骤二：并发向大模型请求翻译 (由于有多个气泡，使用并发组加速)

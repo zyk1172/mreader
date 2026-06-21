@@ -178,6 +178,105 @@ class AITranslator {
         return filtered.isEmpty ? preferredLanguages : filtered
     }
 
+    static func filteredMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, isRightToLeft: Bool) -> [TextBlock] {
+        let inset = min(max(CGFloat(safeAreaInset), 0), 0.3)
+        let safeRect = CGRect(x: inset, y: inset, width: max(0, 1 - inset * 2), height: max(0, 1 - inset * 2))
+
+        let filtered = blocks.filter { block in
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return false }
+            guard safeRect.contains(CGPoint(x: block.boundingBox.midX, y: block.boundingBox.midY)) else { return false }
+            guard !isLikelyEdgeNoise(text) else { return false }
+
+            let height = block.boundingBox.height
+            let area = block.boundingBox.width * block.boundingBox.height
+            if text.count <= 2 && height < 0.022 {
+                return false
+            }
+            if height < 0.014 || area < 0.00012 {
+                return false
+            }
+            return true
+        }
+
+        return sortedTextBlocks(filtered, isRightToLeft: isRightToLeft)
+    }
+
+    static func groupedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
+        let sorted = sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
+        guard sorted.count > 1 else { return sorted }
+
+        var groups: [TextBlock] = []
+        for block in sorted {
+            guard let last = groups.last else {
+                groups.append(block)
+                continue
+            }
+
+            if shouldMerge(last.boundingBox, with: block.boundingBox) {
+                let merged = TextBlock(
+                    id: last.id,
+                    text: joinedOCRText(last.text, block.text),
+                    boundingBox: last.boundingBox.union(block.boundingBox),
+                    translation: last.translation
+                )
+                groups[groups.count - 1] = merged
+            } else {
+                groups.append(block)
+            }
+        }
+
+        return sortedTextBlocks(groups, isRightToLeft: isRightToLeft)
+    }
+
+    private static func isLikelyEdgeNoise(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let noiseFragments = ["http://", "https://", "www.", ".com", ".net", ".org", "@", "copyright", "©", "sample"]
+        return noiseFragments.contains { lowercased.contains($0) }
+    }
+
+    private static func shouldMerge(_ lhs: CGRect, with rhs: CGRect) -> Bool {
+        let expanded = lhs.insetBy(dx: -0.045, dy: -0.035)
+        if expanded.intersects(rhs) {
+            return lhs.union(rhs).width < 0.78 && lhs.union(rhs).height < 0.34
+        }
+
+        let horizontalGap = max(0, max(lhs.minX, rhs.minX) - min(lhs.maxX, rhs.maxX))
+        let verticalGap = max(0, max(lhs.minY, rhs.minY) - min(lhs.maxY, rhs.maxY))
+        let sameLine = abs(lhs.midY - rhs.midY) < 0.055 && horizontalGap < 0.09
+        let sameBalloonColumn = abs(lhs.midX - rhs.midX) < 0.13 && verticalGap < 0.06
+        let union = lhs.union(rhs)
+        return (sameLine || sameBalloonColumn) && union.width < 0.78 && union.height < 0.34
+    }
+
+    private static func joinedOCRText(_ lhs: String, _ rhs: String) -> String {
+        let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !left.isEmpty else { return right }
+        guard !right.isEmpty else { return left }
+
+        if left.hasSuffix("-") {
+            return String(left.dropLast()) + right
+        }
+        if containsCJK(left) || containsCJK(right) {
+            return left + right
+        }
+        let noSpaceBefore = CharacterSet(charactersIn: ".,!?;:)]}」』》）！？。，、；：")
+        if let first = right.unicodeScalars.first, noSpaceBefore.contains(first) {
+            return left + right
+        }
+        return left + " " + right
+    }
+
+    private static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            let value = scalar.value
+            return (0x4E00...0x9FFF).contains(value)
+                || (0x3040...0x30FF).contains(value)
+                || (0xAC00...0xD7AF).contains(value)
+        }
+    }
+
     private static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
         let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard validBlocks.count > 1 else { return validBlocks }

@@ -33,10 +33,12 @@ final class ComicLibraryStore: ObservableObject {
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
+            merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
             merged.readingDirectionRaw = existing.readingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
             merged.imageFitModeRaw = existing.imageFitModeRaw
+            merged.scrollSpeedRaw = existing.scrollSpeedRaw
             merged.seriesID = comic.seriesID ?? existing.seriesID
             comics[index] = merged
         } else {
