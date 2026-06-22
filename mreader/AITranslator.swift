@@ -8,12 +8,20 @@ struct TextBlock: Identifiable {
     let text: String
     let boundingBox: CGRect // 原图中的相对坐标 (0.0 ~ 1.0)
     var translation: String?
+    var confidence: Double
+    var ocrSource: String
+    var isFiltered: Bool
+    var filterReason: String?
 
-    init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
         self.translation = translation
+        self.confidence = confidence
+        self.ocrSource = ocrSource
+        self.isFiltered = isFiltered
+        self.filterReason = filterReason
     }
 }
 
@@ -34,29 +42,15 @@ class AITranslator {
     """
     
     // 1. 使用 Apple 原生 Vision 框架进行 OCR 识别 (极低内存占用，全本地执行)
-    static func recognizeText(in image: UIImage, isRightToLeft: Bool = false) async throws -> [TextBlock] {
-        let languagePasses = [
-            ["ja-JP", "zh-Hans", "zh-Hant", "ko-KR", "en-US"],
-            ["zh-Hans", "zh-Hant", "en-US"],
-            ["ja-JP", "en-US"],
-            ["en-US"]
-        ]
-
-        var lastError: Error?
-        for languages in languagePasses {
-            do {
-                let blocks = try await recognizeText(in: image, languages: languages, isRightToLeft: isRightToLeft)
-                if !blocks.isEmpty {
-                    return blocks
-                }
-            } catch {
-                lastError = error
-            }
-        }
-        if let lastError {
-            throw lastError
-        }
-        return []
+    static func recognizeText(in image: UIImage, isRightToLeft: Bool = false, minimumTextHeight: Double = 0.008) async throws -> [TextBlock] {
+        try await OCRPreprocessor.recognizeText(
+            in: image,
+            options: OCRPreprocessor.Options(
+                isRightToLeft: isRightToLeft,
+                minimumTextHeight: minimumTextHeight,
+                languages: ["zh-Hans", "zh-Hant", "ja-JP", "en-US"]
+            )
+        )
     }
 
     private static func recognizeText(in image: UIImage, languages: [String], isRightToLeft: Bool) async throws -> [TextBlock] {
@@ -86,7 +80,7 @@ class AITranslator {
                             width: visionRect.size.width,
                             height: visionRect.size.height
                         )
-                        blocks.append(TextBlock(text: topCandidate.string, boundingBox: swiftUIRect))
+                        blocks.append(TextBlock(text: topCandidate.string, boundingBox: swiftUIRect, confidence: Double(topCandidate.confidence)))
                     }
                 }
                 continuation.resume(returning: sortedTextBlocks(blocks, isRightToLeft: isRightToLeft))
@@ -94,7 +88,7 @@ class AITranslator {
             
             // 专为漫画阅读设置高精度
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = false
+            request.usesLanguageCorrection = true
             request.minimumTextHeight = 0.008
             request.recognitionLanguages = supportedRecognitionLanguages(from: languages, request: request)
             
@@ -178,32 +172,60 @@ class AITranslator {
         return filtered.isEmpty ? preferredLanguages : filtered
     }
 
-    static func filteredMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, isRightToLeft: Bool) -> [TextBlock] {
+    static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
         let inset = min(max(CGFloat(safeAreaInset), 0), 0.3)
+        let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.004), 0.05)
+        let minimumArea = minimumHeight * 0.0048
         let safeRect = CGRect(x: inset, y: inset, width: max(0, 1 - inset * 2), height: max(0, 1 - inset * 2))
 
-        let filtered = blocks.filter { block in
+        return sortedTextBlocks(blocks.map { block in
+            var annotated = block
             let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return false }
-            guard safeRect.contains(CGPoint(x: block.boundingBox.midX, y: block.boundingBox.midY)) else { return false }
-            guard !isLikelyEdgeNoise(text) else { return false }
+            if text.isEmpty {
+                annotated.isFiltered = true
+                annotated.filterReason = "空文本"
+                return annotated
+            }
+            if !safeRect.contains(CGPoint(x: block.boundingBox.midX, y: block.boundingBox.midY)) {
+                annotated.isFiltered = true
+                annotated.filterReason = "安全区外"
+                print("MReader OCR filter text=\(text) reason=安全区外 box=\(block.boundingBox)")
+                return annotated
+            }
+            if let noiseReason = edgeNoiseReason(text) {
+                annotated.isFiltered = true
+                annotated.filterReason = noiseReason
+                print("MReader OCR filter text=\(text) reason=\(noiseReason)")
+                return annotated
+            }
 
             let height = block.boundingBox.height
             let area = block.boundingBox.width * block.boundingBox.height
-            if text.count <= 2 && height < 0.022 {
-                return false
+            if text.count <= 2 && height < minimumHeight * 1.55 {
+                annotated.isFiltered = true
+                annotated.filterReason = "短文本过小"
+                print("MReader OCR filter text=\(text) reason=短文本过小 height=\(height)")
+                return annotated
             }
-            if height < 0.014 || area < 0.00012 {
-                return false
+            if height < minimumHeight || area < minimumArea {
+                annotated.isFiltered = true
+                annotated.filterReason = "字号/面积过小"
+                print("MReader OCR filter text=\(text) reason=字号/面积过小 height=\(height) area=\(area)")
+                return annotated
             }
-            return true
-        }
-
-        return sortedTextBlocks(filtered, isRightToLeft: isRightToLeft)
+            annotated.isFiltered = false
+            annotated.filterReason = nil
+            return annotated
+        }, isRightToLeft: isRightToLeft)
     }
 
-    static func groupedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
-        let sorted = sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
+    static func filteredMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
+        annotatedMangaTextBlocks(blocks, safeAreaInset: safeAreaInset, minimumTextHeight: minimumTextHeight, isRightToLeft: isRightToLeft)
+            .filter { !$0.isFiltered }
+    }
+
+    nonisolated static func groupedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
+        let sorted = sortedTextBlocks(deduplicatedMangaTextBlocks(blocks, isRightToLeft: isRightToLeft), isRightToLeft: isRightToLeft)
         guard sorted.count > 1 else { return sorted }
 
         var groups: [TextBlock] = []
@@ -213,7 +235,7 @@ class AITranslator {
                 continue
             }
 
-            if shouldMerge(last.boundingBox, with: block.boundingBox) {
+            if shouldMerge(last, with: block) {
                 let merged = TextBlock(
                     id: last.id,
                     text: joinedOCRText(last.text, block.text),
@@ -229,27 +251,81 @@ class AITranslator {
         return sortedTextBlocks(groups, isRightToLeft: isRightToLeft)
     }
 
-    private static func isLikelyEdgeNoise(_ text: String) -> Bool {
-        let lowercased = text.lowercased()
-        let noiseFragments = ["http://", "https://", "www.", ".com", ".net", ".org", "@", "copyright", "©", "sample"]
-        return noiseFragments.contains { lowercased.contains($0) }
+    nonisolated static func deduplicatedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
+        var kept: [TextBlock] = []
+        for block in sortedTextBlocks(blocks, isRightToLeft: isRightToLeft) {
+            let normalized = normalizedOCRText(block.text)
+            guard !normalized.isEmpty else { continue }
+            if let existingIndex = kept.firstIndex(where: { existing in
+                let overlap = existing.boundingBox.intersection(block.boundingBox)
+                guard !overlap.isNull else { return false }
+                let union = existing.boundingBox.union(block.boundingBox)
+                let overlapRatio = (overlap.width * overlap.height) / max(union.width * union.height, 0.0001)
+                guard overlapRatio > 0.28 else { return false }
+                let existingText = normalizedOCRText(existing.text)
+                return existingText == normalized
+                    || existingText.contains(normalized)
+                    || normalized.contains(existingText)
+                    || textSimilarity(existingText, normalized) > 0.72
+            }) {
+                let existing = kept[existingIndex]
+                if block.confidence > existing.confidence || rectArea(block.boundingBox) > rectArea(existing.boundingBox) * 1.2 {
+                    kept[existingIndex] = block
+                }
+            } else {
+                kept.append(block)
+            }
+        }
+        return sortedTextBlocks(kept, isRightToLeft: isRightToLeft)
     }
 
-    private static func shouldMerge(_ lhs: CGRect, with rhs: CGRect) -> Bool {
-        let expanded = lhs.insetBy(dx: -0.045, dy: -0.035)
-        if expanded.intersects(rhs) {
-            return lhs.union(rhs).width < 0.78 && lhs.union(rhs).height < 0.34
+    nonisolated private static func edgeNoiseReason(_ text: String) -> String? {
+        let lowercased = text.lowercased()
+        let noiseFragments = ["http://", "https://", "www.", ".com", ".net", ".org"]
+        if noiseFragments.contains(where: { lowercased.contains($0) }) {
+            return "网址"
+        }
+        if lowercased.contains("copyright") || lowercased.contains("©") {
+            return "版权水印"
+        }
+        if lowercased == "sample" || lowercased.contains("sample") && text.count < 20 {
+            return "样张水印"
+        }
+        return nil
+    }
+
+    nonisolated private static func shouldMerge(_ lhsBlock: TextBlock, with rhsBlock: TextBlock) -> Bool {
+        let lhs = lhsBlock.boundingBox
+        let rhs = rhsBlock.boundingBox
+        let lhsHeight = max(lhs.height, 0.001)
+        let rhsHeight = max(rhs.height, 0.001)
+        let smallerTextHeight = min(lhsHeight, rhsHeight)
+        let largerTextHeight = max(lhsHeight, rhsHeight)
+
+        // 不同字号通常属于不同气泡、旁白或页边标注；即便距离很近也不要强行合并。
+        if largerTextHeight / smallerTextHeight > 1.32 {
+            return false
         }
 
         let horizontalGap = max(0, max(lhs.minX, rhs.minX) - min(lhs.maxX, rhs.maxX))
         let verticalGap = max(0, max(lhs.minY, rhs.minY) - min(lhs.maxY, rhs.maxY))
-        let sameLine = abs(lhs.midY - rhs.midY) < 0.055 && horizontalGap < 0.09
-        let sameBalloonColumn = abs(lhs.midX - rhs.midX) < 0.13 && verticalGap < 0.06
+        let maxSentenceGap = smallerTextHeight * 0.5
+        if horizontalGap > maxSentenceGap && verticalGap > maxSentenceGap {
+            return false
+        }
+
         let union = lhs.union(rhs)
-        return (sameLine || sameBalloonColumn) && union.width < 0.78 && union.height < 0.34
+        guard union.width < 0.72, union.height < 0.28 else { return false }
+
+        let rowCenterTolerance = smallerTextHeight * 0.72
+        let columnCenterTolerance = max(min(lhs.width, rhs.width) * 0.62, smallerTextHeight * 0.9)
+        let sameLine = abs(lhs.midY - rhs.midY) <= rowCenterTolerance && horizontalGap <= maxSentenceGap
+        let sameBalloonColumn = abs(lhs.midX - rhs.midX) <= columnCenterTolerance && verticalGap <= maxSentenceGap
+
+        return sameLine || sameBalloonColumn
     }
 
-    private static func joinedOCRText(_ lhs: String, _ rhs: String) -> String {
+    nonisolated private static func joinedOCRText(_ lhs: String, _ rhs: String) -> String {
         let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
         let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !left.isEmpty else { return right }
@@ -268,7 +344,7 @@ class AITranslator {
         return left + " " + right
     }
 
-    private static func containsCJK(_ text: String) -> Bool {
+    nonisolated private static func containsCJK(_ text: String) -> Bool {
         text.unicodeScalars.contains { scalar in
             let value = scalar.value
             return (0x4E00...0x9FFF).contains(value)
@@ -277,7 +353,27 @@ class AITranslator {
         }
     }
 
-    private static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
+    nonisolated private static func normalizedOCRText(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "[\\p{P}\\p{S}]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func textSimilarity(_ lhs: String, _ rhs: String) -> CGFloat {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        let leftSet = Set(lhs)
+        let rightSet = Set(rhs)
+        let intersection = leftSet.intersection(rightSet).count
+        let union = leftSet.union(rightSet).count
+        return CGFloat(intersection) / CGFloat(max(union, 1))
+    }
+
+    nonisolated private static func rectArea(_ rect: CGRect) -> CGFloat {
+        max(rect.width, 0) * max(rect.height, 0)
+    }
+
+    nonisolated static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
         let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard validBlocks.count > 1 else { return validBlocks }
 

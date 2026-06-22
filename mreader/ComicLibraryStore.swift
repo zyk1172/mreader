@@ -1,6 +1,54 @@
 import Foundation
 import Combine
 
+nonisolated private struct ComicLibrarySnapshot: Sendable {
+    let comics: [ComicBook]
+    let series: [ComicSeries]
+}
+
+private actor ComicLibraryDiskStore {
+    func load(libraryURL: URL, seriesURL: URL) -> ComicLibrarySnapshot {
+        let comics: [ComicBook]
+        do {
+            let data = try Data(contentsOf: libraryURL)
+            comics = try JSONDecoder().decode([ComicBook].self, from: data)
+                .sorted { $0.lastReadAt > $1.lastReadAt }
+        } catch {
+            comics = []
+        }
+
+        let series: [ComicSeries]
+        do {
+            let data = try Data(contentsOf: seriesURL)
+            series = try JSONDecoder().decode([ComicSeries].self, from: data)
+                .sorted { $0.createdAt > $1.createdAt }
+        } catch {
+            series = []
+        }
+        return ComicLibrarySnapshot(comics: comics, series: series)
+    }
+
+    func saveComics(_ comics: [ComicBook], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(comics)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            print("保存书架失败: \(error)")
+        }
+    }
+
+    func saveSeries(_ series: [ComicSeries], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(series)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            print("保存系列失败: \(error)")
+        }
+    }
+}
+
 @MainActor
 final class ComicLibraryStore: ObservableObject {
     @Published private(set) var comics: [ComicBook] = []
@@ -8,24 +56,29 @@ final class ComicLibraryStore: ObservableObject {
 
     private let libraryURL: URL
     private let seriesURL: URL
+    private let diskStore = ComicLibraryDiskStore()
 
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         libraryURL = applicationSupportURL.appendingPathComponent("library.json")
         seriesURL = applicationSupportURL.appendingPathComponent("series.json")
         ComicManager.ensureLocalLibraryExists()
-        load()
-        purgeNetworkLibraryState()
-        runStartupMaintenance()
+        Task {
+            await load()
+            purgeNetworkLibraryState()
+            runStartupMaintenance()
+        }
     }
 
     func add(_ comic: ComicBook) {
-        if let index = comics.firstIndex(where: { $0.id == comic.id || ($0.libraryPath != nil && $0.libraryPath == comic.libraryPath) }) {
+        if let index = comics.firstIndex(where: { matchesExistingComic($0, comic) }) {
             let existing = comics[index]
             var merged = comic
             merged.id = existing.id
             merged.title = existing.title.isEmpty ? comic.title : existing.title
             merged.currentPageIndex = min(existing.currentPageIndex, max(0, comic.totalPages - 1))
+            merged.scrollProgress = existing.scrollProgress
+            merged.scrollPageProgress = existing.scrollPageProgress
             merged.lastReadAt = existing.lastReadAt
             merged.isLocked = existing.isLocked
             merged.isOCREnabled = existing.isOCREnabled
@@ -34,6 +87,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
+            merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
             merged.readingDirectionRaw = existing.readingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
@@ -110,6 +164,12 @@ final class ComicLibraryStore: ObservableObject {
 
     func rebuildThumbnail(for id: UUID) {
         guard let index = comics.firstIndex(where: { $0.id == id }) else { return }
+        if comics[index].sourceType == .komga {
+            Task {
+                await syncKomgaSources()
+            }
+            return
+        }
         guard comics[index].sourceType == .local else { return }
         let bookmarkData = comics[index].bookmarkData
         Task.detached(priority: .utility) {
@@ -141,7 +201,43 @@ final class ComicLibraryStore: ObservableObject {
 
     func syncAllLibrariesAsync() async {
         await syncLocalLibraryAsync()
+        await syncKomgaSources()
         HapticManager.shared.play(.success)
+    }
+
+    @discardableResult
+    func syncKomgaSources() async -> Int {
+        let results = await KomgaProvider.syncEnabledSources()
+        var changed = false
+        var syncedCount = 0
+        for result in results {
+            if let error = result.error {
+                print("Komga 同步失败 \(result.source.name): \(error.localizedDescription)")
+                let oldCount = comics.count
+                comics.removeAll { $0.sourceType == .komga && $0.mediaSourceID == result.source.id }
+                if comics.count != oldCount {
+                    changed = true
+                    print("Komga 源失去连接，已从书架移除 \(oldCount - comics.count) 本漫画: \(result.source.name)")
+                }
+                continue
+            }
+            syncedCount += result.comics.count
+            if applyKomgaScan(result.comics, sourceID: result.source.id) {
+                changed = true
+            }
+        }
+        if changed {
+            sortAndSave()
+        }
+        return syncedCount
+    }
+
+    func removeKomgaSource(id: UUID) {
+        let oldCount = comics.count
+        comics.removeAll { $0.sourceType == .komga && $0.mediaSourceID == id }
+        if comics.count != oldCount {
+            save()
+        }
     }
 
     private func applyScan(_ scanned: ComicManager.LibraryScanResult) {
@@ -203,6 +299,9 @@ final class ComicLibraryStore: ObservableObject {
 
     func rebuildAllThumbnails() {
         let workItems = comics.filter { $0.sourceType == .local }.map { ($0.id, $0.bookmarkData) }
+        Task {
+            await syncKomgaSources()
+        }
         Task.detached(priority: .utility) {
             for (id, bookmarkData) in workItems {
                 let coverPath = ComicManager.rebuildCoverImage(bookmarkData: bookmarkData)
@@ -267,30 +366,10 @@ final class ComicLibraryStore: ObservableObject {
         save()
     }
 
-    func updateProgress(for id: UUID, pageIndex: Int) {
-        guard let index = comics.firstIndex(where: { $0.id == id }) else { return }
-        let clampedPageIndex = min(max(pageIndex, 0), max(0, comics[index].totalPages - 1))
-        comics[index].currentPageIndex = clampedPageIndex
-        comics[index].lastReadAt = Date()
-        sortAndSave()
-    }
-
-    private func load() {
-        do {
-            let data = try Data(contentsOf: libraryURL)
-            comics = try JSONDecoder().decode([ComicBook].self, from: data)
-            comics.sort { $0.lastReadAt > $1.lastReadAt }
-        } catch {
-            comics = []
-        }
-
-        do {
-            let data = try Data(contentsOf: seriesURL)
-            series = try JSONDecoder().decode([ComicSeries].self, from: data)
-            series.sort { $0.createdAt > $1.createdAt }
-        } catch {
-            series = []
-        }
+    private func load() async {
+        let snapshot = await diskStore.load(libraryURL: libraryURL, seriesURL: seriesURL)
+        comics = snapshot.comics
+        series = snapshot.series
     }
 
     private func sortAndSave() {
@@ -307,7 +386,13 @@ final class ComicLibraryStore: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "mreader.webdav.librarySources")
         let oldComicCount = comics.count
         let oldSeriesCount = series.count
-        comics.removeAll { $0.sourceType != .local }
+        comics.removeAll { comic in
+            let legacyRemoteType = ![ComicSourceType.local.rawValue, ComicSourceType.komga.rawValue].contains(comic.sourceTypeRaw)
+            return legacyRemoteType ||
+            comic.libraryPath?.hasPrefix("smb://") == true ||
+            comic.libraryPath?.hasPrefix("http://") == true ||
+            comic.libraryPath?.hasPrefix("https://") == true
+        }
         series.removeAll { item in
             guard let path = item.libraryPath else { return false }
             return path.hasPrefix("smb://") || path.hasPrefix("http://") || path.hasPrefix("https://")
@@ -318,6 +403,69 @@ final class ComicLibraryStore: ObservableObject {
         if series.count != oldSeriesCount {
             saveSeries()
         }
+    }
+
+    private func matchesExistingComic(_ existing: ComicBook, _ incoming: ComicBook) -> Bool {
+        if existing.id == incoming.id {
+            return true
+        }
+        if existing.sourceType == .local, incoming.sourceType == .local,
+           existing.libraryPath != nil, existing.libraryPath == incoming.libraryPath {
+            return true
+        }
+        if existing.sourceType == .komga, incoming.sourceType == .komga,
+           existing.mediaSourceID == incoming.mediaSourceID,
+           existing.komgaBookID == incoming.komgaBookID {
+            return true
+        }
+        return false
+    }
+
+    private func applyKomgaScan(_ remoteComics: [ComicBook], sourceID: UUID) -> Bool {
+        var changed = false
+        let remoteIDs = Set(remoteComics.map(\.id))
+        for comic in remoteComics {
+            if upsertRemoteComic(comic) {
+                changed = true
+            }
+        }
+        let oldCount = comics.count
+        comics.removeAll { comic in
+            comic.sourceType == .komga && comic.mediaSourceID == sourceID && !remoteIDs.contains(comic.id)
+        }
+        return changed || comics.count != oldCount
+    }
+
+    private func upsertRemoteComic(_ comic: ComicBook) -> Bool {
+        if let index = comics.firstIndex(where: { matchesExistingComic($0, comic) }) {
+            let existing = comics[index]
+            var merged = comic
+            merged.id = existing.id
+            merged.currentPageIndex = min(existing.currentPageIndex, max(0, comic.totalPages - 1))
+            merged.scrollProgress = existing.scrollProgress
+            merged.scrollPageProgress = existing.scrollPageProgress
+            merged.lastReadAt = existing.lastReadAt
+            merged.isLocked = existing.isLocked
+            merged.isOCREnabled = existing.isOCREnabled
+            merged.isAITranslationEnabled = existing.isAITranslationEnabled
+            merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
+            merged.ocrTextScale = existing.ocrTextScale
+            merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
+            merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
+            merged.readingDirectionRaw = existing.readingDirectionRaw
+            merged.readingModeRaw = existing.readingModeRaw
+            merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
+            merged.imageFitModeRaw = existing.imageFitModeRaw
+            merged.scrollSpeedRaw = existing.scrollSpeedRaw
+            let didChange = merged != existing
+            if didChange {
+                comics[index] = merged
+            }
+            return didChange
+        }
+        comics.append(comic)
+        return true
     }
 
     private func upsertScannedComic(_ result: ComicManager.ImportResult, seriesID: UUID?) -> Bool {
@@ -384,24 +532,18 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func save() {
-        do {
-            let folderURL = libraryURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(comics)
-            try data.write(to: libraryURL, options: .atomic)
-        } catch {
-            print("保存书架失败: \(error)")
+        let snapshot = comics
+        let url = libraryURL
+        Task {
+            await diskStore.saveComics(snapshot, to: url)
         }
     }
 
     private func saveSeries() {
-        do {
-            let folderURL = seriesURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(series)
-            try data.write(to: seriesURL, options: .atomic)
-        } catch {
-            print("保存系列失败: \(error)")
+        let snapshot = series
+        let url = seriesURL
+        Task {
+            await diskStore.saveSeries(snapshot, to: url)
         }
     }
 }

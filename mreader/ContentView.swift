@@ -30,14 +30,91 @@ enum ImportPickerMode {
     case folder
 }
 
+private enum DeleteRequest: Identifiable {
+    case comic(ComicBook)
+    case series(ComicSeries)
+    case selection(comics: Set<UUID>, series: Set<UUID>)
+
+    var id: String {
+        switch self {
+        case .comic(let comic):
+            return "comic-\(comic.id.uuidString)"
+        case .series(let series):
+            return "series-\(series.id.uuidString)"
+        case .selection(let comics, let series):
+            return "selection-\(comics.map(\.uuidString).sorted().joined(separator: ","))-\(series.map(\.uuidString).sorted().joined(separator: ","))"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .comic(let comic):
+            return "删除“\(comic.title)”？"
+        case .series(let series):
+            return "删除系列“\(series.title)”？"
+        case .selection(let comics, let series):
+            return "删除选中的 \(comics.count + series.count) 项？"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .comic:
+            return "会删除用户漫画库中的真实文件，并清理书架记录。此操作不能撤销。"
+        case .series:
+            return "会删除该系列文件夹及其中漫画，并清理书架记录。此操作不能撤销。"
+        case .selection:
+            return "会删除选中漫画或系列对应的真实文件，并清理书架记录。此操作不能撤销。"
+        }
+    }
+}
+
 nonisolated struct MReaderSettingsBackup: Codable {
-    var version = 1
+    var version = 2
     var openAIAPIKey: String
     var openAIBaseURL: String
     var openAIModel: String
     var translationTargetLanguage: String
     var translationPromptTemplate: String?
     var isHapticFeedbackEnabled: Bool
+    var mediaSources: [MediaSourceBackup]?
+}
+
+nonisolated struct MediaSourceBackup: Codable {
+    var id: UUID
+    var name: String
+    var type: MediaSourceType
+    var baseURL: String
+    var username: String?
+    var createdAt: Date
+    var lastSyncAt: Date?
+    var isEnabled: Bool
+    var apiKey: String?
+
+    init(source: MediaSource, apiKey: String?) {
+        id = source.id
+        name = source.name
+        type = source.type
+        baseURL = source.baseURL
+        username = source.username
+        createdAt = source.createdAt
+        lastSyncAt = source.lastSyncAt
+        isEnabled = source.isEnabled
+        self.apiKey = apiKey
+    }
+
+    var mediaSource: MediaSource {
+        MediaSource(
+            id: id,
+            name: name,
+            type: type,
+            baseURL: baseURL,
+            username: username,
+            createdAt: createdAt,
+            lastSyncAt: lastSyncAt,
+            isEnabled: isEnabled
+        )
+    }
 }
 
 nonisolated struct SettingsBackupDocument: FileDocument, Identifiable {
@@ -92,6 +169,8 @@ struct ContentView: View {
     @State private var renamingComic: ComicBook?
     @State private var renameTitle = ""
     @State private var importingSeriesID: UUID?
+    @State private var deleteRequest: DeleteRequest?
+    @State private var isRefreshingLibraries = false
     @AppStorage("openai_api_key") private var apiKey = ""
     @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
     @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
@@ -103,7 +182,7 @@ struct ContentView: View {
     @State private var renamingSeries: ComicSeries?
 
     private var hasAnyLibrarySource: Bool {
-        hasLibraryRoot
+        hasLibraryRoot || KomgaProvider.loadSources().contains { $0.type == .komga && $0.isEnabled }
     }
 
     private var visibleComics: [ComicBook] {
@@ -255,6 +334,23 @@ struct ContentView: View {
             } message: {
                 Text("创建后可以打开系列并添加章节漫画。")
             }
+            .confirmationDialog(
+                deleteRequest?.title ?? "确认删除？",
+                isPresented: Binding(
+                    get: { deleteRequest != nil },
+                    set: { if !$0 { deleteRequest = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) {
+                    performConfirmedDelete()
+                }
+                Button("取消", role: .cancel) {
+                    deleteRequest = nil
+                }
+            } message: {
+                Text(deleteRequest?.message ?? "")
+            }
             .sheet(isPresented: $showStorageManager) {
                 StorageManagerView(library: library)
             }
@@ -267,7 +363,7 @@ struct ContentView: View {
     private var allowedImportTypes: [UTType] {
         switch importPickerMode {
         case .files:
-            return [.zip, .pdf, .image, UTType(filenameExtension: "cbz"), UTType(filenameExtension: "rar"), UTType(filenameExtension: "cbr"), UTType(filenameExtension: "7z")].compactMap { $0 }
+            return [.zip, .pdf, .epub, .image, UTType(filenameExtension: "cbz"), UTType(filenameExtension: "7z"), UTType(filenameExtension: "rar"), UTType(filenameExtension: "cbr")].compactMap { $0 }
         case .folder:
             return [.folder, .directory]
         }
@@ -286,6 +382,9 @@ struct ContentView: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
+        }
+        .refreshable {
+            await refreshShelfLibraries()
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
     }
@@ -309,6 +408,7 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 openAISettingsSection
+                mediaSourceSettingsSection
                 importServiceSection
                 interactionSettingsSection
                 backupSettingsSection
@@ -351,18 +451,25 @@ struct ContentView: View {
     }
 
     private var emptyShelfView: some View {
-        ContentUnavailableView {
-            Label("书架空空如也", systemImage: "books.vertical")
-        } description: {
-            Text("支持导入图片文件夹、ZIP、CBZ")
-        } actions: {
-            Button("导入漫画文件") {
-                beginImport(.files)
+        ScrollView {
+            ContentUnavailableView {
+                Label("书架空空如也", systemImage: "books.vertical")
+            } description: {
+                Text("支持导入图片文件夹、ZIP、CBZ")
+            } actions: {
+                Button("导入漫画文件") {
+                    beginImport(.files)
+                }
+                .buttonStyle(.borderedProminent)
+                Button("导入漫画文件夹") {
+                    beginImport(.folder)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            Button("导入漫画文件夹") {
-                beginImport(.folder)
-            }
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 460)
+        }
+        .refreshable {
+            await refreshShelfLibraries()
         }
     }
 
@@ -417,8 +524,20 @@ struct ContentView: View {
                 }
                 .padding(.vertical, 12)
             }
+            .refreshable {
+                await refreshShelfLibraries()
+            }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
+    }
+
+    private func refreshShelfLibraries() async {
+        guard !isRefreshingLibraries else { return }
+        isRefreshingLibraries = true
+        HapticManager.shared.play(.light)
+        await library.syncAllLibrariesAsync()
+        hasLibraryRoot = ComicManager.hasSelectedLibraryRoot()
+        isRefreshingLibraries = false
     }
 
     private func twoColumnGrid(cardWidth: CGFloat) -> [GridItem] {
@@ -540,7 +659,11 @@ struct ContentView: View {
 
             Button {
                 HapticManager.shared.play(.light)
-                FileOpenPresenter.shared.open(ComicManager.localLibraryURLForOpening())
+                guard let url = ComicManager.localLibraryURLForOpening() else {
+                    isLibraryRootPicking = true
+                    return
+                }
+                FileOpenPresenter.shared.open(url)
             } label: {
                 Label("在 Files 中显示", systemImage: "folder")
             }
@@ -654,9 +777,7 @@ struct ContentView: View {
 
         Button(role: .destructive) {
             HapticManager.shared.play(.heavy)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                library.deleteSeries(id: series.id)
-            }
+            deleteRequest = .series(series)
         } label: {
             Label("删除", systemImage: "trash")
         }
@@ -717,7 +838,7 @@ struct ContentView: View {
             .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
 
             Button(role: .destructive) {
-                deleteSelectedItems()
+                requestDeleteSelectedItems()
             } label: {
                 Label("删除", systemImage: "trash")
             }
@@ -815,6 +936,16 @@ struct ContentView: View {
         }
     }
 
+    private var mediaSourceSettingsSection: some View {
+        Section(header: Text("漫画媒体库")) {
+            NavigationLink {
+                MediaSourceSettingsView(library: library)
+            } label: {
+                Label("Komga", systemImage: "server.rack")
+            }
+        }
+    }
+
     private var interactionSettingsSection: some View {
         Section(header: Text("交互")) {
             Toggle("触感反馈", isOn: $isHapticFeedbackEnabled)
@@ -875,6 +1006,36 @@ struct ContentView: View {
         }
     }
 
+    private func requestDeleteSelectedItems() {
+        guard !selectedComicIDs.isEmpty || !selectedSeriesIDs.isEmpty else { return }
+        HapticManager.shared.play(.heavy)
+        deleteRequest = .selection(comics: selectedComicIDs, series: selectedSeriesIDs)
+    }
+
+    private func performConfirmedDelete() {
+        guard let request = deleteRequest else { return }
+        HapticManager.shared.play(.heavy)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+            switch request {
+            case .comic(let comic):
+                library.delete(id: comic.id)
+            case .series(let series):
+                library.deleteSeries(id: series.id)
+            case .selection(let comicIDs, let seriesIDs):
+                for seriesID in seriesIDs {
+                    library.deleteSeries(id: seriesID)
+                }
+                for comicID in comicIDs {
+                    library.delete(id: comicID)
+                }
+            }
+            selectedComicIDs.removeAll()
+            selectedSeriesIDs.removeAll()
+            isSelectionMode = false
+        }
+        deleteRequest = nil
+    }
+
     private func deleteSelectedItems() {
         HapticManager.shared.play(.heavy)
         withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
@@ -891,9 +1052,7 @@ struct ContentView: View {
     }
 
     private func readerDestination(for comic: ComicBook) -> some View {
-        ReaderContainerView(comic: comic) { pageIndex in
-            library.updateProgress(for: comic.id, pageIndex: pageIndex)
-        } onComicUpdate: { updatedComic in
+        ReaderContainerView(comic: comic) { updatedComic in
             library.update(updatedComic)
         }
     }
@@ -937,16 +1096,15 @@ struct ContentView: View {
 
         Button(role: .destructive) {
             HapticManager.shared.play(.heavy)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                library.delete(id: comic.id)
-            }
+            deleteRequest = .comic(comic)
         } label: {
             Label("删除", systemImage: "trash")
         }
     }
 
     private func folderURL(for comic: ComicBook) -> URL? {
-        try? ComicManager.resolveBookmark(comic.bookmarkData)
+        guard comic.sourceType == .local else { return nil }
+        return try? ComicManager.resolveBookmark(comic.bookmarkData)
     }
     
     private func importComicsOrFolder(from urls: [URL], seriesID: UUID? = nil) {
@@ -962,34 +1120,35 @@ struct ContentView: View {
                 return URL(fileURLWithPath: path, isDirectory: true)
             }
 
-            let singleURL = urls.count == 1 ? urls.first : nil
-            let singleURLIsDirectory = await Task.detached(priority: .utility) {
-                guard let singleURL else { return false }
-                return Self.isDirectoryURL(singleURL)
-            }.value
-
-            if let url = singleURL, singleURLIsDirectory {
-                // 如果只导入了一个文件夹，检查其内部结构
-                let folderInspection = await Task.detached(priority: .utility) {
-                    Self.inspectImportFolder(url)
+            for url in urls {
+                let isDirectory = await Task.detached(priority: .utility) {
+                    Self.isDirectoryURL(url)
                 }.value
-                let hasDirectImages = folderInspection.hasDirectImages
-                let childFoldersOrZips = folderInspection.childFoldersOrZips
 
-                if !hasDirectImages && !childFoldersOrZips.isEmpty {
-                    let targetSeriesID = await MainActor.run { () -> UUID? in
-                        if let seriesID {
-                            return seriesID
+                if isDirectory {
+                    let folderInspection = await Task.detached(priority: .utility) {
+                        ComicManager.inspectImportFolder(url)
+                    }.value
+
+                    if !folderInspection.hasDirectImages && !folderInspection.importableChildren.isEmpty {
+                        let targetSeriesID = await MainActor.run { () -> UUID? in
+                            if let seriesID {
+                                return seriesID
+                            }
+                            return library.addSeries(title: url.lastPathComponent)?.id
                         }
-                        return library.addSeries(title: url.lastPathComponent)?.id
-                    }
 
-                    if let targetSeriesID {
+                        guard let targetSeriesID else {
+                            failedCount += folderInspection.importableChildren.count
+                            continue
+                        }
+
                         let targetRoot = await MainActor.run { () -> URL? in
                             guard let path = library.series.first(where: { $0.id == targetSeriesID })?.libraryPath else { return nil }
                             return URL(fileURLWithPath: path, isDirectory: true)
                         }
-                        for childURL in childFoldersOrZips {
+
+                        for childURL in folderInspection.importableChildren {
                             if let info = await ComicManager.importFileOrFolder(url: childURL, destinationRoot: targetRoot) {
                                 await MainActor.run {
                                     library.addImported(info, seriesID: targetSeriesID)
@@ -1002,34 +1161,19 @@ struct ContentView: View {
                                 }
                             }
                         }
-                    } else {
-                        failedCount += childFoldersOrZips.count
-                    }
-                } else {
-                    // 普通漫画文件夹
-                    if let info = await ComicManager.importFileOrFolder(url: url, destinationRoot: seriesDestinationRoot) {
-                        await MainActor.run {
-                            library.addImported(info, seriesID: seriesID)
-                        }
-                        importedCount += 1
-                    } else {
-                        failedCount += 1
-                        failureReason = ComicManager.zipImportFailureReason(for: url)
+                        continue
                     }
                 }
-            } else {
-                // 多选文件导入
-                for url in urls {
-                    if let info = await ComicManager.importFileOrFolder(url: url, destinationRoot: seriesDestinationRoot) {
-                        await MainActor.run {
-                            library.addImported(info, seriesID: seriesID)
-                        }
-                        importedCount += 1
-                    } else {
-                        failedCount += 1
-                        if urls.count == 1 {
-                            failureReason = ComicManager.zipImportFailureReason(for: url)
-                        }
+
+                if let info = await ComicManager.importFileOrFolder(url: url, destinationRoot: seriesDestinationRoot) {
+                    await MainActor.run {
+                        library.addImported(info, seriesID: seriesID)
+                    }
+                    importedCount += 1
+                } else {
+                    failedCount += 1
+                    if urls.count == 1 {
+                        failureReason = ComicManager.zipImportFailureReason(for: url)
                     }
                 }
             }
@@ -1037,7 +1181,7 @@ struct ContentView: View {
             await MainActor.run {
                 if importedCount == 0 && failedCount > 0 {
                     HapticManager.shared.play(.error)
-                    importError = failureReason?.isEmpty == false ? failureReason! : "没有找到可读取的图片，或压缩包/PDF 解析失败。当前可直接读取 ZIP、CBZ、7z、PDF 和图片文件夹；RAR、CBR 暂未支持。"
+                    importError = failureReason?.isEmpty == false ? failureReason! : "没有找到可读取的图片，或压缩包/PDF 解析失败。当前支持 ZIP、CBZ、7z、PDF 和图片文件夹；RAR、CBR 暂未开放导入入口。"
                 } else if failedCount > 0 {
                     HapticManager.shared.play(.warning)
                     importError = "已导入 \(importedCount) 个项目，\(failedCount) 个项目失败。失败项目可能不包含可读取图片或压缩包已损坏。"
@@ -1074,36 +1218,18 @@ struct ContentView: View {
         url.hasDirectoryPath || ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
     }
 
-    nonisolated private static func inspectImportFolder(_ url: URL) -> (hasDirectImages: Bool, childFoldersOrZips: [URL]) {
-        let isSecurityScoped = url.startAccessingSecurityScopedResource()
-        defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
-
-        var childFoldersOrZips: [URL] = []
-        guard let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
-            return (false, [])
-        }
-
-        for fileURL in contents {
-            let ext = fileURL.pathExtension.lowercased()
-            if ["jpg", "jpeg", "png", "webp", "gif", "heic", "heif"].contains(ext) {
-                return (true, [])
-            }
-            if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true || ["zip", "cbz", "rar", "cbr", "pdf", "7z"].contains(ext) {
-                childFoldersOrZips.append(fileURL)
-            }
-        }
-
-        return (false, childFoldersOrZips)
-    }
-
     private func makeSettingsBackup() -> MReaderSettingsBackup {
-        MReaderSettingsBackup(
+        let mediaSources = KomgaProvider.loadSources().map { source in
+            MediaSourceBackup(source: source, apiKey: KomgaProvider.apiKey(for: source.id))
+        }
+        return MReaderSettingsBackup(
             openAIAPIKey: apiKey,
             openAIBaseURL: baseURL,
             openAIModel: modelName,
             translationTargetLanguage: translationTargetLanguage,
             translationPromptTemplate: translationPromptTemplate,
-            isHapticFeedbackEnabled: isHapticFeedbackEnabled
+            isHapticFeedbackEnabled: isHapticFeedbackEnabled,
+            mediaSources: mediaSources
         )
     }
 
@@ -1124,13 +1250,33 @@ struct ContentView: View {
             translationTargetLanguage = backup.translationTargetLanguage
             translationPromptTemplate = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
+            restoreMediaSources(from: backup.mediaSources ?? [])
             library.syncLocalLibrary()
+            Task {
+                await library.syncKomgaSources()
+            }
             HapticManager.shared.play(.success)
             importError = "设置备份已恢复。"
         } catch {
             HapticManager.shared.play(.error)
             importError = "设置备份恢复失败，请确认选择的是 MReader 设置备份 JSON。"
         }
+    }
+
+    private func restoreMediaSources(from backups: [MediaSourceBackup]) {
+        guard !backups.isEmpty else { return }
+        var sources = KomgaProvider.loadSources()
+        for backup in backups {
+            let source = backup.mediaSource
+            sources.removeAll { existing in
+                existing.id == source.id || (existing.type == source.type && existing.baseURL == source.baseURL)
+            }
+            sources.append(source)
+            if let apiKey = backup.apiKey, !apiKey.isEmpty {
+                try? KomgaProvider.saveAPIKey(apiKey, for: source.id)
+            }
+        }
+        try? KomgaProvider.saveSources(sources)
     }
 
 }
@@ -1367,10 +1513,8 @@ private func sourceLabel(for comic: ComicBook) -> String {
     switch comic.sourceType {
     case .local:
         return "本地"
-    case .smb:
-        return "SMB"
-    case .webdav:
-        return "WebDAV"
+    case .komga:
+        return "Komga"
     }
 }
 

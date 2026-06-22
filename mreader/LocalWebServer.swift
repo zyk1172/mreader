@@ -2,6 +2,75 @@ import Foundation
 import Network
 import Combine
 
+private final class HTTPRequestReceiveState {
+    private var headerBuffer = Data()
+    private var bodyHandle: FileHandle?
+    private(set) var header: String?
+    private(set) var contentLength = 0
+    private(set) var receivedBodyBytes = 0
+    private(set) var bodyFileURL: URL?
+
+    var isComplete: Bool {
+        header != nil && receivedBodyBytes >= contentLength
+    }
+
+    func append(_ data: Data) throws {
+        if header == nil {
+            headerBuffer.append(data)
+            guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
+            let headerData = headerBuffer[..<headerEnd.lowerBound]
+            header = String(data: headerData, encoding: .utf8) ?? ""
+            contentLength = HTTPRequestReceiveState.contentLength(from: header ?? "") ?? 0
+            if contentLength > 0 {
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("MReaderWebUpload-\(UUID().uuidString).body")
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+                bodyFileURL = url
+                bodyHandle = try FileHandle(forWritingTo: url)
+                let bodyStart = headerEnd.upperBound
+                if bodyStart < headerBuffer.count {
+                    try appendBody(headerBuffer[bodyStart...])
+                }
+            }
+            headerBuffer.removeAll(keepingCapacity: false)
+        } else {
+            try appendBody(data[...])
+        }
+    }
+
+    func cleanup() {
+        try? bodyHandle?.close()
+        bodyHandle = nil
+        if let bodyFileURL {
+            try? FileManager.default.removeItem(at: bodyFileURL)
+        }
+    }
+
+    private func appendBody(_ body: Data.SubSequence) throws {
+        guard !body.isEmpty else { return }
+        let remaining = max(contentLength - receivedBodyBytes, 0)
+        guard remaining > 0 else { return }
+        let chunkCount = min(body.count, remaining)
+        let chunk = body.prefix(chunkCount)
+        if bodyHandle == nil {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MReaderWebUpload-\(UUID().uuidString).body")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            bodyFileURL = url
+            bodyHandle = try FileHandle(forWritingTo: url)
+        }
+        try bodyHandle?.write(contentsOf: Data(chunk))
+        receivedBodyBytes += chunk.count
+    }
+
+    private static func contentLength(from header: String) -> Int? {
+        header
+            .components(separatedBy: "\r\n")
+            .first { $0.lowercased().hasPrefix("content-length:") }
+            .flatMap { Int($0.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "") }
+    }
+}
+
 final class LocalWebServer: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var address = ""
@@ -11,11 +80,20 @@ final class LocalWebServer: ObservableObject {
     private var onUpload: ((URL) -> Void)?
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
-    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "rar", "cbr", "7z", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
+    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "7z", "epub", "pdf", "rar", "cbr", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
+
+    nonisolated static func clearStaleBodyFiles() {
+        let tempRoot = FileManager.default.temporaryDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(at: tempRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
+        for file in files where file.lastPathComponent.hasPrefix("MReaderWebUpload-") && file.pathExtension == "body" {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
 
     func start(onUpload: @escaping (URL) -> Void) {
         self.onUpload = onUpload
         stop()
+        Self.clearStaleBodyFiles()
 
         do {
             let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
@@ -57,18 +135,27 @@ final class LocalWebServer: ObservableObject {
 
     private func handle(_ connection: NWConnection) {
         connection.start(queue: .global(qos: .userInitiated))
-        receive(on: connection, buffer: Data())
+        receive(on: connection, state: HTTPRequestReceiveState())
     }
 
-    private func receive(on connection: NWConnection, buffer: Data) {
+    private func receive(on connection: NWConnection, state: HTTPRequestReceiveState) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            var requestData = buffer
-            if let data {
-                requestData.append(data)
+            if let data, !data.isEmpty {
+                do {
+                    try state.append(data)
+                } catch {
+                    state.cleanup()
+                    self.sendResponse(
+                        self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(error.localizedDescription)"),
+                        on: connection
+                    )
+                    return
+                }
             }
 
-            if requestData.count > self.maxUploadSize + 8192 {
+            if state.contentLength > self.maxUploadSize {
+                state.cleanup()
                 self.sendResponse(
                     self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
                     on: connection
@@ -76,43 +163,37 @@ final class LocalWebServer: ObservableObject {
                 return
             }
 
-            if error != nil || isComplete {
-                self.respond(to: requestData, on: connection)
+            if error != nil {
+                state.cleanup()
+                self.sendResponse(
+                    self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
+                    on: connection
+                )
                 return
             }
 
-            if self.hasCompleteHTTPRequest(requestData) {
-                self.respond(to: requestData, on: connection)
+            if state.isComplete || isComplete {
+                self.respond(to: state, on: connection)
             } else {
-                self.receive(on: connection, buffer: requestData)
+                self.receive(on: connection, state: state)
             }
         }
     }
 
-    private func hasCompleteHTTPRequest(_ data: Data) -> Bool {
-        guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)) else { return false }
-        let headerData = data[..<headerEnd.lowerBound]
-        guard let header = String(data: headerData, encoding: .utf8) else { return false }
-        let contentLength = header
-            .components(separatedBy: "\r\n")
-            .first { $0.lowercased().hasPrefix("content-length:") }
-            .flatMap { Int($0.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "") } ?? 0
-        return data.count >= headerEnd.upperBound + contentLength
-    }
-
-    private func respond(to requestData: Data, on connection: NWConnection) {
+    private func respond(to state: HTTPRequestReceiveState, on connection: NWConnection) {
         let response: Data
-        if let requestText = String(data: requestData.prefix(4096), encoding: .utf8),
+        if let requestText = state.header,
            requestText.hasPrefix("POST /upload") {
-            if (contentLength(from: requestText) ?? 0) > maxUploadSize {
+            if state.contentLength > maxUploadSize {
                 response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
             } else {
-                response = handleUpload(requestData)
+                response = handleUpload(header: requestText, bodyURL: state.bodyFileURL)
             }
         } else {
             response = httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: uploadPage())
         }
 
+        state.cleanup()
         sendResponse(response, on: connection)
     }
 
@@ -122,29 +203,28 @@ final class LocalWebServer: ObservableObject {
         })
     }
 
-    private func handleUpload(_ requestData: Data) -> Data {
-        guard let headerEnd = requestData.range(of: Data("\r\n\r\n".utf8)),
-              let header = String(data: requestData[..<headerEnd.lowerBound], encoding: .utf8),
+    private func handleUpload(header: String, bodyURL: URL?) -> Data {
+        guard let bodyURL,
               let boundary = boundary(from: header) else {
             return httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传格式不正确")
         }
 
-        let body = requestData[headerEnd.upperBound...]
-        guard let uploadedFile = extractFile(from: Data(body), boundary: boundary) else {
+        guard let uploadedFile = extractFile(fromBodyFile: bodyURL, boundary: boundary) else {
             return httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "没有找到上传文件")
         }
         guard allowedUploadExtensions.contains(URL(fileURLWithPath: uploadedFile.fileName).pathExtension.lowercased()) else {
-            return httpResponse(status: "415 Unsupported Media Type", contentType: "text/plain; charset=utf-8", body: "仅支持 ZIP、CBZ、PDF、JPG、PNG、WebP、HEIC。")
+            return httpResponse(status: "415 Unsupported Media Type", contentType: "text/plain; charset=utf-8", body: "仅支持 ZIP、CBZ、7z、EPUB、PDF、RAR、CBR、JPG、PNG、WebP、HEIC。")
         }
-        guard uploadedFile.data.count <= maxUploadSize else {
+        guard uploadedFile.byteCount <= maxUploadSize else {
             return httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
         }
 
         do {
-            let uploadRoot = FileManager.default.temporaryDirectory.appendingPathComponent("MReaderWebUploads", isDirectory: true)
+            let uploadRoot = ComicManager.webUploadTemporaryRoot()
             try FileManager.default.createDirectory(at: uploadRoot, withIntermediateDirectories: true)
             let destinationURL = uploadRoot.appendingPathComponent(uploadedFile.fileName)
-            try uploadedFile.data.write(to: destinationURL, options: .atomic)
+            try? FileManager.default.removeItem(at: destinationURL)
+            try copyFileRange(from: bodyURL, range: uploadedFile.range, to: destinationURL)
 
             DispatchQueue.main.async { [weak self] in
                 self?.onUpload?(destinationURL)
@@ -165,26 +245,59 @@ final class LocalWebServer: ObservableObject {
             .trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
     }
 
-    private func contentLength(from header: String) -> Int? {
-        header
-            .components(separatedBy: "\r\n")
-            .first { $0.lowercased().hasPrefix("content-length:") }
-            .flatMap { Int($0.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "") }
-    }
+    private func extractFile(fromBodyFile bodyURL: URL, boundary: String) -> (fileName: String, range: Range<UInt64>, byteCount: UInt64)? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: bodyURL.path),
+              let fileSize = attributes[.size] as? NSNumber else { return nil }
+        let totalBytes = fileSize.uint64Value
+        guard totalBytes > 0 else { return nil }
 
-    private func extractFile(from body: Data, boundary: String) -> (fileName: String, data: Data)? {
+        let head = readFileChunk(bodyURL, offset: 0, length: min(Int(totalBytes), 256 * 1024))
         let separator = Data("\r\n\r\n".utf8)
-        guard let partHeaderEnd = body.range(of: separator) else { return nil }
-        let partHeaderData = body[..<partHeaderEnd.lowerBound]
+        guard let partHeaderEnd = head.range(of: separator) else { return nil }
+        let partHeaderData = head[..<partHeaderEnd.lowerBound]
         guard let partHeader = String(data: partHeaderData, encoding: .utf8),
               let rawFileName = fileName(from: partHeader) else { return nil }
 
         let safeFileName = sanitizedFileName(rawFileName)
-        let fileStart = partHeaderEnd.upperBound
+        let fileStart = UInt64(partHeaderEnd.upperBound)
         let endMarker = Data("\r\n--\(boundary)".utf8)
-        guard let fileEnd = body[fileStart...].range(of: endMarker) else { return nil }
+        let tailLength = min(Int(totalBytes), 512 * 1024)
+        let tailOffset = totalBytes - UInt64(tailLength)
+        let tail = readFileChunk(bodyURL, offset: tailOffset, length: tailLength)
+        guard let fileEndInTail = tail.range(of: endMarker, options: .backwards) else { return nil }
+        let fileEnd = tailOffset + UInt64(fileEndInTail.lowerBound)
+        guard fileEnd >= fileStart else { return nil }
 
-        return (safeFileName, Data(body[fileStart..<fileEnd.lowerBound]))
+        return (safeFileName, fileStart..<fileEnd, fileEnd - fileStart)
+    }
+
+    private func readFileChunk(_ url: URL, offset: UInt64, length: Int) -> Data {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: offset)
+            return try handle.read(upToCount: length) ?? Data()
+        } catch {
+            return Data()
+        }
+    }
+
+    private func copyFileRange(from sourceURL: URL, range: Range<UInt64>, to destinationURL: URL) throws {
+        FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        let destination = try FileHandle(forWritingTo: destinationURL)
+        defer {
+            try? source.close()
+            try? destination.close()
+        }
+        try source.seek(toOffset: range.lowerBound)
+        var remaining = range.upperBound - range.lowerBound
+        while remaining > 0 {
+            let readSize = min(Int(remaining), 1024 * 1024)
+            guard let chunk = try source.read(upToCount: readSize), !chunk.isEmpty else { break }
+            try destination.write(contentsOf: chunk)
+            remaining -= UInt64(chunk.count)
+        }
     }
 
     private func fileName(from partHeader: String) -> String? {
@@ -232,9 +345,9 @@ final class LocalWebServer: ObservableObject {
         </head>
         <body><main>
         <h1>MReader 网页导入</h1>
-        <p>选择 ZIP、CBZ 或包含图片的压缩包上传。上传完成后 app 会自动加入书架。</p>
+        <p>选择 ZIP、CBZ、7z、EPUB、PDF、RAR、CBR 或图片上传。上传完成后 app 会自动加入书架。</p>
         <form method="post" action="/upload" enctype="multipart/form-data">
-        <input name="file" type="file" accept=".zip,.cbz,.rar,.cbr,.7z,.pdf,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
+        <input name="file" type="file" accept=".zip,.cbz,.7z,.epub,.pdf,.rar,.cbr,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
         <button type="submit">上传到 MReader</button>
         </form>
         </main></body></html>

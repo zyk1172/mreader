@@ -1,6 +1,6 @@
 import Foundation
 
-struct ComicSeries: Identifiable, Codable, Hashable {
+struct ComicSeries: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var title: String
     var createdAt: Date
