@@ -56,7 +56,10 @@ struct OCRPreprocessor {
             }
         }
 
-        let merged = deduplicated(allBlocks, isRightToLeft: options.isRightToLeft)
+        let merged = AITranslator.deduplicatedMangaTextBlocks(
+            allBlocks,
+            isRightToLeft: options.isRightToLeft
+        )
         print("MReader OCR merged blocks=\(merged.count) from=\(allBlocks.count)")
         return merged
     }
@@ -192,7 +195,11 @@ struct OCRPreprocessor {
                         text: candidate.string,
                         boundingBox: rect,
                         confidence: Double(candidate.confidence),
-                        ocrSource: variant.name
+                        ocrSource: variant.name,
+                        estimatedFontScale: Double(rect.height),
+                        textColorHex: variant.name == "original"
+                            ? representativeTextColorHex(in: cgImage, visionRect: observation.boundingBox)
+                            : nil
                     ))
                 }
                 continuation.resume(returning: AITranslator.sortedTextBlocks(blocks, isRightToLeft: options.isRightToLeft))
@@ -200,7 +207,7 @@ struct OCRPreprocessor {
 
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
-            request.minimumTextHeight = min(max(Float(options.minimumTextHeight * 0.45), 0.0015), 0.04)
+            request.minimumTextHeight = min(max(Float(options.minimumTextHeight * 0.45), 0.0008), 0.04)
             request.recognitionLanguages = supportedRecognitionLanguages(from: options.languages, request: request)
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -221,28 +228,42 @@ struct OCRPreprocessor {
         return CGRect(x: x, y: y, width: width, height: height)
     }
 
-    nonisolated private static func deduplicated(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
-        var kept: [TextBlock] = []
-        for block in AITranslator.sortedTextBlocks(blocks, isRightToLeft: isRightToLeft) {
-            let normalized = normalize(block.text)
-            guard !normalized.isEmpty else { continue }
-            if let existingIndex = kept.firstIndex(where: { existing in
-                normalize(existing.text) == normalized && existing.boundingBox.intersection(block.boundingBox).areaRatio(against: existing.boundingBox.union(block.boundingBox)) > 0.35
-            }) {
-                if block.confidence > kept[existingIndex].confidence {
-                    kept[existingIndex] = block
-                }
-            } else {
-                kept.append(block)
+    nonisolated private static func representativeTextColorHex(in image: CGImage, visionRect: CGRect) -> String? {
+        let pixelRect = CGRect(
+            x: visionRect.minX * CGFloat(image.width),
+            y: (1 - visionRect.maxY) * CGFloat(image.height),
+            width: visionRect.width * CGFloat(image.width),
+            height: visionRect.height * CGFloat(image.height)
+        ).integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard pixelRect.width >= 2, pixelRect.height >= 2,
+              let crop = image.cropping(to: pixelRect) else { return nil }
+
+        let width = 12
+        let height = 12
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .low
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var darkest = (r: UInt8(255), g: UInt8(255), b: UInt8(255), luminance: Double(255))
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let r = pixels[index]
+            let g = pixels[index + 1]
+            let b = pixels[index + 2]
+            let luminance = 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)
+            if luminance < darkest.luminance {
+                darkest = (r, g, b, luminance)
             }
         }
-        return AITranslator.sortedTextBlocks(kept, isRightToLeft: isRightToLeft)
-    }
-
-    nonisolated private static func normalize(_ text: String) -> String {
-        text.lowercased()
-            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(format: "#%02X%02X%02X", darkest.r, darkest.g, darkest.b)
     }
 
     nonisolated private static func pixelSize(for image: UIImage) -> CGSize {
@@ -277,14 +298,5 @@ struct OCRPreprocessor {
     nonisolated private static func averageConfidence(_ blocks: [TextBlock]) -> Double {
         guard !blocks.isEmpty else { return 0 }
         return blocks.reduce(0) { $0 + $1.confidence } / Double(blocks.count)
-    }
-}
-
-private extension CGRect {
-    nonisolated func areaRatio(against rect: CGRect) -> CGFloat {
-        guard !isNull, !rect.isNull, rect.width > 0, rect.height > 0 else { return 0 }
-        let intersection = self.intersection(rect)
-        guard !intersection.isNull else { return 0 }
-        return (intersection.width * intersection.height) / max(rect.width * rect.height, 1)
     }
 }

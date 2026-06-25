@@ -1,27 +1,93 @@
 import Foundation
 import Security
 
+nonisolated struct HiddenKomgaComic: Codable, Identifiable, Hashable, Sendable {
+    let key: String
+    var mediaSourceID: UUID
+    var komgaBookID: String
+    var komgaSeriesID: String?
+    var title: String
+    var sourceName: String
+    var hiddenAt: Date
+
+    var id: String { key }
+}
+
+nonisolated struct KomgaSourceSyncResult: Sendable {
+    let source: MediaSource
+    let comics: [ComicBook]
+    let isAuthoritative: Bool
+    let error: Error?
+}
+
+nonisolated private struct KomgaSourceSyncPayload: Sendable {
+    let comics: [ComicBook]
+    let isAuthoritative: Bool
+}
+
 nonisolated enum KomgaProvider {
+    private static let sourcesLock = NSLock()
+    nonisolated(unsafe) private static var sourcesCache: [MediaSource]?
+    private static let hiddenComicsLock = NSLock()
+    nonisolated(unsafe) private static var hiddenComicsCache: [HiddenKomgaComic]?
+
     private static var sourcesURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("media_sources.json")
     }
 
+    private static var hiddenComicsURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("hidden_komga_comics.json")
+    }
+
     static func loadSources() -> [MediaSource] {
+        sourcesLock.lock()
+        if let sourcesCache {
+            sourcesLock.unlock()
+            return sourcesCache
+        }
+        sourcesLock.unlock()
+
         do {
             let data = try Data(contentsOf: sourcesURL)
-            return try JSONDecoder().decode([MediaSource].self, from: data)
+            let sources = try JSONDecoder().decode([MediaSource].self, from: data)
+                .sorted { lhs, rhs in
+                    let nameCompare = lhs.name.localizedStandardCompare(rhs.name)
+                    if nameCompare != .orderedSame {
+                        return nameCompare == .orderedAscending
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+            sourcesLock.lock()
+            sourcesCache = sources
+            sourcesLock.unlock()
+            return sources
         } catch {
+            sourcesLock.lock()
+            sourcesCache = []
+            sourcesLock.unlock()
             return []
         }
     }
 
     static func saveSources(_ sources: [MediaSource]) throws {
+        let sortedSources = sources.sorted { lhs, rhs in
+            let nameCompare = lhs.name.localizedStandardCompare(rhs.name)
+            if nameCompare != .orderedSame {
+                return nameCompare == .orderedAscending
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        sourcesLock.lock()
+        sourcesCache = sortedSources
+        sourcesLock.unlock()
+
         let folderURL = sourcesURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(sources)
+        let data = try encoder.encode(sortedSources)
         try data.write(to: sourcesURL, options: .atomic)
     }
 
@@ -56,6 +122,119 @@ nonisolated enum KomgaProvider {
         try saveSources(sources)
         deleteAPIKey(for: id)
         RemoteImageLoader.removeCachedImages(sourceID: id)
+        RemotePageLoader.removeCachedPages(sourceID: id)
+    }
+
+    static func hiddenKomgaComics() -> [HiddenKomgaComic] {
+        hiddenComicsLock.lock()
+        if let hiddenComicsCache {
+            hiddenComicsLock.unlock()
+            return hiddenComicsCache
+        }
+        hiddenComicsLock.unlock()
+
+        do {
+            let data = try Data(contentsOf: hiddenComicsURL)
+            let hidden = try JSONDecoder().decode([HiddenKomgaComic].self, from: data)
+                .sorted { lhs, rhs in
+                    let titleCompare = lhs.title.localizedStandardCompare(rhs.title)
+                    if titleCompare != .orderedSame {
+                        return titleCompare == .orderedAscending
+                    }
+                    return lhs.key < rhs.key
+                }
+            hiddenComicsLock.lock()
+            hiddenComicsCache = hidden
+            hiddenComicsLock.unlock()
+            return hidden
+        } catch {
+            hiddenComicsLock.lock()
+            hiddenComicsCache = []
+            hiddenComicsLock.unlock()
+            return []
+        }
+    }
+
+    static func hiddenKomgaComicKeys() -> Set<String> {
+        Set(hiddenKomgaComics().map(\.key))
+    }
+
+    static func hideComic(_ comic: ComicBook, sourceName: String? = nil) {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID else {
+            return
+        }
+        var hidden = hiddenKomgaComics()
+        let key = hiddenKey(mediaSourceID: sourceID, komgaBookID: bookID)
+        let resolvedSourceName = sourceName ?? loadSources().first(where: { $0.id == sourceID })?.name ?? "Komga"
+        let record = HiddenKomgaComic(
+            key: key,
+            mediaSourceID: sourceID,
+            komgaBookID: bookID,
+            komgaSeriesID: comic.komgaSeriesID,
+            title: comic.title,
+            sourceName: resolvedSourceName,
+            hiddenAt: Date()
+        )
+        if let index = hidden.firstIndex(where: { $0.key == key }) {
+            hidden[index] = record
+        } else {
+            hidden.append(record)
+        }
+        saveHiddenKomgaComics(hidden)
+    }
+
+    static func unhideComic(key: String) {
+        var hidden = hiddenKomgaComics()
+        hidden.removeAll { $0.key == key }
+        saveHiddenKomgaComics(hidden)
+    }
+
+    static func isHidden(_ comic: ComicBook) -> Bool {
+        guard let key = hiddenKey(for: comic) else { return false }
+        return hiddenKomgaComics().contains { $0.key == key }
+    }
+
+    static func hiddenKey(for comic: ComicBook) -> String? {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID else {
+            return nil
+        }
+        return hiddenKey(mediaSourceID: sourceID, komgaBookID: bookID)
+    }
+
+    static func sourceName(for comic: ComicBook) -> String {
+        guard let sourceID = comic.mediaSourceID else { return "Komga" }
+        return loadSources().first(where: { $0.id == sourceID })?.name ?? "Komga"
+    }
+
+    private static func hiddenKey(mediaSourceID: UUID, komgaBookID: String) -> String {
+        "\(mediaSourceID.uuidString):\(komgaBookID)"
+    }
+
+    private static func saveHiddenKomgaComics(_ hidden: [HiddenKomgaComic]) {
+        let sortedHidden = hidden.sorted { lhs, rhs in
+            let titleCompare = lhs.title.localizedStandardCompare(rhs.title)
+            if titleCompare != .orderedSame {
+                return titleCompare == .orderedAscending
+            }
+            return lhs.key < rhs.key
+        }
+        hiddenComicsLock.lock()
+        hiddenComicsCache = sortedHidden
+        hiddenComicsLock.unlock()
+
+        do {
+            try FileManager.default.createDirectory(at: hiddenComicsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(sortedHidden)
+            try data.write(to: hiddenComicsURL, options: .atomic)
+        } catch {
+            print("保存 Komga 隐藏列表失败: \(error.localizedDescription)")
+        }
     }
 
     static func testConnection(baseURL: String, apiKey: String) async throws -> [KomgaLibraryDTO] {
@@ -63,29 +242,78 @@ nonisolated enum KomgaProvider {
         return try await client.testConnection()
     }
 
-    static func syncEnabledSources() async -> [(source: MediaSource, comics: [ComicBook], error: Error?)] {
-        var results: [(MediaSource, [ComicBook], Error?)] = []
+    static func remoteReadProgress(for comic: ComicBook) async throws -> Int? {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID,
+              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+            return nil
+        }
+        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
+        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+        return (try await client.book(bookID: bookID)).readProgress?.resolvedPageIndex
+    }
+
+    static func updateReadProgress(for comic: ComicBook) async throws {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID,
+              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+            return
+        }
+        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
+        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+        try await client.updateReadProgress(bookID: bookID, pageIndex: comic.currentPageIndex, totalPages: comic.totalPages)
+    }
+
+    static func deleteBook(_ comic: ComicBook) async throws {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID,
+              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+            throw MediaSourceError.notFound
+        }
+        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
+        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+        try await client.deleteBook(bookID: bookID)
+    }
+
+    static func syncEnabledSources() async -> [KomgaSourceSyncResult] {
+        var results: [KomgaSourceSyncResult] = []
         for source in loadSources().filter({ $0.type == .komga && $0.isEnabled }) {
             do {
-                let comics = try await syncSource(source)
+                let payload = try await syncSource(source)
                 var updatedSource = source
                 updatedSource.lastSyncAt = Date()
                 try? updateSource(updatedSource)
-                results.append((updatedSource, comics, nil))
+                results.append(KomgaSourceSyncResult(
+                    source: updatedSource,
+                    comics: payload.comics,
+                    isAuthoritative: payload.isAuthoritative,
+                    error: nil
+                ))
             } catch {
-                results.append((source, [], error))
+                results.append(KomgaSourceSyncResult(
+                    source: source,
+                    comics: [],
+                    isAuthoritative: false,
+                    error: error
+                ))
             }
         }
         return results
     }
 
-    static func syncSource(_ source: MediaSource) async throws -> [ComicBook] {
-        guard source.type == .komga else { return [] }
+    private static func syncSource(_ source: MediaSource) async throws -> KomgaSourceSyncPayload {
+        guard source.type == .komga else {
+            return KomgaSourceSyncPayload(comics: [], isAuthoritative: true)
+        }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
         let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
         let libraries = try await client.libraries()
         var comics: [ComicBook] = []
         var seenBookIDs = Set<String>()
+        var hadPartialFailure = false
 
         for library in libraries {
             let seriesList: [KomgaSeriesDTO]
@@ -93,6 +321,7 @@ nonisolated enum KomgaProvider {
                 seriesList = try await client.series(libraryID: library.id)
             } catch {
                 print("Komga 书库 \(library.name) 拉取 series 失败: \(error.localizedDescription)")
+                hadPartialFailure = true
                 continue
             }
             var libraryComicCount = 0
@@ -104,6 +333,7 @@ nonisolated enum KomgaProvider {
                     print("Komga series \(series.displayTitle) books=\(books.count)")
                 } catch {
                     print("Komga series \(series.displayTitle) 拉取 books 失败: \(error.localizedDescription)")
+                    hadPartialFailure = true
                     continue
                 }
                 libraryBookCount += books.count
@@ -114,6 +344,7 @@ nonisolated enum KomgaProvider {
                         pageCount = try await resolvedPageCount(book: book, client: client)
                     } catch {
                         print("Komga book \(book.displayTitle) pageCount 解析失败: \(error.localizedDescription)")
+                        hadPartialFailure = true
                         continue
                     }
                     guard pageCount > 0 else {
@@ -123,7 +354,9 @@ nonisolated enum KomgaProvider {
                     seenBookIDs.insert(book.id)
                     let coverPath = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
                     let title = mergedTitle(series: series, book: book)
-                    comics.append(makeComic(source: source, libraryID: library.id, seriesID: series.id, book: book, title: title, pageCount: pageCount, coverPath: coverPath))
+                    var comic = makeComic(source: source, libraryID: library.id, seriesID: series.id, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
+                    applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
+                    comics.append(comic)
                     libraryComicCount += 1
                 }
             }
@@ -136,6 +369,7 @@ nonisolated enum KomgaProvider {
                 } catch {
                     print("Komga 书库 \(library.name) fallback books 失败: \(error.localizedDescription)")
                     print("Komga 同步书库 \(library.name): series=\(seriesList.count), books=\(libraryBookCount), comics=\(libraryComicCount)")
+                    hadPartialFailure = true
                     continue
                 }
                 libraryBookCount += books.count
@@ -146,6 +380,7 @@ nonisolated enum KomgaProvider {
                         pageCount = try await resolvedPageCount(book: book, client: client)
                     } catch {
                         print("Komga book \(book.displayTitle) pageCount 解析失败: \(error.localizedDescription)")
+                        hadPartialFailure = true
                         continue
                     }
                     guard pageCount > 0 else {
@@ -155,13 +390,15 @@ nonisolated enum KomgaProvider {
                     seenBookIDs.insert(book.id)
                     let coverPath = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
                     let title = directBookTitle(library: library, book: book)
-                    comics.append(makeComic(source: source, libraryID: library.id, seriesID: book.seriesId, book: book, title: title, pageCount: pageCount, coverPath: coverPath))
+                    var comic = makeComic(source: source, libraryID: library.id, seriesID: book.seriesId, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
+                    applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
+                    comics.append(comic)
                     libraryComicCount += 1
                 }
             }
             print("Komga 同步书库 \(library.name): series=\(seriesList.count), books=\(libraryBookCount), comics=\(libraryComicCount)")
         }
-        return comics
+        return KomgaSourceSyncPayload(comics: comics, isAuthoritative: !hadPartialFailure)
     }
 
     private static func resolvedPageCount(book: KomgaBookDTO, client: KomgaAPIClient) async throws -> Int {
@@ -169,6 +406,17 @@ nonisolated enum KomgaProvider {
             return pageCount
         }
         return try await client.pages(bookID: book.id).count
+    }
+
+    private static func applyRemoteProgress(from book: KomgaBookDTO, pageCount: Int, to comic: inout ComicBook) {
+        guard book.readProgress != nil else { return }
+        comic.currentPageIndex = remotePageIndex(book: book, pageCount: pageCount)
+        comic.hasBeenOpened = true
+    }
+
+    private static func remotePageIndex(book: KomgaBookDTO, pageCount: Int) -> Int {
+        guard let remotePage = book.readProgress?.resolvedPageIndex else { return 0 }
+        return min(max(remotePage, 0), max(0, pageCount - 1))
     }
 
     private static func cachedCoverPath(sourceID: UUID, bookID: String, client: KomgaAPIClient) async throws -> String? {

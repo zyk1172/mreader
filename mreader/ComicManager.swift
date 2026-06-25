@@ -1,7 +1,7 @@
 import PDFKit
-import SWCompression
 import SwiftUI
 import ZIPFoundation
+import ImageIO
 import os
 import Darwin
 
@@ -49,7 +49,6 @@ class ComicManager {
         let libraryPath: String
         let sourceTypeRaw: String
         let sourceURL: String?
-        let smbPath: String?
         let chapterTypeRaw: String?
         let chapterPath: String?
 
@@ -62,7 +61,6 @@ class ComicManager {
             libraryPath: String,
             sourceTypeRaw: String = ComicSourceType.local.rawValue,
             sourceURL: String? = nil,
-            smbPath: String? = nil,
             chapterTypeRaw: String? = nil,
             chapterPath: String? = nil
         ) {
@@ -74,7 +72,6 @@ class ComicManager {
             self.libraryPath = libraryPath
             self.sourceTypeRaw = sourceTypeRaw
             self.sourceURL = sourceURL
-            self.smbPath = smbPath
             self.chapterTypeRaw = chapterTypeRaw
             self.chapterPath = chapterPath
         }
@@ -117,8 +114,6 @@ class ComicManager {
 
     nonisolated enum ArchiveFormat: String, Sendable {
         case zip
-        case sevenZip
-        case rar
     }
 
     nonisolated struct ArchiveImageEntry: Sendable {
@@ -134,7 +129,6 @@ class ComicManager {
         case memoryLimit
         case permissionDenied
         case encodingFailed
-        case archiveTooLarge
 
         var errorDescription: String? {
             switch self {
@@ -143,15 +137,13 @@ class ComicManager {
             case .noImages:
                 return "压缩包内没有找到图片"
             case .unsupportedArchive:
-                return "RAR/CBR 需要接入 UnrarKit；当前构建尚未链接该库"
+                return "当前仅支持 ZIP、CBZ、EPUB、PDF 和图片文件夹"
             case .memoryLimit:
                 return "图片过大，可能导致内存不足"
             case .permissionDenied:
                 return "没有权限读取该文件"
             case .encodingFailed:
                 return "压缩包文件名编码解析失败"
-            case .archiveTooLarge:
-                return "7z 文件过大，当前版本为避免内存暴涨未加载"
             }
         }
     }
@@ -161,7 +153,6 @@ class ComicManager {
     nonisolated private static let logger = Logger(subsystem: "MReader", category: "LibraryIO")
     nonisolated private static let archivePageScheme = "mreader-zip-page"
     nonisolated private static let maxArchiveImageBytes: UInt64 = 120 * 1024 * 1024
-    nonisolated private static let maxSevenZipArchiveBytes: UInt64 = 600 * 1024 * 1024
 
     func loadFrom(bookmarkData: Data) -> Bool {
         stopAccessing()
@@ -227,6 +218,24 @@ class ComicManager {
         return pages.isEmpty ? nil : LoadResult(url: pageSourceURL, accessToken: nil, pages: pages)
     }
 
+    nonisolated static func loadDownloadedRemotePages(from sourceURL: URL) async -> LoadResult? {
+        if sourceURL.pathExtension.lowercased() == "pdf" {
+            guard let pageSourceURL = await extractImagesFromPDF(sourceURL) else { return nil }
+            let sortedURLs = getAllImages(from: pageSourceURL)
+                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            let pages = sortedURLs.enumerated().map { ComicPage(index: $0, url: $1) }
+            return pages.isEmpty ? nil : LoadResult(url: pageSourceURL, accessToken: nil, pages: pages)
+        }
+        if supportedImageExtensions.contains(sourceURL.pathExtension.lowercased()) {
+            return LoadResult(
+                url: sourceURL,
+                accessToken: nil,
+                pages: [ComicPage(index: 0, url: sourceURL)]
+            )
+        }
+        return loadTemporaryPages(from: sourceURL)
+    }
+
     func applyLoadedPages(_ result: LoadResult) {
         stopAccessing()
         accessToken = result.accessToken
@@ -235,7 +244,11 @@ class ComicManager {
 
     nonisolated static func resolveBookmark(_ bookmarkData: Data) throws -> URL {
         var isStale = false
-        return try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+        let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+        if isStale {
+            logger.warning("bookmark-stale resolved-path=\(url.path, privacy: .public)")
+        }
+        return url
     }
     
     // 新增：批量导入多选文件或文件夹
@@ -255,6 +268,12 @@ class ComicManager {
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
 
         let ext = url.pathExtension.lowercased()
+
+        // EPUB 保留为单文件，阅读时按需读取页面。整本解压会放大导入耗时和失败面，
+        // 也会让封面依赖第一张成功落盘的图片。
+        if ext == "epub" {
+            return importArchiveReference(url: url, destinationRoot: destinationRoot)
+        }
 
         if isReadableArchive(url) {
             return importArchiveReference(url: url, destinationRoot: destinationRoot)
@@ -282,21 +301,20 @@ class ComicManager {
 
         let destinationFolder: URL
         if temporaryExtractionURL != nil {
-            guard let libraryRoot = destinationRoot ?? selectedLibraryRootURL() else { return nil }
-            let didStartLibraryAccess = libraryRoot.startAccessingSecurityScopedResource()
-            defer {
-                if didStartLibraryAccess {
-                    libraryRoot.stopAccessingSecurityScopedResource()
+            guard let movedFolder = withLibraryWriteAccess(destinationRoot: destinationRoot, { libraryRoot -> URL? in
+                let targetFolder = uniqueFolder(in: libraryRoot, preferredName: sanitizedFolderName(url.deletingPathExtension().lastPathComponent))
+                do {
+                    try FileManager.default.moveItem(at: imageSourceURL, to: targetFolder)
+                    return targetFolder
+                } catch {
+                    logger.error("import-document-move-failed target=\(targetFolder.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                    return nil
                 }
-            }
-            let targetFolder = uniqueFolder(in: libraryRoot, preferredName: sanitizedFolderName(url.deletingPathExtension().lastPathComponent))
-            do {
-                try FileManager.default.moveItem(at: imageSourceURL, to: targetFolder)
-                destinationFolder = targetFolder
-                temporaryExtractionURL = nil // 已经移走，不需要 defer 删除
-            } catch {
+            }) ?? nil else {
                 return nil
             }
+            destinationFolder = movedFolder
+            temporaryExtractionURL = nil
         } else if destinationRoot == nil && imageSourceURL.hasDirectoryPath && isInsideLocalLibrary(imageSourceURL) {
             destinationFolder = imageSourceURL
         } else {
@@ -395,28 +413,22 @@ class ComicManager {
         let imageURLs = getAllImages(from: sourceURL)
             .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         guard !imageURLs.isEmpty else { return nil }
-        let libraryRoot = root ?? selectedLibraryRootURL()
-        guard let libraryRoot else { return nil }
-        let didStartLibraryAccess = libraryRoot.startAccessingSecurityScopedResource()
-        defer {
-            if didStartLibraryAccess {
-                libraryRoot.stopAccessingSecurityScopedResource()
+        return withLibraryWriteAccess(destinationRoot: root) { libraryRoot in
+            let targetFolder = uniqueFolder(in: libraryRoot, preferredName: sanitizedFolderName(title))
+            do {
+                try FileManager.default.createDirectory(at: targetFolder, withIntermediateDirectories: true)
+                for (index, imageURL) in imageURLs.enumerated() {
+                    let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
+                    let destination = targetFolder.appendingPathComponent(String(format: "%05d.%@", index + 1, ext))
+                    try FileManager.default.copyItem(at: imageURL, to: destination)
+                }
+                return targetFolder
+            } catch {
+                try? FileManager.default.removeItem(at: targetFolder)
+                logger.error("import-folder-copy-failed target=\(targetFolder.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                return nil
             }
-        }
-
-        let targetFolder = uniqueFolder(in: libraryRoot, preferredName: sanitizedFolderName(title))
-        do {
-            try FileManager.default.createDirectory(at: targetFolder, withIntermediateDirectories: true)
-            for (index, imageURL) in imageURLs.enumerated() {
-                let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
-                let destination = targetFolder.appendingPathComponent(String(format: "%05d.%@", index + 1, ext))
-                try FileManager.default.copyItem(at: imageURL, to: destination)
-            }
-            return targetFolder
-        } catch {
-            try? FileManager.default.removeItem(at: targetFolder)
-            return nil
-        }
+        } ?? nil
     }
 
     nonisolated private static func importArchiveReference(url: URL, destinationRoot: URL?) -> ImportResult? {
@@ -428,16 +440,17 @@ class ComicManager {
             if destinationRoot == nil && isInsideLocalLibrary(url) {
                 destinationURL = url
             } else {
-                let libraryRoot = destinationRoot ?? selectedLibraryRootURL()
-                guard let libraryRoot else { return nil }
-                let didStartLibraryAccess = libraryRoot.startAccessingSecurityScopedResource()
-                defer {
-                    if didStartLibraryAccess {
-                        libraryRoot.stopAccessingSecurityScopedResource()
+                guard let copiedURL = withLibraryWriteAccess(destinationRoot: destinationRoot, { libraryRoot -> URL? in
+                    let destinationURL = uniqueURL(in: libraryRoot, preferredName: url.lastPathComponent, isDirectory: false)
+                    do {
+                        try FileManager.default.copyItem(at: url, to: destinationURL)
+                        return destinationURL
+                    } catch {
+                        logger.error("import-archive-copy-failed source=\(url.path, privacy: .public) target=\(destinationURL.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                        return nil
                     }
-                }
-                destinationURL = uniqueURL(in: libraryRoot, preferredName: url.lastPathComponent, isDirectory: false)
-                try FileManager.default.copyItem(at: url, to: destinationURL)
+                }) ?? nil else { return nil }
+                destinationURL = copiedURL
             }
 
             let bookmark = createBookmark(for: destinationURL)
@@ -448,7 +461,14 @@ class ComicManager {
                 encodingRawValue: firstEntry.encodingRawValue,
                 format: firstEntry.format
             )
-            let coverPath = cacheCoverData(coverData, cacheKey: coverCacheKey(for: destinationURL, suffix: firstEntry.path))
+            let coverPath = cacheCoverData(
+                coverData,
+                cacheKey: coverCacheKey(for: destinationURL, suffix: firstEntry.path)
+            ) ?? archivePageURL(
+                archiveURL: destinationURL,
+                entry: firstEntry,
+                index: 0
+            ).absoluteString
             return ImportResult(
                 title: destinationURL.deletingPathExtension().lastPathComponent,
                 pagesCount: entries.count,
@@ -461,6 +481,94 @@ class ComicManager {
             )
         } catch {
             logger.error("import-archive-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// EPUB 导入：将图片提取到库内文件夹，bookmark 指向文件夹，避免反复读 zip
+    nonisolated private static func importEPUBAsImageFolder(url: URL, destinationRoot: URL?) async -> ImportResult? {
+        do {
+            // 1. 解析 EPUB 获取有序图片路径
+            let entries = try epubImageEntries(in: url)
+            guard !entries.isEmpty else {
+                logger.error("import-epub-no-images path=\(url.lastPathComponent, privacy: .public)")
+                return nil
+            }
+
+            // 2. 在库内创建图片文件夹
+            guard let folderURL = withLibraryWriteAccess(destinationRoot: destinationRoot, { libraryRoot -> URL? in
+                let folderName = sanitizedFolderName(url.deletingPathExtension().lastPathComponent)
+                let folderURL = uniqueFolder(in: libraryRoot, preferredName: folderName)
+                do {
+                    try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+                    return folderURL
+                } catch {
+                    logger.error("import-epub-create-folder failed path=\(folderURL.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                    return nil
+                }
+            }) ?? nil else { return nil }
+
+            // 3. 逐页提取图片到文件夹
+            let pathEncoding = entries.first?.encodingRawValue.flatMap { String.Encoding(rawValue: $0) }
+            let archive = try compatibleZIPArchive(url: url, pathEncoding: pathEncoding)
+            var extractedCount = 0
+            for (index, entry) in entries.enumerated() {
+                let rawExt = (entry.path as NSString).pathExtension.lowercased()
+                let fileExt = rawExt.isEmpty ? "jpg" : rawExt
+                let destFile = folderURL.appendingPathComponent(String(format: "%05d.%@", index + 1, fileExt))
+                do {
+                    let data = try zipEntryData(archive: archive, entryPath: entry.path, encoding: pathEncoding, maximumBytes: maxArchiveImageBytes)
+                    try data.write(to: destFile, options: .atomic)
+                    extractedCount += 1
+                } catch {
+                    logger.warning("import-epub-extract-page-failed index=\(index) path=\(entry.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            guard extractedCount > 0 else {
+                logger.error("import-epub-all-pages-failed path=\(url.lastPathComponent, privacy: .public)")
+                try? FileManager.default.removeItem(at: folderURL)
+                return nil
+            }
+
+            // 4. 生成封面（第一页图片直接作为封面）
+            let firstEntryPath = entries.first?.path ?? ""
+            let firstPathExt = (firstEntryPath as NSString).pathExtension.lowercased()
+            let coverFileExt = firstPathExt.isEmpty ? "jpg" : firstPathExt
+            let firstImageURL = folderURL.appendingPathComponent(String(format: "%05d.%@", 1, coverFileExt))
+            let coverPath: String?
+            if let imageData = try? Data(contentsOf: firstImageURL),
+               imageData.count > 100,
+               isDecodableImageData(imageData) {
+                let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                let coverDir = cacheDir.appendingPathComponent("MReaderCoverCache", isDirectory: true)
+                try? FileManager.default.createDirectory(at: coverDir, withIntermediateDirectories: true)
+                let coverFile = coverDir.appendingPathComponent("\(folderURL.lastPathComponent).jpg")
+                try? imageData.write(to: coverFile, options: .atomic)
+                coverPath = coverFile.path
+            } else {
+                coverPath = nil
+            }
+
+            // 5. 创建 bookmark 指向文件夹
+            let bookmark = createBookmark(for: folderURL)
+            guard let bookmark else {
+                try? FileManager.default.removeItem(at: folderURL)
+                return nil
+            }
+
+            return ImportResult(
+                title: url.deletingPathExtension().lastPathComponent,
+                pagesCount: extractedCount,
+                bookmarkData: bookmark,
+                coverImagePath: coverPath,
+                fileSize: folderSize(folderURL),
+                libraryPath: folderURL.path,
+                chapterTypeRaw: ChapterType.folder.rawValue,
+                chapterPath: folderURL.path
+            )
+        } catch {
+            logger.error("import-epub-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -608,6 +716,60 @@ class ComicManager {
         selectedLibraryRootURL() != nil
     }
 
+    /// 移动本地漫画文件到目标文件夹，返回新位置的 bookmarkData
+    nonisolated static func moveComicFile(bookmarkData: Data, to destinationFolder: URL) -> Data? {
+        guard let sourceURL = try? resolveBookmark(bookmarkData) else { return nil }
+        let isSecurityScoped = sourceURL.startAccessingSecurityScopedResource()
+        defer { if isSecurityScoped { sourceURL.stopAccessingSecurityScopedResource() } }
+
+        return withSelectedLibraryRoot { libraryRoot -> Data? in
+            let standardizedRoot = libraryRoot.standardizedFileURL
+            let standardizedDestination = destinationFolder.standardizedFileURL
+            let rootPath = standardizedRoot.path
+            let destinationPath = standardizedDestination.path
+            guard destinationPath == rootPath || destinationPath.hasPrefix(rootPath + "/") else {
+                return nil
+            }
+
+            let fileName = sourceURL.lastPathComponent
+            let destinationURL = standardizedDestination.appendingPathComponent(
+                fileName,
+                isDirectory: sourceURL.hasDirectoryPath
+            )
+            guard destinationURL.path != sourceURL.standardizedFileURL.path else {
+                return bookmarkData
+            }
+
+            do {
+                try FileManager.default.createDirectory(
+                    at: standardizedDestination,
+                    withIntermediateDirectories: true
+                )
+                let finalURL: URL
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    finalURL = uniqueURL(
+                        in: standardizedDestination,
+                        preferredName: fileName,
+                        isDirectory: sourceURL.hasDirectoryPath
+                    )
+                } else {
+                    finalURL = destinationURL
+                }
+                try FileManager.default.moveItem(at: sourceURL, to: finalURL)
+                return createBookmark(for: finalURL)
+            } catch {
+                logger.error("move-comic-file-failed source=\(sourceURL.path, privacy: .public) dest=\(destinationURL.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        } ?? nil
+    }
+
+    /// 获取移动后文件的新 libraryPath
+    nonisolated static func libraryPathOfMovedFile(oldBookmark: Data, newBookmark: Data) -> String? {
+        guard let newURL = try? resolveBookmark(newBookmark) else { return nil }
+        return newURL.path
+    }
+
     nonisolated static func setLibraryRoot(_ url: URL) -> Bool {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -645,6 +807,26 @@ class ComicManager {
         return try body(url)
     }
 
+    nonisolated private static func withLibraryWriteAccess<T>(
+        destinationRoot: URL?,
+        _ body: (URL) throws -> T
+    ) rethrows -> T? {
+        guard let selectedRoot = selectedLibraryRootURL() else { return nil }
+        let targetRoot = (destinationRoot ?? selectedRoot).standardizedFileURL
+        let selectedPath = selectedRoot.standardizedFileURL.path
+        let targetPath = targetRoot.path
+        guard targetPath == selectedPath || targetPath.hasPrefix(selectedPath + "/") else {
+            return nil
+        }
+        let didStart = selectedRoot.startAccessingSecurityScopedResource()
+        defer {
+            if didStart {
+                selectedRoot.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try body(targetRoot)
+    }
+
     nonisolated static func readableLocalLibraryAddress() -> String {
         selectedLibraryRootURL()?.path ?? "未选择漫画库"
     }
@@ -668,13 +850,21 @@ class ComicManager {
     }
 
     nonisolated static func temporaryImportCacheSize() -> Int64 {
-        folderSize(temporaryImportRoot())
+        folderSize(temporaryImportRoot()) +
+            folderSize(archiveCompatibilityCacheRoot()) +
+            folderSize(webUploadTemporaryRoot())
     }
 
     nonisolated static func clearTemporaryImportCache() {
         try? FileManager.default.removeItem(at: temporaryImportRoot())
         try? FileManager.default.removeItem(at: webUploadTemporaryRoot())
+        try? FileManager.default.removeItem(at: archiveCompatibilityCacheRoot())
         LocalWebServer.clearStaleBodyFiles()
+    }
+
+    nonisolated private static func archiveCompatibilityCacheRoot() -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ArchiveCompatibility", isDirectory: true)
     }
 
     nonisolated static func rebuildCoverImage(bookmarkData: Data) -> String? {
@@ -853,8 +1043,8 @@ class ComicManager {
     }
 
     nonisolated private static let supportedImageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
-    nonisolated private static let supportedArchiveExtensions: Set<String> = ["zip", "cbz", "7z", "epub"]
-    nonisolated private static let unsupportedArchiveExtensions: Set<String> = ["rar", "cbr"]
+    nonisolated private static let supportedArchiveExtensions: Set<String> = ["zip", "cbz", "epub"]
+    nonisolated private static let unsupportedArchiveExtensions: Set<String> = ["7z", "rar", "cbr"]
     nonisolated private static let supportedDocumentExtensions: Set<String> = ["pdf"]
 
     nonisolated private static func isInsideLocalLibrary(_ url: URL) -> Bool {
@@ -969,9 +1159,35 @@ class ComicManager {
 
     nonisolated static func imageData(forArchivePageURL url: URL) -> Data? {
         guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url) else {
+            logger.error("archive-page-url-invalid url=\(url.absoluteString, privacy: .public)")
             return nil
         }
-        return try? archiveImageData(archiveURL: archiveURL, entryPath: entryPath, encodingRawValue: encodingRawValue, format: format)
+        let readData = {
+            try archiveImageData(
+                archiveURL: archiveURL,
+                entryPath: entryPath,
+                encodingRawValue: encodingRawValue,
+                format: format
+            )
+        }
+        do {
+            let data: Data
+            if let scopedData = try withSelectedLibraryRoot({ _ in try readData() }) {
+                data = scopedData
+            } else {
+                data = try readData()
+            }
+            guard !data.isEmpty else {
+                logger.error("archive-page-empty archive=\(archiveURL.lastPathComponent, privacy: .public) entry=\(entryPath, privacy: .public)")
+                return nil
+            }
+            return data
+        } catch {
+            logger.error(
+                "archive-page-read-failed archive=\(archiveURL.lastPathComponent, privacy: .public) entry=\(entryPath, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     nonisolated static func zipImportFailureReason(for url: URL) -> String {
@@ -994,7 +1210,7 @@ class ComicManager {
     }
 
     nonisolated private static func canReadArchiveExtension(_ ext: String) -> Bool {
-        ext == "zip" || ext == "cbz" || ext == "7z" || ext == "epub"
+        ext == "zip" || ext == "cbz" || ext == "epub"
     }
 
     nonisolated private static func isUnsupportedArchiveExtension(_ ext: String) -> Bool {
@@ -1007,31 +1223,58 @@ class ComicManager {
     }
 
     nonisolated private static func archiveImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
+        if archiveURL.pathExtension.lowercased() == "epub" {
+            return try epubImageEntries(in: archiveURL)
+        }
         switch archiveFormat(for: archiveURL) {
         case .zip:
             return try zipImageEntries(in: archiveURL)
-        case .sevenZip:
-            return try sevenZipImageEntries(in: archiveURL)
-        case .rar:
-            throw ArchiveReadError.unsupportedArchive
         }
+    }
+
+    nonisolated static func archivePageCountForDiagnostics(at archiveURL: URL) throws -> Int {
+        try archiveImageEntries(in: archiveURL).count
+    }
+
+    nonisolated static func archiveFirstPageDataForDiagnostics(at archiveURL: URL) throws -> Data {
+        guard let first = try archiveImageEntries(in: archiveURL).first else {
+            throw ArchiveReadError.noImages
+        }
+        return try archiveImageData(
+            archiveURL: archiveURL,
+            entryPath: first.path,
+            encodingRawValue: first.encodingRawValue,
+            format: first.format
+        )
+    }
+
+    nonisolated static func archiveFirstPageURLForDiagnostics(at archiveURL: URL) throws -> URL {
+        guard let first = try archiveImageEntries(in: archiveURL).first else {
+            throw ArchiveReadError.noImages
+        }
+        return archivePageURL(archiveURL: archiveURL, entry: first, index: 0)
+    }
+
+    nonisolated static func archivePageDataForDiagnostics(at archiveURL: URL, index: Int) throws -> Data {
+        let entries = try archiveImageEntries(in: archiveURL)
+        guard entries.indices.contains(index) else {
+            throw ArchiveReadError.noImages
+        }
+        let pageURL = archivePageURL(archiveURL: archiveURL, entry: entries[index], index: index)
+        guard let data = imageData(forArchivePageURL: pageURL) else {
+            throw ArchiveReadError.damagedArchive
+        }
+        return data
     }
 
     nonisolated private static func archiveImageData(archiveURL: URL, entryPath: String, encodingRawValue: UInt?, format: ArchiveFormat) throws -> Data {
         switch format {
         case .zip:
             return try zipImageData(archiveURL: archiveURL, entryPath: entryPath, encodingRawValue: encodingRawValue)
-        case .sevenZip:
-            return try sevenZipImageData(archiveURL: archiveURL, entryPath: entryPath)
-        case .rar:
-            throw ArchiveReadError.unsupportedArchive
         }
     }
 
-    nonisolated private static func archiveFormat(for archiveURL: URL) -> ArchiveFormat {
-        let ext = archiveURL.pathExtension.lowercased()
-        if ext == "7z" { return .sevenZip }
-        if ext == "rar" || ext == "cbr" { return .rar }
+    nonisolated private static func archiveFormat(for _: URL) -> ArchiveFormat {
         return .zip
     }
 
@@ -1043,7 +1286,7 @@ class ComicManager {
         var lastError: Error?
         for encoding in zipPathEncodings() {
             do {
-                let archive = try Archive(url: archiveURL, accessMode: .read, pathEncoding: encoding)
+                let archive = try compatibleZIPArchive(url: archiveURL, pathEncoding: encoding)
                 let entries = archive.compactMap { entry -> ArchiveImageEntry? in
                     let path = encoding.map { entry.path(using: $0) } ?? entry.path
                     guard entry.type == .file, isValidArchiveImagePath(path) else { return nil }
@@ -1069,14 +1312,30 @@ class ComicManager {
 
     nonisolated private static func zipImageData(archiveURL: URL, entryPath: String, encodingRawValue: UInt?) throws -> Data {
         let encoding = encodingRawValue.map { String.Encoding(rawValue: $0) }
-        let archive = try Archive(url: archiveURL, accessMode: .read, pathEncoding: encoding)
+        let archive = try compatibleZIPArchive(url: archiveURL, pathEncoding: encoding)
+        return try zipEntryData(archive: archive, entryPath: entryPath, encoding: encoding, maximumBytes: maxArchiveImageBytes)
+    }
+
+    nonisolated private static func zipEntryData(
+        archive: Archive,
+        entryPath: String,
+        encoding: String.Encoding?,
+        maximumBytes: UInt64
+    ) throws -> Data {
+        let normalizedTarget = normalizedArchivePath(entryPath)
         guard let entry = archive.first(where: { entry in
             let path = encoding.map { entry.path(using: $0) } ?? entry.path
-            return path == entryPath
+            return normalizedArchivePath(path).caseInsensitiveCompare(normalizedTarget) == .orderedSame
         }) else {
+            let samplePaths = archive.prefix(8).map { entry in
+                encoding.map { entry.path(using: $0) } ?? entry.path
+            }
+            logger.error(
+                "zip-entry-not-found target=\(entryPath, privacy: .public) samples=\(samplePaths.joined(separator: " | "), privacy: .public)"
+            )
             throw ArchiveReadError.encodingFailed
         }
-        guard entry.uncompressedSize <= maxArchiveImageBytes else {
+        guard entry.uncompressedSize <= maximumBytes else {
             throw ArchiveReadError.memoryLimit
         }
         var data = Data()
@@ -1091,67 +1350,494 @@ class ComicManager {
         }
     }
 
-    nonisolated private static func sevenZipImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
-        guard FileManager.default.isReadableFile(atPath: archiveURL.path) else {
-            throw ArchiveReadError.permissionDenied
-        }
+    nonisolated private static func epubImageEntries(in archiveURL: URL) throws -> [ArchiveImageEntry] {
+        var lastError: Error?
+        for encoding in zipPathEncodings() {
+            do {
+                let archive = try compatibleZIPArchive(url: archiveURL, pathEncoding: encoding)
+                let paths = archive.compactMap { entry -> String? in
+                    guard entry.type == .file else { return nil }
+                    return encoding.map { entry.path(using: $0) } ?? entry.path
+                }
+                let pathLookup = paths.reduce(into: [String: String]()) { result, path in
+                    result[path.lowercased()] = result[path.lowercased()] ?? path
+                }
 
-        let container = try sevenZipContainerData(for: archiveURL)
-        let infos: [SevenZipEntryInfo]
-        do {
-            infos = try SevenZipContainer.info(container: container)
-        } catch {
-            throw ArchiveReadError.damagedArchive
-        }
+                // 1. 解析 container.xml 获取 OPF 路径
+                let containerData = try zipEntryData(
+                    archive: archive,
+                    entryPath: pathLookup["meta-inf/container.xml"] ?? "META-INF/container.xml",
+                    encoding: encoding,
+                    maximumBytes: 2_000_000
+                )
+                guard let containerXML = decodedXMLText(containerData) else {
+                    throw ArchiveReadError.encodingFailed
+                }
 
-        let entries = infos.compactMap { info -> ArchiveImageEntry? in
-            let name = info.name
-            guard info.type == .regular, isValidArchiveImagePath(name) else { return nil }
-            if let size = info.size, UInt64(size) > maxArchiveImageBytes {
-                return nil
+                // 尝试多种方式提取 OPF 路径
+                var opfPathValue: String? = nil
+                // 标准方式: <rootfile full-path="..." media-type="...">
+                opfPathValue = firstRegexCapture(#"<rootfile\b[^>]*\bfull-path\s*=\s*["']([^"']+)["']"#, in: containerXML)
+                // 备选: 直接找 .opf 文件
+                if opfPathValue == nil {
+                    opfPathValue = firstRegexCapture(#"["']([^"']*\.opf)["']"#, in: containerXML)
+                }
+                // 备选: 遍历所有 <rootfile> 标签
+                if opfPathValue == nil {
+                    for rootfileTag in regexMatches(#"<rootfile\b[^>]*>"#, in: containerXML) {
+                        if let path = xmlAttribute("full-path", in: rootfileTag) {
+                            opfPathValue = path
+                            break
+                        }
+                    }
+                }
+                guard let opfPathValue else {
+                    throw ArchiveReadError.encodingFailed
+                }
+
+                let opfPath = pathLookup[opfPathValue.lowercased()] ?? opfPathValue
+                let opfData = try zipEntryData(
+                    archive: archive,
+                    entryPath: opfPath,
+                    encoding: encoding,
+                    maximumBytes: 5_000_000
+                )
+                guard let opfXML = decodedXMLText(opfData) else {
+                    throw ArchiveReadError.encodingFailed
+                }
+
+                let opfFolder = (opfPath as NSString).deletingLastPathComponent
+
+                // 2. 解析 manifest（所有资源项）
+                var manifest: [String: (path: String, mediaType: String, properties: String)] = [:]
+                var manifestOrder: [String] = []
+                for tag in regexMatches(#"<item\b[^>]*>"#, in: opfXML) {
+                    guard let id = xmlAttribute("id", in: tag),
+                          let href = xmlAttribute("href", in: tag) else { continue }
+                    let resolved = resolveArchivePath(baseFolder: opfFolder, relativePath: href)
+                    manifest[id] = (
+                        path: pathLookup[resolved.lowercased()] ?? resolved,
+                        mediaType: xmlAttribute("media-type", in: tag) ?? "",
+                        properties: xmlAttribute("properties", in: tag) ?? ""
+                    )
+                    manifestOrder.append(id)
+                }
+
+                // 3. 解析 spine（页面顺序）
+                let spineTags = regexMatches(#"<itemref\b[^>]*>"#, in: opfXML)
+                var orderedPaths: [String] = []
+                var resolvedSpineItems = 0
+                var xhtmlImageReferenceCount = 0
+                for tag in spineTags {
+                    guard let idref = xmlAttribute("idref", in: tag),
+                          let item = manifest[idref] else { continue }
+                    resolvedSpineItems += 1
+
+                    // 直接是图片类型
+                    if item.mediaType.lowercased().hasPrefix("image/") || isValidArchiveImagePath(item.path) {
+                        orderedPaths.append(item.path)
+                        continue
+                    }
+
+                    // HTML/XHTML 页面 → 提取其中引用的图片
+                    if item.mediaType.lowercased().contains("html") ||
+                       item.mediaType.lowercased().contains("xml") ||
+                       item.path.lowercased().hasSuffix(".html") ||
+                       item.path.lowercased().hasSuffix(".xhtml") ||
+                       item.path.lowercased().hasSuffix(".htm") {
+                        guard let pageData = try? zipEntryData(
+                            archive: archive,
+                            entryPath: item.path,
+                            encoding: encoding,
+                            maximumBytes: 3_000_000
+                        ),
+                        let pageText = decodedXMLText(pageData) else {
+                            logger.warning(
+                                "epub-xhtml-read-failed archive=\(archiveURL.lastPathComponent, privacy: .public) entry=\(item.path, privacy: .public)"
+                            )
+                            continue
+                        }
+                        let pageFolder = (item.path as NSString).deletingLastPathComponent
+
+                        // 提取 <img src="..."> 引用
+                        let imgRefs = regexMatches(#"<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']"#, in: pageText, captureGroup: 1)
+                        // 提取 <image xlink:href="..."> 引用（SVG）
+                        let svgRefs = regexMatches(#"<image\b[^>]*\bxlink:href\s*=\s*["']([^"']+)["']"#, in: pageText, captureGroup: 1)
+                        // 提取 CSS url(...) 引用
+                        let cssRefs = regexMatches(#"url\s*\(\s*["']?([^"')]+)["']?\s*\)"#, in: pageText, captureGroup: 1)
+                        // 宽松兜底：兼容 namespace、属性顺序和部分不规范 XHTML。
+                        let genericRefs = regexMatches(
+                            #"(?:src|href|xlink:href)\s*=\s*["']([^"']+)["']"#,
+                            in: pageText,
+                            captureGroup: 1
+                        )
+
+                        let allRefs = Array(Set(imgRefs + svgRefs + cssRefs + genericRefs))
+                        var foundImageInPage = false
+                        for reference in allRefs {
+                            let resolved = resolveArchivePath(baseFolder: pageFolder, relativePath: reference)
+                            if let actual = pathLookup[resolved.lowercased()],
+                               isValidArchiveImagePath(actual) {
+                                orderedPaths.append(actual)
+                                foundImageInPage = true
+                                xhtmlImageReferenceCount += 1
+                            }
+                        }
+                        // 如果 HTML 里没找到有效图片，但 HTML 本身可能是一个图片页（如全页图）
+                        if !foundImageInPage && isValidArchiveImagePath(item.path) {
+                            orderedPaths.append(item.path)
+                        }
+                    }
+                }
+
+                // 4. 处理 cover-image（确保封面在最前面）
+                let coverID = regexMatches(#"<meta\b[^>]*>"#, in: opfXML)
+                    .first(where: { xmlAttribute("name", in: $0)?.lowercased() == "cover" })
+                    .flatMap { xmlAttribute("content", in: $0) }
+                let coverFromProps = manifest.first(where: { $0.value.properties.split(separator: " ").contains("cover-image") })?.value.path
+                let coverFromMeta = coverID.flatMap { manifest[$0]?.path }
+                let coverFromGuide = regexMatches(#"<reference\b[^>]*>"#, in: opfXML)
+                    .first(where: { xmlAttribute("type", in: $0)?.lowercased().contains("cover") == true })
+                    .flatMap { tag -> String? in
+                        guard let href = xmlAttribute("href", in: tag) else { return nil }
+                        let resolved = resolveArchivePath(baseFolder: opfFolder, relativePath: href)
+                        return pathLookup[resolved.lowercased()] ?? resolved
+                    }
+                let coverPath = coverFromProps ?? coverFromMeta ?? coverFromGuide
+
+                if let coverPath, isValidArchiveImagePath(coverPath) {
+                    orderedPaths.removeAll { $0.caseInsensitiveCompare(coverPath) == .orderedSame }
+                    orderedPaths.insert(coverPath, at: 0)
+                }
+
+                // 部分制作工具会生成不规范 XHTML。spine 无法完整解析时，仍按 OPF manifest
+                // 中的图片声明顺序恢复图片页，避免整本书只剩封面。
+                if orderedPaths.count <= 1 {
+                    let manifestImages = manifestOrder.compactMap { id -> String? in
+                        guard let item = manifest[id],
+                              let actual = pathLookup[item.path.lowercased()],
+                              (item.mediaType.lowercased().hasPrefix("image/") || isValidArchiveImagePath(actual)) else {
+                            return nil
+                        }
+                        return actual
+                    }
+                    orderedPaths.append(contentsOf: manifestImages)
+                }
+
+                // 5. 去重并返回
+                var seen = Set<String>()
+                let uniquePaths = orderedPaths.filter { seen.insert($0.lowercased()).inserted }
+                if !uniquePaths.isEmpty {
+                    logger.info(
+                        "epub-list path=\(archiveURL.lastPathComponent, privacy: .public) manifest=\(manifest.count, privacy: .public) spine=\(spineTags.count, privacy: .public) resolvedSpine=\(resolvedSpineItems, privacy: .public) xhtmlRefs=\(xhtmlImageReferenceCount, privacy: .public) images=\(uniquePaths.count, privacy: .public)"
+                    )
+                    return uniquePaths.map {
+                        ArchiveImageEntry(path: $0, encodingRawValue: encoding?.rawValue, format: .zip)
+                    }
+                }
+
+                // 6. 兜底：如果 spine 解析失败，直接扫描所有图片
+                return try zipImageEntries(in: archiveURL)
+            } catch {
+                lastError = error
             }
-            return ArchiveImageEntry(path: name, encodingRawValue: nil, format: .sevenZip)
         }
-        .sorted { lhs, rhs in
-            lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
-        }
-
-        if entries.isEmpty {
-            throw ArchiveReadError.noImages
-        }
-        logger.info("7z-list path=\(archiveURL.lastPathComponent, privacy: .public) images=\(entries.count, privacy: .public)")
-        return entries
+        if let lastError { throw lastError }
+        throw ArchiveReadError.noImages
     }
 
-    nonisolated private static func sevenZipImageData(archiveURL: URL, entryPath: String) throws -> Data {
-        let container = try sevenZipContainerData(for: archiveURL)
-        let entries: [SevenZipEntry]
-        do {
-            entries = try SevenZipContainer.open(container: container)
-        } catch {
-            throw ArchiveReadError.damagedArchive
+    nonisolated private static func compatibleZIPArchive(
+        url: URL,
+        pathEncoding: String.Encoding?
+    ) throws -> Archive {
+        let offset = try zipLocalHeaderOffset(in: url)
+        if offset == 0 {
+            let directArchive = try Archive(url: url, accessMode: .read, pathEncoding: pathEncoding)
+            if directArchive.makeIterator().next() != nil {
+                return directArchive
+            }
+            guard let correction = try centralDirectoryCorrection(in: url) else {
+                return directArchive
+            }
+            let patchedURL = try patchedCentralDirectoryArchiveURL(
+                sourceURL: url,
+                endRecordOffset: correction.endRecordOffset,
+                centralDirectorySize: correction.centralDirectorySize,
+                recordedCentralDirectoryOffset: correction.recordedOffset,
+                correctedCentralDirectoryOffset: correction.correctedOffset
+            )
+            return try Archive(url: patchedURL, accessMode: .read, pathEncoding: pathEncoding)
         }
-        guard let entry = entries.first(where: { $0.info.name == entryPath }) else {
-            throw ArchiveReadError.encodingFailed
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = UInt(bitPattern: url.standardizedFileURL.path.hashValue)
+        let cacheRoot = archiveCompatibilityCacheRoot()
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        let normalizedURL = cacheRoot.appendingPathComponent(
+            "\(key)-\(fileSize)-\(Int(modified))-\(offset).zip"
+        )
+
+        if !FileManager.default.fileExists(atPath: normalizedURL.path) {
+            let temporaryURL = normalizedURL.appendingPathExtension("partial")
+            try? FileManager.default.removeItem(at: temporaryURL)
+            FileManager.default.createFile(atPath: temporaryURL.path, contents: nil)
+            let reader = try FileHandle(forReadingFrom: url)
+            let writer = try FileHandle(forWritingTo: temporaryURL)
+            defer {
+                try? reader.close()
+                try? writer.close()
+            }
+            try reader.seek(toOffset: UInt64(offset))
+            while autoreleasepool(invoking: {
+                let chunk = try? reader.read(upToCount: 1_048_576)
+                guard let chunk, !chunk.isEmpty else { return false }
+                try? writer.write(contentsOf: chunk)
+                return true
+            }) {}
+            try writer.synchronize()
+            try FileManager.default.moveItem(at: temporaryURL, to: normalizedURL)
+            logger.info(
+                "zip-prefix-normalized path=\(url.lastPathComponent, privacy: .public) prefixBytes=\(offset, privacy: .public)"
+            )
         }
-        guard let data = entry.data else {
-            throw ArchiveReadError.damagedArchive
-        }
-        guard UInt64(data.count) <= maxArchiveImageBytes else {
-            throw ArchiveReadError.memoryLimit
-        }
-        return data
+
+        return try Archive(url: normalizedURL, accessMode: .read, pathEncoding: pathEncoding)
     }
 
-    nonisolated private static func sevenZipContainerData(for archiveURL: URL) throws -> Data {
-        let values = try archiveURL.resourceValues(forKeys: [.fileSizeKey])
-        if let fileSize = values.fileSize, UInt64(fileSize) > maxSevenZipArchiveBytes {
-            throw ArchiveReadError.archiveTooLarge
+    nonisolated private static func centralDirectoryCorrection(
+        in url: URL
+    ) throws -> (
+        endRecordOffset: UInt64,
+        centralDirectorySize: UInt32,
+        recordedOffset: UInt32,
+        correctedOffset: UInt32
+    )? {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let fileSize = try handle.seekToEnd()
+        let tailSize = min(fileSize, 65_557)
+        try handle.seek(toOffset: fileSize - tailSize)
+        let tail = try handle.readToEnd() ?? Data()
+        let endSignature = Data([0x50, 0x4B, 0x05, 0x06])
+        guard let relativeRange = tail.range(of: endSignature, options: .backwards),
+              relativeRange.lowerBound + 20 <= tail.count else {
+            return nil
         }
-        do {
-            return try Data(contentsOf: archiveURL, options: .mappedIfSafe)
-        } catch {
-            throw ArchiveReadError.permissionDenied
+
+        let recordOffset = fileSize - tailSize + UInt64(relativeRange.lowerBound)
+        let centralDirectorySize = littleEndianUInt32(in: tail, offset: relativeRange.lowerBound + 12)
+        let recordedOffset = littleEndianUInt32(in: tail, offset: relativeRange.lowerBound + 16)
+        guard centralDirectorySize != UInt32.max, recordedOffset != UInt32.max else { return nil }
+        let expectedEndRecordOffset = UInt64(recordedOffset) + UInt64(centralDirectorySize)
+        guard recordOffset > expectedEndRecordOffset else { return nil }
+        let delta = recordOffset - expectedEndRecordOffset
+        guard delta <= UInt64(UInt32.max) - UInt64(recordedOffset) else { return nil }
+        let correctedOffset = UInt32(UInt64(recordedOffset) + delta)
+
+        try handle.seek(toOffset: UInt64(correctedOffset))
+        let signature = try handle.read(upToCount: 4) ?? Data()
+        guard signature == Data([0x50, 0x4B, 0x01, 0x02]) else { return nil }
+        return (recordOffset, centralDirectorySize, recordedOffset, correctedOffset)
+    }
+
+    nonisolated private static func patchedCentralDirectoryArchiveURL(
+        sourceURL: URL,
+        endRecordOffset: UInt64,
+        centralDirectorySize: UInt32,
+        recordedCentralDirectoryOffset: UInt32,
+        correctedCentralDirectoryOffset: UInt32
+    ) throws -> URL {
+        let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = UInt(bitPattern: sourceURL.standardizedFileURL.path.hashValue)
+        let cacheRoot = archiveCompatibilityCacheRoot()
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        let patchedURL = cacheRoot.appendingPathComponent(
+            "\(key)-\(fileSize)-\(Int(modified))-cdv2-\(correctedCentralDirectoryOffset).zip"
+        )
+        guard !FileManager.default.fileExists(atPath: patchedURL.path) else {
+            return patchedURL
+        }
+
+        let temporaryURL = patchedURL.appendingPathExtension("partial")
+        try? FileManager.default.removeItem(at: temporaryURL)
+        try FileManager.default.copyItem(at: sourceURL, to: temporaryURL)
+        let handle = try FileHandle(forWritingTo: temporaryURL)
+        defer { try? handle.close() }
+
+        let reader = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? reader.close() }
+        try reader.seek(toOffset: UInt64(correctedCentralDirectoryOffset))
+        var centralDirectoryData = try reader.read(upToCount: Int(centralDirectorySize)) ?? Data()
+        let offsetDelta = correctedCentralDirectoryOffset - recordedCentralDirectoryOffset
+        var cursor = 0
+        var patchedEntryCount = 0
+        while cursor + 46 <= centralDirectoryData.count,
+              centralDirectoryData[cursor..<(cursor + 4)] == Data([0x50, 0x4B, 0x01, 0x02]) {
+            let fileNameLength = Int(littleEndianUInt16(in: centralDirectoryData, offset: cursor + 28))
+            let extraLength = Int(littleEndianUInt16(in: centralDirectoryData, offset: cursor + 30))
+            let commentLength = Int(littleEndianUInt16(in: centralDirectoryData, offset: cursor + 32))
+            let localOffset = littleEndianUInt32(in: centralDirectoryData, offset: cursor + 42)
+            if localOffset != UInt32.max {
+                try reader.seek(toOffset: UInt64(localOffset))
+                let recordedSignature = try reader.read(upToCount: 4) ?? Data()
+                if recordedSignature != Data([0x50, 0x4B, 0x03, 0x04]) {
+                    let correctedLocalOffset = localOffset + offsetDelta
+                    try reader.seek(toOffset: UInt64(correctedLocalOffset))
+                    let correctedSignature = try reader.read(upToCount: 4) ?? Data()
+                    if correctedSignature == Data([0x50, 0x4B, 0x03, 0x04]) {
+                        replaceLittleEndianUInt32(
+                            in: &centralDirectoryData,
+                            offset: cursor + 42,
+                            value: correctedLocalOffset
+                        )
+                        patchedEntryCount += 1
+                    }
+                }
+            }
+            cursor += 46 + fileNameLength + extraLength + commentLength
+        }
+
+        try handle.seek(toOffset: UInt64(correctedCentralDirectoryOffset))
+        try handle.write(contentsOf: centralDirectoryData)
+        try handle.seek(toOffset: endRecordOffset + 16)
+        var littleEndianOffset = correctedCentralDirectoryOffset.littleEndian
+        let offsetData = withUnsafeBytes(of: &littleEndianOffset) { Data($0) }
+        try handle.write(contentsOf: offsetData)
+        try handle.synchronize()
+        try FileManager.default.moveItem(at: temporaryURL, to: patchedURL)
+        logger.info(
+            "zip-central-directory-corrected path=\(sourceURL.lastPathComponent, privacy: .public) correctedOffset=\(correctedCentralDirectoryOffset, privacy: .public) localEntries=\(patchedEntryCount, privacy: .public)"
+        )
+        return patchedURL
+    }
+
+    nonisolated private static func littleEndianUInt16(in data: Data, offset: Int) -> UInt16 {
+        guard offset >= 0, offset + 2 <= data.count else { return 0 }
+        return data[offset..<(offset + 2)].enumerated().reduce(UInt16.zero) { result, element in
+            result | (UInt16(element.element) << UInt16(element.offset * 8))
+        }
+    }
+
+    nonisolated private static func littleEndianUInt32(in data: Data, offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= data.count else { return 0 }
+        return data[offset..<(offset + 4)].enumerated().reduce(UInt32.zero) { result, element in
+            result | (UInt32(element.element) << UInt32(element.offset * 8))
+        }
+    }
+
+    nonisolated private static func replaceLittleEndianUInt32(
+        in data: inout Data,
+        offset: Int,
+        value: UInt32
+    ) {
+        guard offset >= 0, offset + 4 <= data.count else { return }
+        var littleEndianValue = value.littleEndian
+        withUnsafeBytes(of: &littleEndianValue) { bytes in
+            data.replaceSubrange(offset..<(offset + 4), with: bytes)
+        }
+    }
+
+    nonisolated private static func zipLocalHeaderOffset(in url: URL) throws -> Int {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let signatures = [
+            Data([0x50, 0x4B, 0x03, 0x04]),
+            Data([0x50, 0x4B, 0x05, 0x06]),
+            Data([0x50, 0x4B, 0x07, 0x08])
+        ]
+        var consumed = 0
+        var overlap = Data()
+        let maximumPrefixBytes = 32 * 1_048_576
+
+        while consumed < maximumPrefixBytes {
+            guard let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty else { break }
+            var searchData = overlap
+            searchData.append(chunk)
+            for signature in signatures {
+                if let range = searchData.range(of: signature) {
+                    return max(0, consumed - overlap.count + range.lowerBound)
+                }
+            }
+            consumed += chunk.count
+            overlap = searchData.suffix(3)
+        }
+        throw ArchiveReadError.damagedArchive
+    }
+
+    nonisolated private static func resolveArchivePath(baseFolder: String, relativePath: String) -> String {
+        let decoded = relativePath.removingPercentEncoding ?? relativePath
+        let withoutFragment = decoded.split(separator: "#", maxSplits: 1).first.map(String.init) ?? decoded
+        let withoutQuery = withoutFragment.split(separator: "?", maxSplits: 1).first.map(String.init) ?? withoutFragment
+        let combined = baseFolder.isEmpty ? withoutQuery : baseFolder + "/" + withoutQuery
+        return canonicalArchivePath(combined)
+    }
+
+    nonisolated private static func normalizedArchivePath(_ path: String) -> String {
+        canonicalArchivePath(path)
+    }
+
+    nonisolated private static func canonicalArchivePath(_ path: String) -> String {
+        let slashPath = path.replacingOccurrences(of: "\\", with: "/")
+        var components: [Substring] = []
+        for component in slashPath.split(separator: "/", omittingEmptySubsequences: true) {
+            switch component {
+            case ".":
+                continue
+            case "..":
+                if !components.isEmpty {
+                    components.removeLast()
+                }
+            default:
+                components.append(component)
+            }
+        }
+        return components.joined(separator: "/")
+    }
+
+    nonisolated private static func decodedXMLText(_ data: Data) -> String? {
+        if let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        if let text = String(data: data, encoding: .utf16) {
+            return text
+        }
+        if let text = String(data: data, encoding: .utf16LittleEndian) {
+            return text
+        }
+        if let text = String(data: data, encoding: .utf16BigEndian) {
+            return text
+        }
+        if let text = String(data: data, encoding: .windowsCP1252) {
+            return text
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated private static func xmlAttribute(_ name: String, in tag: String) -> String? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        return firstRegexCapture(
+            "(?:^|\\s)" + escapedName + "\\s*=\\s*[\"']([^\"']+)[\"']",
+            in: tag
+        )
+    }
+
+    nonisolated private static func firstRegexCapture(_ pattern: String, in value: String) -> String? {
+        regexMatches(pattern, in: value, captureGroup: 1).first
+    }
+
+    nonisolated private static func regexMatches(_ pattern: String, in value: String, captureGroup: Int = 0) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return []
+        }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return regex.matches(in: value, range: range).compactMap { match in
+            guard captureGroup < match.numberOfRanges,
+                  let resultRange = Range(match.range(at: captureGroup), in: value) else { return nil }
+            return String(value[resultRange])
         }
     }
 
@@ -1256,12 +1942,18 @@ class ComicManager {
     }
 
     nonisolated private static func cacheCoverData(_ data: Data?, cacheKey: String, forceOverwrite: Bool = false) -> String? {
-        guard let data else { return nil }
+        guard let data, isDecodableImageData(data) else {
+            logger.warning("cover-cache-rejected-invalid-image key=\(cacheKey, privacy: .public)")
+            return nil
+        }
         let destination = coverCacheURL(cacheKey: cacheKey)
         do {
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: destination.path), !forceOverwrite {
-                return destination.path
+                if isDecodableImageFile(destination) {
+                    return destination.path
+                }
+                try? FileManager.default.removeItem(at: destination)
             }
             if forceOverwrite {
                 try? FileManager.default.removeItem(at: destination)
@@ -1273,14 +1965,29 @@ class ComicManager {
         }
     }
 
+    nonisolated private static func isDecodableImageData(_ data: Data) -> Bool {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            return false
+        }
+        return CGImageSourceGetCount(source) > 0
+    }
+
+    nonisolated private static func isDecodableImageFile(_ url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            return false
+        }
+        return CGImageSourceGetCount(source) > 0
+    }
+
     nonisolated private static func coverCacheURL(cacheKey: String) -> URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let encoded = Data(cacheKey.utf8)
             .base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "=", with: "")
-        return caches.appendingPathComponent("MReaderCoverCache", isDirectory: true)
+        return applicationSupport.appendingPathComponent("MReaderCoverCache", isDirectory: true)
             .appendingPathComponent(encoded + ".jpg")
     }
 

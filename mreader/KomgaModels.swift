@@ -3,6 +3,7 @@ import Foundation
 nonisolated enum MediaSourceType: String, Codable, Hashable, Sendable {
     case local
     case komga
+    case opds
 }
 
 nonisolated struct MediaSource: Identifiable, Codable, Hashable, Sendable {
@@ -45,21 +46,21 @@ nonisolated enum MediaSourceError: LocalizedError, Equatable, Sendable {
         case .invalidURL:
             return "服务器地址格式不正确"
         case .unauthorized:
-            return "认证失败，请检查 Komga API Key"
+            return "认证失败，请检查服务器凭据"
         case .unreachable:
             return "无法连接到 Komga 服务器"
         case .invalidResponse:
             return "服务器返回了无法识别的响应"
         case .notFound:
-            return "Komga 资源不存在"
+            return "远程资源不存在"
         case .timeout:
             return "连接超时"
         case .decodingFailed:
-            return "Komga JSON 解析失败"
+            return "服务器目录解析失败"
         case .imageLoadFailed:
             return "页面图片加载失败"
         case .apiKeyMissing:
-            return "缺少 Komga API Key"
+            return "缺少服务器凭据"
         case .keychainFailed(let message):
             return "Keychain 保存失败：\(message)"
         case .serverError(let status, let body):
@@ -107,6 +108,7 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
     let pageCountValue: Int?
     let metadata: KomgaMetadataDTO?
     let media: KomgaBookMediaDTO?
+    let readProgress: KomgaReadProgressDTO?
 
     var displayTitle: String {
         let metadataTitle = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -136,6 +138,7 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
         case pageCountValue = "pageCount"
         case metadata
         case media
+        case readProgress
     }
 
     init(from decoder: Decoder) throws {
@@ -154,6 +157,7 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
         pageCountValue = container.decodeFlexibleInt(forKey: .pageCountValue)
         metadata = try? container.decodeIfPresent(KomgaMetadataDTO.self, forKey: .metadata)
         media = try? container.decodeIfPresent(KomgaBookMediaDTO.self, forKey: .media)
+        readProgress = try? container.decodeIfPresent(KomgaReadProgressDTO.self, forKey: .readProgress)
     }
 }
 
@@ -183,6 +187,39 @@ nonisolated struct KomgaPageDTO: Decodable, Hashable, Sendable {
     let mediaType: String?
 }
 
+nonisolated struct KomgaReadProgressDTO: Decodable, Hashable, Sendable {
+    let page: Int?
+    let pageIndex: Int?
+    let completed: Bool?
+
+    var resolvedPageIndex: Int? {
+        pageIndex ?? page.map { max($0 - 1, 0) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case page
+        case pageIndex
+        case completed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        page = container.decodeFlexibleInt(forKey: .page)
+        pageIndex = container.decodeFlexibleInt(forKey: .pageIndex)
+        completed = try? container.decodeIfPresent(Bool.self, forKey: .completed)
+    }
+}
+
+nonisolated struct KomgaReadProgressUpdateDTO: Encodable, Sendable {
+    let page: Int
+    let completed: Bool
+
+    init(pageIndex: Int, completed: Bool) {
+        self.page = pageIndex + 1
+        self.completed = completed
+    }
+}
+
 nonisolated struct KomgaPageResponse<T: Decodable & Sendable>: Decodable, Sendable {
     let content: [T]
 
@@ -202,7 +239,7 @@ nonisolated struct KomgaPageResponse<T: Decodable & Sendable>: Decodable, Sendab
 }
 
 private extension KeyedDecodingContainer {
-    func decodeFlexibleString(forKey key: Key) -> String? {
+    nonisolated func decodeFlexibleString(forKey key: Key) -> String? {
         if let value = try? decodeIfPresent(String.self, forKey: key) {
             return value
         }
@@ -215,7 +252,7 @@ private extension KeyedDecodingContainer {
         return nil
     }
 
-    func decodeFlexibleInt(forKey key: Key) -> Int? {
+    nonisolated func decodeFlexibleInt(forKey key: Key) -> Int? {
         if let value = try? decodeIfPresent(Int.self, forKey: key) {
             return value
         }

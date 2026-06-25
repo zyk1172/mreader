@@ -29,6 +29,16 @@ nonisolated enum RemoteImageLoader {
         try? FileManager.default.removeItem(at: url)
     }
 
+    static func removeCachedImages(sourceID: UUID, bookID: String) {
+        let safeBookID = safeFileName(bookID)
+        let coverURL = cacheRoot
+            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
+            .appendingPathComponent("covers", isDirectory: true)
+            .appendingPathComponent(safeBookID)
+            .appendingPathExtension("img")
+        try? FileManager.default.removeItem(at: coverURL)
+    }
+
     private static func coverURL(sourceID: UUID, bookID: String) -> URL {
         cacheRoot
             .appendingPathComponent(sourceID.uuidString, isDirectory: true)
@@ -57,6 +67,10 @@ nonisolated enum RemotePageLoader {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID else {
+            return nil
+        }
+        guard KomgaProvider.loadSources().contains(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+            print("Komga 源已禁用，拒绝打开远程漫画: \(comic.title)")
             return nil
         }
         let totalPages = max(comic.remotePageCount ?? comic.totalPages, 0)
@@ -88,6 +102,18 @@ nonisolated enum RemotePageLoader {
 
     static func pruneDiskCache() async {
         await RemotePageCache.shared.pruneDiskCacheIfNeeded()
+    }
+
+    static func removeCachedPages(sourceID: UUID, bookID: String) {
+        let url = cacheRoot
+            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
+            .appendingPathComponent(RemoteImageLoader.safeFileName(bookID), isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    static func removeCachedPages(sourceID: UUID) {
+        let url = cacheRoot.appendingPathComponent(sourceID.uuidString, isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
     }
 
     private static func pageURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
@@ -266,7 +292,7 @@ actor RemotePageCache {
     nonisolated private static func download(key: PageCacheKey, diskURL: URL) async -> Data? {
         if Task.isCancelled { return nil }
         do {
-            guard let source = KomgaProvider.loadSources().first(where: { $0.id == key.sourceID && $0.type == .komga }),
+            guard let source = KomgaProvider.loadSources().first(where: { $0.id == key.sourceID && $0.type == .komga && $0.isEnabled }),
                   let apiKey = KomgaProvider.apiKey(for: key.sourceID) else {
                 return nil
             }
@@ -277,6 +303,9 @@ actor RemotePageCache {
             try FileManager.default.createDirectory(at: diskURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? data.write(to: diskURL, options: .atomic)
             return data
+        } catch MediaSourceError.notFound {
+            print("Komga 页面不存在 book=\(key.bookID) page=\(key.pageIndex)")
+            return nil
         } catch {
             print("Komga 页面加载失败 page=\(key.pageIndex): \(error.localizedDescription)")
             return nil

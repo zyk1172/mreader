@@ -54,7 +54,7 @@ ZIP/CBZ 读取采用递归扫描，支持压缩包里包一层或多层目录的
 
 ![ZIP 递归扫描](docs/images/07-zip-recursive.png)
 
-PDF 漫画会按页渲染，长条 PDF 在滚动模式下保存真实阅读位置。EPUB 已作为第一版支持格式接入，适合作为图片型 EPUB 漫画入口。7z 通过 SWCompression 方向接入；RAR/CBR 已预留导入入口，但完整读取仍需要后续链接 UnrarKit 或等价 RAR 解压库。README 中这点明确说明，是为了避免把“UI 可选择”误认为“底层已经完整支持”。
+PDF 漫画会按页渲染，长条 PDF 在滚动模式下保存真实阅读位置。EPUB 已作为第一版支持格式接入，适合作为图片型 EPUB 漫画入口。第一版稳定导入格式聚焦 ZIP、CBZ、EPUB、PDF 和图片文件夹；7z、RAR、CBR 暂不开放入口，避免出现“可选择但底层不可用”的体验。
 
 ## Komga 媒体库
 
@@ -127,7 +127,6 @@ open mreader.xcodeproj
 当前依赖包括：
 
 - ZIPFoundation：ZIP/CBZ 读取。
-- SWCompression / BitByteData：用于更多压缩格式方向的支持。
 - Apple Vision：本地 OCR。
 - CoreImage / ImageIO：OCR 预处理与高分辨率解码。
 - PDFKit / UIKit / SwiftUI：PDF 渲染与阅读界面。
@@ -167,7 +166,7 @@ xcodebuild \
 
 第一版的重点是“能稳定作为个人漫画阅读器使用”。后续可以继续增强：
 
-- 真正链接 UnrarKit 或其他稳定 RAR 库，完整支持 RAR/CBR。
+- 如果后续确实需要更多压缩格式，再单独评估 7z、RAR、CBR 的稳定解压库和内存策略。
 - 增加更细的远程媒体库冲突策略。
 - 增加离线缓存策略，但仍不改变本地库原则。
 - 增加更完整的视觉模型 OCR/翻译模式。

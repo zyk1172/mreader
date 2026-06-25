@@ -28,6 +28,9 @@ final class HapticManager {
     }
 
     func play(_ level: HapticLevel) {
+#if targetEnvironment(simulator)
+        return
+#else
         guard UserDefaults.standard.object(forKey: HapticSettings.isEnabledKey) as? Bool ?? true else { return }
 
         switch level {
@@ -45,13 +48,16 @@ final class HapticManager {
             notificationGenerator.notificationOccurred(.error)
         }
         prepare()
+#endif
     }
 
     func prepare() {
+#if !targetEnvironment(simulator)
         lightGenerator.prepare()
         mediumGenerator.prepare()
         heavyGenerator.prepare()
         notificationGenerator.prepare()
+#endif
     }
 }
 

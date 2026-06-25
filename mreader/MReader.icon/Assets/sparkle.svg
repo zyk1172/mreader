@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.42" stop-color="#F8FBFF"/>
+      <stop offset="1" stop-color="#B8C8DA"/>
+    </radialGradient>
+  </defs>
+  <path
+    d="M770 172
+       C780 232 800 252 860 262
+       C800 272 780 292 770 352
+       C760 292 740 272 680 262
+       C740 252 760 232 770 172
+       Z"
+    fill="url(#spark)"
+  />
+</svg>

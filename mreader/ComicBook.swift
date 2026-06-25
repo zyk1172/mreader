@@ -3,6 +3,12 @@ import Foundation
 enum ComicSourceType: String, Codable, Hashable, Sendable {
     case local
     case komga
+    case opds
+}
+
+enum AITranslationMode: String, Codable, Hashable, Sendable {
+    case ocr
+    case vision
 }
 
 struct ComicBook: Identifiable, Codable, Hashable, Sendable {
@@ -15,7 +21,6 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var libraryPath: String?
     var sourceTypeRaw: String
     var sourceURL: String?
-    var smbPath: String?
     var mediaSourceID: UUID?
     var komgaLibraryID: String?
     var komgaSeriesID: String?
@@ -27,6 +32,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var chapterPath: String?
     var seriesID: UUID?
     var currentPageIndex: Int
+    var hasBeenOpened: Bool
     var scrollProgress: Double
     var scrollPageProgress: Double
     var lastReadAt: Date
@@ -38,6 +44,8 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var ocrTextScale: Double
     var ocrSafeAreaInset: Double
     var ocrMinimumTextHeight: Double
+    var aiTranslationModeRaw: String
+    var hasInitializedReadingPreset: Bool
     var readingDirectionRaw: String
     var readingModeRaw: String
     var pageTurnAnimationRaw: String
@@ -48,7 +56,11 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         ComicSourceType(rawValue: sourceTypeRaw) ?? .local
     }
 
-    init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, smbPath: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = Date(), isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0.05, ocrMinimumTextHeight: Double = 0.014, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard") {
+    nonisolated var aiTranslationMode: AITranslationMode {
+        AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
+    }
+
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard") {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -58,7 +70,6 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.libraryPath = libraryPath
         self.sourceTypeRaw = sourceTypeRaw
         self.sourceURL = sourceURL
-        self.smbPath = smbPath
         self.mediaSourceID = mediaSourceID
         self.komgaLibraryID = komgaLibraryID
         self.komgaSeriesID = komgaSeriesID
@@ -70,6 +81,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.chapterPath = chapterPath
         self.seriesID = seriesID
         self.currentPageIndex = currentPageIndex
+        self.hasBeenOpened = hasBeenOpened
         self.scrollProgress = scrollProgress
         self.scrollPageProgress = scrollPageProgress
         self.lastReadAt = lastReadAt
@@ -81,6 +93,8 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.ocrTextScale = ocrTextScale
         self.ocrSafeAreaInset = ocrSafeAreaInset
         self.ocrMinimumTextHeight = ocrMinimumTextHeight
+        self.aiTranslationModeRaw = aiTranslationModeRaw
+        self.hasInitializedReadingPreset = hasInitializedReadingPreset
         self.readingDirectionRaw = readingDirectionRaw
         self.readingModeRaw = readingModeRaw
         self.pageTurnAnimationRaw = pageTurnAnimationRaw
@@ -99,7 +113,6 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         libraryPath = try container.decodeIfPresent(String.self, forKey: .libraryPath)
         sourceTypeRaw = try container.decodeIfPresent(String.self, forKey: .sourceTypeRaw) ?? ComicSourceType.local.rawValue
         sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
-        smbPath = try container.decodeIfPresent(String.self, forKey: .smbPath)
         mediaSourceID = try container.decodeIfPresent(UUID.self, forKey: .mediaSourceID)
         komgaLibraryID = try container.decodeIfPresent(String.self, forKey: .komgaLibraryID)
         komgaSeriesID = try container.decodeIfPresent(String.self, forKey: .komgaSeriesID)
@@ -111,17 +124,20 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         chapterPath = try container.decodeIfPresent(String.self, forKey: .chapterPath)
         seriesID = try container.decodeIfPresent(UUID.self, forKey: .seriesID)
         currentPageIndex = try container.decodeIfPresent(Int.self, forKey: .currentPageIndex) ?? 0
+        hasBeenOpened = try container.decodeIfPresent(Bool.self, forKey: .hasBeenOpened) ?? (currentPageIndex > 0)
         scrollProgress = try container.decodeIfPresent(Double.self, forKey: .scrollProgress) ?? 0
         scrollPageProgress = try container.decodeIfPresent(Double.self, forKey: .scrollPageProgress) ?? 0
-        lastReadAt = try container.decodeIfPresent(Date.self, forKey: .lastReadAt) ?? Date()
+        lastReadAt = try container.decodeIfPresent(Date.self, forKey: .lastReadAt) ?? .distantPast
         isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         isOCREnabled = try container.decodeIfPresent(Bool.self, forKey: .isOCREnabled) ?? true
         isAITranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAITranslationEnabled) ?? true
         isAutoTranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoTranslationEnabled) ?? false
         isAutoOCRMagnificationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoOCRMagnificationEnabled) ?? false
         ocrTextScale = try container.decodeIfPresent(Double.self, forKey: .ocrTextScale) ?? 0.55
-        ocrSafeAreaInset = try container.decodeIfPresent(Double.self, forKey: .ocrSafeAreaInset) ?? 0.05
-        ocrMinimumTextHeight = try container.decodeIfPresent(Double.self, forKey: .ocrMinimumTextHeight) ?? 0.014
+        ocrSafeAreaInset = try container.decodeIfPresent(Double.self, forKey: .ocrSafeAreaInset) ?? 0
+        ocrMinimumTextHeight = try container.decodeIfPresent(Double.self, forKey: .ocrMinimumTextHeight) ?? 0.002
+        aiTranslationModeRaw = try container.decodeIfPresent(String.self, forKey: .aiTranslationModeRaw) ?? AITranslationMode.ocr.rawValue
+        hasInitializedReadingPreset = try container.decodeIfPresent(Bool.self, forKey: .hasInitializedReadingPreset) ?? true
         readingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .readingDirectionRaw) ?? "leftToRight"
         readingModeRaw = try container.decodeIfPresent(String.self, forKey: .readingModeRaw) ?? "horizontalPage"
         pageTurnAnimationRaw = try container.decodeIfPresent(String.self, forKey: .pageTurnAnimationRaw) ?? "slide"

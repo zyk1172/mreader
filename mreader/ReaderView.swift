@@ -40,8 +40,23 @@ struct ReaderContainerView: View {
                     }.value
                 case .komga:
                     result = await RemotePageLoader.loadPages(for: comic)
+                case .opds:
+                    result = await OPDSProvider.loadPages(for: comic)
                 }
                 if let result {
+                    if comic.sourceType == .komga,
+                       let remotePage = try? await KomgaProvider.remoteReadProgress(for: comic),
+                       remotePage > comic.currentPageIndex {
+                        let maxIndex = max(0, result.pages.count - 1)
+                        comic.currentPageIndex = min(remotePage, maxIndex)
+                        onComicUpdate(comic)
+                    }
+                    if comic.sourceType == .opds, comic.totalPages != result.pages.count {
+                        comic.totalPages = result.pages.count
+                        comic.remotePageCount = result.pages.count
+                        comic.currentPageIndex = min(comic.currentPageIndex, max(0, result.pages.count - 1))
+                        onComicUpdate(comic)
+                    }
                     manager.applyLoadedPages(result)
                     isLoaded = true
                 } else {
@@ -49,7 +64,12 @@ struct ReaderContainerView: View {
                 }
             }
         }
-        .onDisappear { manager.stopAccessing() }
+        .onDisappear {
+            // ReaderView 必须先用仍然存在的页面数保存进度，再释放安全作用域和页面。
+            DispatchQueue.main.async {
+                manager.stopAccessing()
+            }
+        }
     }
 }
 
@@ -95,6 +115,27 @@ enum ScrollSpeed: String, CaseIterable {
             return 0.8
         }
     }
+}
+
+private struct InitialReadingPreset {
+    let readingMode: ReadingMode
+    let pageTurnAnimation: PageTurnAnimation
+    let imageFitMode: ImageFitMode
+    let reason: String
+
+    static let longStrip = InitialReadingPreset(
+        readingMode: .continuousScroll,
+        pageTurnAnimation: .none,
+        imageFitMode: .fitWidth,
+        reason: "long-strip"
+    )
+
+    static let normalPage = InitialReadingPreset(
+        readingMode: .horizontalPage,
+        pageTurnAnimation: .slide,
+        imageFitMode: .fitScreen,
+        reason: "normal-page"
+    )
 }
 
 @MainActor
@@ -253,6 +294,31 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
     }
 }
 
+nonisolated private func imagePixelSize(from data: Data) -> CGSize? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+        return nil
+    }
+    return imagePixelSize(from: source)
+}
+
+nonisolated private func imagePixelSize(from url: URL) -> CGSize? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+        return nil
+    }
+    return imagePixelSize(from: source)
+}
+
+nonisolated private func imagePixelSize(from source: CGImageSource) -> CGSize? {
+    guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) as? [CFString: Any],
+          let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+          let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+          width > 0,
+          height > 0 else {
+        return nil
+    }
+    return CGSize(width: width, height: height)
+}
+
 struct ReaderView: View {
     var manager: ComicManager
     @State private var comic: ComicBook
@@ -262,17 +328,15 @@ struct ReaderView: View {
     
     @AppStorage("translation_target_language") private var translationTargetLanguage = "中文"
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
-    @AppStorage("ocr_use_vision_model") private var ocrUseVisionModel = false
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
+    @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @State private var currentPageIndex: Int
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
-    @State private var hasOpened = false
     @State private var translateRequestID = UUID()
     @State private var ocrMagnifyRequestID = UUID()
     @State private var isOCRMagnificationVisible = false
     @State private var pageTurnDirection = 1
-    @State private var autoHideControlsWorkItem: DispatchWorkItem?
     @State private var didRestoreScrollPosition = false
     @State private var jumpPageText = ""
     @State private var scrollJumpRequestID = UUID()
@@ -282,6 +346,13 @@ struct ReaderView: View {
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
     @State private var isAITranslationInProgress = false
+    @State private var activityLastRecordedAt = Date()
+    @State private var activityLastPageIndex: Int
+    @State private var dismissGestureProgress: CGFloat = 0
+    @State private var isDismissAnimating = false
+    @State private var lastReaderInteractionAt = Date()
+    @State private var isBurnInProtectionLocked = false
+    @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -303,6 +374,10 @@ struct ReaderView: View {
         ScrollSpeed(rawValue: comic.scrollSpeedRaw) ?? .standard
     }
 
+    private var aiTranslationMode: AITranslationMode {
+        comic.aiTranslationMode
+    }
+
     private var isOCRMagnificationActive: Bool {
         comic.isOCREnabled && (isOCRMagnificationVisible || comic.isAutoOCRMagnificationEnabled)
     }
@@ -310,35 +385,35 @@ struct ReaderView: View {
     private var readingModeRaw: Binding<String> {
         Binding(
             get: { comic.readingModeRaw },
-            set: { newValue in updateComic { $0.readingModeRaw = newValue } }
+            set: { newValue in updateComic { $0.readingModeRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
     private var readingDirectionRaw: Binding<String> {
         Binding(
             get: { comic.readingDirectionRaw },
-            set: { newValue in updateComic { $0.readingDirectionRaw = newValue } }
+            set: { newValue in updateComic { $0.readingDirectionRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
     private var scrollSpeedRaw: Binding<String> {
         Binding(
             get: { comic.scrollSpeedRaw },
-            set: { newValue in updateComic { $0.scrollSpeedRaw = newValue } }
+            set: { newValue in updateComic { $0.scrollSpeedRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
     private var pageTurnAnimationRaw: Binding<String> {
         Binding(
             get: { comic.pageTurnAnimationRaw },
-            set: { newValue in updateComic { $0.pageTurnAnimationRaw = newValue } }
+            set: { newValue in updateComic { $0.pageTurnAnimationRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
     private var imageFitModeRaw: Binding<String> {
         Binding(
             get: { comic.imageFitModeRaw },
-            set: { newValue in updateComic { $0.imageFitModeRaw = newValue } }
+            set: { newValue in updateComic { $0.imageFitModeRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
@@ -351,6 +426,7 @@ struct ReaderView: View {
         _lastSavedScrollProgress = State(initialValue: comic.scrollProgress)
         _lastSavedScrollPageProgress = State(initialValue: comic.scrollPageProgress)
         _lastPrefetchPageIndex = State(initialValue: min(max(comic.currentPageIndex, 0), maxIndex))
+        _activityLastPageIndex = State(initialValue: min(max(comic.currentPageIndex, 0), maxIndex))
     }
 
     var body: some View {
@@ -375,7 +451,9 @@ struct ReaderView: View {
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: translationTargetLanguage,
                     onTranslationStateChange: updateAITranslationProgress,
-                    onToggleControls: toggleControls
+                    areControlsVisible: showControls,
+                    onShowControls: showControlsIfNeeded,
+                    onHideControls: hideControls
                 )
                 .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
                 .ignoresSafeArea()
@@ -393,7 +471,9 @@ struct ReaderView: View {
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: translationTargetLanguage,
                     onTranslationStateChange: updateAITranslationProgress,
-                    onToggleControls: toggleControls
+                    areControlsVisible: showControls,
+                    onShowControls: showControlsIfNeeded,
+                    onHideControls: hideControls
                 )
                 .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
                 .ignoresSafeArea()
@@ -413,7 +493,9 @@ struct ReaderView: View {
                     scrollPageProgress: comic.scrollPageProgress,
                     onScrollPositionChange: saveScrollPosition,
                     onTranslationStateChange: updateAITranslationProgress,
-                    onToggleControls: toggleControls
+                    areControlsVisible: showControls,
+                    onShowControls: showControlsIfNeeded,
+                    onHideControls: hideControls
                 )
                 .ignoresSafeArea()
             }
@@ -431,12 +513,58 @@ struct ReaderView: View {
                     .transition(.opacity)
             }
 
-            TwoFingerSwipeDownDismissView {
-                dismiss()
-            }
+            TwoFingerSwipeDownDismissView(
+                onProgress: { progress in
+                    guard !isDismissAnimating else { return }
+                    dismissGestureProgress = progress
+                    recordReaderInteraction()
+                },
+                onCancel: {
+                    guard !isDismissAnimating else { return }
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                        dismissGestureProgress = 0
+                    }
+                },
+                onSwipe: completeTwoFingerDismiss
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
             .background(ScrollsToTopDisabledView())
+
+            ReaderControlsDoubleTapOverlay(isEnabled: !showComicSettings) {
+                toggleControls()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+
+            ReaderPageTapOverlay(
+                isEnabled: (readingMode == .horizontalPage || readingMode == .verticalPage || readingMode == .doublePage) && !showControls && !showComicSettings,
+                onPreviousPage: previousContainerPage,
+                onNextPage: nextContainerPage,
+                onLongPress: {
+                    guard comic.isAITranslationEnabled else { return }
+                    HapticManager.shared.play(.medium)
+                    translateRequestID = UUID()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+
+            if showControls {
+                GeometryReader { proxy in
+                    VStack(spacing: 0) {
+                        readerTopControlBar
+                            .padding(.top, proxy.safeAreaInsets.top + 4)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 8)
+                            .background(.ultraThinMaterial)
+                        Spacer(minLength: 0)
+                    }
+                    .ignoresSafeArea(edges: .top)
+                }
+                .transition(.opacity)
+                .zIndex(20)
+            }
 
             if showControls && comic.isOCREnabled {
                 VStack {
@@ -449,7 +577,6 @@ struct ReaderView: View {
                             if isOCRMagnificationVisible {
                                 ocrMagnifyRequestID = UUID()
                             }
-                            scheduleAutoHideControls()
                         } label: {
                             Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
                                 .font(.system(size: 17, weight: .semibold))
@@ -469,7 +596,6 @@ struct ReaderView: View {
                         Button {
                             HapticManager.shared.play(.light)
                             translateRequestID = UUID()
-                            scheduleAutoHideControls()
                         } label: {
                             Text("AI")
                                 .font(.system(size: 15, weight: .bold, design: .rounded))
@@ -491,73 +617,66 @@ struct ReaderView: View {
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
             }
+
+            if isBurnInProtectionLocked {
+                Color.black
+                    .ignoresSafeArea()
+                    .overlay {
+                        VStack(spacing: 14) {
+                            Image(systemName: "lock.display")
+                                .font(.system(size: 38, weight: .medium))
+                            Text("屏幕保护已启用")
+                                .font(.headline)
+                            Text("页面静止超过 4 小时。轻点屏幕继续阅读。")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(28)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isBurnInProtectionLocked = false
+                        recordReaderInteraction()
+                    }
+                    .zIndex(100)
+            }
         }
-        .scaleEffect(max(0.72, 1 - max(0, 0) / 900))
-        .rotation3DEffect(.degrees(hasOpened ? 0 : -9), axis: (x: 0, y: 1, z: 0), perspective: 0.65)
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: hasOpened)
-        .offset(y: max(0, 0))
+        .scaleEffect(max(0.72, 1 - dismissGestureProgress * 0.22))
+        .offset(y: dismissGestureProgress * 190)
+        .opacity(max(0.08, 1 - dismissGestureProgress * 0.88))
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle("")
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
         .defersSystemGestures(on: .horizontal) // 将水平滑动优先级完全交给翻页
-        .toolbar(showControls ? .visible : .hidden, for: .navigationBar)
-        .toolbarBackground(showControls ? .visible : .hidden, for: .navigationBar)
-        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
-        .toolbar {
-            if showControls {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        HapticManager.shared.play(.light)
-                        autoHideControlsWorkItem?.cancel()
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.backward")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("返回")
-                        }
-                        .foregroundColor(.white)
-                        .frame(height: 40)
-                    }
-                }
-
-                ToolbarItem(placement: .principal) {
-                    Text(manager.pages.isEmpty ? "" : "\(currentPageIndex + 1) / \(manager.pages.count)")
-                        .font(.system(.headline, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 72)
-                }
-
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button {
-                        HapticManager.shared.play(.light)
-                        autoHideControlsWorkItem?.cancel()
-                        showComicSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(width: 40, height: 36)
-                            .foregroundColor(.white)
-                    }
-                }
-            }
-        }
+        .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
         .onAppear {
-            hasOpened = true
+            recordReaderInteraction()
+            applyEPUBPresetBeforeFirstOpen()
+            Task {
+                await initializeReadingPresetIfNeeded()
+            }
             recordReaderOpenIfNeeded()
             preloadPages(around: currentPageIndex)
         }
         .onDisappear {
-            autoHideControlsWorkItem?.cancel()
             RemotePagePrefetcher.shared.cancelAll()
+            recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
         }
-        .statusBar(hidden: !showControls)
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard !Task.isCancelled else { break }
+                recordReadingActivity()
+                checkBurnInProtection()
+            }
+        }
+        .statusBar(hidden: true)
         .onChange(of: currentPageIndex) { oldValue, newValue in
             let clampedValue = min(max(newValue, 0), max(0, manager.pages.count - 1))
             if clampedValue != newValue {
@@ -566,12 +685,16 @@ struct ReaderView: View {
             }
             if newValue != oldValue {
                 pageTurnDirection = newValue > oldValue ? 1 : -1
+                recordReadingActivity()
+                recordReaderInteraction()
             }
-            persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: true)
+            let isScrollingMode = readingMode == .continuousScroll || readingMode == .infiniteScroll
+            persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: !isScrollingMode)
             preloadPages(around: clampedValue)
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background || newPhase == .inactive else { return }
+            recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "scenePhase-\(newPhase)", force: true)
         }
     }
@@ -623,6 +746,44 @@ struct ReaderView: View {
         .background(.ultraThinMaterial).environment(\.colorScheme, .dark)
     }
 
+    private var readerTopControlBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                HapticManager.shared.play(.light)
+                dismiss()
+            } label: {
+                Label("返回", systemImage: "chevron.backward")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 72, minHeight: 40, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 4)
+
+            Text(manager.pages.isEmpty ? "" : "\(currentPageIndex + 1) / \(manager.pages.count)")
+                .font(.system(.headline, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .frame(minWidth: 76, minHeight: 40)
+
+            Spacer(minLength: 4)
+
+            Button {
+                HapticManager.shared.play(.light)
+                showComicSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("阅读设置")
+        }
+        .contentShape(Rectangle())
+    }
+
     private var comicSettingsSheet: some View {
         NavigationStack {
             Form {
@@ -667,14 +828,38 @@ struct ReaderView: View {
                         set: { newValue in updateComic { $0.isAITranslationEnabled = newValue } }
                     ))
 
+                    Picker("翻译模式", selection: Binding(
+                        get: { comic.aiTranslationMode },
+                        set: { newValue in
+                            updateComic {
+                                $0.aiTranslationModeRaw = newValue.rawValue
+                                if newValue == .ocr {
+                                    $0.isOCREnabled = true
+                                }
+                            }
+                        }
+                    )) {
+                        Text("OCR 文本").tag(AITranslationMode.ocr)
+                        Text("视觉图片").tag(AITranslationMode.vision)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!comic.isAITranslationEnabled)
+
                     Toggle("自动翻译当前页", isOn: Binding(
                         get: { comic.isAutoTranslationEnabled },
                         set: { newValue in updateComic { $0.isAutoTranslationEnabled = newValue } }
                     ))
-                    .disabled(!comic.isOCREnabled || !comic.isAITranslationEnabled)
+                    .disabled(!comic.isAITranslationEnabled || (aiTranslationMode == .ocr && !comic.isOCREnabled))
 
                     Toggle("AI 翻译边框进度", isOn: $aiTranslationBorderProgressEnabled)
                         .disabled(!comic.isAITranslationEnabled)
+
+                    Picker("翻译文字配色", selection: $translationColorStyleRaw) {
+                        ForEach(TranslationColorStyle.allCases, id: \.rawValue) { style in
+                            Text(style.title).tag(style.rawValue)
+                        }
+                    }
+                    .disabled(!comic.isAITranslationEnabled)
 
                     Picker("翻译为", selection: $translationTargetLanguage) {
                         Text("中文").tag("中文")
@@ -693,7 +878,7 @@ struct ReaderView: View {
                             Slider(value: Binding(
                                 get: { comic.ocrMinimumTextHeight },
                                 set: { newValue in updateComic { $0.ocrMinimumTextHeight = newValue } }
-                            ), in: 0.006...0.035, step: 0.001)
+                            ), in: 0.002...0.035, step: 0.001)
                         }
 
                         HStack(alignment: .center, spacing: 12) {
@@ -716,16 +901,9 @@ struct ReaderView: View {
                     .disabled(!comic.isOCREnabled)
                 }
 
-                Section(header: Text("OCR 调试"), footer: Text("视觉模型会把当前裁剪区域或切片发送到第三方 OpenAI 兼容接口。默认仍使用本地 Apple Vision OCR。")) {
+                Section(header: Text("OCR 调试"), footer: Text("视觉图片识别翻译会把当前页或兜底切片发送到第三方 OpenAI 兼容接口。")) {
                     Toggle("显示 OCR 调试框", isOn: $ocrShowDebugBoxes)
                         .disabled(!comic.isOCREnabled)
-                    Toggle("视觉模型识别/翻译", isOn: $ocrUseVisionModel)
-                        .disabled(!comic.isOCREnabled)
-                    if ocrUseVisionModel {
-                        Text("当前版本不会默认上传整页图片。后续接入视觉模型时，应优先上传气泡裁剪区域或页面切片。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
                 Section(header: Text("跳转")) {
@@ -785,6 +963,145 @@ struct ReaderView: View {
         }
     }
 
+    private func initializeReadingPresetIfNeeded() async {
+        guard !comic.hasInitializedReadingPreset else { return }
+        guard comic.currentPageIndex == 0 else {
+            await MainActor.run {
+                comic.hasInitializedReadingPreset = true
+                onComicUpdate(comic)
+            }
+            return
+        }
+
+        let preset = await detectInitialReadingPreset()
+        await MainActor.run {
+            guard !comic.hasInitializedReadingPreset, comic.currentPageIndex == 0 else { return }
+            comic.readingModeRaw = preset.readingMode.rawValue
+            comic.pageTurnAnimationRaw = preset.pageTurnAnimation.rawValue
+            comic.imageFitModeRaw = preset.imageFitMode.rawValue
+            comic.isAutoOCRMagnificationEnabled = false
+            comic.isAutoTranslationEnabled = false
+            comic.hasInitializedReadingPreset = true
+            print("MReader initial preset comic=\(comic.id) mode=\(comic.readingModeRaw) animation=\(comic.pageTurnAnimationRaw) fit=\(comic.imageFitModeRaw) reason=\(preset.reason)")
+            onComicUpdate(comic)
+        }
+    }
+
+    private func applyEPUBPresetBeforeFirstOpen() {
+        guard isEPUBComic, !comic.hasBeenOpened else { return }
+        comic.readingModeRaw = ReadingMode.horizontalPage.rawValue
+        comic.pageTurnAnimationRaw = PageTurnAnimation.curl.rawValue
+        comic.imageFitModeRaw = ImageFitMode.fitScreen.rawValue
+        comic.hasInitializedReadingPreset = true
+        onComicUpdate(comic)
+    }
+
+    private func detectInitialReadingPreset() async -> InitialReadingPreset {
+        if isEPUBComic {
+            return InitialReadingPreset(
+                readingMode: .horizontalPage,
+                pageTurnAnimation: .curl,
+                imageFitMode: .fitScreen,
+                reason: "epub"
+            )
+        }
+        if isPDFComic {
+            return InitialReadingPreset(
+                readingMode: InitialReadingPreset.longStrip.readingMode,
+                pageTurnAnimation: InitialReadingPreset.longStrip.pageTurnAnimation,
+                imageFitMode: InitialReadingPreset.longStrip.imageFitMode,
+                reason: "pdf"
+            )
+        }
+        let sampleIndices = readingPresetSamplePageIndices(totalPages: manager.pages.count)
+        guard !sampleIndices.isEmpty else {
+            print("MReader initial preset fallback: no sample pages for comic=\(comic.id)")
+            return InitialReadingPreset.normalPage
+        }
+        var ratios: [CGFloat] = []
+        for index in sampleIndices {
+            guard manager.pages.indices.contains(index),
+                  let size = await pagePixelSize(for: manager.pages[index].url) else {
+                print("MReader initial preset sample skipped comic=\(comic.id) page=\(index + 1)")
+                continue
+            }
+            ratios.append(size.height / max(size.width, 1))
+        }
+        guard let medianRatio = medianRatio(ratios) else {
+            print("MReader initial preset fallback: cannot read sample page sizes comic=\(comic.id) samples=\(sampleIndices.map { $0 + 1 })")
+            return InitialReadingPreset.normalPage
+        }
+        if medianRatio > 1.8 {
+            return InitialReadingPreset(
+                readingMode: .continuousScroll,
+                pageTurnAnimation: .none,
+                imageFitMode: .fitWidth,
+                reason: String(format: "median ratio %.3f pages %@", medianRatio, sampleIndices.map { "\($0 + 1)" }.joined(separator: ","))
+            )
+        }
+        return InitialReadingPreset(
+            readingMode: .horizontalPage,
+            pageTurnAnimation: .slide,
+            imageFitMode: .fitScreen,
+            reason: String(format: "median ratio %.3f pages %@", medianRatio, sampleIndices.map { "\($0 + 1)" }.joined(separator: ","))
+        )
+    }
+
+    private func readingPresetSamplePageIndices(totalPages: Int) -> [Int] {
+        guard totalPages > 0 else { return [] }
+        let preferred = (2..<min(totalPages, 5)).map { $0 }
+        if !preferred.isEmpty {
+            return preferred
+        }
+        return Array(0..<totalPages)
+    }
+
+    private func medianRatio(_ ratios: [CGFloat]) -> CGFloat? {
+        guard !ratios.isEmpty else { return nil }
+        let sortedRatios = ratios.sorted()
+        let middle = sortedRatios.count / 2
+        if sortedRatios.count.isMultiple(of: 2) {
+            return (sortedRatios[middle - 1] + sortedRatios[middle]) / 2
+        }
+        return sortedRatios[middle]
+    }
+
+    private var isEPUBComic: Bool {
+        hasDocumentExtension("epub")
+    }
+
+    private var isPDFComic: Bool {
+        hasDocumentExtension("pdf")
+    }
+
+    private func hasDocumentExtension(_ expectedExtension: String) -> Bool {
+        let rawValues = [comic.libraryPath, comic.chapterPath, comic.sourceURL]
+        if rawValues.contains(where: { path in
+            guard let path else { return false }
+            if let url = URL(string: path), url.scheme != nil {
+                return url.pathExtension.lowercased() == expectedExtension
+            }
+            return URL(fileURLWithPath: path).pathExtension.lowercased() == expectedExtension
+        }) {
+            return true
+        }
+        let chapterType = comic.chapterTypeRaw?.lowercased()
+        return chapterType == expectedExtension
+    }
+
+    private func pagePixelSize(for url: URL) async -> CGSize? {
+        if RemotePageLoader.isRemotePageURL(url) {
+            guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
+            return imagePixelSize(from: data)
+        }
+        if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
+            return imagePixelSize(from: data)
+        }
+        return await Task.detached(priority: .utility) {
+            imagePixelSize(from: url)
+        }.value
+    }
+
     private func updateComic(_ mutate: (inout ComicBook) -> Void) {
         HapticManager.shared.play(.light)
         mutate(&comic)
@@ -799,7 +1116,7 @@ struct ReaderView: View {
     }
 
     private var ocrMinimumPreviewFontSize: CGFloat {
-        min(max(CGFloat(comic.ocrMinimumTextHeight) * 900, 8), 32)
+        min(max(CGFloat(comic.ocrMinimumTextHeight) * 900, 2), 32)
     }
 
     private var ocrTextSizeLabel: String {
@@ -842,12 +1159,20 @@ struct ReaderView: View {
     private func recordReaderOpenIfNeeded() {
         guard !didRecordReaderOpen else { return }
         didRecordReaderOpen = true
+        comic.hasBeenOpened = true
+        activityLastRecordedAt = Date()
+        activityLastPageIndex = currentPageIndex
         let clampedValue = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
         print("MReader progress open comic=\(comic.id) restoredPage=\(clampedValue) storedPage=\(comic.currentPageIndex) mode=\(comic.readingModeRaw)")
         persistReadingProgress(pageIndex: clampedValue, reason: "readerOpen", force: true)
     }
 
     private func saveScrollPosition(pageIndex: Int, progress: Double, pageProgress: Double) {
+        if pageIndex != currentPageIndex ||
+            abs(progress - lastSavedScrollProgress) > 0.001 ||
+            abs(pageProgress - lastSavedScrollPageProgress) > 0.004 {
+            recordReaderInteraction()
+        }
         persistReadingProgress(pageIndex: pageIndex, scrollProgress: progress, scrollPageProgress: pageProgress, reason: "scrollVisiblePage", force: false)
     }
 
@@ -859,7 +1184,11 @@ struct ReaderView: View {
     }
 
     private func persistReadingProgress(pageIndex: Int, scrollProgress: Double? = nil, scrollPageProgress: Double? = nil, reason: String, force: Bool) {
-        let clampedPageIndex = min(max(pageIndex, 0), max(0, manager.pages.count - 1))
+        let clampedPageIndex = ReaderProgressPolicy.clampedPageIndex(
+            pageIndex,
+            loadedPageCount: manager.pages.count,
+            declaredPageCount: comic.totalPages
+        )
         let clampedProgress = min(max(scrollProgress ?? comic.scrollProgress, 0), 1)
         let clampedPageProgress = min(max(scrollPageProgress ?? comic.scrollPageProgress, 0), 1)
         let now = Date()
@@ -876,11 +1205,27 @@ struct ReaderView: View {
         lastSavedScrollProgress = clampedProgress
         lastSavedScrollPageProgress = clampedPageProgress
         comic.currentPageIndex = clampedPageIndex
+        comic.hasBeenOpened = true
         comic.scrollProgress = clampedProgress
         comic.scrollPageProgress = clampedPageProgress
         comic.lastReadAt = Date()
         print("MReader progress persist reason=\(reason) comic=\(comic.id) page=\(clampedPageIndex) global=\(String(format: "%.4f", clampedProgress)) pageProgress=\(String(format: "%.4f", clampedPageProgress))")
         onComicUpdate(comic)
+    }
+
+    private func recordReadingActivity() {
+        let now = Date()
+        let pageIndex = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
+        ReadingActivityStore.shared.record(
+            comicID: comic.id,
+            previousDate: activityLastRecordedAt,
+            now: now,
+            previousPageIndex: activityLastPageIndex,
+            currentPageIndex: pageIndex,
+            completed: comic.hasBeenOpened && pageIndex >= max(0, manager.pages.count - 1)
+        )
+        activityLastRecordedAt = now
+        activityLastPageIndex = pageIndex
     }
 
     private func preloadPages(around index: Int) {
@@ -924,39 +1269,415 @@ struct ReaderView: View {
         pageTurnDirection = 1
         currentPageIndex = min(max(0, manager.pages.count - 1), currentPageIndex + 1)
     }
+
+    private func previousContainerPage() {
+        if readingMode == .doublePage {
+            let leftPageIndex = currentPageIndex - currentPageIndex % 2
+            guard leftPageIndex > 0 else {
+                HapticManager.shared.play(.warning)
+                return
+            }
+            HapticManager.shared.play(.light)
+            pageTurnDirection = -1
+            currentPageIndex = max(0, leftPageIndex - 2)
+        } else {
+            previousPage()
+        }
+    }
+
+    private func nextContainerPage() {
+        if readingMode == .doublePage {
+            let leftPageIndex = currentPageIndex - currentPageIndex % 2
+            guard leftPageIndex + 2 <= max(0, manager.pages.count - 1) else {
+                HapticManager.shared.play(.warning)
+                return
+            }
+            HapticManager.shared.play(.light)
+            pageTurnDirection = 1
+            currentPageIndex = min(max(0, manager.pages.count - 1), leftPageIndex + 2)
+        } else {
+            nextPage()
+        }
+    }
     
     private func toggleControls() {
-        HapticManager.shared.play(.light)
         if showControls {
+            HapticManager.shared.play(.light)
             hideControls()
         } else {
+            showControlsIfNeeded()
+        }
+    }
+
+    private func showControlsIfNeeded() {
+        recordReaderInteraction()
+        HapticManager.shared.play(.light)
+        if !showControls {
             withAnimation(.easeInOut(duration: 0.18)) {
                 showControls = true
             }
-            scheduleAutoHideControls()
         }
-    }
-
-    private func scheduleAutoHideControls() {
-        autoHideControlsWorkItem?.cancel()
-        let workItem = DispatchWorkItem {
-            hideControls()
-        }
-        autoHideControlsWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: workItem)
     }
 
     private func hideControls() {
-        autoHideControlsWorkItem?.cancel()
-        autoHideControlsWorkItem = nil
+        recordReaderInteraction()
         withAnimation(.easeInOut(duration: 0.18)) {
             showControls = false
         }
     }
 
+    private func recordReaderInteraction() {
+        lastReaderInteractionAt = Date()
+    }
+
+    private func checkBurnInProtection(now: Date = Date()) {
+        guard isBurnInProtectionEnabled,
+              !isBurnInProtectionLocked,
+              now.timeIntervalSince(lastReaderInteractionAt) >= BurnInProtectionPolicy.timeout else { return }
+        recordReadingActivity()
+        persistReadingProgress(pageIndex: currentPageIndex, reason: "burnInProtection", force: true)
+        UIApplication.shared.isIdleTimerDisabled = false
+        HapticManager.shared.play(.warning)
+        isBurnInProtectionLocked = true
+    }
+
+    private func completeTwoFingerDismiss() {
+        guard !isDismissAnimating else { return }
+        isDismissAnimating = true
+        HapticManager.shared.play(.medium)
+        recordReadingActivity()
+        persistReadingProgress(pageIndex: currentPageIndex, reason: "twoFingerDismiss", force: true)
+        withAnimation(.easeIn(duration: 0.24)) {
+            dismissGestureProgress = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            dismiss()
+        }
+    }
+
+}
+
+nonisolated enum BurnInProtectionPolicy {
+    static let timeout: TimeInterval = 4 * 60 * 60
+}
+
+nonisolated enum ReaderProgressPolicy {
+    static func clampedPageIndex(_ pageIndex: Int, loadedPageCount: Int, declaredPageCount: Int) -> Int {
+        let pageCount = max(loadedPageCount, declaredPageCount)
+        return min(max(pageIndex, 0), max(0, pageCount - 1))
+    }
 }
 
 // MARK: - 支持 AI 的图片加载器
+private struct ReaderControlsDoubleTapOverlay: View {
+    let isEnabled: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        ReaderControlsDoubleTapRecognizer(isEnabled: isEnabled, onToggle: onToggle)
+    }
+}
+
+private struct ReaderControlsDoubleTapRecognizer: UIViewRepresentable {
+    let isEnabled: Bool
+    let onToggle: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isEnabled: isEnabled, onToggle: onToggle)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = InstallingView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.onToggle = onToggle
+        context.coordinator.attach(to: uiView.window)
+    }
+
+    final class InstallingView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            coordinator?.attach(to: window)
+        }
+
+        deinit {
+            coordinator?.detach()
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var isEnabled: Bool
+        var onToggle: () -> Void
+        private weak var hostView: UIView?
+        private var recognizer: UITapGestureRecognizer?
+
+        init(isEnabled: Bool, onToggle: @escaping () -> Void) {
+            self.isEnabled = isEnabled
+            self.onToggle = onToggle
+        }
+
+        func attach(to view: UIView?) {
+            if hostView == nil && view == nil {
+                return
+            }
+            if let hostView, let view, hostView === view {
+                return
+            }
+            detach()
+            guard let view else { return }
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+            recognizer.numberOfTapsRequired = 2
+            recognizer.cancelsTouchesInView = false
+            recognizer.delegate = self
+            view.addGestureRecognizer(recognizer)
+            self.hostView = view
+            self.recognizer = recognizer
+        }
+
+        func detach() {
+            if let recognizer {
+                recognizer.view?.removeGestureRecognizer(recognizer)
+            }
+            recognizer = nil
+            hostView = nil
+        }
+
+        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            onToggle()
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard isEnabled, let view = gestureRecognizer.view else { return false }
+            guard !ReaderGestureTouchFilter.isInteractiveTouch(touch) else { return false }
+            let location = touch.location(in: view)
+            let bounds = view.bounds
+            guard bounds.width > 1, bounds.height > 1 else { return false }
+            return location.x >= bounds.width * 0.35 &&
+                location.x <= bounds.width * 0.65 &&
+                location.y >= bounds.height * 0.25 &&
+                location.y <= bounds.height * 0.75
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+
+private struct ReaderPageTapOverlay: View {
+    let isEnabled: Bool
+    let onPreviousPage: () -> Void
+    let onNextPage: () -> Void
+    let onLongPress: () -> Void
+
+    var body: some View {
+        ReaderPageTapRecognizer(
+            isEnabled: isEnabled,
+            onPreviousPage: onPreviousPage,
+            onNextPage: onNextPage,
+            onLongPress: onLongPress
+        )
+    }
+}
+
+private struct ReaderPageTapRecognizer: UIViewRepresentable {
+    let isEnabled: Bool
+    let onPreviousPage: () -> Void
+    let onNextPage: () -> Void
+    let onLongPress: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            isEnabled: isEnabled,
+            onPreviousPage: onPreviousPage,
+            onNextPage: onNextPage,
+            onLongPress: onLongPress
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = InstallingView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.onPreviousPage = onPreviousPage
+        context.coordinator.onNextPage = onNextPage
+        context.coordinator.onLongPress = onLongPress
+        context.coordinator.attach(to: uiView.window)
+    }
+
+    final class InstallingView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            coordinator?.attach(to: window)
+        }
+
+        deinit {
+            coordinator?.detach()
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var isEnabled: Bool
+        var onPreviousPage: () -> Void
+        var onNextPage: () -> Void
+        var onLongPress: () -> Void
+        private weak var hostView: UIView?
+        private var recognizer: UITapGestureRecognizer?
+        private var longPressRecognizer: UILongPressGestureRecognizer?
+
+        init(isEnabled: Bool, onPreviousPage: @escaping () -> Void, onNextPage: @escaping () -> Void, onLongPress: @escaping () -> Void) {
+            self.isEnabled = isEnabled
+            self.onPreviousPage = onPreviousPage
+            self.onNextPage = onNextPage
+            self.onLongPress = onLongPress
+        }
+
+        func attach(to view: UIView?) {
+            if hostView == nil && view == nil {
+                return
+            }
+            if let hostView, let view, hostView === view {
+                return
+            }
+            detach()
+            guard let view else { return }
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+            recognizer.numberOfTapsRequired = 1
+            recognizer.cancelsTouchesInView = false
+            recognizer.delegate = self
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+            longPress.minimumPressDuration = 0.55
+            longPress.allowableMovement = 18
+            longPress.cancelsTouchesInView = false
+            longPress.delegate = self
+            recognizer.require(toFail: longPress)
+            view.addGestureRecognizer(recognizer)
+            view.addGestureRecognizer(longPress)
+            self.hostView = view
+            self.recognizer = recognizer
+            self.longPressRecognizer = longPress
+        }
+
+        func detach() {
+            if let recognizer {
+                recognizer.view?.removeGestureRecognizer(recognizer)
+            }
+            if let longPressRecognizer {
+                longPressRecognizer.view?.removeGestureRecognizer(longPressRecognizer)
+            }
+            recognizer = nil
+            longPressRecognizer = nil
+            hostView = nil
+        }
+
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard recognizer.state == .began else { return }
+            onLongPress()
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended, let view = recognizer.view else { return }
+            let location = recognizer.location(in: view)
+            let xRatio = location.x / max(view.bounds.width, 1)
+            if xRatio < 0.35 {
+                onPreviousPage()
+            } else if xRatio > 0.65 {
+                onNextPage()
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard isEnabled, let view = gestureRecognizer.view else { return false }
+            guard !ReaderGestureTouchFilter.isInteractiveTouch(touch) else { return false }
+            let location = touch.location(in: view)
+            let bounds = view.bounds
+            guard bounds.width > 1, bounds.height > 1 else { return false }
+            if gestureRecognizer is UILongPressGestureRecognizer {
+                return true
+            }
+            let xRatio = location.x / bounds.width
+            return xRatio < 0.35 || xRatio > 0.65
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+
+private enum ReaderGestureTouchFilter {
+    static func isInteractiveTouch(_ touch: UITouch) -> Bool {
+        var view = touch.view
+        while let current = view {
+            if current is UIControl ||
+                current is UINavigationBar ||
+                current is UIToolbar ||
+                current is UITextField ||
+                current is UITextView {
+                return true
+            }
+            let typeName = String(describing: type(of: current))
+            if typeName.contains("NavigationBar") ||
+                typeName.contains("Toolbar") ||
+                typeName.contains("TextField") {
+                return true
+            }
+            view = current.superview
+        }
+        return false
+    }
+}
+
+private struct PageHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
+nonisolated enum ReaderVisiblePageDetector {
+    static func visiblePageIndex(frames: [Int: CGRect], viewport: CGRect) -> Int? {
+        guard !frames.isEmpty, viewport.width > 0, viewport.height > 0 else { return nil }
+        let viewportCenterY = viewport.midY
+        let candidates = frames.compactMap { index, frame -> (index: Int, visibleArea: CGFloat, centerDistance: CGFloat)? in
+            let intersection = frame.intersection(viewport)
+            guard !intersection.isNull, intersection.width > 1, intersection.height > 1 else { return nil }
+            return (
+                index: index,
+                visibleArea: intersection.width * intersection.height,
+                centerDistance: abs(frame.midY - viewportCenterY)
+            )
+        }
+        return candidates.max { lhs, rhs in
+            if abs(lhs.visibleArea - rhs.visibleArea) > 1 {
+                return lhs.visibleArea < rhs.visibleArea
+            }
+            if abs(lhs.centerDistance - rhs.centerDistance) > 0.5 {
+                return lhs.centerDistance > rhs.centerDistance
+            }
+            return lhs.index > rhs.index
+        }?.index
+    }
+}
+
 private struct PageFramePreferenceKey: PreferenceKey {
     static var defaultValue: [Int: CGRect] = [:]
 
@@ -978,17 +1699,18 @@ private struct ScrollViewportSizePreferenceKey: PreferenceKey {
 
 private struct ScrollViewAccessor: UIViewRepresentable {
     let onResolve: (UIScrollView) -> Void
+    let onScroll: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(onScroll: onScroll)
     }
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         DispatchQueue.main.async {
-            if let scrollView = view.enclosingScrollView {
-                context.coordinator.attach(to: scrollView)
-                onResolve(scrollView)
+                if let scrollView = view.enclosingScrollView {
+                    context.coordinator.attach(to: scrollView)
+                    onResolve(scrollView)
             }
         }
         return view
@@ -997,6 +1719,7 @@ private struct ScrollViewAccessor: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         DispatchQueue.main.async {
             if let scrollView = uiView.enclosingScrollView {
+                context.coordinator.onScroll = onScroll
                 context.coordinator.attach(to: scrollView)
                 onResolve(scrollView)
             }
@@ -1004,12 +1727,23 @@ private struct ScrollViewAccessor: UIViewRepresentable {
     }
 
     final class Coordinator {
+        var onScroll: () -> Void
         weak var scrollView: UIScrollView?
+        private var contentOffsetObservation: NSKeyValueObservation?
+
+        init(onScroll: @escaping () -> Void) {
+            self.onScroll = onScroll
+        }
 
         func attach(to scrollView: UIScrollView) {
             scrollView.scrollsToTop = false
             guard self.scrollView !== scrollView else { return }
             self.scrollView = scrollView
+            contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.onScroll()
+                }
+            }
         }
     }
 }
@@ -1096,6 +1830,8 @@ private extension UIView {
 }
 
 struct ContinuousScrollReader: View {
+    private static let coordinateSpaceName = "mreader.readerScroll"
+
     let pages: [ComicPage]
     @Binding var currentPageIndex: Int
     let readingMode: ReadingMode
@@ -1110,11 +1846,13 @@ struct ContinuousScrollReader: View {
     let scrollPageProgress: Double
     let onScrollPositionChange: (Int, Double, Double) -> Void
     let onTranslationStateChange: (Bool) -> Void
-    let onToggleControls: () -> Void
+    let areControlsVisible: Bool
+    let onShowControls: () -> Void
+    let onHideControls: () -> Void
 
     @State private var scrollView: UIScrollView?
+    @State private var pageHeights: [Int: CGFloat] = [:]
     @State private var pageFrames: [Int: CGRect] = [:]
-    @State private var pageContentFrames: [Int: CGRect] = [:]
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
@@ -1134,6 +1872,7 @@ struct ContinuousScrollReader: View {
                                 isOCREnabled: comic.isOCREnabled,
                                 isAITranslationEnabled: comic.isAITranslationEnabled,
                                 isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
+                                aiTranslationModeRaw: comic.aiTranslationModeRaw,
                                 translateRequestID: translateRequestID,
                                 ocrMagnifyRequestID: ocrMagnifyRequestID,
                                 isOCRMagnificationVisible: isOCRMagnificationVisible && page.index == currentPageIndex,
@@ -1143,21 +1882,27 @@ struct ContinuousScrollReader: View {
                                 isRightToLeftReading: comic.readingDirectionRaw == ReadingDirection.rightToLeft.rawValue,
                                 targetLanguage: targetLanguage,
                                 imageFitMode: .fitWidth,
+                                visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
                                 placeholderHeight: max(viewportProxy.size.height, viewportProxy.size.width * 1.35),
                                 showsLoadingIndicator: page.index == currentPageIndex,
+                                isPageTapGestureEnabled: !areControlsVisible,
                                 onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                                 onPreviousPage: { stepScroll(-1) },
                                 onNextPage: { stepScroll(1) },
-                                onToggleControls: onToggleControls
+                                areControlsVisible: areControlsVisible,
+                                onShowControls: onShowControls,
+                                onHideControls: onHideControls
                             )
                             .frame(maxWidth: .infinity)
                             .id(page.index)
                             .background(
                                 GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: PageFramePreferenceKey.self,
-                                        value: [page.index: geo.frame(in: .named("readerScroll"))]
-                                    )
+                                    Color.clear
+                                        .preference(key: PageHeightPreferenceKey.self, value: [page.index: max(geo.size.height, 1)])
+                                        .preference(
+                                            key: PageFramePreferenceKey.self,
+                                            value: [page.index: geo.frame(in: .named(Self.coordinateSpaceName))]
+                                        )
                                 }
                             )
                         }
@@ -1171,12 +1916,15 @@ struct ContinuousScrollReader: View {
                         }
                     )
                 }
-                .coordinateSpace(name: "readerScroll")
+                .coordinateSpace(name: Self.coordinateSpaceName)
                 .background(ScrollViewAccessor(
                     onResolve: { resolvedScrollView in
                         if scrollView !== resolvedScrollView {
                             scrollView = resolvedScrollView
                         }
+                    },
+                    onScroll: {
+                        scheduleVisiblePageUpdate(delay: 0.04)
                     }
                 ))
                 .onAppear {
@@ -1194,9 +1942,12 @@ struct ContinuousScrollReader: View {
                     viewportSize = size
                     scheduleVisiblePageUpdate(delay: 0.02)
                 }
+                .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
+                    pageHeights = heights
+                }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     pageFrames = frames
-                    scheduleVisiblePageUpdate(delay: 0.08)
+                    scheduleVisiblePageUpdate(delay: 0.04)
                 }
                 .onDisappear {
                     updateCurrentPageFromVisibleFrames()
@@ -1241,10 +1992,10 @@ struct ContinuousScrollReader: View {
                 if let scrollView {
                     let maxOffsetY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
                     let minOffsetY = -scrollView.adjustedContentInset.top
-                    let targetFrame = pageFrames[targetIndex]
-                    if let frame = targetFrame, frame.height > 1 {
-                        let pageOffset = min(max(frame.height * savedPageProgress, 0), max(frame.height - 1, 0))
-                        let targetY = min(max(scrollView.contentOffset.y + frame.minY + pageOffset, minOffsetY), maxOffsetY)
+                    let targetPageHeight = estimatedPageHeight(for: targetIndex)
+                    if targetPageHeight > 1 {
+                        let pageOffset = min(max(targetPageHeight * savedPageProgress, 0), max(targetPageHeight - 1, 0))
+                        let targetY = min(max(minOffsetY + pageTop(for: targetIndex) + pageOffset, minOffsetY), maxOffsetY)
                         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: animated)
                     } else if savedProgress > 0.001 {
                         let targetY = minOffsetY + (maxOffsetY - minOffsetY) * savedProgress
@@ -1271,6 +2022,17 @@ struct ContinuousScrollReader: View {
         updateCurrentPageFromViewport(frames: pageFrames, viewportSize: viewportSize)
     }
 
+    private func estimatedPageHeight(for index: Int) -> CGFloat {
+        pageHeights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
+    }
+
+    private func pageTop(for index: Int) -> CGFloat {
+        guard index > 0 else { return 0 }
+        return (0..<index).reduce(CGFloat.zero) { partial, pageIndex in
+            partial + estimatedPageHeight(for: pageIndex)
+        }
+    }
+
     private func updateCurrentPageFromViewport(frames: [Int: CGRect], viewportSize: CGSize) {
         guard didRestorePosition, !frames.isEmpty else { return }
         let visibleSize: CGSize
@@ -1287,28 +2049,25 @@ struct ContinuousScrollReader: View {
         }
 
         let viewport = CGRect(origin: .zero, size: visibleSize)
-        let viewportCenterY = viewport.midY
-        var visible = frames.compactMap { index, frame -> (Int, CGFloat, CGFloat)? in
-            let overlap = frame.intersection(viewport)
-            guard !overlap.isNull, overlap.height > 1 else { return nil }
-            let centerDistance = abs(frame.midY - viewportCenterY)
-            return (index, overlap.height, centerDistance)
-        }
-        if visible.isEmpty {
-            visible = frames.map { index, frame in
-                (index, CGFloat(0), abs(frame.midY - viewportCenterY))
+        guard let visiblePageIndex = ReaderVisiblePageDetector.visiblePageIndex(frames: frames, viewport: viewport) else { return }
+        if visiblePageIndex == 0,
+           currentPageIndex > 0,
+           let scrollView {
+            let minOffsetY = -scrollView.adjustedContentInset.top
+            let isStillBelowTop = scrollView.contentOffset.y > minOffsetY + max(visibleSize.height * 0.42, 140)
+            if isStillBelowTop {
+                print(
+                    "MReader scroll ignored stale page-zero frame current=\(currentPageIndex) " +
+                    "offsetY=\(Int(scrollView.contentOffset.y)) frames=\(frames.count)"
+                )
+                scheduleVisiblePageUpdate(delay: 0.06)
+                return
             }
         }
-        guard let best = visible.max(by: {
-            if abs($0.1 - $1.1) > 1 {
-                return $0.1 < $1.1
-            }
-            return $0.2 > $1.2
-        }) else { return }
-        let didChangePage = currentPageIndex != best.0
+        let didChangePage = currentPageIndex != visiblePageIndex
         if didChangePage {
-            print("MReader scroll currentPageIndex update old=\(currentPageIndex) new=\(best.0) frames=\(frames.count)")
-            currentPageIndex = best.0
+            print("MReader scroll currentPageIndex update old=\(currentPageIndex) new=\(visiblePageIndex) frames=\(frames.count)")
+            currentPageIndex = visiblePageIndex
         }
 
         let progress: CGFloat
@@ -1321,9 +2080,9 @@ struct ContinuousScrollReader: View {
                 lastStableContentOffsetY = scrollView.contentOffset.y
             }
         } else {
-            progress = CGFloat(best.0) / CGFloat(max(pages.count - 1, 1))
+            progress = CGFloat(visiblePageIndex) / CGFloat(max(pages.count - 1, 1))
         }
-        let activeFrame = frames[best.0]
+        let activeFrame = frames[visiblePageIndex]
         let pageProgress: CGFloat
         if let activeFrame, activeFrame.height > 1 {
             pageProgress = min(max(-activeFrame.minY / max(activeFrame.height, 1), 0), 1)
@@ -1333,7 +2092,7 @@ struct ContinuousScrollReader: View {
         let shouldNotifyProgress = didChangePage || Date().timeIntervalSince(lastScrollPositionNotifyDate) > 1.0
         if shouldNotifyProgress {
             lastScrollPositionNotifyDate = Date()
-            onScrollPositionChange(best.0, Double(progress), Double(pageProgress))
+            onScrollPositionChange(visiblePageIndex, Double(progress), Double(pageProgress))
         }
     }
 
@@ -1369,7 +2128,9 @@ struct AnimatedPageReader: View {
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onTranslationStateChange: (Bool) -> Void
-    let onToggleControls: () -> Void
+    let areControlsVisible: Bool
+    let onShowControls: () -> Void
+    let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
 
@@ -1378,18 +2139,26 @@ struct AnimatedPageReader: View {
             let isRTL = readingDirection == .rightToLeft
 
             ZStack {
+                if pageTurnAnimation == .curl,
+                   let revealedPageIndex = revealedPageIndex(isRTL: isRTL),
+                   pages.indices.contains(revealedPageIndex) {
+                    pageView(index: revealedPageIndex)
+                        .id("revealed-\(pages[revealedPageIndex].id)")
+                }
+
                 if pages.indices.contains(currentPageIndex) {
                     pageView(index: currentPageIndex)
                         .id(pages[currentPageIndex].id)
                         .transition(transition)
-                        .rotation3DEffect(
-                            .degrees(pageTurnAnimation == .curl ? Double(dragOffset / -18) : 0),
-                            axis: (x: readingMode == .verticalPage ? 1 : 0, y: readingMode == .verticalPage ? 0 : 1, z: 0),
-                            anchor: dragOffset < 0 ? .leading : .trailing,
-                            perspective: 0.75
+                        .modifier(
+                            InteractiveBookPageCurlModifier(
+                                dragOffset: pageTurnAnimation == .curl ? dragOffset : 0,
+                                pageExtent: readingMode == .verticalPage ? geo.size.height : geo.size.width,
+                                isVertical: readingMode == .verticalPage
+                            )
                         )
                         .offset(pageOffset)
-                        .animation(pageTurnAnimation == .none ? nil : .easeInOut(duration: 0.24), value: currentPageIndex)
+                        .animation(pageChangeAnimation, value: currentPageIndex)
                 }
             }
             .contentShape(Rectangle())
@@ -1421,11 +2190,38 @@ struct AnimatedPageReader: View {
             return directionalSlideTransition
         case .curl:
             return .asymmetric(
-                insertion: .scale(scale: 0.96).combined(with: .opacity),
-                removal: .scale(scale: 1.04).combined(with: .opacity)
+                insertion: .modifier(
+                    active: PageCurlTransitionModifier(
+                        angle: pageTurnDirection >= 0 ? 68 : -68,
+                        opacity: 0.08,
+                        isVertical: readingMode == .verticalPage
+                    ),
+                    identity: PageCurlTransitionModifier(angle: 0, opacity: 1, isVertical: readingMode == .verticalPage)
+                ),
+                removal: .modifier(
+                    active: PageCurlTransitionModifier(
+                        angle: pageTurnDirection >= 0 ? -68 : 68,
+                        opacity: 0.08,
+                        isVertical: readingMode == .verticalPage
+                    ),
+                    identity: PageCurlTransitionModifier(angle: 0, opacity: 1, isVertical: readingMode == .verticalPage)
+                )
             )
         case .fade:
-            return .opacity
+            return .opacity.combined(with: .scale(scale: 0.975))
+        }
+    }
+
+    private var pageChangeAnimation: Animation? {
+        switch pageTurnAnimation {
+        case .none:
+            return nil
+        case .slide:
+            return .easeOut(duration: 0.28)
+        case .fade:
+            return .easeInOut(duration: 0.34)
+        case .curl:
+            return .spring(response: 0.44, dampingFraction: 0.84)
         }
     }
 
@@ -1447,11 +2243,20 @@ struct AnimatedPageReader: View {
     }
 
     private var pageOffset: CGSize {
-        guard pageTurnAnimation == .slide || pageTurnAnimation == .curl else { return .zero }
+        guard pageTurnAnimation == .slide else { return .zero }
         if readingMode == .verticalPage {
             return CGSize(width: 0, height: dragOffset * 0.18)
         }
         return CGSize(width: dragOffset * 0.18, height: 0)
+    }
+
+    private func revealedPageIndex(isRTL: Bool) -> Int? {
+        guard abs(dragOffset) > 2 else { return nil }
+        if readingMode == .verticalPage {
+            return currentPageIndex + (dragOffset < 0 ? 1 : -1)
+        }
+        let isForwardDrag = isRTL ? dragOffset > 0 : dragOffset < 0
+        return currentPageIndex + (isForwardDrag ? 1 : -1)
     }
 
     private func pageView(index: Int) -> some View {
@@ -1460,19 +2265,24 @@ struct AnimatedPageReader: View {
             isOCREnabled: comic.isOCREnabled,
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+            aiTranslationModeRaw: comic.aiTranslationModeRaw,
             translateRequestID: translateRequestID,
             ocrMagnifyRequestID: ocrMagnifyRequestID,
-                            isOCRMagnificationVisible: isOCRMagnificationVisible,
-                            ocrTextScale: comic.ocrTextScale,
-                            ocrSafeAreaInset: comic.ocrSafeAreaInset,
-                            ocrMinimumTextHeight: comic.ocrMinimumTextHeight,
-                            isRightToLeftReading: readingDirection == .rightToLeft,
+            isOCRMagnificationVisible: isOCRMagnificationVisible,
+            ocrTextScale: comic.ocrTextScale,
+            ocrSafeAreaInset: comic.ocrSafeAreaInset,
+            ocrMinimumTextHeight: comic.ocrMinimumTextHeight,
+            isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
+            isPageTapGestureEnabled: false,
+            isLongPressTranslationEnabled: areControlsVisible,
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: previousPage,
             onNextPage: nextPage,
-            onToggleControls: onToggleControls
+            areControlsVisible: areControlsVisible,
+            onShowControls: onShowControls,
+            onHideControls: onHideControls
         )
     }
 
@@ -1510,7 +2320,9 @@ struct DoublePageReader: View {
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onTranslationStateChange: (Bool) -> Void
-    let onToggleControls: () -> Void
+    let areControlsVisible: Bool
+    let onShowControls: () -> Void
+    let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
 
@@ -1539,7 +2351,7 @@ struct DoublePageReader: View {
             .id(leftPageIndex)
             .transition(doublePageTransition)
             .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? dragOffset * 0.16 : 0)
-            .animation(pageTurnAnimation == .none ? nil : .easeInOut(duration: 0.24), value: leftPageIndex)
+            .animation(pageChangeAnimation, value: leftPageIndex)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 28)
@@ -1556,12 +2368,6 @@ struct DoublePageReader: View {
                         }
                     }
             )
-            .simultaneousGesture(
-                SpatialTapGesture()
-                    .onEnded { value in
-                        handleTap(at: value.location, in: geo.size)
-                    }
-            )
         }
     }
 
@@ -1571,6 +2377,7 @@ struct DoublePageReader: View {
             isOCREnabled: comic.isOCREnabled,
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+            aiTranslationModeRaw: comic.aiTranslationModeRaw,
             translateRequestID: translateRequestID,
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
@@ -1580,35 +2387,21 @@ struct DoublePageReader: View {
             isRightToLeftReading: readingDirection == .rightToLeft,
             targetLanguage: targetLanguage,
             imageFitMode: imageFitMode,
+            isPageTapGestureEnabled: false,
+            isLongPressTranslationEnabled: areControlsVisible,
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: {},
             onNextPage: {},
-            onToggleControls: onToggleControls
+            areControlsVisible: areControlsVisible,
+            onShowControls: onShowControls,
+            onHideControls: onHideControls
         )
-    }
-
-    private func handleTap(at location: CGPoint, in size: CGSize) {
-        let edgeWidth = size.width * 0.28
-        let centerWidth = size.width * 0.22
-        let centerMinX = (size.width - centerWidth) / 2
-        let centerMaxX = centerMinX + centerWidth
-        if location.x >= centerMinX && location.x <= centerMaxX {
-            onToggleControls()
-            return
-        }
-        if location.x < edgeWidth {
-            readingDirection == .rightToLeft ? nextSpread() : previousSpread()
-        } else if location.x > size.width - edgeWidth {
-            readingDirection == .rightToLeft ? previousSpread() : nextSpread()
-        } else {
-            onToggleControls()
-        }
     }
 
     private var doublePageTransition: AnyTransition {
         switch pageTurnAnimation {
         case .fade:
-            return .opacity
+            return .opacity.combined(with: .scale(scale: 0.975))
         case .slide:
             let isForward = pageTurnDirection >= 0
             let forwardInsertion: Edge = readingDirection == .rightToLeft ? .leading : .trailing
@@ -1619,11 +2412,30 @@ struct DoublePageReader: View {
             )
         case .curl:
             return .asymmetric(
-                insertion: .scale(scale: 0.96).combined(with: .opacity),
-                removal: .scale(scale: 1.04).combined(with: .opacity)
+                insertion: .modifier(
+                    active: PageCurlTransitionModifier(angle: pageTurnDirection >= 0 ? 68 : -68, opacity: 0.08, isVertical: false),
+                    identity: PageCurlTransitionModifier(angle: 0, opacity: 1, isVertical: false)
+                ),
+                removal: .modifier(
+                    active: PageCurlTransitionModifier(angle: pageTurnDirection >= 0 ? -68 : 68, opacity: 0.08, isVertical: false),
+                    identity: PageCurlTransitionModifier(angle: 0, opacity: 1, isVertical: false)
+                )
             )
         case .none:
             return .identity
+        }
+    }
+
+    private var pageChangeAnimation: Animation? {
+        switch pageTurnAnimation {
+        case .none:
+            return nil
+        case .slide:
+            return .easeOut(duration: 0.28)
+        case .fade:
+            return .easeInOut(duration: 0.34)
+        case .curl:
+            return .spring(response: 0.44, dampingFraction: 0.84)
         }
     }
 
@@ -1648,11 +2460,124 @@ struct DoublePageReader: View {
     }
 }
 
+private struct PageCurlTransitionModifier: AnimatableModifier {
+    var angle: Double
+    var opacity: Double
+    let isVertical: Bool
+
+    var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(angle, opacity) }
+        set {
+            angle = newValue.first
+            opacity = newValue.second
+        }
+    }
+
+    func body(content: Content) -> some View {
+        let progress = min(abs(angle) / 90, 1)
+        content
+            .overlay {
+                LinearGradient(
+                    colors: [
+                        .clear,
+                        .black.opacity(0.08 + progress * 0.18),
+                        .white.opacity(progress * 0.22)
+                    ],
+                    startPoint: isVertical ? .top : (angle >= 0 ? .leading : .trailing),
+                    endPoint: isVertical ? .bottom : (angle >= 0 ? .trailing : .leading)
+                )
+                .allowsHitTesting(false)
+            }
+            .rotation3DEffect(
+                .degrees(angle),
+                axis: isVertical ? (x: 1, y: 0, z: 0) : (x: 0, y: 1, z: 0),
+                anchor: angle >= 0 ? (isVertical ? .top : .leading) : (isVertical ? .bottom : .trailing),
+                perspective: 0.58
+            )
+            .scaleEffect(0.985 + opacity * 0.015)
+            .opacity(opacity)
+            .shadow(
+                color: .black.opacity(0.52 * progress),
+                radius: 10 + progress * 20,
+                x: isVertical ? 0 : (angle >= 0 ? -14 : 14),
+                y: isVertical ? (angle >= 0 ? -14 : 14) : 0
+            )
+    }
+}
+
+private struct InteractiveBookPageCurlModifier: ViewModifier {
+    let dragOffset: CGFloat
+    let pageExtent: CGFloat
+    let isVertical: Bool
+
+    func body(content: Content) -> some View {
+        let extent = max(pageExtent, 1)
+        let progress = min(abs(dragOffset) / extent, 1)
+        let direction: CGFloat = dragOffset < 0 ? -1 : 1
+        let angle = Double(direction * progress * 86)
+        let anchor: UnitPoint = isVertical
+            ? (direction < 0 ? .top : .bottom)
+            : (direction < 0 ? .leading : .trailing)
+
+        content
+            .overlay {
+                if progress > 0 {
+                    ZStack {
+                        Color.white.opacity(progress * 0.10)
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                .black.opacity(progress * 0.30),
+                                .white.opacity(progress * 0.34),
+                                .clear
+                            ],
+                            startPoint: foldStart(direction: direction),
+                            endPoint: foldEnd(direction: direction)
+                        )
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            .rotation3DEffect(
+                .degrees(angle),
+                axis: isVertical ? (x: 1, y: 0, z: 0) : (x: 0, y: 1, z: 0),
+                anchor: anchor,
+                perspective: 0.52
+            )
+            .offset(
+                x: isVertical ? 0 : direction * extent * progress * 0.12,
+                y: isVertical ? direction * extent * progress * 0.12 : 0
+            )
+            .shadow(
+                color: .black.opacity(progress * 0.62),
+                radius: 8 + progress * 26,
+                x: isVertical ? 0 : -direction * (8 + progress * 18),
+                y: isVertical ? -direction * (8 + progress * 18) : 0
+            )
+    }
+
+    private func foldStart(direction: CGFloat) -> UnitPoint {
+        if isVertical {
+            return direction < 0 ? .bottom : .top
+        }
+        return direction < 0 ? .trailing : .leading
+    }
+
+    private func foldEnd(direction: CGFloat) -> UnitPoint {
+        if isVertical {
+            return direction < 0 ? .top : .bottom
+        }
+        return direction < 0 ? .leading : .trailing
+    }
+}
+
 struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
+    let onProgress: (CGFloat) -> Void
+    let onCancel: () -> Void
     let onSwipe: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onSwipe: onSwipe)
+        Coordinator(onProgress: onProgress, onCancel: onCancel, onSwipe: onSwipe)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -1663,16 +2588,26 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onProgress = onProgress
+        context.coordinator.onCancel = onCancel
         context.coordinator.onSwipe = onSwipe
         (uiView as? WindowGestureInstallView)?.coordinator = context.coordinator
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onProgress: (CGFloat) -> Void
+        var onCancel: () -> Void
         var onSwipe: () -> Void
         let recognizer = UIPanGestureRecognizer()
         private var hasTriggered = false
 
-        init(onSwipe: @escaping () -> Void) {
+        init(
+            onProgress: @escaping (CGFloat) -> Void,
+            onCancel: @escaping () -> Void,
+            onSwipe: @escaping () -> Void
+        ) {
+            self.onProgress = onProgress
+            self.onCancel = onCancel
             self.onSwipe = onSwipe
             super.init()
             recognizer.minimumNumberOfTouches = 2
@@ -1689,17 +2624,28 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 hasTriggered = false
-            case .changed, .ended:
+            case .changed:
+                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
+                onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
                 guard !hasTriggered else { return }
                 let isDownward = translation.y > 110 && velocity.y > 220
-                let isMostlyVertical = abs(translation.x) < translation.y * 0.65
                 if isDownward && isMostlyVertical {
                     hasTriggered = true
-                    HapticManager.shared.play(.medium)
                     onSwipe()
+                }
+            case .ended:
+                guard !hasTriggered else { return }
+                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
+                let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
+                if shouldDismiss {
+                    hasTriggered = true
+                    onSwipe()
+                } else {
+                    onCancel()
                 }
             case .cancelled, .failed:
                 hasTriggered = false
+                onCancel()
             default:
                 break
             }
@@ -1743,6 +2689,7 @@ struct LocalImageView: View {
     let isOCREnabled: Bool
     let isAITranslationEnabled: Bool
     let isAutoTranslationEnabled: Bool
+    let aiTranslationModeRaw: String
     let translateRequestID: UUID
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
@@ -1752,12 +2699,17 @@ struct LocalImageView: View {
     let isRightToLeftReading: Bool
     let targetLanguage: String
     let imageFitMode: ImageFitMode
+    var visionViewportAspect: CGFloat? = nil
     var placeholderHeight: CGFloat? = nil
     var showsLoadingIndicator: Bool = true
+    var isPageTapGestureEnabled: Bool = true
+    var isLongPressTranslationEnabled: Bool = true
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
-    let onToggleControls: () -> Void
+    let areControlsVisible: Bool
+    let onShowControls: () -> Void
+    let onHideControls: () -> Void
     @State private var uiImage: UIImage? = nil
     @State private var isLoadingImage = true
     @State private var loadFailed = false
@@ -1767,6 +2719,7 @@ struct LocalImageView: View {
     @State private var pendingSingleTapWorkItem: DispatchWorkItem?
     @State private var lastDoubleTapTime = Date.distantPast
     @State private var viewportWidth: CGFloat = 0
+    @State private var viewportSize: CGSize = .zero
     
     // AI 相关的状态
     @State private var textBlocks: [TextBlock] = []
@@ -1776,16 +2729,24 @@ struct LocalImageView: View {
     @State private var recognizedBlocksCacheKey: String?
     @State private var isTranslating = false
     @State private var isRecognizingOCR = false
+    @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
     @AppStorage("openai_api_key") private var apiKey = ""
     @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
     @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
+    @AppStorage("ai_model_pool") private var modelPoolText = ""
+    @AppStorage("ai_model_pool_enabled") private var isModelPoolEnabled = true
     @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
-    @AppStorage("ocr_use_vision_model") private var ocrUseVisionModel = false
+    @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
+
+    private var aiTranslationMode: AITranslationMode {
+        AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
+    }
 
     private var canTranslate: Bool {
-        isOCREnabled && isAITranslationEnabled
+        isAITranslationEnabled && (aiTranslationMode == .vision || isOCREnabled)
     }
 
     var body: some View {
@@ -1806,7 +2767,6 @@ struct LocalImageView: View {
                     .scaleEffect(scale)
                     .offset(offset)
                     .gesture(zoomGesture)
-                    .simultaneousGesture(doubleTapGesture)
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
@@ -1822,14 +2782,31 @@ struct LocalImageView: View {
                     .foregroundStyle(.white)
             }
         }
+        .overlay(alignment: .bottom) {
+            if let translationErrorMessage {
+                Text(translationErrorMessage)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+        }
         .frame(height: reservedDisplayHeight)
         .frame(maxWidth: .infinity, minHeight: imageFitMode == .fitWidth ? nil : 0, maxHeight: imageFitMode == .fitWidth ? nil : .infinity)
         .background {
             GeometryReader { proxy in
                 Color.clear
-                    .onAppear { viewportWidth = proxy.size.width }
-                    .onChange(of: proxy.size.width) { _, newValue in
-                        viewportWidth = newValue
+                    .onAppear {
+                        viewportWidth = proxy.size.width
+                        viewportSize = proxy.size
+                    }
+                    .onChange(of: proxy.size) { _, newValue in
+                        viewportWidth = newValue.width
+                        viewportSize = newValue
                     }
             }
         }
@@ -1914,8 +2891,12 @@ struct LocalImageView: View {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
                 ColorfulTranslatedText(
-                    text: item.block.translation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-                    fontSize: translationFontSize(for: item.block, in: size)
+                    segments: item.blocks.compactMap {
+                        let value = ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        return value.isEmpty ? nil : value
+                    },
+                    fontSize: translationFontSize(for: item.blocks, in: item.rect),
+                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast
                 )
                 .frame(width: item.rect.width)
                 .position(x: item.rect.midX, y: item.rect.midY)
@@ -1936,21 +2917,20 @@ struct LocalImageView: View {
     @ViewBuilder
     private func ocrMagnificationOverlay(in size: CGSize) -> some View {
         if isOCRMagnificationVisible {
-            ForEach(ocrTextBlocks) { block in
-                let rect = ocrBubbleRect(for: block, in: size)
-                Text(block.text)
-                    .font(.system(size: ocrFontSize(for: block, in: size), weight: .semibold))
+            ForEach(ocrLayoutItems(in: size)) { item in
+                let text = item.blocks.map(\.text).joined(separator: "\n\n")
+                Text(text)
+                    .font(.system(size: uniformOCRFontSize, weight: .semibold))
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.55)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(Color.white.opacity(0.92))
                     .foregroundColor(.black)
                     .cornerRadius(6)
-                    .frame(width: rect.size.width)
-                    .position(x: rect.midX, y: rect.midY)
+                    .frame(width: item.rect.size.width)
+                    .position(x: item.rect.midX, y: item.rect.midY)
             }
         }
     }
@@ -2002,27 +2982,54 @@ struct LocalImageView: View {
         let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
         let original = overlayRect(for: block, in: size, scaleMultiplier: magnificationScale)
         let safeMargin: CGFloat = 12
-        let maxWidth = max(96, min(size.width - safeMargin * 2, isOCRMagnificationVisible ? 230 : 190))
+        let maxWidth = max(96, min(size.width - safeMargin * 2, isOCRMagnificationVisible ? 260 : 230))
         let widthMultiplier: CGFloat = isOCRMagnificationVisible ? 1.32 : 1.08
-        let width = min(max(original.width * widthMultiplier, 70), maxWidth)
-        let height = min(max(original.height * 1.16, 24), 56)
+        let translatedText = (block.translation ?? block.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let characterCount = max(translatedText.count, 1)
+        let contentDrivenWidth = min(max(CGFloat(sqrt(Double(characterCount))) * 25, 84), maxWidth)
+        let width = min(max(original.width * widthMultiplier, contentDrivenWidth), maxWidth)
+        let estimatedCharactersPerLine = max(Int((width - 12) / 13), 1)
+        let estimatedLineCount = max(1, Int(ceil(Double(characterCount) / Double(estimatedCharactersPerLine))))
+        let contentDrivenHeight = CGFloat(estimatedLineCount) * 21 + 10
+        let maxHeight = max(56, min(size.height * 0.38, 168))
+        let height = min(max(original.height * 1.2, contentDrivenHeight, 34), maxHeight)
         let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
         let y = min(max(original.midY, safeMargin + height / 2), size.height - safeMargin - height / 2)
         return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
     }
 
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
+        let initialItems = visibleTranslationBlocks.map { block in
+            TranslationLayoutItem(blocks: [block], rect: translationBubbleRect(for: block, in: size))
+        }
+        var denseGroups: [TranslationLayoutItem] = []
+        for item in initialItems {
+            if let index = denseGroups.firstIndex(where: { existing in
+                existing.rect.insetBy(dx: -8, dy: -8).intersects(item.rect) &&
+                existing.blocks.count < 4
+            }) {
+                let mergedBlocks = denseGroups[index].blocks + item.blocks
+                var mergedRect = denseGroups[index].rect.union(item.rect)
+                mergedRect.size.height = min(max(mergedRect.height, CGFloat(mergedBlocks.count) * 30), 150)
+                mergedRect.size.width = min(max(mergedRect.width, 96), max(size.width - 24, 96))
+                denseGroups[index] = TranslationLayoutItem(blocks: mergedBlocks, rect: clampedTranslationRect(mergedRect, safeMargin: 12, in: size))
+            } else {
+                denseGroups.append(item)
+            }
+        }
+
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
-        for block in visibleTranslationBlocks {
-            let original = translationBubbleRect(for: block, in: size)
+        for item in denseGroups {
+            let original = item.rect
+            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
             let anchor = CGPoint(
-                x: block.boundingBox.midX * size.width,
-                y: block.boundingBox.midY * size.height
+                x: sourceRect.midX * size.width,
+                y: sourceRect.midY * size.height
             )
             let rect = nonOverlappingTranslationRect(original, anchor: anchor, occupiedRects: occupiedRects, in: size)
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
-            items.append(TranslationLayoutItem(block: block, rect: rect))
+            items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect))
         }
         return items
     }
@@ -2078,9 +3085,26 @@ struct LocalImageView: View {
         let safeMargin: CGFloat = 12
         let maxWidth = max(100, size.width - safeMargin * 2)
         let width = min(max(original.width, 72), maxWidth)
+        let characterCount = max(block.text.count, 1)
+        let charactersPerLine = max(Int(width / max(uniformOCRFontSize * 0.72, 1)), 1)
+        let lineCount = max(1, Int(ceil(Double(characterCount) / Double(charactersPerLine))))
+        let height = min(max(CGFloat(lineCount) * uniformOCRFontSize * 1.3 + 8, 34), 140)
         let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
-        let y = min(max(original.midY, safeMargin + 18), size.height - safeMargin - 18)
-        return CGRect(x: x - width / 2, y: y - 18, width: width, height: 36)
+        let y = min(max(original.midY, safeMargin + height / 2), size.height - safeMargin - height / 2)
+        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+    }
+
+    private func ocrLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
+        var occupiedRects: [CGRect] = []
+        var items: [TranslationLayoutItem] = []
+        for block in ocrTextBlocks {
+            let original = ocrBubbleRect(for: block, in: size)
+            let anchor = CGPoint(x: block.boundingBox.midX * size.width, y: block.boundingBox.midY * size.height)
+            let rect = nonOverlappingTranslationRect(original, anchor: anchor, occupiedRects: occupiedRects, in: size)
+            occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
+            items.append(TranslationLayoutItem(blocks: [block], rect: rect))
+        }
+        return items
     }
 
     private func loadImage() async {
@@ -2101,6 +3125,7 @@ struct LocalImageView: View {
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
                 debugTextBlocks.removeAll()
+                translationErrorMessage = nil
                 recognizedBlocksCache = nil
                 recognizedBlocksCacheKey = nil
                 scale = 1
@@ -2125,6 +3150,7 @@ struct LocalImageView: View {
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
             debugTextBlocks.removeAll()
+            translationErrorMessage = nil
             recognizedBlocksCache = nil
             recognizedBlocksCacheKey = nil
             scale = 1
@@ -2165,29 +3191,10 @@ struct LocalImageView: View {
             }
     }
 
-    private var doubleTapGesture: some Gesture {
-        SpatialTapGesture(count: 2)
-            .onEnded { value in
-                pendingSingleTapWorkItem?.cancel()
-                pendingSingleTapWorkItem = nil
-                lastDoubleTapTime = Date()
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                    if scale > 1.1 {
-                        scale = 1
-                        lastScale = 1
-                        offset = .zero
-                    } else {
-                        scale = 2.5
-                        lastScale = 2.5
-                        offset = CGSize(width: -value.location.x * 0.35, height: -value.location.y * 0.18)
-                    }
-                }
-            }
-    }
-
     private var tapPageGesture: some Gesture {
         SpatialTapGesture(count: 1, coordinateSpace: .local)
             .onEnded { value in
+                guard isPageTapGestureEnabled else { return }
                 guard scale <= 1.05 else { return }
                 guard Date().timeIntervalSince(lastDoubleTapTime) > 0.28 else { return }
 
@@ -2200,8 +3207,6 @@ struct LocalImageView: View {
                         onPreviousPage()
                     } else if tapLocation.x > width * 2.0 / 3.0 {
                         onNextPage()
-                    } else {
-                        onToggleControls()
                     }
                 }
                 pendingSingleTapWorkItem = workItem
@@ -2212,7 +3217,7 @@ struct LocalImageView: View {
     private var longPressTranslationGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.55, maximumDistance: 18)
             .onEnded { _ in
-                guard canTranslate, scale <= 1.05 else { return }
+                guard isLongPressTranslationEnabled, canTranslate, scale <= 1.05 else { return }
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
                 HapticManager.shared.play(.medium)
@@ -2220,44 +3225,60 @@ struct LocalImageView: View {
             }
     }
 
-    private func ocrFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
-        let boxWidth = max(block.boundingBox.width * size.width, 1)
-        let boxHeight = max(block.boundingBox.height * size.height, 1)
-        let characterCount = max(block.text.filter { !$0.isWhitespace && !$0.isNewline }.count, 1)
-        let isVerticalText = boxHeight > boxWidth * 1.35
-
-        let estimatedOriginalFontSize: CGFloat
-        if isVerticalText {
-            let perCharacterHeight = boxHeight / CGFloat(characterCount)
-            let verticalEstimate = min(boxWidth * 0.82, perCharacterHeight * 1.05)
-            estimatedOriginalFontSize = max(verticalEstimate, min(boxWidth, boxHeight) * 0.46)
-        } else {
-            let averageCharacterWidth = boxWidth / CGFloat(characterCount)
-            let widthBasedEstimate = averageCharacterWidth * 1.45
-            let horizontalEstimate = min(boxHeight * 0.62, widthBasedEstimate)
-            estimatedOriginalFontSize = max(horizontalEstimate, boxHeight * 0.48)
-        }
-
-        let scaled = max(estimatedOriginalFontSize, 7) * ocrTextSizeFactor
-        return min(max(scaled, 9), 22)
+    private var uniformOCRFontSize: CGFloat {
+        11 + CGFloat(normalizedOCRScale) * 8
     }
 
-    private func translationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
-        let blockHeight = max(block.boundingBox.height * size.height, 10)
-        let baseSize = min(max(blockHeight * 0.36, 9), 13)
-        guard isOCRMagnificationVisible else { return baseSize }
-        let magnified = baseSize * min(max(ocrTextSizeFactor, 1), 1.22)
-        return min(max(magnified, 9), 15)
+    private func translationFontSize(for blocks: [TextBlock], in bubbleRect: CGRect) -> CGFloat {
+        let segments = blocks.compactMap { block -> String? in
+            let text = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+        guard !segments.isEmpty else { return 12 }
+        let availableWidth = max(bubbleRect.width - 14, 24)
+        let availableHeight = max(bubbleRect.height - 10, 20)
+        let requestedMaximum: CGFloat = isOCRMagnificationVisible ? 28 : 25
+        var lower: CGFloat = 11
+        var upper = requestedMaximum
+        for _ in 0..<8 {
+            let candidate = (lower + upper) / 2
+            if translationTextFits(
+                segments,
+                fontSize: candidate,
+                width: availableWidth,
+                height: availableHeight
+            ) {
+                lower = candidate
+            } else {
+                upper = candidate
+            }
+        }
+        return min(max(lower, 11), requestedMaximum)
+    }
+
+    private func translationTextFits(_ segments: [String], fontSize: CGFloat, width: CGFloat, height: CGFloat) -> Bool {
+        let charactersPerLine = max(Int(width / max(fontSize * 0.86, 1)), 1)
+        let lines = segments.reduce(0) { partial, segment in
+            let explicitLines = segment.split(separator: "\n", omittingEmptySubsequences: false)
+            let segmentLines = explicitLines.reduce(0) { lineTotal, line in
+                lineTotal + max(1, Int(ceil(Double(max(line.count, 1)) / Double(charactersPerLine))))
+            }
+            return partial + segmentLines
+        }
+        let segmentSpacing = CGFloat(max(segments.count - 1, 0)) * 7
+        let requiredHeight = CGFloat(max(lines, 1)) * fontSize * 1.24 + segmentSpacing
+        return requiredHeight <= height
     }
 
     private var ocrTextSizeFactor: CGFloat {
-        let normalized: Double
+        0.92 + CGFloat(normalizedOCRScale) * 0.44
+    }
+
+    private var normalizedOCRScale: Double {
         if ocrTextScale > 1 {
-            normalized = min(max((ocrTextScale - 0.8) / 2.4, 0), 1)
-        } else {
-            normalized = min(max(ocrTextScale, 0), 1)
+            return min(max((ocrTextScale - 0.8) / 2.4, 0), 1)
         }
-        return 0.92 + CGFloat(normalized) * 0.44
+        return min(max(ocrTextScale, 0), 1)
     }
 
     private func preparedTextBlocks(from blocks: [TextBlock]) -> [TextBlock] {
@@ -2304,55 +3325,31 @@ struct LocalImageView: View {
         translationTask?.cancel()
         guard canTranslate, let image = uiImage else { return }
         let pageURL = url
+        translationErrorMessage = nil
         isTranslating = true
         onTranslationStateChange(true)
         
         translationTask = Task {
             do {
-                let recognizedBlocks = try await recognizedTextBlocks(for: image)
-                try Task.checkCancellation()
-                let blocks = preparedTextBlocks(from: recognizedBlocks)
-                await MainActor.run { self.textBlocks = blocks } // 先显示个框（可选）
-                
-                let maxConcurrentTranslations = 3
-                var nextIndex = 0
-                while nextIndex < blocks.count {
-                    try Task.checkCancellation()
-                    let batchEnd = min(nextIndex + maxConcurrentTranslations, blocks.count)
-                    await withTaskGroup(of: (Int, String).self) { group in
-                        for i in nextIndex..<batchEnd {
-                            let text = blocks[i].text
-                            let key = apiKey
-                            let base = baseURL
-                            let model = modelName
-                            let target = targetLanguage
-                            let prompt = translationPromptTemplate
-                            group.addTask {
-                                guard !Task.isCancelled else { return (i, "") }
-                                let translated = try? await AITranslator.translate(text: text, apiKey: key, baseURL: base, model: model, targetLanguage: target, promptTemplate: prompt)
-                                return (i, translated ?? "翻译失败")
-                            }
-                        }
-
-                        for await (index, translatedText) in group {
-                            guard !Task.isCancelled else { return }
-                            await MainActor.run {
-                                guard !Task.isCancelled else { return }
-                                guard self.url == pageURL else { return }
-                                guard textBlocks.indices.contains(index) else { return }
-                                guard !translatedText.isEmpty else { return }
-                                textBlocks[index].translation = translatedText
-                            }
-                        }
-                    }
-                    nextIndex = batchEnd
+                switch aiTranslationMode {
+                case .ocr:
+                    try await startOCRTextTranslation(image: image, pageURL: pageURL)
+                case .vision:
+                    try await startVisionImageTranslation(image: image, pageURL: pageURL)
                 }
             } catch {
                 if !Task.isCancelled {
                     print("翻译异常: \(error)")
+                    await MainActor.run {
+                        self.translationErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        HapticManager.shared.play(.error)
+                    }
                 }
             }
             await MainActor.run {
+                if !Task.isCancelled && self.translationErrorMessage == nil {
+                    HapticManager.shared.play(.success)
+                }
                 self.isTranslating = false
                 self.onTranslationStateChange(false)
                 self.translationTask = nil
@@ -2360,13 +3357,101 @@ struct LocalImageView: View {
         }
     }
 
+    private func startOCRTextTranslation(image: UIImage, pageURL: URL) async throws {
+        let recognizedBlocks = try await recognizedTextBlocks(for: image)
+        try Task.checkCancellation()
+        let blocks = preparedTextBlocks(from: recognizedBlocks)
+        await MainActor.run { self.textBlocks = blocks }
+        guard !blocks.isEmpty else { return }
+
+        let requestAPIKey = apiKey
+        let requestBaseURL = baseURL
+        let requestModelName = modelName
+        let requestModelPoolText = modelPoolText
+        let requestIsModelPoolEnabled = isModelPoolEnabled
+        let requestTargetLanguage = targetLanguage
+        let requestPromptTemplate = translationPromptTemplate
+        let maximumConcurrentRequests = min(3, blocks.count)
+
+        await withTaskGroup(of: (Int, String?, String?).self) { group in
+            var nextIndex = 0
+
+            func submit(_ index: Int) {
+                let block = blocks[index]
+                group.addTask {
+                    do {
+                        let translatedText = try await AITranslator.translate(
+                            text: block.text,
+                            ocrMetadata: AITranslator.ocrMetadata(for: block),
+                            apiKey: requestAPIKey,
+                            baseURL: requestBaseURL,
+                            model: requestModelName,
+                            modelPoolText: requestModelPoolText,
+                            isModelPoolEnabled: requestIsModelPoolEnabled,
+                            targetLanguage: requestTargetLanguage,
+                            promptTemplate: requestPromptTemplate
+                        )
+                        return (index, translatedText, nil)
+                    } catch {
+                        let message = (error as? LocalizedError)?.errorDescription
+                            ?? error.localizedDescription
+                        return (index, nil, message)
+                    }
+                }
+            }
+
+            while nextIndex < maximumConcurrentRequests {
+                submit(nextIndex)
+                nextIndex += 1
+            }
+
+            while let (index, translatedText, errorMessage) = await group.next() {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    return
+                }
+                await MainActor.run {
+                    guard self.url == pageURL, textBlocks.indices.contains(index) else { return }
+                    if let translatedText {
+                        textBlocks[index].translation = translatedText
+                    } else if let errorMessage {
+                        translationErrorMessage = errorMessage
+                    }
+                }
+                if nextIndex < blocks.count {
+                    submit(nextIndex)
+                    nextIndex += 1
+                }
+            }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func startVisionImageTranslation(image: UIImage, pageURL: URL) async throws {
+        let blocks = try await AITranslator.translateVisionPage(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: modelName,
+            modelPoolText: modelPoolText,
+            isModelPoolEnabled: isModelPoolEnabled,
+            targetLanguage: targetLanguage,
+            promptTemplate: visionTranslationPromptTemplate,
+            isRightToLeft: isRightToLeftReading,
+            viewportAspect: visionViewportAspect
+                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
+        )
+        try Task.checkCancellation()
+        await MainActor.run {
+            guard self.url == pageURL else { return }
+            self.textBlocks = blocks
+        }
+    }
+
     private func recognizedTextBlocks(for image: UIImage) async throws -> [TextBlock] {
         let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)"
         if recognizedBlocksCacheKey == key, let recognizedBlocksCache {
             return recognizedBlocksCache
-        }
-        if ocrUseVisionModel {
-            print("MReader OCR visual model enabled but image upload is not automatic; using local Vision OCR.")
         }
         let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
         let blocks = try await AITranslator.recognizeText(in: ocrImage, isRightToLeft: isRightToLeftReading, minimumTextHeight: ocrMinimumTextHeight)
@@ -2379,25 +3464,67 @@ struct LocalImageView: View {
 }
 
 private struct TranslationLayoutItem: Identifiable {
-    let block: TextBlock
+    let blocks: [TextBlock]
     let rect: CGRect
 
-    var id: UUID { block.id }
+    var id: UUID { blocks.first?.id ?? UUID() }
+}
+
+private enum TranslationColorStyle: String, CaseIterable {
+    case contrast
+    case coolWarm
+    case jewel
+
+    var title: String {
+        switch self {
+        case .contrast: return "高对比"
+        case .coolWarm: return "冷暖分明"
+        case .jewel: return "宝石色"
+        }
+    }
+
+    var palettes: [[Color]] {
+        switch self {
+        case .contrast:
+            return [
+                [Color(red: 0.02, green: 0.22, blue: 0.72), Color(red: 0.52, green: 0.05, blue: 0.58)],
+                [Color(red: 0.0, green: 0.42, blue: 0.48), Color(red: 0.72, green: 0.16, blue: 0.18)],
+                [Color(red: 0.18, green: 0.15, blue: 0.62), Color(red: 0.65, green: 0.22, blue: 0.04)]
+            ]
+        case .coolWarm:
+            return [
+                [Color(red: 0.0, green: 0.32, blue: 0.82), Color(red: 0.0, green: 0.62, blue: 0.68)],
+                [Color(red: 0.86, green: 0.10, blue: 0.28), Color(red: 0.76, green: 0.34, blue: 0.02)],
+                [Color(red: 0.30, green: 0.12, blue: 0.72), Color(red: 0.74, green: 0.12, blue: 0.52)]
+            ]
+        case .jewel:
+            return [
+                [Color(red: 0.05, green: 0.30, blue: 0.66), Color(red: 0.36, green: 0.08, blue: 0.54)],
+                [Color(red: 0.0, green: 0.46, blue: 0.36), Color(red: 0.64, green: 0.08, blue: 0.18)],
+                [Color(red: 0.12, green: 0.20, blue: 0.58), Color(red: 0.58, green: 0.28, blue: 0.0)]
+            ]
+        }
+    }
 }
 
 private struct ColorfulTranslatedText: View {
-    let text: String
+    let segments: [String]
     let fontSize: CGFloat
+    let style: TranslationColorStyle
 
     var body: some View {
-        Text(text)
-            .font(.system(size: fontSize, weight: .semibold))
-            .lineLimit(nil)
-            .fixedSize(horizontal: false, vertical: true)
-            .multilineTextAlignment(.center)
-            .foregroundStyle(colorGradient)
-            .shadow(color: .white.opacity(0.45), radius: 0.8, x: 0, y: 0)
-            .shadow(color: .black.opacity(0.5), radius: 1.8, x: 0, y: 1)
+        VStack(spacing: segments.count > 1 ? 7 : 0) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                Text(segment)
+                    .font(.system(size: fontSize, weight: .bold))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(colorGradient(index: index))
+                    .shadow(color: .white.opacity(0.78), radius: 0.7)
+                    .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+            }
+        }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .background {
@@ -2405,9 +3532,9 @@ private struct ColorfulTranslatedText: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.95),
-                                Color(red: 0.86, green: 0.94, blue: 1.0).opacity(0.93),
-                                Color(red: 1.0, green: 0.88, blue: 0.96).opacity(0.93)
+                                Color.white.opacity(0.98),
+                                Color(red: 0.92, green: 0.96, blue: 1.0).opacity(0.97),
+                                Color(red: 1.0, green: 0.93, blue: 0.97).opacity(0.97)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -2415,27 +3542,29 @@ private struct ColorfulTranslatedText: View {
                     )
                     .overlay {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(colorGradient.opacity(0.86), lineWidth: 1)
+                            .strokeBorder(colorGradient(index: 0).opacity(0.9), lineWidth: 1)
                     }
             }
     }
 
-    private var colorGradient: LinearGradient {
-        LinearGradient(
-            colors: Self.palette,
+    private func colorGradient(index: Int) -> LinearGradient {
+        let palettes = style.palettes
+        let colors = palettes[index % palettes.count]
+        return LinearGradient(
+            colors: colors,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
     }
 
     static let palette: [Color] = [
-        Color(red: 0.18, green: 0.56, blue: 0.95),
-        Color(red: 0.42, green: 0.34, blue: 0.92),
-        Color(red: 0.68, green: 0.30, blue: 0.88),
-        Color(red: 0.88, green: 0.32, blue: 0.68),
-        Color(red: 0.20, green: 0.72, blue: 0.78),
-        Color(red: 0.30, green: 0.66, blue: 0.90),
-        Color(red: 0.90, green: 0.56, blue: 0.30).opacity(0.62)
+        Color(red: 0.10, green: 0.38, blue: 0.82),
+        Color(red: 0.32, green: 0.22, blue: 0.78),
+        Color(red: 0.55, green: 0.18, blue: 0.72),
+        Color(red: 0.75, green: 0.20, blue: 0.55),
+        Color(red: 0.12, green: 0.58, blue: 0.65),
+        Color(red: 0.18, green: 0.50, blue: 0.78),
+        Color(red: 0.72, green: 0.38, blue: 0.18).opacity(0.7)
     ]
 }
 
@@ -2453,7 +3582,7 @@ private struct AppleIntelligenceGlowBorder: View {
             GeometryReader { proxy in
                 let bandWidth = max(lineWidth, 1)
                 let screenCornerRadius = adaptiveScreenCornerRadius(for: proxy.size)
-                let outerCornerRadius = screenCornerRadius > 0 ? screenCornerRadius : cornerRadius
+                let outerCornerRadius = (screenCornerRadius > 0 ? screenCornerRadius : cornerRadius) + 5
                 let layerCount = 36
                 let layerWidth = bandWidth / CGFloat(layerCount)
                 let outwardExpansion = max(layerWidth * 1.5, 1)

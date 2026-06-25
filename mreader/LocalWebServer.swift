@@ -80,7 +80,7 @@ final class LocalWebServer: ObservableObject {
     private var onUpload: ((URL) -> Void)?
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
-    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "7z", "epub", "pdf", "rar", "cbr", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
+    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
 
     nonisolated static func clearStaleBodyFiles() {
         let tempRoot = FileManager.default.temporaryDirectory
@@ -213,7 +213,7 @@ final class LocalWebServer: ObservableObject {
             return httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "没有找到上传文件")
         }
         guard allowedUploadExtensions.contains(URL(fileURLWithPath: uploadedFile.fileName).pathExtension.lowercased()) else {
-            return httpResponse(status: "415 Unsupported Media Type", contentType: "text/plain; charset=utf-8", body: "仅支持 ZIP、CBZ、7z、EPUB、PDF、RAR、CBR、JPG、PNG、WebP、HEIC。")
+            return httpResponse(status: "415 Unsupported Media Type", contentType: "text/plain; charset=utf-8", body: "仅支持 ZIP、CBZ、EPUB、PDF、JPG、PNG、WebP、HEIC。")
         }
         guard uploadedFile.byteCount <= maxUploadSize else {
             return httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
@@ -345,9 +345,9 @@ final class LocalWebServer: ObservableObject {
         </head>
         <body><main>
         <h1>MReader 网页导入</h1>
-        <p>选择 ZIP、CBZ、7z、EPUB、PDF、RAR、CBR 或图片上传。上传完成后 app 会自动加入书架。</p>
+        <p>选择 ZIP、CBZ、EPUB、PDF 或图片上传。上传完成后 app 会自动加入书架。</p>
         <form method="post" action="/upload" enctype="multipart/form-data">
-        <input name="file" type="file" accept=".zip,.cbz,.7z,.epub,.pdf,.rar,.cbr,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
+        <input name="file" type="file" accept=".zip,.cbz,.epub,.pdf,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
         <button type="submit">上传到 MReader</button>
         </form>
         </main></body></html>

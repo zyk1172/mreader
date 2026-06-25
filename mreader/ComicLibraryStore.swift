@@ -7,6 +7,8 @@ nonisolated private struct ComicLibrarySnapshot: Sendable {
 }
 
 private actor ComicLibraryDiskStore {
+    private var latestComicsRevision = 0
+
     func load(libraryURL: URL, seriesURL: URL) -> ComicLibrarySnapshot {
         let comics: [ComicBook]
         do {
@@ -28,7 +30,9 @@ private actor ComicLibraryDiskStore {
         return ComicLibrarySnapshot(comics: comics, series: series)
     }
 
-    func saveComics(_ comics: [ComicBook], to url: URL) {
+    func saveComics(_ comics: [ComicBook], revision: Int, to url: URL) {
+        guard revision >= latestComicsRevision else { return }
+        latestComicsRevision = revision
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(comics)
@@ -57,6 +61,8 @@ final class ComicLibraryStore: ObservableObject {
     private let libraryURL: URL
     private let seriesURL: URL
     private let diskStore = ComicLibraryDiskStore()
+    private var pendingKomgaProgressTasks: [UUID: Task<Void, Never>] = [:]
+    private var comicsSaveRevision = 0
 
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -76,7 +82,8 @@ final class ComicLibraryStore: ObservableObject {
             var merged = comic
             merged.id = existing.id
             merged.title = existing.title.isEmpty ? comic.title : existing.title
-            merged.currentPageIndex = min(existing.currentPageIndex, max(0, comic.totalPages - 1))
+            merged.currentPageIndex = min(max(existing.currentPageIndex, 0), max(0, comic.totalPages - 1))
+            merged.hasBeenOpened = existing.hasBeenOpened
             merged.scrollProgress = existing.scrollProgress
             merged.scrollPageProgress = existing.scrollPageProgress
             merged.lastReadAt = existing.lastReadAt
@@ -88,12 +95,15 @@ final class ComicLibraryStore: ObservableObject {
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
             merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
+            merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
+            merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
             merged.imageFitModeRaw = existing.imageFitModeRaw
             merged.scrollSpeedRaw = existing.scrollSpeedRaw
-            merged.seriesID = comic.seriesID ?? existing.seriesID
+            // 本地系列归属优先，避免扫描或远端同步把用户手动移动结果覆盖掉。
+            merged.seriesID = existing.seriesID ?? comic.seriesID
             comics[index] = merged
         } else {
             comics.insert(comic, at: 0)
@@ -111,7 +121,6 @@ final class ComicLibraryStore: ObservableObject {
             libraryPath: result.libraryPath,
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
-            smbPath: result.smbPath,
             chapterTypeRaw: result.chapterTypeRaw,
             chapterPath: result.chapterPath,
             seriesID: seriesID
@@ -133,6 +142,11 @@ final class ComicLibraryStore: ObservableObject {
         if let comic = comics.first(where: { $0.id == id }) {
             if comic.sourceType == .local {
                 ComicManager.deleteLibraryPath(comic.libraryPath)
+            } else if comic.sourceType == .komga {
+                Task {
+                    await deleteKomgaComic(comic)
+                }
+                return
             }
         }
         comics.removeAll { $0.id == id }
@@ -141,8 +155,17 @@ final class ComicLibraryStore: ObservableObject {
 
     func update(_ comic: ComicBook) {
         guard let index = comics.firstIndex(where: { $0.id == comic.id }) else { return }
-        comics[index] = comic
+        let existing = comics[index]
+        var merged = comic
+        if comic.sourceType == .komga {
+            merged.currentPageIndex = min(max(existing.currentPageIndex, comic.currentPageIndex), max(0, comic.totalPages - 1))
+        }
+        merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened
+        comics[index] = merged
         sortAndSave()
+        if merged.sourceType == .komga {
+            scheduleKomgaProgressSync(for: merged)
+        }
     }
 
     @discardableResult
@@ -160,6 +183,46 @@ final class ComicLibraryStore: ObservableObject {
         guard let index = comics.firstIndex(where: { $0.id == comicID }) else { return }
         comics[index].seriesID = seriesID
         save()
+    }
+
+    /// 移动漫画到系列（本地漫画会物理移动文件，Komga 漫画只改 seriesID）
+    func moveComicToSeries(_ comicID: UUID, toSeries seriesID: UUID?) -> Bool {
+        guard let index = comics.firstIndex(where: { $0.id == comicID }) else { return false }
+        let comic = comics[index]
+
+        // 远程漫画：只改 seriesID
+        if comic.sourceType != .local {
+            comics[index].seriesID = seriesID
+            save()
+            return true
+        }
+
+        // 本地漫画：加入系列时移动到系列目录，移出系列时移动回漫画根目录。
+        let targetPath: String
+        if let targetSeriesID = seriesID {
+            guard let seriesIndex = self.series.firstIndex(where: { $0.id == targetSeriesID }),
+                  let path = self.series[seriesIndex].libraryPath else {
+                return false
+            }
+            targetPath = path
+        } else {
+            guard let path = ComicManager.selectedLibraryRootURL()?.path else { return false }
+            targetPath = path
+        }
+        guard !comic.bookmarkData.isEmpty else { return false }
+
+        // 执行文件移动
+        guard let newBookmark = ComicManager.moveComicFile(bookmarkData: comic.bookmarkData, to: URL(fileURLWithPath: targetPath, isDirectory: true)) else {
+            return false
+        }
+
+        comics[index].seriesID = seriesID
+        comics[index].bookmarkData = newBookmark
+        if let newLibraryPath = ComicManager.libraryPathOfMovedFile(oldBookmark: comic.bookmarkData, newBookmark: newBookmark) {
+            comics[index].libraryPath = newLibraryPath
+        }
+        save()
+        return true
     }
 
     func rebuildThumbnail(for id: UUID) {
@@ -202,28 +265,34 @@ final class ComicLibraryStore: ObservableObject {
     func syncAllLibrariesAsync() async {
         await syncLocalLibraryAsync()
         await syncKomgaSources()
+        await syncOPDSSources()
         HapticManager.shared.play(.success)
     }
 
     @discardableResult
     func syncKomgaSources() async -> Int {
+        let loadedSources = KomgaProvider.loadSources().filter { $0.type == .komga }
+        let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
+        let oldDisabledCount = comics.count
+        comics.removeAll { comic in
+            guard comic.sourceType == .komga, let sourceID = comic.mediaSourceID else { return false }
+            return disabledSourceIDs.contains(sourceID)
+        }
         let results = await KomgaProvider.syncEnabledSources()
-        var changed = false
+        var changed = comics.count != oldDisabledCount
         var syncedCount = 0
         for result in results {
             if let error = result.error {
                 print("Komga 同步失败 \(result.source.name): \(error.localizedDescription)")
-                let oldCount = comics.count
-                comics.removeAll { $0.sourceType == .komga && $0.mediaSourceID == result.source.id }
-                if comics.count != oldCount {
-                    changed = true
-                    print("Komga 源失去连接，已从书架移除 \(oldCount - comics.count) 本漫画: \(result.source.name)")
-                }
+                print("Komga 源暂时不可用，保留旧书架记录: \(result.source.name)")
                 continue
             }
             syncedCount += result.comics.count
-            if applyKomgaScan(result.comics, sourceID: result.source.id) {
+            if applyKomgaScan(result.comics, sourceID: result.source.id, isAuthoritative: result.isAuthoritative) {
                 changed = true
+            }
+            if !result.isAuthoritative {
+                print("Komga 同步结果不完整，跳过缺失项清理: \(result.source.name)")
             }
         }
         if changed {
@@ -233,11 +302,88 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     func removeKomgaSource(id: UUID) {
+        for comic in comics where comic.sourceType == .komga && comic.mediaSourceID == id {
+            pendingKomgaProgressTasks[comic.id]?.cancel()
+            pendingKomgaProgressTasks[comic.id] = nil
+        }
         let oldCount = comics.count
         comics.removeAll { $0.sourceType == .komga && $0.mediaSourceID == id }
         if comics.count != oldCount {
             save()
         }
+    }
+
+    @discardableResult
+    func syncOPDSSources() async -> Int {
+        let loadedSources = KomgaProvider.loadSources().filter { $0.type == .opds }
+        let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
+        let oldDisabledCount = comics.count
+        comics.removeAll { comic in
+            guard comic.sourceType == .opds, let sourceID = comic.mediaSourceID else { return false }
+            return disabledSourceIDs.contains(sourceID)
+        }
+        let results = await OPDSProvider.syncEnabledSources()
+        var changed = comics.count != oldDisabledCount
+        var syncedCount = 0
+        for result in results {
+            if let error = result.error {
+                print("OPDS 同步失败 \(result.source.name): \(error.localizedDescription)")
+                continue
+            }
+            syncedCount += result.comics.count
+            if applyRemoteScan(
+                result.comics,
+                sourceID: result.source.id,
+                sourceType: .opds,
+                isAuthoritative: result.isAuthoritative
+            ) {
+                changed = true
+            }
+        }
+        if changed {
+            sortAndSave()
+        }
+        return syncedCount
+    }
+
+    func removeOPDSSource(id: UUID) {
+        let oldCount = comics.count
+        comics.removeAll { $0.sourceType == .opds && $0.mediaSourceID == id }
+        OPDSProvider.removeCachedFiles(sourceID: id)
+        if comics.count != oldCount {
+            save()
+        }
+    }
+
+    func setKomgaSourceEnabled(id: UUID, isEnabled: Bool) async {
+        var sources = KomgaProvider.loadSources()
+        guard let index = sources.firstIndex(where: { $0.id == id }) else { return }
+        sources[index].isEnabled = isEnabled
+        try? KomgaProvider.updateSource(sources[index])
+        if isEnabled {
+            await syncKomgaSources()
+        } else {
+            removeKomgaSource(id: id)
+        }
+    }
+
+    func setMediaSourceEnabled(id: UUID, isEnabled: Bool) async {
+        guard let source = KomgaProvider.loadSources().first(where: { $0.id == id }) else { return }
+        var updatedSource = source
+        updatedSource.isEnabled = isEnabled
+        try? KomgaProvider.updateSource(updatedSource)
+        switch source.type {
+        case .komga:
+            if isEnabled { _ = await syncKomgaSources() } else { removeKomgaSource(id: id) }
+        case .opds:
+            if isEnabled { _ = await syncOPDSSources() } else { removeOPDSSource(id: id) }
+        case .local:
+            break
+        }
+    }
+
+    func refreshVisibility() {
+        objectWillChange.send()
     }
 
     private func applyScan(_ scanned: ComicManager.LibraryScanResult) {
@@ -370,6 +516,7 @@ final class ComicLibraryStore: ObservableObject {
         let snapshot = await diskStore.load(libraryURL: libraryURL, seriesURL: seriesURL)
         comics = snapshot.comics
         series = snapshot.series
+        normalizeLegacyReadingDefaults()
     }
 
     private func sortAndSave() {
@@ -387,7 +534,7 @@ final class ComicLibraryStore: ObservableObject {
         let oldComicCount = comics.count
         let oldSeriesCount = series.count
         comics.removeAll { comic in
-            let legacyRemoteType = ![ComicSourceType.local.rawValue, ComicSourceType.komga.rawValue].contains(comic.sourceTypeRaw)
+            let legacyRemoteType = ![ComicSourceType.local.rawValue, ComicSourceType.komga.rawValue, ComicSourceType.opds.rawValue].contains(comic.sourceTypeRaw)
             return legacyRemoteType ||
             comic.libraryPath?.hasPrefix("smb://") == true ||
             comic.libraryPath?.hasPrefix("http://") == true ||
@@ -405,6 +552,28 @@ final class ComicLibraryStore: ObservableObject {
         }
     }
 
+    private func normalizeLegacyReadingDefaults() {
+        var changed = false
+        for index in comics.indices {
+            if abs(comics[index].ocrSafeAreaInset - 0.05) < 0.000_001 {
+                comics[index].ocrSafeAreaInset = 0
+                changed = true
+            }
+            if abs(comics[index].ocrMinimumTextHeight - 0.014) < 0.000_001 ||
+                abs(comics[index].ocrMinimumTextHeight - 0.006) < 0.000_001 {
+                comics[index].ocrMinimumTextHeight = 0.002
+                changed = true
+            }
+            if AITranslationMode(rawValue: comics[index].aiTranslationModeRaw) == nil {
+                comics[index].aiTranslationModeRaw = AITranslationMode.ocr.rawValue
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        }
+    }
+
     private func matchesExistingComic(_ existing: ComicBook, _ incoming: ComicBook) -> Bool {
         if existing.id == incoming.id {
             return true
@@ -418,22 +587,81 @@ final class ComicLibraryStore: ObservableObject {
            existing.komgaBookID == incoming.komgaBookID {
             return true
         }
+        if existing.sourceType == .opds, incoming.sourceType == .opds,
+           existing.mediaSourceID == incoming.mediaSourceID,
+           existing.remoteCoverID == incoming.remoteCoverID {
+            return true
+        }
         return false
     }
 
-    private func applyKomgaScan(_ remoteComics: [ComicBook], sourceID: UUID) -> Bool {
-        var changed = false
-        let remoteIDs = Set(remoteComics.map(\.id))
-        for comic in remoteComics {
-            if upsertRemoteComic(comic) {
-                changed = true
-            }
+    private func komgaIdentityKey(for comic: ComicBook) -> String? {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID else {
+            return nil
         }
+        return "\(sourceID.uuidString):\(bookID)"
+    }
+
+    private func removeLocalKomgaState(for comic: ComicBook) {
+        pendingKomgaProgressTasks[comic.id]?.cancel()
+        pendingKomgaProgressTasks[comic.id] = nil
+        comics.removeAll { existing in
+            if existing.id == comic.id {
+                return true
+            }
+            guard existing.sourceType == .komga,
+                  comic.sourceType == .komga,
+                  existing.mediaSourceID == comic.mediaSourceID,
+                  existing.komgaBookID == comic.komgaBookID else {
+                return false
+            }
+            return true
+        }
+        if let key = KomgaProvider.hiddenKey(for: comic) {
+            KomgaProvider.unhideComic(key: key)
+        }
+        if let sourceID = comic.mediaSourceID, let bookID = comic.komgaBookID {
+            RemoteImageLoader.removeCachedImages(sourceID: sourceID, bookID: bookID)
+            RemotePageLoader.removeCachedPages(sourceID: sourceID, bookID: bookID)
+        }
+        save()
+    }
+
+    private func applyKomgaScan(_ remoteComics: [ComicBook], sourceID: UUID, isAuthoritative: Bool) -> Bool {
+        applyRemoteScan(remoteComics, sourceID: sourceID, sourceType: .komga, isAuthoritative: isAuthoritative)
+    }
+
+    private func applyRemoteScan(
+        _ remoteComics: [ComicBook],
+        sourceID: UUID,
+        sourceType: ComicSourceType,
+        isAuthoritative: Bool
+    ) -> Bool {
+        var changed = false
+        let remoteKeys = Set(remoteComics.map(remoteIdentityKey))
+        for comic in remoteComics where upsertRemoteComic(comic) {
+            changed = true
+        }
+        guard isAuthoritative else { return changed }
         let oldCount = comics.count
         comics.removeAll { comic in
-            comic.sourceType == .komga && comic.mediaSourceID == sourceID && !remoteIDs.contains(comic.id)
+            guard comic.sourceType == sourceType, comic.mediaSourceID == sourceID else { return false }
+            return !remoteKeys.contains(remoteIdentityKey(comic))
         }
         return changed || comics.count != oldCount
+    }
+
+    private func remoteIdentityKey(_ comic: ComicBook) -> String {
+        switch comic.sourceType {
+        case .komga:
+            return "\(comic.mediaSourceID?.uuidString ?? ""):\(comic.komgaBookID ?? "")"
+        case .opds:
+            return "\(comic.mediaSourceID?.uuidString ?? ""):\(comic.remoteCoverID ?? comic.sourceURL ?? "")"
+        case .local:
+            return comic.libraryPath ?? comic.id.uuidString
+        }
     }
 
     private func upsertRemoteComic(_ comic: ComicBook) -> Bool {
@@ -441,7 +669,12 @@ final class ComicLibraryStore: ObservableObject {
             let existing = comics[index]
             var merged = comic
             merged.id = existing.id
-            merged.currentPageIndex = min(existing.currentPageIndex, max(0, comic.totalPages - 1))
+            if comic.sourceType == .opds {
+                merged.totalPages = max(existing.totalPages, comic.totalPages)
+                merged.remotePageCount = existing.remotePageCount ?? comic.remotePageCount
+            }
+            merged.currentPageIndex = min(max(existing.currentPageIndex, comic.currentPageIndex), max(0, merged.totalPages - 1))
+            merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened || comic.currentPageIndex > 0
             merged.scrollProgress = existing.scrollProgress
             merged.scrollPageProgress = existing.scrollPageProgress
             merged.lastReadAt = existing.lastReadAt
@@ -453,19 +686,66 @@ final class ComicLibraryStore: ObservableObject {
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
             merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
+            merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
+            merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
             merged.imageFitModeRaw = existing.imageFitModeRaw
             merged.scrollSpeedRaw = existing.scrollSpeedRaw
+            merged.seriesID = existing.seriesID
             let didChange = merged != existing
             if didChange {
                 comics[index] = merged
+            }
+            if comic.sourceType == .komga, existing.currentPageIndex > comic.currentPageIndex {
+                Task {
+                    await self.syncKomgaProgressNow(for: merged)
+                }
             }
             return didChange
         }
         comics.append(comic)
         return true
+    }
+
+    private func deleteKomgaComic(_ comic: ComicBook) async {
+        do {
+            try await KomgaProvider.deleteBook(comic)
+            removeLocalKomgaState(for: comic)
+            HapticManager.shared.play(.success)
+        } catch MediaSourceError.notFound {
+            removeLocalKomgaState(for: comic)
+            HapticManager.shared.play(.success)
+        } catch {
+            print("Komga 删除失败 \(comic.title): \(error.localizedDescription)")
+            HapticManager.shared.play(.error)
+        }
+    }
+
+    private func scheduleKomgaProgressSync(for comic: ComicBook) {
+        guard comic.sourceType == .komga else { return }
+        pendingKomgaProgressTasks[comic.id]?.cancel()
+        pendingKomgaProgressTasks[comic.id] = Task { [comic] in
+            do {
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self.syncKomgaProgressNow(for: comic)
+            await MainActor.run {
+                self.pendingKomgaProgressTasks[comic.id] = nil
+            }
+        }
+    }
+
+    private func syncKomgaProgressNow(for comic: ComicBook) async {
+        do {
+            try await KomgaProvider.updateReadProgress(for: comic)
+        } catch {
+            print("Komga 阅读进度同步失败 \(comic.title): \(error.localizedDescription)")
+        }
     }
 
     private func upsertScannedComic(_ result: ComicManager.ImportResult, seriesID: UUID?) -> Bool {
@@ -483,8 +763,9 @@ final class ComicLibraryStore: ObservableObject {
                 comics[index].fileSize = result.fileSize
                 changed = true
             }
-            if comics[index].coverImagePath == nil || comics[index].coverImagePath != result.coverImagePath {
-                comics[index].coverImagePath = result.coverImagePath
+            if let coverImagePath = result.coverImagePath,
+               comics[index].coverImagePath != coverImagePath {
+                comics[index].coverImagePath = coverImagePath
                 changed = true
             }
             if comics[index].seriesID != seriesID {
@@ -497,10 +778,6 @@ final class ComicLibraryStore: ObservableObject {
             }
             if comics[index].sourceURL != result.sourceURL {
                 comics[index].sourceURL = result.sourceURL
-                changed = true
-            }
-            if comics[index].smbPath != result.smbPath {
-                comics[index].smbPath = result.smbPath
                 changed = true
             }
             if comics[index].chapterTypeRaw != result.chapterTypeRaw {
@@ -523,7 +800,6 @@ final class ComicLibraryStore: ObservableObject {
             libraryPath: result.libraryPath,
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
-            smbPath: result.smbPath,
             chapterTypeRaw: result.chapterTypeRaw,
             chapterPath: result.chapterPath,
             seriesID: seriesID
@@ -532,10 +808,12 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func save() {
+        comicsSaveRevision += 1
+        let revision = comicsSaveRevision
         let snapshot = comics
         let url = libraryURL
         Task {
-            await diskStore.saveComics(snapshot, to: url)
+            await diskStore.saveComics(snapshot, revision: revision, to: url)
         }
     }
 
