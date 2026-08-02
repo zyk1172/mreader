@@ -152,7 +152,7 @@ final class ReadingActivityStore: ObservableObject {
 nonisolated enum ComicReadingProgress {
     static func completedPages(for comic: ComicBook) -> Int {
         guard comic.hasBeenOpened, comic.totalPages > 0 else { return 0 }
-        return min(max(comic.currentPageIndex + 1, 0), comic.totalPages)
+        return min(max(comic.furthestPageIndex + 1, 0), comic.totalPages)
     }
 
     static func fraction(for comic: ComicBook) -> Double {

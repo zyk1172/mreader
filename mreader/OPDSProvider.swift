@@ -31,8 +31,9 @@ nonisolated enum OPDSProvider {
         return try OPDSXMLFeedParser.parse(data: data, baseURL: baseURL).publications
     }
 
-    static func addSource(name: String, baseURL: String, username: String?, credential: String) async throws -> MediaSource {
+    static func addSource(name: String, baseURL: String, username: String?, credential: String, lanURL: String? = nil) async throws -> MediaSource {
         var source = try makeSource(name: name, baseURL: baseURL, username: username)
+        source.lanURL = lanURL
         _ = try await OPDSClient(source: source, credential: credential).publications(limit: 1)
         source.lastSyncAt = Date()
         try KomgaProvider.saveAPIKey(credential, for: source.id)
@@ -50,7 +51,10 @@ nonisolated enum OPDSProvider {
                 guard let credential = KomgaProvider.apiKey(for: source.id) else {
                     throw MediaSourceError.apiKeyMissing
                 }
-                let publications = try await OPDSClient(source: source, credential: credential).publications()
+                var resolvedSource = source
+                let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+                resolvedSource.baseURL = resolvedURL
+                let publications = try await OPDSClient(source: resolvedSource, credential: credential).publications()
                 let comics = publications.map { makeComic(source: source, publication: $0) }
                 var updatedSource = source
                 updatedSource.lastSyncAt = Date()
@@ -98,8 +102,11 @@ nonisolated enum OPDSProvider {
         }
 
         do {
+            var resolvedSource = source
+            let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+            resolvedSource.baseURL = resolvedURL
             let publicationID = comic.remoteCoverID ?? remoteURL.absoluteString
-            let localURL = try await OPDSClient(source: source, credential: credential).download(
+            let localURL = try await OPDSClient(source: resolvedSource, credential: credential).download(
                 remoteURL,
                 publicationID: publicationID
             )

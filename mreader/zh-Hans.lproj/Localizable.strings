@@ -1,0 +1,441 @@
+/* Main Tabs */
+"tab.continueReading" = "立即阅读";
+"tab.library" = "书架";
+"tab.statistics" = "阅读统计";
+
+/* Navigation */
+"nav.settings" = "设置";
+"nav.back" = "返回";
+"nav.done" = "完成";
+"nav.cancel" = "取消";
+"nav.save" = "保存";
+
+/* Shelf */
+"shelf.title" = "书架";
+"shelf.all" = "全部";
+"shelf.inProgress" = "正在阅读";
+"shelf.locked" = "已锁定";
+"shelf.local" = "本地漫画";
+"shelf.komga" = "Komga 漫画";
+"shelf.opds" = "OPDS 漫画";
+"shelf.itemCount" = "%d 项";
+"shelf.empty" = "还没有漫画";
+"shelf.pullToRefresh" = "下拉刷新";
+"shelf.gridMode" = "网格";
+"shelf.listMode" = "列表";
+"shelf.filterCategory" = "分类书架";
+"shelf.activity" = "书架活动";
+
+/* Comic Actions */
+"comic.rename" = "重命名";
+"comic.share" = "分享";
+"comic.openInFiles" = "在文件中打开";
+"comic.lock" = "锁定";
+"comic.unlock" = "取消锁定";
+"comic.rebuildThumbnail" = "重建缩略图";
+"comic.hide" = "隐藏";
+"comic.delete" = "删除";
+"comic.markAsRead" = "标记已读";
+"comic.addToSeries" = "添加到系列";
+"comic.removeFromSeries" = "移出系列";
+
+/* Series */
+"series.title" = "系列";
+"series.new" = "新系列";
+"series.name" = "系列名称";
+"series.create" = "创建";
+"series.rename" = "重命名系列";
+"series.markAllRead" = "标记全部已读";
+"series.rebuildThumbnails" = "重建缩略图";
+"series.importFiles" = "导入章节文件";
+"series.importFolder" = "导入章节文件夹";
+"series.addFromShelf" = "从书架添加";
+"series.empty" = "系列为空";
+"series.addChapters" = "添加章节漫画后会显示在这里";
+
+/* Reader */
+"reader.settings" = "阅读设置";
+"reader.jumpToPage" = "跳转";
+"reader.pageNumber" = "页码";
+"reader.currentPage" = "当前 %d / %d";
+"reader.bookmark" = "书签";
+"reader.addBookmark" = "添加书签到第 %d 页";
+"reader.noBookmarks" = "暂无书签";
+"reader.editBookmarkNote" = "编辑书签备注";
+"reader.bookmarkNotePlaceholder" = "备注（可选）";
+"reader.deleteBookmark" = "删除书签";
+
+/* Reading Settings */
+"reader.mode" = "阅读模式";
+"reader.mode.horizontalPage" = "水平翻页";
+"reader.mode.verticalPage" = "垂直翻页";
+"reader.mode.continuousScroll" = "连续滚动";
+"reader.mode.infiniteScroll" = "无限滚动";
+"reader.mode.doublePage" = "双页模式";
+"reader.direction" = "阅读方向";
+"reader.direction.leftToRight" = "从左到右";
+"reader.direction.rightToLeft" = "从右到左";
+"reader.animation" = "翻页动画";
+"reader.animation.none" = "无动画";
+"reader.animation.slide" = "滑动";
+"reader.animation.fade" = "淡入淡出";
+"reader.animation.curl" = "卷曲";
+"reader.fitMode" = "图片适配";
+"reader.fitMode.fitScreen" = "适应屏幕";
+"reader.fitMode.fitWidth" = "适应宽度";
+"reader.fitMode.fitHeight" = "适应高度";
+"reader.fitMode.original" = "原始尺寸";
+"reader.scrollSpeed" = "滚动速度";
+"reader.scrollSpeed.slow" = "慢";
+"reader.scrollSpeed.standard" = "标准";
+"reader.scrollSpeed.fast" = "快";
+
+/* OCR Settings */
+"ocr.enable" = "OCR 文字识别";
+"ocr.autoMagnify" = "自动文字放大";
+"ocr.magnifySize" = "放大文字大小";
+"ocr.safeArea" = "忽略边缘区域";
+"ocr.aiTranslation" = "AI 翻译";
+"ocr.translationMode" = "翻译模式";
+"ocr.translationMode.ocr" = "OCR 文本";
+"ocr.translationMode.vision" = "视觉图片";
+"ocr.autoTranslate" = "自动翻译当前页";
+"ocr.borderProgress" = "AI 翻译边框进度";
+"ocr.colorStyle" = "翻译文字配色";
+"ocr.colorStyle.contrast" = "高对比";
+"ocr.colorStyle.coolWarm" = "冷暖分明";
+"ocr.colorStyle.jewel" = "宝石色";
+"ocr.targetLanguage" = "翻译为";
+"translation.language.zh-Hans" = "简体中文";
+"translation.language.zh-Hant" = "繁体中文";
+"translation.language.en" = "英语";
+"translation.language.ja" = "日语";
+"translation.language.ko" = "韩语";
+"translation.language.fr" = "法语";
+"translation.language.de" = "德语";
+"translation.language.es" = "西班牙语";
+"translation.language.it" = "意大利语";
+"translation.language.pt" = "葡萄牙语";
+"translation.language.ru" = "俄语";
+"translation.language.th" = "泰语";
+"translation.language.vi" = "越南语";
+"translation.language.id" = "印度尼西亚语";
+"translation.language.ar" = "阿拉伯语";
+"aiProvider.title" = "AI 接口配置";
+"aiProvider.saved" = "已保存的接口";
+"aiProvider.empty" = "尚未添加 AI 接口";
+"aiProvider.emptyDescription" = "添加 OpenAI 兼容接口及其子模型。";
+"aiProvider.sharedModelDescription" = "OCR 与视觉翻译共同使用当前子模型。请求失败时不会自动切换其他模型。";
+"aiProvider.add" = "添加接口配置";
+"aiProvider.makeActive" = "设为当前";
+"aiProvider.deleteTitle" = "删除接口配置？";
+"aiProvider.deleteMessage" = "此接口保存的 API Key 和子模型将一并删除。";
+"aiProvider.connection" = "接口连接";
+"aiProvider.name" = "接口名称";
+"aiProvider.childModels" = "子模型";
+"aiProvider.childModelsDescription" = "每行输入一个模型名称，然后选择 OCR 与视觉翻译共同使用的唯一子模型。";
+"aiProvider.currentChildModel" = "当前子模型";
+"aiProvider.modelRequired" = "请至少添加并选择一个子模型。";
+"aiProvider.apiKeyRequired" = "请输入 API Key。";
+"ocr.filter" = "OCR 过滤";
+"ocr.filterDescription" = "网页地址、广告标注、页边极小字会被忽略，不送去 OCR 放大或 AI 翻译。";
+"ocr.minTextSize" = "不处理小字大小";
+"ocr.debug" = "OCR 调试";
+"ocr.debugDescription" = "视觉图片识别翻译会把当前页或兜底切片发送到第三方 OpenAI 兼容接口。";
+"ocr.showDebugBoxes" = "显示 OCR 调试框";
+
+/* Settings */
+"settings.title" = "设置";
+"settings.openai" = "OpenAI 兼容接口";
+"settings.selectLibrary" = "选择漫画库";
+"settings.selectLibraryDescription" = "请选择 Files 中的 Manga 或其他漫画根目录。后续扫描、导入、删除都只基于这个目录。";
+"settings.selectLibraryRoot" = "选择漫画根目录";
+"settings.openaiDescription" = "Base URL 填到 /v1 即可，例如 https://api.openai.com/v1 或你的代理服务地址。OCR 模式只发送文字；视觉模式会按设置上传当前页或切片图片。";
+"settings.apiKey" = "输入 OpenAI API Key";
+"settings.baseUrl" = "Base URL";
+"settings.model" = "模型";
+"settings.testConnection" = "测试连接";
+"settings.connectionSuccess" = "连接成功，模型 %@ 可用";
+"settings.translationPrompt" = "翻译 Prompt 模板";
+"settings.visionPrompt" = "视觉翻译 Prompt 模板";
+"settings.resetDefault" = "恢复默认";
+
+/* Media Sources */
+"mediaSources.title" = "远程漫画媒体库";
+"mediaSources.added" = "已添加媒体库";
+"mediaSources.noServers" = "还没有远程漫画服务器";
+"mediaSources.add" = "添加远程服务器";
+"mediaSources.type" = "类型";
+"mediaSources.name" = "显示名称";
+"mediaSources.serverUrl" = "服务器地址";
+"mediaSources.lanUrl" = "内网地址（可选）";
+"mediaSources.lanPrefix" = "内网: ";
+"mediaSources.username" = "用户名（Bearer Token 模式可留空）";
+"mediaSources.apiKey" = "API Key";
+"mediaSources.password" = "密码或 Token";
+"mediaSources.testAndSave" = "测试连接并保存";
+"mediaSources.refresh" = "刷新";
+"mediaSources.edit" = "编辑";
+"mediaSources.remove" = "移除";
+"mediaSources.enable" = "启用";
+"mediaSources.disable" = "禁用";
+"mediaSources.hiddenComics" = "已隐藏的 Komga 漫画";
+"mediaSources.noHidden" = "暂无隐藏的 Komga 漫画";
+"mediaSources.unhide" = "取消隐藏";
+"mediaSources.komgaDescription" = "Komga API Key 仅保存到 Keychain。";
+"mediaSources.opdsDescription" = "OPDS 支持 Atom/JSON 目录。填写用户名时使用 Basic 认证；用户名留空时凭据作为 Bearer Token。";
+"mediaSources.saveSuccess" = "保存成功";
+"mediaSources.discoveredKomga" = "发现 %d 个 Komga 书库";
+"mediaSources.discoveredOpds" = "发现 %d 本 OPDS 出版物";
+"mediaSources.connectSuccess" = "连接成功：%@，已保存 %@";
+"mediaSources.syncComplete" = "%@，已同步 %d 本漫画";
+"mediaSources.refreshComplete" = "刷新完成：已同步 %d 本 %@ 漫画";
+
+/* Import */
+"import.files" = "从本机或云盘导入文件";
+"import.folder" = "从本机或云盘导入文件夹";
+"import.webServer" = "网页服务";
+"import.webServerDescription" = "开启后可通过局域网访问设备，上传漫画文件。";
+"import.uploadFiles" = "上传文件";
+
+/* Backup */
+"backup.title" = "备份与恢复";
+"backup.export" = "导出设置备份";
+"backup.import" = "导入设置备份";
+"backup.description" = "普通备份不包含 API Key、密码或 Token。需要迁移凭证时，请使用密码加密备份。漫画文件、阅读进度和缓存不包含在内。";
+"backup.exportEncrypted" = "导出加密凭证备份";
+"backup.encryptTitle" = "加密设置备份";
+"backup.decryptTitle" = "解锁设置备份";
+"backup.password" = "备份密码";
+"backup.passwordConfirm" = "再次输入密码";
+"backup.passwordDescription" = "密码至少 8 个字符。密码不会保存，丢失后无法恢复备份。";
+
+/* Storage */
+"storage.title" = "管理空间";
+"storage.comicCount" = "漫画数量";
+"storage.coverCache" = "封面缓存";
+"storage.pageCache" = "页面缓存";
+"storage.tempCache" = "临时解压缓存";
+"storage.clearTempCache" = "清理临时解压缓存";
+"storage.rebuildCovers" = "检查并重建封面索引";
+"storage.refreshIndex" = "刷新漫画库索引";
+"storage.resetDetection" = "重置漫画类型检测记录";
+
+/* Local Library */
+"localLibrary.title" = "本地库";
+"localLibrary.address" = "地址";
+"localLibrary.copyAddress" = "复制本地库地址";
+"localLibrary.changeRoot" = "更换漫画根目录";
+
+/* Interaction */
+"interaction.title" = "交互";
+"interaction.haptic" = "触感反馈";
+"interaction.burnInProtection" = "屏幕防烧伤保护";
+"interaction.dailyGoal" = "每日阅读页数目标";
+
+/* Statistics */
+"stats.title" = "阅读统计";
+"stats.todaySummary" = "今日概览";
+"stats.readingGoal" = "阅读目标";
+"stats.readingRings" = "阅读环";
+"stats.sevenDayActivity" = "7天活动";
+"stats.thirtyDayDots" = "30天打卡";
+"stats.topComics" = "最爱漫画";
+"stats.pagesRead" = "已读 %d 页";
+"stats.dailyGoal" = "每日目标 %d 页";
+"stats.currentStreak" = "当前连续";
+"stats.longestStreak" = "最长连续";
+
+/* Common */
+"common.loading" = "加载中...";
+"common.error" = "错误";
+"common.success" = "成功";
+"common.confirm" = "确认";
+"common.delete" = "删除";
+"common.cancel" = "取消";
+"common.save" = "保存";
+"common.edit" = "编辑";
+"common.close" = "关闭";
+"common.refresh" = "刷新";
+"common.retry" = "重试";
+"common.yes" = "是";
+"common.no" = "否";
+"common.filter" = "过滤";
+
+/* Error Messages */
+"error.unreachable" = "无法连接到服务器";
+"error.unauthorized" = "认证失败，请检查服务器凭据";
+"error.invalidUrl" = "服务器地址格式不正确";
+"error.timeout" = "连接超时";
+"error.notFound" = "远程资源不存在";
+"error.serverError" = "服务器错误 %d";
+"error.importFailed" = "导入失败";
+"error.importSuccess" = "导入已处理";
+"error.backupFailed" = "设置备份导出失败";
+
+/* Days of Week */
+"day.monday" = "周一";
+"day.tuesday" = "周二";
+"day.wednesday" = "周三";
+"day.thursday" = "周四";
+"day.friday" = "周五";
+"day.saturday" = "周六";
+"day.sunday" = "周日";
+
+/* Translation Languages */
+"lang.chinese" = "中文";
+"lang.english" = "英文";
+"lang.japanese" = "日文";
+"lang.korean" = "韩文";
+"lang.simplifiedChinese" = "简体中文";
+"lang.traditionalChinese" = "繁体中文";
+
+/* Vision Prompt Template */
+"visionPrompt.title" = "视觉翻译 Prompt 模板";
+"visionPrompt.resetDefault" = "恢复默认";
+
+/* Statistics */
+"stats.pagesReadShort" = "%d页";
+
+/* Delete Confirmation */
+"delete.localComic" = "会删除用户漫画库中的真实文件，并清理书架记录。此操作不能撤销。";
+"delete.komgaComic" = "会调用 Komga 服务器删除该漫画，并清理书架记录。此操作不能撤销。";
+"delete.opdsComic" = "只会删除 MReader 中的 OPDS 书架记录和本地缓存，不会删除服务器上的文件。";
+"delete.series" = "会删除该系列文件夹及其中漫画，并清理书架记录。此操作不能撤销。";
+"delete.selection" = "会删除选中漫画或系列对应的真实文件，并清理书架记录。此操作不能撤销。";
+
+/* Error Messages */
+"error.libraryRootFailed" = "无法保存漫画根目录访问权限，请重新选择 Files 中的文件夹。";
+"error.restoreFailed" = "恢复失败";
+
+/* Import Messages */
+"import.noReadableImages" = "没有找到可读取的图片，或压缩包/PDF 解析失败。当前支持 ZIP、CBZ、EPUB、PDF 和图片文件夹。";
+"import.partialSuccessWithPDF" = "已导入 %d 个项目，PDF 已处理为文件夹漫画并刷新书架；另有 %d 个项目失败。";
+"import.partialSuccess" = "已导入 %d 个项目，%d 个项目失败。失败项目可能不包含可读取图片或压缩包已损坏。";
+"import.pdfProcessedSingle" = "PDF 已处理为文件夹漫画，已刷新书架，请查看。";
+"import.pdfProcessed" = "%d 个 PDF 已处理为文件夹漫画，已刷新书架，请查看。";
+
+/* Comic Additional */
+"comic.readTo" = "读到 %d / %d";
+
+/* Shelf Additional */
+"shelf.selectedCount" = "已选 %d";
+"shelf.emptyTitle" = "书架空空如也";
+"shelf.emptyDescription" = "支持导入图片文件夹、ZIP、CBZ";
+"shelf.importComics" = "导入漫画文件";
+"shelf.importFolder" = "导入漫画文件夹";
+
+/* Series Additional */
+"series.newDescription" = "创建后可以打开系列并添加章节漫画。";
+"series.addChapterFiles" = "导入章节文件";
+"series.addChapterFolder" = "导入章节文件夹";
+"series.addFromShelfButton" = "从书架添加";
+"series.addSheetTitle" = "添加章节";
+"series.removeFromSeries" = "移出系列";
+
+/* Comic Additional */
+"comic.hideDescription" = "此操作只会从 MReader 书架隐藏该漫画，不会删除 Komga 服务器文件。";
+"comic.sourceLocal" = "本地";
+"comic.sourceKomga" = "Komga";
+"comic.sourceOpds" = "OPDS";
+"comic.notOpened" = "尚未阅读";
+"comic.continueReading" = "继续阅读";
+"comic.readProgress" = "阅读进度";
+"comic.pagesCount" = "%d 页";
+"comic.chaptersPages" = "%d 章 · %d 页";
+"comic.chaptersCount" = "%d 章";
+
+/* Reader Additional */
+"reader.loadFailed" = "加载失败";
+"reader.parsing" = "正在解析...";
+"reader.imageLoadFailed" = "图片加载失败";
+"reader.noImagesFound" = "没有找到图片";
+"reader.noImagesDescription" = "请重新导入包含 JPG、PNG 或 WebP 图片的漫画文件夹。";
+"reader.burnInEnabled" = "屏幕保护已启用";
+"reader.burnInDescription" = "页面静止超过 4 小时。轻点屏幕继续阅读。";
+"reader.ocrMagnify" = "OCR文字放大";
+"reader.aiTranslationLabel" = "AI翻译";
+"reader.ocrFilterExample" = "示例文字";
+"reader.ocrFilterThreshold" = "当前阈值 %d";
+"reader.ocrFilterSmallText" = "比示例更小的字不处理";
+"reader.bookmarkEditNote" = "编辑书签备注";
+"reader.bookmarkNotePlaceholder" = "备注（可选）";
+"reader.ocrTextSizeSmall" = "小";
+"reader.ocrTextSizeStandard" = "标准";
+"reader.ocrTextSizeLarge" = "大";
+"reader.ocrTextSizeExtraLarge" = "特大";
+"reader.imageLoadError" = "图片加载失败";
+"reader.currentPageOf" = "当前 %d / %d";
+"reader.bookmarkPage" = "第 %d 页";
+
+/* Settings Additional */
+"settings.translationPromptPlaceholder" = "可用占位符：{targetLanguage}、{ocrText}";
+"settings.visionPromptPlaceholder" = "可用占位符：{targetLanguage}";
+"settings.restoreSuccess" = "恢复成功";
+"settings.restoreSuccessMessage" = "设置备份已恢复。";
+"settings.restoreFailed" = "恢复失败";
+
+/* Import Additional */
+"import.accessAddress" = "访问地址";
+"import.copyWebAddress" = "复制网页地址";
+"import.title" = "导入服务";
+"import.comicMediaLibrary" = "漫画媒体库";
+"import.itemsCount" = "导入 %d 个项目";
+"import.importAndParse" = "导入并解析";
+"import.refreshRemoteLibrary" = "刷新远程漫画库";
+
+/* Settings Additional */
+"settings.invalidUrl" = "URL 格式不正确";
+"settings.invalidResponse" = "无效响应";
+"settings.apiKeyInvalid" = "API Key 无效或无权限";
+"settings.modelNotFound" = "模型 %@ 不存在";
+
+
+/* Comic Additional */
+"comic.unknownSize" = "未知大小";
+
+/* Statistics Additional */
+"stats.todaySummary" = "今日摘要";
+"stats.dailyGoalLabel" = "每日目标";
+"stats.minutes" = "分钟";
+"stats.pages" = "页";
+"stats.completed" = "完成";
+"stats.goalPages" = "%d 页";
+"stats.pagesPerDay" = "页/天";
+"stats.readingRingsLabel" = "阅读圆环";
+"stats.todayGoal" = "今日 / %d";
+"stats.weekGoal" = "本周目标";
+"stats.streakDays" = "连续天数";
+"stats.thisWeek" = "本周";
+"stats.minutesPages" = "%d 分钟 · %d 页";
+"stats.monthlyRecord" = "本月记录";
+"stats.currentStreakDays" = "连续 %d 天";
+"stats.longestStreakDays" = "最长 %d 天";
+"stats.solidDotMeaning" = "实心圆表示当天阅读";
+"stats.topReading" = "阅读最多";
+"stats.noReadingRecords" = "暂无阅读记录";
+"stats.noReadingRecordsDescription" = "开始阅读后，这里会显示最常读的漫画。";
+"stats.activityDetail" = "%d 分钟 · %d / %d 页";
+
+/* Storage Additional */
+"storage.seriesCount" = "系列数量";
+"storage.comicCountLabel" = "漫画数量";
+"storage.imagePages" = "图片页数";
+"storage.copyAddress" = "复制本地库地址";
+"storage.cacheAndTemp" = "缓存与临时文件";
+"storage.cacheDescription" = "漫画源文件只存放在 Files 可见的 MReader 本地库；这里不删除漫画源文件。";
+"storage.tempExtractCache" = "临时解压缓存";
+"storage.clearTempCache" = "清理临时解压缓存";
+"storage.rebuildCoverIndex" = "检查并重建封面索引";
+"storage.refreshLibraryIndex" = "刷新漫画库索引";
+
+/* Background Task */
+"background.processing" = "后台处理中";
+"background.taskCount" = "%d 个任务";
+
+/* Time */
+"time.today" = "今天";
+"time.yesterday" = "昨天";
+"time.daysAgo" = "%d天前";
+"ocr.visualVerification" = "低置信度视觉复核";
+"ocr.visualVerificationDescription" = "仅在本地 OCR 置信度较低时，将最多 3 个文字裁剪区域发送到已配置的第三方视觉模型。";

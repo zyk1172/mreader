@@ -11,20 +11,37 @@ nonisolated struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var type: MediaSourceType
     var baseURL: String
+    var lanURL: String?
     var username: String?
     var createdAt: Date
     var lastSyncAt: Date?
     var isEnabled: Bool
 
-    init(id: UUID = UUID(), name: String, type: MediaSourceType, baseURL: String, username: String? = nil, createdAt: Date = Date(), lastSyncAt: Date? = nil, isEnabled: Bool = true) {
+    nonisolated var resolvedBaseURL: String { baseURL }
+
+    init(id: UUID = UUID(), name: String, type: MediaSourceType, baseURL: String, lanURL: String? = nil, username: String? = nil, createdAt: Date = Date(), lastSyncAt: Date? = nil, isEnabled: Bool = true) {
         self.id = id
         self.name = name
         self.type = type
         self.baseURL = baseURL
+        self.lanURL = lanURL
         self.username = username
         self.createdAt = createdAt
         self.lastSyncAt = lastSyncAt
         self.isEnabled = isEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        type = try container.decode(MediaSourceType.self, forKey: .type)
+        baseURL = try container.decode(String.self, forKey: .baseURL)
+        lanURL = try container.decodeIfPresent(String.self, forKey: .lanURL)
+        username = try container.decodeIfPresent(String.self, forKey: .username)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        lastSyncAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncAt)
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
     }
 }
 
@@ -191,15 +208,30 @@ nonisolated struct KomgaReadProgressDTO: Decodable, Hashable, Sendable {
     let page: Int?
     let pageIndex: Int?
     let completed: Bool?
+    let readDate: String?
+    let created: String?
+    let lastModified: String?
 
     var resolvedPageIndex: Int? {
         pageIndex ?? page.map { max($0 - 1, 0) }
+    }
+
+    var resolvedUpdatedAt: Date {
+        [lastModified, readDate, created]
+            .compactMap { value in
+                guard let value else { return nil }
+                return try? Date(value, strategy: .iso8601)
+            }
+            .max() ?? .distantPast
     }
 
     private enum CodingKeys: String, CodingKey {
         case page
         case pageIndex
         case completed
+        case readDate
+        case created
+        case lastModified
     }
 
     init(from decoder: Decoder) throws {
@@ -207,6 +239,9 @@ nonisolated struct KomgaReadProgressDTO: Decodable, Hashable, Sendable {
         page = container.decodeFlexibleInt(forKey: .page)
         pageIndex = container.decodeFlexibleInt(forKey: .pageIndex)
         completed = try? container.decodeIfPresent(Bool.self, forKey: .completed)
+        readDate = container.decodeFlexibleString(forKey: .readDate)
+        created = container.decodeFlexibleString(forKey: .created)
+        lastModified = container.decodeFlexibleString(forKey: .lastModified)
     }
 }
 
@@ -218,6 +253,11 @@ nonisolated struct KomgaReadProgressUpdateDTO: Encodable, Sendable {
         self.page = pageIndex + 1
         self.completed = completed
     }
+}
+
+nonisolated struct RemoteReadingProgressSnapshot: Equatable, Sendable {
+    let pageIndex: Int
+    let updatedAt: Date
 }
 
 nonisolated struct KomgaPageResponse<T: Decodable & Sendable>: Decodable, Sendable {

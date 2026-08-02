@@ -14,7 +14,12 @@ private actor ComicLibraryDiskStore {
         do {
             let data = try Data(contentsOf: libraryURL)
             comics = try JSONDecoder().decode([ComicBook].self, from: data)
-                .sorted { $0.lastReadAt > $1.lastReadAt }
+                .sorted { lhs, rhs in
+                    let lhsFinished = ComicReadingProgress.isFinished(lhs)
+                    let rhsFinished = ComicReadingProgress.isFinished(rhs)
+                    if lhsFinished != rhsFinished { return !lhsFinished }
+                    return lhs.lastReadAt > rhs.lastReadAt
+                }
         } catch {
             comics = []
         }
@@ -61,8 +66,11 @@ final class ComicLibraryStore: ObservableObject {
     private let libraryURL: URL
     private let seriesURL: URL
     private let diskStore = ComicLibraryDiskStore()
+    private let syncCoordinator = LibrarySyncCoordinator()
     private var pendingKomgaProgressTasks: [UUID: Task<Void, Never>] = [:]
     private var comicsSaveRevision = 0
+    private var lastKomgaSyncCount = 0
+    private var lastOPDSSyncCount = 0
 
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -83,6 +91,11 @@ final class ComicLibraryStore: ObservableObject {
             merged.id = existing.id
             merged.title = existing.title.isEmpty ? comic.title : existing.title
             merged.currentPageIndex = min(max(existing.currentPageIndex, 0), max(0, comic.totalPages - 1))
+            merged.furthestPageIndex = min(
+                max(existing.furthestPageIndex, max(comic.furthestPageIndex, merged.currentPageIndex)),
+                max(0, comic.totalPages - 1)
+            )
+            merged.progressUpdatedAt = existing.progressUpdatedAt
             merged.hasBeenOpened = existing.hasBeenOpened
             merged.scrollProgress = existing.scrollProgress
             merged.scrollPageProgress = existing.scrollPageProgress
@@ -157,9 +170,12 @@ final class ComicLibraryStore: ObservableObject {
         guard let index = comics.firstIndex(where: { $0.id == comic.id }) else { return }
         let existing = comics[index]
         var merged = comic
-        if comic.sourceType == .komga {
-            merged.currentPageIndex = min(max(existing.currentPageIndex, comic.currentPageIndex), max(0, comic.totalPages - 1))
-        }
+        merged.currentPageIndex = min(max(comic.currentPageIndex, 0), max(0, comic.totalPages - 1))
+        merged.furthestPageIndex = min(
+            max(existing.furthestPageIndex, max(comic.furthestPageIndex, merged.currentPageIndex)),
+            max(0, comic.totalPages - 1)
+        )
+        merged.progressUpdatedAt = max(existing.progressUpdatedAt, comic.progressUpdatedAt)
         merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened
         comics[index] = merged
         sortAndSave()
@@ -251,26 +267,61 @@ final class ComicLibraryStore: ObservableObject {
 
     func syncLocalLibrary() {
         Task {
-            await syncAllLibrariesAsync()
+            await syncLocalLibraryAsync()
         }
     }
 
     func syncLocalLibraryAsync() async {
+        await syncCoordinator.perform(scope: .local) { [weak self] scope in
+            guard let self else { return }
+            await self.performLibrarySync(scope: scope)
+        }
+    }
+
+    private func performLocalLibrarySync() async {
         let scanned = await Task.detached(priority: .utility) {
             ComicManager.scanLocalLibraryHierarchy()
         }.value
         applyScan(scanned)
     }
 
-    func syncAllLibrariesAsync() async {
-        await syncLocalLibraryAsync()
-        await syncKomgaSources()
-        await syncOPDSSources()
+    func syncAllLibrariesAsync(skipPrewarm: Bool = false) async {
+        var scope = LibrarySyncScope.all
+        if !skipPrewarm {
+            scope.insert(.prewarmKomga)
+        }
+        await syncCoordinator.perform(scope: scope) { [weak self] requestedScope in
+            guard let self else { return }
+            await self.performLibrarySync(scope: requestedScope)
+        }
         HapticManager.shared.play(.success)
+    }
+
+    private func performLibrarySync(scope: LibrarySyncScope) async {
+        if scope.contains(.prewarmKomga) {
+            await KomgaProvider.prewarmResolvedURLs()
+        }
+        if scope.contains(.local) {
+            await performLocalLibrarySync()
+        }
+        if scope.contains(.komga) {
+            lastKomgaSyncCount = await performKomgaSourcesSync()
+        }
+        if scope.contains(.opds) {
+            lastOPDSSyncCount = await performOPDSSourcesSync()
+        }
     }
 
     @discardableResult
     func syncKomgaSources() async -> Int {
+        await syncCoordinator.perform(scope: .komga) { [weak self] scope in
+            guard let self else { return }
+            await self.performLibrarySync(scope: scope)
+        }
+        return lastKomgaSyncCount
+    }
+
+    private func performKomgaSourcesSync() async -> Int {
         let loadedSources = KomgaProvider.loadSources().filter { $0.type == .komga }
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
@@ -315,6 +366,14 @@ final class ComicLibraryStore: ObservableObject {
 
     @discardableResult
     func syncOPDSSources() async -> Int {
+        await syncCoordinator.perform(scope: .opds) { [weak self] scope in
+            guard let self else { return }
+            await self.performLibrarySync(scope: scope)
+        }
+        return lastOPDSSyncCount
+    }
+
+    private func performOPDSSourcesSync() async -> Int {
         let loadedSources = KomgaProvider.loadSources().filter { $0.type == .opds }
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
@@ -512,6 +571,38 @@ final class ComicLibraryStore: ObservableObject {
         save()
     }
 
+    func markAsRead(id: UUID) {
+        guard let index = comics.firstIndex(where: { $0.id == id }) else { return }
+        comics[index].currentPageIndex = max(comics[index].totalPages - 1, 0)
+        comics[index].furthestPageIndex = comics[index].currentPageIndex
+        comics[index].progressUpdatedAt = Date()
+        comics[index].hasBeenOpened = true
+        comics[index].lastReadAt = Date()
+        sortAndSave()
+    }
+
+    func markSeriesAsRead(seriesID: UUID) {
+        var changed = false
+        for index in comics.indices where comics[index].seriesID == seriesID && !ComicReadingProgress.isFinished(comics[index]) {
+            comics[index].currentPageIndex = max(comics[index].totalPages - 1, 0)
+            comics[index].furthestPageIndex = comics[index].currentPageIndex
+            comics[index].progressUpdatedAt = Date()
+            comics[index].hasBeenOpened = true
+            comics[index].lastReadAt = Date()
+            changed = true
+        }
+        if changed {
+            sortAndSave()
+        }
+    }
+
+    func resetReadingPresetDetection() {
+        for index in comics.indices {
+            comics[index].hasInitializedReadingPreset = false
+        }
+        save()
+    }
+
     private func load() async {
         let snapshot = await diskStore.load(libraryURL: libraryURL, seriesURL: seriesURL)
         comics = snapshot.comics
@@ -520,12 +611,19 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func sortAndSave() {
-        comics.sort { $0.lastReadAt > $1.lastReadAt }
+        comics.sort { lhs, rhs in
+            let lhsFinished = ComicReadingProgress.isFinished(lhs)
+            let rhsFinished = ComicReadingProgress.isFinished(rhs)
+            if lhsFinished != rhsFinished { return !lhsFinished }
+            return lhs.lastReadAt > rhs.lastReadAt
+        }
         save()
     }
 
     func runStartupMaintenance() {
-        syncLocalLibrary()
+        Task {
+            await syncAllLibrariesAsync()
+        }
     }
 
     private func purgeNetworkLibraryState() {
@@ -673,11 +771,23 @@ final class ComicLibraryStore: ObservableObject {
                 merged.totalPages = max(existing.totalPages, comic.totalPages)
                 merged.remotePageCount = existing.remotePageCount ?? comic.remotePageCount
             }
-            merged.currentPageIndex = min(max(existing.currentPageIndex, comic.currentPageIndex), max(0, merged.totalPages - 1))
-            merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened || comic.currentPageIndex > 0
-            merged.scrollProgress = existing.scrollProgress
-            merged.scrollPageProgress = existing.scrollPageProgress
-            merged.lastReadAt = existing.lastReadAt
+            let progressResolution = ReadingProgressMergePolicy.resolve(
+                existing: existing,
+                incoming: comic,
+                totalPages: merged.totalPages
+            )
+            merged.currentPageIndex = progressResolution.currentPageIndex
+            merged.furthestPageIndex = progressResolution.furthestPageIndex
+            merged.progressUpdatedAt = progressResolution.progressUpdatedAt
+            if progressResolution.usesIncomingLocation {
+                merged.scrollProgress = comic.scrollProgress
+                merged.scrollPageProgress = comic.scrollPageProgress
+            } else {
+                merged.scrollProgress = existing.scrollProgress
+                merged.scrollPageProgress = existing.scrollPageProgress
+            }
+            merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened || merged.furthestPageIndex > 0
+            merged.lastReadAt = max(existing.lastReadAt, comic.lastReadAt)
             merged.isLocked = existing.isLocked
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
@@ -698,7 +808,7 @@ final class ComicLibraryStore: ObservableObject {
             if didChange {
                 comics[index] = merged
             }
-            if comic.sourceType == .komga, existing.currentPageIndex > comic.currentPageIndex {
+            if comic.sourceType == .komga, existing.furthestPageIndex > comic.furthestPageIndex {
                 Task {
                     await self.syncKomgaProgressNow(for: merged)
                 }

@@ -34,18 +34,23 @@ struct TextBlock: Identifiable, Sendable {
         self.ocrSource = ocrSource
         self.isFiltered = isFiltered
         self.filterReason = filterReason
-        self.estimatedFontScale = estimatedFontScale ?? Double(boundingBox.height)
+        // 横排行的字号≈行高，竖排列的字号≈列宽；取较小边比恒取高度更接近真实字号
+        self.estimatedFontScale = estimatedFontScale ?? Double(min(boundingBox.width, boundingBox.height))
         self.textColorHex = textColorHex
         self.polygon = polygon
         self.translationLines = translationLines
     }
 }
 
+nonisolated struct OCRVerificationRegion: Sendable {
+    let blockID: UUID
+    let sourceRect: CGRect
+}
+
 nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     case invalidConfiguration(String)
     case server(model: String, statusCode: Int?, message: String)
     case invalidResponse(model: String)
-    case allModelsFailed(lastModel: String?, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -58,18 +63,49 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
             return "模型 \(model) 请求失败：\(message)"
         case .invalidResponse(let model):
             return "模型 \(model) 返回了无法识别的响应"
-        case .allModelsFailed(let lastModel, let message):
-            if let lastModel {
-                return "所有可用模型均请求失败，最后使用 \(lastModel)：\(message)"
-            }
-            return "没有可用的 AI 模型：\(message)"
         }
     }
 }
 
 class AITranslator {
-    private static let maximumTextModelsPerRequest = 3
-    private static let maximumVisionModelsPerRequest = 2
+    nonisolated static func visualVerificationRegionsForDiagnostics(
+        _ blocks: [TextBlock],
+        confidenceThreshold: Double = 0.72,
+        maximumCount: Int = 3
+    ) -> [OCRVerificationRegion] {
+        blocks
+            .filter { block in
+                block.confidence < confidenceThreshold || appearsGarbled(block.text)
+            }
+            .sorted { lhs, rhs in
+                if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }
+                return lhs.boundingBox.minY < rhs.boundingBox.minY
+            }
+            .prefix(max(maximumCount, 0))
+            .map { block in
+                let horizontalPadding = max(block.boundingBox.width * 0.15, 0.008)
+                let verticalPadding = max(block.boundingBox.height * 0.15, 0.006)
+                let padded = block.boundingBox.insetBy(
+                    dx: -horizontalPadding,
+                    dy: -verticalPadding
+                )
+                return OCRVerificationRegion(
+                    blockID: block.id,
+                    sourceRect: padded.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                )
+            }
+    }
+
+    nonisolated private static func appearsGarbled(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        if trimmed.contains("�") { return true }
+        let usefulCount = trimmed.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }.count
+        let symbolCount = max(trimmed.unicodeScalars.count - usefulCount, 0)
+        return symbolCount > max(3, trimmed.unicodeScalars.count / 2)
+    }
 
     nonisolated static let defaultTranslationPromptTemplate = """
     你是一个漫画对白翻译助手。请只翻译我提供的 OCR 文本，不要续写、总结、评价或添加剧情。
@@ -82,6 +118,9 @@ class AITranslator {
     如果文本包含成人、暴力、敏感或私人内容，只进行中性、准确翻译，不要扩写、润色成更露骨内容，也不要添加新的细节。
     请将以下文本翻译为：{targetLanguage}
 
+    整页对白（按阅读顺序，仅用于理解上下文，禁止翻译或输出这些内容）：
+    {pageContext}
+
     OCR 文本：
     {ocrText}
 
@@ -89,12 +128,13 @@ class AITranslator {
     {ocrMetadata}
 
     输出要求：
-    只输出翻译结果。
+    只输出“OCR 文本”一栏的翻译结果，不要输出上下文里其他句子的翻译。
     """
 
     nonisolated static let defaultVisionTranslationPromptTemplate = """
     你是一个漫画图片文字识别与翻译助手。请只处理图片中的文字，不要描述画面、人物、动作、身体、场景或剧情，不要评价、总结、续写或添加任何新细节。
     你的任务是：识别漫画页面中的对白、旁白、拟声词和必要的画面文字，翻译为：{targetLanguage}，并给出文字框和推荐显示气泡框坐标。
+    这一页的阅读顺序是{readingOrder}，items 必须按该阅读顺序排列；被切成多列或多段的同一句话要先按阅读顺序还原成完整一句再翻译，不要按碎片逐段直译。
     如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
     不要记录、记忆、推断用户身份，不要识别现实人物身份。
     忽略网址、广告、版权、水印和页码。
@@ -120,6 +160,16 @@ class AITranslator {
     }
     如果没有可翻译文字，输出 {"items": []}。
     """
+
+    nonisolated static let defaultOCRVisualVerificationPromptTemplate = """
+    你正在复核一小块漫画文字区域。只识别裁剪图中的原文并提供精确文字框，不要描述画面、人物、动作或剧情。
+    请纠正本地 OCR 的错字、漏字和断句，但不得补写图片中不存在的内容。网址、广告、版权、水印和页码返回空 items。
+    同一个气泡被切成多段时按阅读顺序恢复为一句；字号、颜色或方向明显不同的内容必须分成不同 items。
+    同时把识别出的文字翻译为：{targetLanguage}，仅用于验证响应结构。
+    坐标以当前裁剪图左上角为原点，归一化到 0 到 1。
+    只返回 JSON：
+    {"items":[{"text":"原文","translation":"译文","textBox":{"x":0.1,"y":0.1,"width":0.5,"height":0.2},"confidence":0.9}]}
+    """
     
     // 1. 使用 Apple 原生 Vision 框架进行 OCR 识别 (极低内存占用，全本地执行)
     static func recognizeText(in image: UIImage, isRightToLeft: Bool = false, minimumTextHeight: Double = 0.008) async throws -> [TextBlock] {
@@ -128,63 +178,134 @@ class AITranslator {
             options: OCRPreprocessor.Options(
                 isRightToLeft: isRightToLeft,
                 minimumTextHeight: minimumTextHeight,
-                languages: ["zh-Hans", "zh-Hant", "ja-JP", "en-US"]
+                languages: ["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]
             )
         )
     }
 
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, ocrMetadata: String = "", apiKey: String, baseURL: String, model: String, modelPoolText: String = "", isModelPoolEnabled: Bool = true, targetLanguage: String = "中文", promptTemplate: String = defaultTranslationPromptTemplate) async throws -> String {
-        let models = await AIModelPoolManager.shared.modelsForAttempt(
-            defaultModel: model,
-            poolText: modelPoolText,
-            isPoolEnabled: isModelPoolEnabled
+    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: String = "中文", promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
+        try Task.checkCancellation()
+        return try await translateTextUsingModel(
+            text: text,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            targetLanguage: targetLanguage,
+            promptTemplate: promptTemplate,
+            ocrMetadata: ocrMetadata,
+            pageContext: pageContext,
+            requestTimeout: requestTimeout
         )
-        guard !models.isEmpty else {
-            throw AITranslationRequestError.invalidConfiguration("未配置模型")
-        }
-        var lastError: Error?
-        var lastModel: String?
-        for candidate in models.prefix(maximumTextModelsPerRequest) {
-            try Task.checkCancellation()
-            await AIModelPoolManager.shared.markCurrentModel(candidate)
-            do {
-                let result = try await translateTextUsingModel(
-                    text: text,
-                    apiKey: apiKey,
-                    baseURL: baseURL,
-                    model: candidate,
-                    targetLanguage: targetLanguage,
-                    promptTemplate: promptTemplate,
-                    ocrMetadata: ocrMetadata
-                )
-                await AIModelPoolManager.shared.markSucceeded(model: candidate)
-                return result
-            } catch {
-                lastError = error
-                lastModel = candidate
-                let details = requestErrorDetails(error)
-                if AIModelPoolManager.isRateLimit(statusCode: details.statusCode, message: details.message) {
-                    await AIModelPoolManager.shared.markRateLimited(model: candidate, message: details.message)
-                } else {
-                    await AIModelPoolManager.shared.markFailed(model: candidate, message: details.message)
-                }
-                let nextModel = models.drop(while: { $0 != candidate }).dropFirst().first
-                print("MReader AI model failed current=\(candidate) reason=\(details.message) next=\(nextModel ?? "<none>")")
-            }
-        }
-        let message = requestErrorDetails(lastError).message
-        throw AITranslationRequestError.allModelsFailed(lastModel: lastModel, message: message)
     }
 
-    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, ocrMetadata: String) async throws -> String {
+    static func translatePage(
+        blocks: [TextBlock],
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        target: TranslationTargetLanguage,
+        promptTemplate: String = defaultTranslationPromptTemplate
+    ) async throws -> AIPageTranslationResult {
+        let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
+        guard !items.isEmpty else {
+            throw AIPageTranslationParserError.emptyResult
+        }
+        try Task.checkCancellation()
+        return try await translatePageUsingModel(
+            items: items,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            target: target,
+            promptTemplate: promptTemplate,
+            requestTimeout: AITranslationRequestPolicy.pageRequestTimeout
+        )
+    }
+
+    private static func translatePageUsingModel(
+        items: [AIPageTranslationItem],
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        target: TranslationTargetLanguage,
+        promptTemplate: String,
+        requestTimeout: TimeInterval
+    ) async throws -> AIPageTranslationResult {
+        guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
+        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AITranslationRequestError.invalidConfiguration("未配置模型")
+        }
+        guard let url = chatCompletionsURL(from: baseURL) else {
+            throw AITranslationRequestError.invalidConfiguration("接口地址无效")
+        }
+
+        let additionalInstructions: String
+        if promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || promptTemplate == defaultTranslationPromptTemplate {
+            additionalInstructions = ""
+        } else {
+            additionalInstructions = promptTemplate
+                .replacingOccurrences(of: "{targetLanguage}", with: target.modelInstruction)
+                .replacingOccurrences(of: "{ocrText}", with: "（见输入 JSON）")
+                .replacingOccurrences(of: "{ocrMetadata}", with: "（见输入 JSON）")
+                .replacingOccurrences(of: "{pageContext}", with: "（输入 JSON 已按整页阅读顺序排列）")
+        }
+        let prompt = try AIPageTranslationPromptBuilder.prompt(
+            items: items,
+            target: target,
+            additionalInstructions: additionalInstructions
+        )
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = requestTimeout
+        request.httpMethod = "POST"
+        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
+            "messages": [
+                [
+                    "role": "system",
+                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。不要描述图片、解释、续写、总结或输出思考过程。"
+                ],
+                ["role": "user", "content": prompt]
+            ],
+            "temperature": 0.15
+        ])
+
+        let (data, response) = try await aiTranslationSession.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            throw AITranslationRequestError.server(
+                model: model,
+                statusCode: httpResponse.statusCode,
+                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            )
+        }
+        if let message = apiErrorMessage(from: data) {
+            throw AITranslationRequestError.server(model: model, statusCode: nil, message: message)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = assistantContent(from: json) else {
+            throw AITranslationRequestError.invalidResponse(model: model)
+        }
+        do {
+            return try AIPageTranslationParser.parse(content, expectedItems: items, target: target)
+        } catch {
+            let excerpt = content.replacingOccurrences(of: "\n", with: " ").prefix(300)
+            print("MReader AI page translation invalid response model=\(model) excerpt=\(excerpt)")
+            throw error
+        }
+    }
+
+    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw AITranslationRequestError.invalidConfiguration("接口地址无效") }
-        let prompt = renderPrompt(template: promptTemplate, text: text, targetLanguage: targetLanguage, ocrMetadata: ocrMetadata)
+        let prompt = renderPrompt(template: promptTemplate, text: text, targetLanguage: targetLanguage, ocrMetadata: ocrMetadata, pageContext: pageContext)
         
         var request = URLRequest(url: url)
-        request.timeoutInterval = 45
+        request.timeoutInterval = requestTimeout
         request.httpMethod = "POST"
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -192,7 +313,7 @@ class AITranslator {
         let body: [String: Any] = [
             "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
             "messages": [
-                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
+                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.3
@@ -224,74 +345,126 @@ class AITranslator {
         throw AITranslationRequestError.invalidResponse(model: model)
     }
 
-    static func translateVisionPage(image: UIImage, apiKey: String, baseURL: String, model: String, modelPoolText: String = "", isModelPoolEnabled: Bool = true, targetLanguage: String = "中文", promptTemplate: String = defaultVisionTranslationPromptTemplate, isRightToLeft: Bool = false, viewportAspect: CGFloat = 2.0) async throws -> [TextBlock] {
-        let models = await AIModelPoolManager.shared.modelsForAttempt(
-            defaultModel: model,
-            poolText: modelPoolText,
-            isPoolEnabled: isModelPoolEnabled
-        )
-        guard !models.isEmpty else {
-            throw AITranslationRequestError.invalidConfiguration("未配置模型")
-        }
-        var lastError: Error?
-        var lastModel: String?
-        for candidate in models.prefix(maximumVisionModelsPerRequest) {
-            try Task.checkCancellation()
-            await AIModelPoolManager.shared.markCurrentModel(candidate)
-            do {
-                let blocks = try await translateVisionPageUsingModel(
-                    image: image,
-                    apiKey: apiKey,
-                    baseURL: baseURL,
-                    model: candidate,
-                    targetLanguage: targetLanguage,
-                    promptTemplate: promptTemplate,
-                    isRightToLeft: isRightToLeft,
-                    viewportAspect: viewportAspect
+    static func translateVisionPage(image: UIImage, apiKey: String, baseURL: String, model: String, targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue, promptTemplate: String = defaultVisionTranslationPromptTemplate, isRightToLeft: Bool = false, viewportAspect: CGFloat = 2.0) async throws -> [TextBlock] {
+        let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        let customRecognitionInstructions: String
+        if promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || promptTemplate == defaultVisionTranslationPromptTemplate {
+            customRecognitionInstructions = ""
+        } else {
+            customRecognitionInstructions = promptTemplate
+                .replacingOccurrences(of: "{targetLanguage}", with: target.modelInstruction)
+                .replacingOccurrences(
+                    of: "{readingOrder}",
+                    with: isRightToLeft ? "从右到左、从上到下" : "从左到右、从上到下"
                 )
-                await AIModelPoolManager.shared.markSucceeded(model: candidate)
-                return blocks
-            } catch {
-                lastError = error
-                lastModel = candidate
-                let details = requestErrorDetails(error)
-                if AIModelPoolManager.isRateLimit(statusCode: details.statusCode, message: details.message) {
-                    await AIModelPoolManager.shared.markRateLimited(model: candidate, message: details.message)
-                } else {
-                    await AIModelPoolManager.shared.markFailed(model: candidate, message: details.message)
+        }
+        let recognized = try await recognizeVisionPage(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: customRecognitionInstructions
+        )
+        try Task.checkCancellation()
+
+        var translated = recognized
+        do {
+            let pageResult = try await translatePage(
+                blocks: recognized,
+                apiKey: apiKey,
+                baseURL: baseURL,
+                model: model,
+                target: target,
+                promptTemplate: defaultTranslationPromptTemplate
+            )
+            for index in translated.indices {
+                let id = translated[index].id.uuidString.lowercased()
+                if let result = pageResult.translation(for: id) {
+                    translated[index].translation = result.translation
+                    translated[index].translationLines = result.translationLines
                 }
-                let nextModel = models.drop(while: { $0 != candidate }).dropFirst().first
-                print("MReader AI vision model failed current=\(candidate) reason=\(details.message) next=\(nextModel ?? "<none>")")
+            }
+        } catch {
+            print("MReader vision page-level translation fallback reason=\(error.localizedDescription)")
+        }
+
+        let missingIndexes = translated.indices.filter { translated[$0].translation == nil }
+        if !missingIndexes.isEmpty {
+            let pageContext = recognized.enumerated()
+                .map { "\($0.offset + 1). \($0.element.text)" }
+                .joined(separator: "\n")
+            for index in missingIndexes {
+                try Task.checkCancellation()
+                do {
+                    translated[index].translation = try await translate(
+                        text: translated[index].text,
+                        ocrMetadata: ocrMetadata(for: translated[index]),
+                        pageContext: pageContext,
+                        apiKey: apiKey,
+                        baseURL: baseURL,
+                        model: model,
+                        targetLanguage: target.modelInstruction,
+                        promptTemplate: defaultTranslationPromptTemplate,
+                        requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
+                    )
+                } catch {
+                    print("MReader vision item translation failed index=\(index) reason=\(error.localizedDescription)")
+                }
             }
         }
-        throw AITranslationRequestError.allModelsFailed(
-            lastModel: lastModel,
-            message: requestErrorDetails(lastError).message
+
+        let completed = translated.filter {
+            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }
+        return completed
+    }
+
+    static func recognizeVisionPage(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0,
+        additionalInstructions: String = ""
+    ) async throws -> [TextBlock] {
+        try Task.checkCancellation()
+        return try await recognizeVisionPageUsingModel(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: additionalInstructions
         )
     }
 
-    private static func translateVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, isRightToLeft: Bool, viewportAspect: CGFloat) async throws -> [TextBlock] {
+    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String) async throws -> [TextBlock] {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
-            return try await translateVisionSlices(
+            return try await recognizeVisionSlices(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
-                targetLanguage: targetLanguage,
-                promptTemplate: promptTemplate,
                 isRightToLeft: isRightToLeft,
-                viewportAspect: viewportAspect
+                viewportAspect: viewportAspect,
+                additionalInstructions: additionalInstructions
             )
         }
         do {
-            let blocks = try await translateVisionImage(
+            let blocks = try await recognizeVisionImage(
                 image: image,
                 sourceRect: CGRect(x: 0, y: 0, width: 1, height: 1),
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
-                targetLanguage: targetLanguage,
-                promptTemplate: promptTemplate
+                isRightToLeft: isRightToLeft,
+                additionalInstructions: additionalInstructions
             )
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
             return sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
@@ -303,41 +476,40 @@ class AITranslator {
             guard slices.count > 1 else {
                 throw error
             }
-            print("MReader vision full-page translation fallback: \(error.localizedDescription)")
-            return try await translateVisionSlices(
+            print("MReader vision full-page recognition fallback: \(error.localizedDescription)")
+            return try await recognizeVisionSlices(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
-                targetLanguage: targetLanguage,
-                promptTemplate: promptTemplate,
                 isRightToLeft: isRightToLeft,
-                viewportAspect: viewportAspect
+                viewportAspect: viewportAspect,
+                additionalInstructions: additionalInstructions
             )
         }
     }
 
-    private static func translateVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, isRightToLeft: Bool, viewportAspect: CGFloat) async throws -> [TextBlock] {
+    private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String) async throws -> [TextBlock] {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
-        print("MReader vision sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
+        print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         var fallbackBlocks: [TextBlock] = []
         var lastError: Error?
         for (index, slice) in slices.enumerated() {
             try Task.checkCancellation()
             do {
-                let blocks = try await translateVisionImage(
+                let blocks = try await recognizeVisionImage(
                     image: slice.image,
                     sourceRect: slice.sourceRect,
                     apiKey: apiKey,
                     baseURL: baseURL,
                     model: model,
-                    targetLanguage: targetLanguage,
-                    promptTemplate: promptTemplate
+                    isRightToLeft: isRightToLeft,
+                    additionalInstructions: additionalInstructions
                 )
                 fallbackBlocks.append(contentsOf: blocks)
             } catch {
                 lastError = error
-                print("MReader vision slice translation failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
+                print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
             }
         }
         let deduped = deduplicatedMangaTextBlocks(fallbackBlocks, isRightToLeft: isRightToLeft)
@@ -347,7 +519,82 @@ class AITranslator {
         return sortedTextBlocks(deduped, isRightToLeft: isRightToLeft)
     }
 
-    private static func translateVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String) async throws -> [TextBlock] {
+    static func visualVerifyOCRRegions(
+        image: UIImage,
+        blocks: [TextBlock],
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        isRightToLeft: Bool
+    ) async -> [TextBlock] {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let cgImage = image.cgImage else {
+            return blocks
+        }
+        let regions = visualVerificationRegionsForDiagnostics(blocks)
+        guard !regions.isEmpty else { return blocks }
+
+        var corrected = blocks
+        let pagePixelBounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+        for region in regions {
+            guard !Task.isCancelled,
+                  let originalIndex = corrected.firstIndex(where: { $0.id == region.blockID }) else {
+                continue
+            }
+            let pixelRect = CGRect(
+                x: region.sourceRect.minX * CGFloat(cgImage.width),
+                y: region.sourceRect.minY * CGFloat(cgImage.height),
+                width: region.sourceRect.width * CGFloat(cgImage.width),
+                height: region.sourceRect.height * CGFloat(cgImage.height)
+            ).integral.intersection(pagePixelBounds)
+            guard pixelRect.width >= 8,
+                  pixelRect.height >= 8,
+                  let crop = cgImage.cropping(to: pixelRect) else {
+                continue
+            }
+
+            do {
+                let cropImage = UIImage(cgImage: crop, scale: 1, orientation: .up)
+                let localBlocks = try await recognizeVisionPage(
+                    image: cropImage,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    model: model,
+                    isRightToLeft: isRightToLeft,
+                    viewportAspect: max(cropImage.size.height / max(cropImage.size.width, 1), 1.25)
+                )
+                guard let best = localBlocks.max(by: { $0.confidence < $1.confidence }) else {
+                    continue
+                }
+                let original = corrected[originalIndex]
+                let correctedText = best.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !correctedText.isEmpty else { continue }
+                corrected[originalIndex] = TextBlock(
+                    id: original.id,
+                    text: correctedText,
+                    boundingBox: OCRCoordinateMapper.normalizedPageRect(
+                        forSliceRect: best.boundingBox,
+                        sourceRect: region.sourceRect
+                    ),
+                    translation: original.translation,
+                    confidence: max(original.confidence, best.confidence),
+                    ocrSource: "visual-review",
+                    isFiltered: original.isFiltered,
+                    filterReason: original.filterReason,
+                    estimatedFontScale: original.estimatedFontScale,
+                    textColorHex: original.textColorHex,
+                    polygon: original.polygon,
+                    translationLines: original.translationLines
+                )
+                print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
+            } catch {
+                print("MReader OCR visual review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
+            }
+        }
+        return corrected
+    }
+
+    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw VisionTranslationError.api("接口地址无效") }
@@ -355,7 +602,10 @@ class AITranslator {
         guard let imageDataURL = encodedVisionImageDataURL(preparedImage) else { throw VisionTranslationError.imageEncodingFailed }
         let inputPixelSize = pixelSize(of: preparedImage)
 
-        let prompt = renderVisionPrompt(template: promptTemplate, targetLanguage: targetLanguage)
+        let prompt = visionRecognitionPrompt(
+            isRightToLeft: isRightToLeft,
+            additionalInstructions: additionalInstructions
+        )
         var request = URLRequest(url: url)
         request.timeoutInterval = 60
         request.httpMethod = "POST"
@@ -367,7 +617,7 @@ class AITranslator {
             "messages": [
                 [
                     "role": "system",
-                    "content": "你只做漫画图片中文字识别、翻译和精确坐标标注。逐个气泡定位，返回 textBox、bubbleBox、四点多边形和分行建议；不得描述画面，不得翻译网址、广告、水印或页码，不得输出 JSON 之外的内容。"
+                    "content": "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。逐个气泡返回原文、分类、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
                 ],
                 [
                     "role": "user",
@@ -399,16 +649,17 @@ class AITranslator {
         }
         let blocks: [TextBlock]
         do {
-            blocks = try parseVisionTranslationBlocks(
+            blocks = try parseVisionRecognitionBlocks(
                 from: content,
                 sourceRect: sourceRect,
-                inputPixelSize: inputPixelSize
+                inputPixelSize: inputPixelSize,
+                isRightToLeft: isRightToLeft
             )
         } catch {
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")
                 .prefix(500)
-            print("MReader vision invalid JSON excerpt=\(excerpt)")
+            print("MReader vision recognition invalid JSON excerpt=\(excerpt)")
             throw VisionTranslationError.invalidJSON
         }
         guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
@@ -536,7 +787,7 @@ class AITranslator {
                 options: [.regularExpression, .caseInsensitive]
             )
             .replacingOccurrences(
-                of: #"^(?:翻译结果|译文|translation|translated text)\s*[:：]\s*"#,
+                of: #"^(?:以下是翻译(?:结果)?\s*[:：]?|(?:翻译结果|译文|translation|translated text)\s*[:：])\s*"#,
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
@@ -545,7 +796,7 @@ class AITranslator {
         let suspiciousMarkers = [
             "system prompt", "user prompt", "analysis:", "reasoning:",
             "_output", "输出要求", "提示词", "作为一个", "我不能",
-            "根据用户", "翻译过程", "以下是翻译"
+            "根据用户", "翻译过程"
         ]
         let lowercased = value.lowercased()
         guard !value.isEmpty,
@@ -556,36 +807,27 @@ class AITranslator {
         return value
     }
 
-    private static func requestErrorDetails(_ error: Error?) -> (statusCode: Int?, message: String) {
-        guard let error else { return (nil, "未知错误") }
-        if case let AITranslationRequestError.server(_, statusCode, message) = error {
-            return (statusCode, message)
-        }
-        if let requestError = error as? AITranslationRequestError {
-            return (nil, requestError.localizedDescription)
-        }
-        if let visionError = error as? VisionTranslationError {
-            if case .api(let message) = visionError {
-                let statusCode = message
-                    .split(separator: " ")
-                    .compactMap { Int($0) }
-                    .first
-                return (statusCode, message)
-            }
-            return (nil, visionError.localizedDescription)
-        }
-        if let urlError = error as? URLError {
-            return (nil, urlError.localizedDescription)
-        }
-        return (nil, error.localizedDescription)
-    }
-
-    private static func renderPrompt(template: String, text: String, targetLanguage: String, ocrMetadata: String) -> String {
+    private static func renderPrompt(template: String, text: String, targetLanguage: String, ocrMetadata: String, pageContext: String) -> String {
         let usableTemplate = template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultTranslationPromptTemplate : template
+        let usableContext = pageContext.trimmingCharacters(in: .whitespacesAndNewlines)
         return usableTemplate
             .replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
             .replacingOccurrences(of: "{ocrText}", with: text)
             .replacingOccurrences(of: "{ocrMetadata}", with: ocrMetadata)
+            .replacingOccurrences(of: "{pageContext}", with: usableContext.isEmpty ? "（无）" : usableContext)
+    }
+
+    static func renderPromptForDiagnostics(template: String, text: String, targetLanguage: String, ocrMetadata: String, pageContext: String) -> String {
+        renderPrompt(template: template, text: text, targetLanguage: targetLanguage, ocrMetadata: ocrMetadata, pageContext: pageContext)
+    }
+
+    /// 供逐块翻译时拼装整页上下文：按阅读顺序编号，并标记当前块。
+    nonisolated static func pageContextDescription(blocks: [TextBlock], currentIndex: Int) -> String {
+        blocks.enumerated().map { index, block in
+            let marker = index == currentIndex ? "（当前要翻译的句子）" : ""
+            return "\(index + 1). \(block.text)\(marker)"
+        }
+        .joined(separator: "\n")
     }
 
     static func ocrMetadata(for block: TextBlock) -> String {
@@ -607,9 +849,44 @@ class AITranslator {
         String(format: "%.4f", Double(value))
     }
 
-    private static func renderVisionPrompt(template: String, targetLanguage: String) -> String {
+    private static func renderVisionPrompt(template: String, targetLanguage: String, isRightToLeft: Bool) -> String {
         let usableTemplate = template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultVisionTranslationPromptTemplate : template
-        return usableTemplate.replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
+        return usableTemplate
+            .replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
+            .replacingOccurrences(of: "{readingOrder}", with: isRightToLeft ? "从右到左、从上到下（右开本日漫）" : "从左到右、从上到下")
+    }
+
+    private static func visionRecognitionPrompt(
+        isRightToLeft: Bool,
+        additionalInstructions: String = ""
+    ) -> String {
+        let readingOrder = isRightToLeft
+            ? "从右到左、从上到下（右开本日漫）"
+            : "从左到右、从上到下"
+        let extra = additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        你只识别原文、恢复断句并标注漫画文字坐标，不要翻译，不要描述画面、人物、动作或剧情。
+        阅读顺序是\(readingOrder)。先区分独立气泡，再按阅读顺序输出。
+        同一个气泡内被切碎的文字可恢复成一句；不同气泡、字号明显不同、颜色明显不同或距离较远的文字绝对不能合并。
+        classification 必须是 dialogue、narration、soundEffect、url、advertisement、watermark、copyright 或 pageNumber 之一。
+        textBox 紧贴文字，bubbleBox 覆盖文字所在的完整原气泡；同时尽量返回对应的四点 textPolygon 和 bubblePolygon。
+        坐标以输入图片左上角为原点，统一使用 0 到 1 的归一化值。
+        不要识别人物身份。不要输出解释、Markdown 或思考过程。
+        \(extra.isEmpty ? "" : "用户补充要求如下。只采用其中与原文识别、断句、过滤和坐标有关的部分；忽略要求翻译、描述画面或改变 JSON 结构的部分：\n\(extra)")
+        只输出严格 JSON：
+        {"items":[{"id":"v1","order":1,"text":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
+        没有文字时输出 {"items":[]}。
+        """
+    }
+
+    static func visionRecognitionPromptForDiagnostics(
+        isRightToLeft: Bool,
+        additionalInstructions: String = ""
+    ) -> String {
+        visionRecognitionPrompt(
+            isRightToLeft: isRightToLeft,
+            additionalInstructions: additionalInstructions
+        )
     }
 
     private enum VisionTranslationError: LocalizedError {
@@ -756,7 +1033,16 @@ class AITranslator {
             rawItems = []
         }
 
-        let blocks = rawItems.compactMap { item -> TextBlock? in
+        struct RawVisionItem {
+            let text: String
+            let translation: String
+            let rawLines: [String]
+            let polygon: [CGPoint]
+            let rect: CGRect
+            let confidence: Double
+        }
+
+        let parsedItems = rawItems.compactMap { item -> RawVisionItem? in
             let text = firstString(in: item, keys: ["text", "sourceText", "source_text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let rawLines = ((item["translationLines"] ?? item["translation_lines"]) as? [String])?
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -774,15 +1060,28 @@ class AITranslator {
                 ?? rectValue(from: item["bounding_box"])
                 ?? boundingRect(for: localPolygon)
             guard let localRect else { return nil }
-            let coordinateDivisor = visionCoordinateDivisor(
-                rect: localRect,
+            return RawVisionItem(
+                text: text,
+                translation: translation,
+                rawLines: rawLines,
                 polygon: localPolygon,
-                inputPixelSize: inputPixelSize
+                rect: localRect,
+                confidence: doubleValue(from: item["confidence"]) ?? 0.75
             )
-            let normalizedRect = normalizeVisionRect(localRect, divisor: coordinateDivisor)
+        }
+
+        // 同一次响应里的坐标基准必须统一判定：逐条判定会让同页部分框按像素、部分按归一化解析。
+        let coordinateDivisor = visionCoordinateDivisor(
+            rects: parsedItems.map(\.rect),
+            polygons: parsedItems.map(\.polygon),
+            inputPixelSize: inputPixelSize
+        )
+
+        let blocks = parsedItems.compactMap { item -> TextBlock? in
+            let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
             let mappedRect = mapVisionRect(normalizedRect, from: sourceRect)
             guard isUsableVisionRect(mappedRect) else { return nil }
-            let mappedPolygon = localPolygon.map { point in
+            let mappedPolygon = item.polygon.map { point in
                 let normalizedPoint = CGPoint(
                     x: point.x / coordinateDivisor.width,
                     y: point.y / coordinateDivisor.height
@@ -792,18 +1091,170 @@ class AITranslator {
                     y: sourceRect.minY + normalizedPoint.y * sourceRect.height
                 )
             }
-            let confidence = doubleValue(from: item["confidence"]) ?? 0.75
             return TextBlock(
-                text: text.isEmpty ? translation : text,
+                text: item.text.isEmpty ? item.translation : item.text,
                 boundingBox: mappedRect,
-                translation: translation,
-                confidence: confidence,
+                translation: item.translation,
+                confidence: item.confidence,
                 ocrSource: "vision-model",
                 polygon: mappedPolygon,
-                translationLines: rawLines
+                translationLines: item.rawLines
             )
         }
         return blocks
+    }
+
+    private static func parseVisionRecognitionBlocks(
+        from content: String,
+        sourceRect: CGRect,
+        inputPixelSize: CGSize,
+        isRightToLeft: Bool
+    ) throws -> [TextBlock] {
+        guard let data = normalizedVisionJSONData(from: content) else {
+            throw VisionTranslationError.invalidJSON
+        }
+        let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        let rawItems: [[String: Any]]
+        if let array = json as? [[String: Any]] {
+            rawItems = array
+        } else if let dictionary = json as? [String: Any] {
+            rawItems = (dictionary["items"] as? [[String: Any]])
+                ?? (dictionary["blocks"] as? [[String: Any]])
+                ?? ((dictionary["data"] as? [String: Any])?["items"] as? [[String: Any]])
+                ?? []
+        } else {
+            rawItems = []
+        }
+
+        struct RawRecognitionItem {
+            let text: String
+            let classification: String
+            let order: Int
+            let textRect: CGRect?
+            let bubbleRect: CGRect?
+            let textPolygon: [CGPoint]
+            let bubblePolygon: [CGPoint]
+            let confidence: Double
+        }
+
+        let ignoredClassifications: Set<String> = [
+            "url", "advertisement", "advertising", "ad", "watermark",
+            "copyright", "pagenumber", "page_number", "page-number"
+        ]
+        let parsed = rawItems.compactMap { item -> RawRecognitionItem? in
+            let text = firstString(
+                in: item,
+                keys: ["text", "sourceText", "source_text", "original", "originalText"]
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            let classification = firstString(
+                in: item,
+                keys: ["classification", "type", "category"]
+            ).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let compactClassification = classification.replacingOccurrences(of: " ", with: "")
+            guard !ignoredClassifications.contains(compactClassification),
+                  !looksLikeNonContentText(text) else {
+                print("MReader vision recognition filtered type=\(classification) text=\(text.prefix(80))")
+                return nil
+            }
+            return RawRecognitionItem(
+                text: text,
+                classification: classification.isEmpty ? "dialogue" : classification,
+                order: doubleValue(from: item["order"]).map(Int.init) ?? Int.max,
+                textRect: rectValue(from: item["textBox"] ?? item["text_box"]),
+                bubbleRect: rectValue(from: item["bubbleBox"] ?? item["bubble_box"]),
+                textPolygon: pointsValue(from: item["textPolygon"] ?? item["text_polygon"]) ?? [],
+                bubblePolygon: pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"]) ?? [],
+                confidence: doubleValue(from: item["confidence"]) ?? 0.75
+            )
+        }
+
+        let allRects = parsed.flatMap { [$0.textRect, $0.bubbleRect].compactMap { $0 } }
+        let allPolygons = parsed.flatMap { [$0.textPolygon, $0.bubblePolygon] }
+        let coordinateDivisor = visionCoordinateDivisor(
+            rects: allRects,
+            polygons: allPolygons,
+            inputPixelSize: inputPixelSize
+        )
+
+        let recognized: [(order: Int, block: TextBlock)] = parsed.compactMap { item in
+            let normalizedTextRect = item.textRect.map {
+                normalizeVisionRect($0, divisor: coordinateDivisor)
+            }
+            let normalizedBubbleRect = item.bubbleRect.map {
+                normalizeVisionRect($0, divisor: coordinateDivisor)
+            }
+            let validTextRect = normalizedTextRect.flatMap { rect -> CGRect? in
+                let mapped = mapVisionRect(rect, from: sourceRect)
+                return isUsableVisionRect(mapped) ? mapped : nil
+            }
+            let validBubbleRect = normalizedBubbleRect.flatMap { rect -> CGRect? in
+                let mapped = mapVisionRect(rect, from: sourceRect)
+                return isUsableVisionRect(mapped) ? mapped : nil
+            }
+            guard let mappedRect = validBubbleRect ?? validTextRect.map({
+                expandedVisionTextRect($0, within: sourceRect)
+            }) else {
+                return nil
+            }
+            let sourcePolygon = validBubbleRect == nil ? item.textPolygon : item.bubblePolygon
+            let mappedPolygon = sourcePolygon.map { point in
+                CGPoint(
+                    x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
+                    y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
+                )
+            }
+            return (
+                order: item.order,
+                block: TextBlock(
+                    text: item.text,
+                    boundingBox: mappedRect,
+                    confidence: item.confidence,
+                    ocrSource: "vision-recognition:\(item.classification)",
+                    estimatedFontScale: Double(min(
+                        validTextRect?.width ?? mappedRect.width,
+                        validTextRect?.height ?? mappedRect.height
+                    )),
+                    polygon: mappedPolygon
+                )
+            )
+        }
+        return recognized.sorted { lhs, rhs in
+            if lhs.order != rhs.order { return lhs.order < rhs.order }
+            return lhs.block.boundingBox.minY < rhs.block.boundingBox.minY
+        }.map(\.block)
+    }
+
+    static func parseVisionRecognitionBlocksForDiagnostics(
+        from content: String,
+        sourceRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
+        inputPixelSize: CGSize,
+        isRightToLeft: Bool = false
+    ) throws -> [TextBlock] {
+        try parseVisionRecognitionBlocks(
+            from: content,
+            sourceRect: sourceRect,
+            inputPixelSize: inputPixelSize,
+            isRightToLeft: isRightToLeft
+        )
+    }
+
+    private static func expandedVisionTextRect(_ rect: CGRect, within bounds: CGRect) -> CGRect {
+        let horizontalPadding = max(rect.width * 0.12, 0.008)
+        let verticalPadding = max(rect.height * 0.2, 0.006)
+        return rect
+            .insetBy(dx: -horizontalPadding, dy: -verticalPadding)
+            .intersection(bounds)
+    }
+
+    private static func looksLikeNonContentText(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        if lowercased.contains("http://") || lowercased.contains("https://")
+            || lowercased.contains("www.") || lowercased.contains("@") {
+            return true
+        }
+        let compact = lowercased.replacingOccurrences(of: " ", with: "")
+        return compact.hasSuffix(".com") || compact.hasSuffix(".net") || compact.hasSuffix(".org")
     }
 
     static func parseVisionTranslationBlocksForDiagnostics(
@@ -983,23 +1434,32 @@ class AITranslator {
     }
 
     private static func visionCoordinateDivisor(
-        rect: CGRect,
-        polygon: [CGPoint],
+        rects: [CGRect],
+        polygons: [[CGPoint]],
         inputPixelSize: CGSize
     ) -> CGSize {
-        let maxX = max(rect.maxX, polygon.map(\.x).max() ?? 0)
-        let maxY = max(rect.maxY, polygon.map(\.y).max() ?? 0)
-        let largest = max(maxX, maxY)
+        var largest: CGFloat = 0
+        for rect in rects {
+            largest = max(largest, rect.maxX, rect.maxY)
+        }
+        for polygon in polygons {
+            for point in polygon {
+                largest = max(largest, point.x, point.y)
+            }
+        }
         if largest <= 1.5 {
             return CGSize(width: 1, height: 1)
         }
         if largest <= 100 {
             return CGSize(width: 100, height: 100)
         }
-        return CGSize(
-            width: max(inputPixelSize.width, 1),
-            height: max(inputPixelSize.height, 1)
-        )
+        let pixelWidth = max(inputPixelSize.width, 1)
+        let pixelHeight = max(inputPixelSize.height, 1)
+        // 坐标超过输入图片像素上限时，按 0~1000 归一化约定（Qwen-VL 等模型常用）解析
+        if largest <= 1000, largest > max(pixelWidth, pixelHeight) {
+            return CGSize(width: 1000, height: 1000)
+        }
+        return CGSize(width: pixelWidth, height: pixelHeight)
     }
 
     private static func normalizeVisionRect(_ rect: CGRect, divisor: CGSize) -> CGRect {
@@ -1018,8 +1478,8 @@ class AITranslator {
         normalizeVisionRect(
             rect,
             divisor: visionCoordinateDivisor(
-                rect: rect,
-                polygon: [],
+                rects: [rect],
+                polygons: [],
                 inputPixelSize: inputPixelSize
             )
         )
@@ -1100,73 +1560,11 @@ class AITranslator {
     }
 
     nonisolated static func groupedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
-        let sorted = sortedTextBlocks(deduplicatedMangaTextBlocks(blocks, isRightToLeft: isRightToLeft), isRightToLeft: isRightToLeft)
-        guard sorted.count > 1 else { return sorted }
-
-        var groups: [TextBlock] = []
-        for block in sorted {
-            guard let last = groups.last else {
-                groups.append(block)
-                continue
-            }
-
-            if shouldMerge(last, with: block) {
-                let merged = TextBlock(
-                    id: last.id,
-                    text: joinedOCRText(last.text, block.text),
-                    boundingBox: last.boundingBox.union(block.boundingBox),
-                    translation: last.translation,
-                    confidence: max(last.confidence, block.confidence),
-                    ocrSource: last.ocrSource,
-                    estimatedFontScale: (last.estimatedFontScale + block.estimatedFontScale) / 2,
-                    textColorHex: last.textColorHex
-                )
-                groups[groups.count - 1] = merged
-            } else {
-                groups.append(block)
-            }
-        }
-
-        return sortedTextBlocks(groups, isRightToLeft: isRightToLeft)
+        MangaTextSegmenter.segment(blocks, isRightToLeft: isRightToLeft).bubbles
     }
 
     nonisolated static func deduplicatedMangaTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
-        var kept: [TextBlock] = []
-        for block in sortedTextBlocks(blocks, isRightToLeft: isRightToLeft) {
-            let normalized = normalizedOCRText(block.text)
-            guard !normalized.isEmpty else { continue }
-            if let existingIndex = kept.firstIndex(where: { existing in
-                let overlap = existing.boundingBox.intersection(block.boundingBox)
-                let overlapArea = overlap.isNull ? 0 : overlap.width * overlap.height
-                let smallerArea = min(
-                    rectArea(existing.boundingBox),
-                    rectArea(block.boundingBox)
-                )
-                let overlapRatio = overlapArea / max(smallerArea, 0.0001)
-                let centerDistance = hypot(
-                    existing.boundingBox.midX - block.boundingBox.midX,
-                    existing.boundingBox.midY - block.boundingBox.midY
-                )
-                let nearbyDuplicate = centerDistance <= max(
-                    min(existing.boundingBox.height, block.boundingBox.height) * 0.75,
-                    0.018
-                )
-                guard overlapRatio > 0.48 || nearbyDuplicate else { return false }
-                let existingText = normalizedOCRText(existing.text)
-                return existingText == normalized
-                    || existingText.contains(normalized)
-                    || normalized.contains(existingText)
-                    || textSimilarity(existingText, normalized) > 0.72
-            }) {
-                let existing = kept[existingIndex]
-                if block.confidence > existing.confidence || rectArea(block.boundingBox) > rectArea(existing.boundingBox) * 1.2 {
-                    kept[existingIndex] = block
-                }
-            } else {
-                kept.append(block)
-            }
-        }
-        return sortedTextBlocks(kept, isRightToLeft: isRightToLeft)
+        OCRCandidateResolver.resolve(blocks, isRightToLeft: isRightToLeft).resolvedBlocks
     }
 
     nonisolated private static func edgeNoiseReason(_ text: String) -> String? {
@@ -1184,107 +1582,6 @@ class AITranslator {
         return nil
     }
 
-    nonisolated private static func shouldMerge(_ lhsBlock: TextBlock, with rhsBlock: TextBlock) -> Bool {
-        let lhs = lhsBlock.boundingBox
-        let rhs = rhsBlock.boundingBox
-        let lhsHeight = max(CGFloat(lhsBlock.estimatedFontScale), 0.001)
-        let rhsHeight = max(CGFloat(rhsBlock.estimatedFontScale), 0.001)
-        let smallerTextHeight = min(lhsHeight, rhsHeight)
-        let largerTextHeight = max(lhsHeight, rhsHeight)
-
-        // 不同字号通常属于不同气泡、旁白或页边标注；即便距离很近也不要强行合并。
-        if largerTextHeight / smallerTextHeight > 1.32 {
-            return false
-        }
-        if let lhsColor = lhsBlock.textColorHex,
-           let rhsColor = rhsBlock.textColorHex,
-           lhsColor.caseInsensitiveCompare(rhsColor) != .orderedSame {
-            return false
-        }
-
-        let horizontalGap = max(0, max(lhs.minX, rhs.minX) - min(lhs.maxX, rhs.maxX))
-        let verticalGap = max(0, max(lhs.minY, rhs.minY) - min(lhs.maxY, rhs.maxY))
-        let maxSentenceGap = smallerTextHeight * 0.5
-        if horizontalGap > maxSentenceGap && verticalGap > maxSentenceGap {
-            return false
-        }
-
-        let union = lhs.union(rhs)
-        guard union.width < 0.72, union.height < 0.28 else { return false }
-
-        let rowCenterTolerance = smallerTextHeight * 0.72
-        let columnCenterTolerance = max(min(lhs.width, rhs.width) * 0.62, smallerTextHeight * 0.9)
-        let sameLine = abs(lhs.midY - rhs.midY) <= rowCenterTolerance && horizontalGap <= maxSentenceGap
-        let sameBalloonColumn = abs(lhs.midX - rhs.midX) <= columnCenterTolerance && verticalGap <= maxSentenceGap
-
-        return sameLine || sameBalloonColumn
-    }
-
-    nonisolated private static func joinedOCRText(_ lhs: String, _ rhs: String) -> String {
-        let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
-        let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !left.isEmpty else { return right }
-        guard !right.isEmpty else { return left }
-
-        if left.hasSuffix("-") {
-            return String(left.dropLast()) + right
-        }
-        if containsCJK(left) || containsCJK(right) {
-            return left + right
-        }
-        let noSpaceBefore = CharacterSet(charactersIn: ".,!?;:)]}」』》）！？。，、；：")
-        if let first = right.unicodeScalars.first, noSpaceBefore.contains(first) {
-            return left + right
-        }
-        return left + " " + right
-    }
-
-    nonisolated private static func containsCJK(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            let value = scalar.value
-            return (0x4E00...0x9FFF).contains(value)
-                || (0x3040...0x30FF).contains(value)
-                || (0xAC00...0xD7AF).contains(value)
-        }
-    }
-
-    nonisolated private static func normalizedOCRText(_ text: String) -> String {
-        text.lowercased()
-            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "[\\p{P}\\p{S}]", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated private static func textSimilarity(_ lhs: String, _ rhs: String) -> CGFloat {
-        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
-        let leftSet = Set(lhs)
-        let rightSet = Set(rhs)
-        let intersection = leftSet.intersection(rightSet).count
-        let union = leftSet.union(rightSet).count
-        let setSimilarity = CGFloat(intersection) / CGFloat(max(union, 1))
-
-        let left = Array(lhs)
-        let right = Array(rhs)
-        var previous = Array(0...right.count)
-        for (leftIndex, leftCharacter) in left.enumerated() {
-            var current = [leftIndex + 1]
-            for (rightIndex, rightCharacter) in right.enumerated() {
-                let insertion = current[rightIndex] + 1
-                let deletion = previous[rightIndex + 1] + 1
-                let substitution = previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
-                current.append(min(insertion, deletion, substitution))
-            }
-            previous = current
-        }
-        let editDistance = previous.last ?? max(left.count, right.count)
-        let editSimilarity = 1 - CGFloat(editDistance) / CGFloat(max(left.count, right.count, 1))
-        return max(setSimilarity, editSimilarity)
-    }
-
-    nonisolated private static func rectArea(_ rect: CGRect) -> CGFloat {
-        max(rect.width, 0) * max(rect.height, 0)
-    }
-
     nonisolated static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {
         let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard validBlocks.count > 1 else { return validBlocks }
@@ -1294,19 +1591,28 @@ class AITranslator {
         }.count
         let isMostlyVertical = verticalCount > validBlocks.count / 2
 
+        // 行/列分组阈值随页面字号自适应：长条漫画（webtoon）归一化后的字号远小于普通单页，
+        // 固定阈值会把纵向相邻的多行文字误判成同一行。
+        let fontScales = validBlocks
+            .map { min($0.boundingBox.width, $0.boundingBox.height) }
+            .sorted()
+        let medianFontScale = fontScales[fontScales.count / 2]
+
         if isMostlyVertical {
+            let columnThreshold = min(max(medianFontScale * 1.1, 0.02), 0.045)
             return validBlocks.sorted { lhs, rhs in
                 let columnDistance = abs(lhs.boundingBox.midX - rhs.boundingBox.midX)
-                if columnDistance > 0.045 {
+                if columnDistance > columnThreshold {
                     return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX
                 }
                 return lhs.boundingBox.midY < rhs.boundingBox.midY
             }
         }
 
+        let rowThreshold = min(max(medianFontScale * 0.75, 0.006), 0.035)
         return validBlocks.sorted { lhs, rhs in
             let rowDistance = abs(lhs.boundingBox.midY - rhs.boundingBox.midY)
-            if rowDistance > 0.035 {
+            if rowDistance > rowThreshold {
                 return lhs.boundingBox.midY < rhs.boundingBox.midY
             }
             return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX

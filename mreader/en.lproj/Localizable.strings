@@ -1,0 +1,441 @@
+/* Main Tabs */
+"tab.continueReading" = "Continue Reading";
+"tab.library" = "Library";
+"tab.statistics" = "Statistics";
+
+/* Navigation */
+"nav.settings" = "Settings";
+"nav.back" = "Back";
+"nav.done" = "Done";
+"nav.cancel" = "Cancel";
+"nav.save" = "Save";
+
+/* Shelf */
+"shelf.title" = "Library";
+"shelf.all" = "All";
+"shelf.inProgress" = "Reading";
+"shelf.locked" = "Locked";
+"shelf.local" = "Local";
+"shelf.komga" = "Komga";
+"shelf.opds" = "OPDS";
+"shelf.itemCount" = "%d items";
+"shelf.empty" = "No comics yet";
+"shelf.pullToRefresh" = "Pull to refresh";
+"shelf.gridMode" = "Grid";
+"shelf.listMode" = "List";
+"shelf.filterCategory" = "Filter";
+"shelf.activity" = "Shelf Activity";
+
+/* Comic Actions */
+"comic.rename" = "Rename";
+"comic.share" = "Share";
+"comic.openInFiles" = "Open in Files";
+"comic.lock" = "Lock";
+"comic.unlock" = "Unlock";
+"comic.rebuildThumbnail" = "Rebuild Thumbnail";
+"comic.hide" = "Hide";
+"comic.delete" = "Delete";
+"comic.markAsRead" = "Mark as Read";
+"comic.addToSeries" = "Add to Series";
+"comic.removeFromSeries" = "Remove from Series";
+
+/* Series */
+"series.title" = "Series";
+"series.new" = "New Series";
+"series.name" = "Series Name";
+"series.create" = "Create";
+"series.rename" = "Rename Series";
+"series.markAllRead" = "Mark All Read";
+"series.rebuildThumbnails" = "Rebuild Thumbnails";
+"series.importFiles" = "Import Chapter Files";
+"series.importFolder" = "Import Chapter Folder";
+"series.addFromShelf" = "Add from Shelf";
+"series.empty" = "Series is Empty";
+"series.addChapters" = "Chapters will appear here after adding";
+
+/* Reader */
+"reader.settings" = "Reader Settings";
+"reader.jumpToPage" = "Jump";
+"reader.pageNumber" = "Page Number";
+"reader.currentPage" = "Page %d / %d";
+"reader.bookmark" = "Bookmarks";
+"reader.addBookmark" = "Add bookmark to page %d";
+"reader.noBookmarks" = "No bookmarks";
+"reader.editBookmarkNote" = "Edit Bookmark Note";
+"reader.bookmarkNotePlaceholder" = "Note (optional)";
+"reader.deleteBookmark" = "Delete bookmark";
+
+/* Reading Settings */
+"reader.mode" = "Reading Mode";
+"reader.mode.horizontalPage" = "Horizontal Page";
+"reader.mode.verticalPage" = "Vertical Page";
+"reader.mode.continuousScroll" = "Continuous Scroll";
+"reader.mode.infiniteScroll" = "Infinite Scroll";
+"reader.mode.doublePage" = "Double Page";
+"reader.direction" = "Reading Direction";
+"reader.direction.leftToRight" = "Left to Right";
+"reader.direction.rightToLeft" = "Right to Left";
+"reader.animation" = "Page Turn Animation";
+"reader.animation.none" = "None";
+"reader.animation.slide" = "Slide";
+"reader.animation.fade" = "Fade";
+"reader.animation.curl" = "Curl";
+"reader.fitMode" = "Image Fit";
+"reader.fitMode.fitScreen" = "Fit Screen";
+"reader.fitMode.fitWidth" = "Fit Width";
+"reader.fitMode.fitHeight" = "Fit Height";
+"reader.fitMode.original" = "Original Size";
+"reader.scrollSpeed" = "Scroll Speed";
+"reader.scrollSpeed.slow" = "Slow";
+"reader.scrollSpeed.standard" = "Standard";
+"reader.scrollSpeed.fast" = "Fast";
+
+/* OCR Settings */
+"ocr.enable" = "OCR Text Recognition";
+"ocr.autoMagnify" = "Auto Text Magnification";
+"ocr.magnifySize" = "Magnify Text Size";
+"ocr.safeArea" = "Ignore Edge Area";
+"ocr.aiTranslation" = "AI Translation";
+"ocr.translationMode" = "Translation Mode";
+"ocr.translationMode.ocr" = "OCR Text";
+"ocr.translationMode.vision" = "Vision Image";
+"ocr.autoTranslate" = "Auto Translate Current Page";
+"ocr.borderProgress" = "AI Translation Border Progress";
+"ocr.colorStyle" = "Translation Text Color";
+"ocr.colorStyle.contrast" = "High Contrast";
+"ocr.colorStyle.coolWarm" = "Cool & Warm";
+"ocr.colorStyle.jewel" = "Jewel Tones";
+"ocr.targetLanguage" = "Translate To";
+"translation.language.zh-Hans" = "Simplified Chinese";
+"translation.language.zh-Hant" = "Traditional Chinese";
+"translation.language.en" = "English";
+"translation.language.ja" = "Japanese";
+"translation.language.ko" = "Korean";
+"translation.language.fr" = "French";
+"translation.language.de" = "German";
+"translation.language.es" = "Spanish";
+"translation.language.it" = "Italian";
+"translation.language.pt" = "Portuguese";
+"translation.language.ru" = "Russian";
+"translation.language.th" = "Thai";
+"translation.language.vi" = "Vietnamese";
+"translation.language.id" = "Indonesian";
+"translation.language.ar" = "Arabic";
+"aiProvider.title" = "AI API Profiles";
+"aiProvider.saved" = "Saved Profiles";
+"aiProvider.empty" = "No AI API Profile";
+"aiProvider.emptyDescription" = "Add an OpenAI-compatible API and its child models.";
+"aiProvider.sharedModelDescription" = "OCR and vision translation use the same selected child model. Requests never switch models automatically.";
+"aiProvider.add" = "Add API Profile";
+"aiProvider.makeActive" = "Set Active";
+"aiProvider.deleteTitle" = "Delete API Profile?";
+"aiProvider.deleteMessage" = "The API key and child models saved for this profile will be removed.";
+"aiProvider.connection" = "Connection";
+"aiProvider.name" = "Profile Name";
+"aiProvider.childModels" = "Child Models";
+"aiProvider.childModelsDescription" = "Enter one model name per line, then select the single model used by OCR and vision.";
+"aiProvider.currentChildModel" = "Current Child Model";
+"aiProvider.modelRequired" = "Add and select at least one child model.";
+"aiProvider.apiKeyRequired" = "Enter an API key.";
+"ocr.filter" = "OCR Filter";
+"ocr.filterDescription" = "Web addresses, ads, and tiny text near edges will be ignored and not sent for OCR or AI translation.";
+"ocr.minTextSize" = "Ignore Small Text Below";
+"ocr.debug" = "OCR Debug";
+"ocr.debugDescription" = "Vision translation sends current page or slices to a third-party OpenAI-compatible API.";
+"ocr.showDebugBoxes" = "Show OCR Debug Boxes";
+
+/* Settings */
+"settings.title" = "Settings";
+"settings.openai" = "OpenAI Compatible API";
+"settings.selectLibrary" = "Select Library";
+"settings.selectLibraryDescription" = "Select a Manga or other comic root directory in Files. All scanning, importing, and deletion will be based on this directory.";
+"settings.selectLibraryRoot" = "Select Comic Root Directory";
+"settings.openaiDescription" = "Enter Base URL up to /v1, e.g. https://api.openai.com/v1 or your proxy. OCR mode sends text only; Vision mode uploads page images.";
+"settings.apiKey" = "Enter OpenAI API Key";
+"settings.baseUrl" = "Base URL";
+"settings.model" = "Model";
+"settings.testConnection" = "Test Connection";
+"settings.connectionSuccess" = "Connected! Model %@ is available";
+"settings.translationPrompt" = "Translation Prompt Template";
+"settings.visionPrompt" = "Vision Translation Prompt Template";
+"settings.resetDefault" = "Reset to Default";
+
+/* Media Sources */
+"mediaSources.title" = "Remote Media Sources";
+"mediaSources.added" = "Added Sources";
+"mediaSources.noServers" = "No remote servers added";
+"mediaSources.add" = "Add Remote Server";
+"mediaSources.type" = "Type";
+"mediaSources.name" = "Display Name";
+"mediaSources.serverUrl" = "Server URL";
+"mediaSources.lanUrl" = "LAN URL (optional)";
+"mediaSources.lanPrefix" = "LAN: ";
+"mediaSources.username" = "Username (leave empty for Bearer Token)";
+"mediaSources.apiKey" = "API Key";
+"mediaSources.password" = "Password or Token";
+"mediaSources.testAndSave" = "Test & Save";
+"mediaSources.refresh" = "Refresh";
+"mediaSources.edit" = "Edit";
+"mediaSources.remove" = "Remove";
+"mediaSources.enable" = "Enable";
+"mediaSources.disable" = "Disable";
+"mediaSources.hiddenComics" = "Hidden Komga Comics";
+"mediaSources.noHidden" = "No hidden comics";
+"mediaSources.unhide" = "Unhide";
+"mediaSources.komgaDescription" = "Komga API Key is stored in Keychain only.";
+"mediaSources.opdsDescription" = "OPDS supports Atom/JSON catalogs. Enter username for Basic auth; leave empty for Bearer token.";
+"mediaSources.saveSuccess" = "Saved successfully";
+"mediaSources.discoveredKomga" = "Found %d Komga libraries";
+"mediaSources.discoveredOpds" = "Found %d OPDS publications";
+"mediaSources.connectSuccess" = "Connected: %@, saved %@";
+"mediaSources.syncComplete" = "%@, synced %d comics";
+"mediaSources.refreshComplete" = "Refresh complete: synced %d %@ comics";
+
+/* Import */
+"import.files" = "Import Files from Device";
+"import.folder" = "Import Folder from Device";
+"import.webServer" = "Web Server";
+"import.webServerDescription" = "Enable to access device over LAN and upload comics.";
+"import.uploadFiles" = "Upload Files";
+
+/* Backup */
+"backup.title" = "Backup & Restore";
+"backup.export" = "Export Settings Backup";
+"backup.import" = "Import Settings Backup";
+"backup.description" = "Standard backups exclude API keys, passwords, and tokens. Use an encrypted credential backup when moving credentials. Comics, progress, and cache are not included.";
+"backup.exportEncrypted" = "Export Encrypted Credential Backup";
+"backup.encryptTitle" = "Encrypt Settings Backup";
+"backup.decryptTitle" = "Unlock Settings Backup";
+"backup.password" = "Backup Password";
+"backup.passwordConfirm" = "Confirm Password";
+"backup.passwordDescription" = "Use at least 8 characters. The password is not stored and a lost password cannot be recovered.";
+
+/* Storage */
+"storage.title" = "Storage Manager";
+"storage.comicCount" = "Comic Count";
+"storage.coverCache" = "Cover Cache";
+"storage.pageCache" = "Page Cache";
+"storage.tempCache" = "Temp Extract Cache";
+"storage.clearTempCache" = "Clear Temp Extract Cache";
+"storage.rebuildCovers" = "Check & Rebuild Cover Index";
+"storage.refreshIndex" = "Refresh Library Index";
+"storage.resetDetection" = "Reset Comic Type Detection";
+
+/* Local Library */
+"localLibrary.title" = "Local Library";
+"localLibrary.address" = "Address";
+"localLibrary.copyAddress" = "Copy Local Library Address";
+"localLibrary.changeRoot" = "Change Comic Root Directory";
+
+/* Interaction */
+"interaction.title" = "Interaction";
+"interaction.haptic" = "Haptic Feedback";
+"interaction.burnInProtection" = "Burn-in Protection";
+"interaction.dailyGoal" = "Daily Reading Page Goal";
+
+/* Statistics */
+"stats.title" = "Reading Statistics";
+"stats.todaySummary" = "Today's Summary";
+"stats.readingGoal" = "Reading Goal";
+"stats.readingRings" = "Reading Rings";
+"stats.sevenDayActivity" = "7-Day Activity";
+"stats.thirtyDayDots" = "30-Day Streak";
+"stats.topComics" = "Top Comics";
+"stats.pagesRead" = "%d pages read";
+"stats.dailyGoal" = "Daily goal: %d pages";
+"stats.currentStreak" = "Current Streak";
+"stats.longestStreak" = "Longest Streak";
+
+/* Common */
+"common.loading" = "Loading...";
+"common.error" = "Error";
+"common.success" = "Success";
+"common.confirm" = "Confirm";
+"common.delete" = "Delete";
+"common.cancel" = "Cancel";
+"common.save" = "Save";
+"common.edit" = "Edit";
+"common.close" = "Close";
+"common.refresh" = "Refresh";
+"common.retry" = "Retry";
+"common.yes" = "Yes";
+"common.no" = "No";
+"common.filter" = "Filtered";
+
+/* Error Messages */
+"error.unreachable" = "Cannot connect to server";
+"error.unauthorized" = "Authentication failed. Check credentials.";
+"error.invalidUrl" = "Invalid server URL format";
+"error.timeout" = "Connection timed out";
+"error.notFound" = "Remote resource not found";
+"error.serverError" = "Server error %d";
+"error.importFailed" = "Import failed";
+"error.importSuccess" = "Import processed";
+"error.backupFailed" = "Settings backup export failed";
+
+/* Days of Week */
+"day.monday" = "Mon";
+"day.tuesday" = "Tue";
+"day.wednesday" = "Wed";
+"day.thursday" = "Thu";
+"day.friday" = "Fri";
+"day.saturday" = "Sat";
+"day.sunday" = "Sun";
+
+/* Translation Languages */
+"lang.chinese" = "Chinese";
+"lang.english" = "English";
+"lang.japanese" = "Japanese";
+"lang.korean" = "Korean";
+"lang.simplifiedChinese" = "Simplified Chinese";
+"lang.traditionalChinese" = "Traditional Chinese";
+
+/* Vision Prompt Template */
+"visionPrompt.title" = "Vision Translation Prompt Template";
+"visionPrompt.resetDefault" = "Reset to Default";
+
+/* Statistics */
+"stats.pagesReadShort" = "%d pages";
+
+/* Delete Confirmation */
+"delete.localComic" = "This will delete the actual file from your comic library and remove the shelf record. This cannot be undone.";
+"delete.komgaComic" = "This will delete the comic from the Komga server and remove the shelf record. This cannot be undone.";
+"delete.opdsComic" = "This will only delete the OPDS shelf record and local cache in MReader, not the server files.";
+"delete.series" = "This will delete the series folder and its comics, and remove the shelf record. This cannot be undone.";
+"delete.selection" = "This will delete the selected comics or series files and remove the shelf records. This cannot be undone.";
+
+/* Error Messages */
+"error.libraryRootFailed" = "Cannot save comic root directory access. Please re-select a folder in Files.";
+"error.restoreFailed" = "Restore Failed";
+
+/* Import Messages */
+"import.noReadableImages" = "No readable images found, or archive/PDF parsing failed. Supports ZIP, CBZ, EPUB, PDF, and image folders.";
+"import.partialSuccessWithPDF" = "Imported %d items. PDFs processed as folder comics; %d items failed.";
+"import.partialSuccess" = "Imported %d items, %d failed. Failed items may not contain readable images or archives may be corrupted.";
+"import.pdfProcessedSingle" = "PDF processed as folder comic, shelf refreshed.";
+"import.pdfProcessed" = "%d PDFs processed as folder comics, shelf refreshed.";
+
+/* Comic Additional */
+"comic.readTo" = "Read to %d / %d";
+
+/* Shelf Additional */
+"shelf.selectedCount" = "Selected %d";
+"shelf.emptyTitle" = "Shelf is Empty";
+"shelf.emptyDescription" = "Supports importing image folders, ZIP, CBZ";
+"shelf.importComics" = "Import Comic Files";
+"shelf.importFolder" = "Import Comic Folder";
+
+/* Series Additional */
+"series.newDescription" = "You can open the series and add chapters after creating it.";
+"series.addChapterFiles" = "Import Chapter Files";
+"series.addChapterFolder" = "Import Chapter Folder";
+"series.addFromShelfButton" = "Add from Shelf";
+"series.addSheetTitle" = "Add Chapter";
+"series.removeFromSeries" = "Remove from Series";
+
+/* Comic Additional */
+"comic.hideDescription" = "This will only hide the comic from the MReader shelf, not delete Komga server files.";
+"comic.sourceLocal" = "Local";
+"comic.sourceKomga" = "Komga";
+"comic.sourceOpds" = "OPDS";
+"comic.notOpened" = "Not read yet";
+"comic.continueReading" = "Continue Reading";
+"comic.readProgress" = "Reading Progress";
+"comic.pagesCount" = "%d pages";
+"comic.chaptersPages" = "%d chapters · %d pages";
+"comic.chaptersCount" = "%d chapters";
+
+/* Reader Additional */
+"reader.loadFailed" = "Load Failed";
+"reader.parsing" = "Parsing...";
+"reader.imageLoadFailed" = "Image Load Failed";
+"reader.noImagesFound" = "No images found";
+"reader.noImagesDescription" = "Please re-import a comic folder containing JPG, PNG, or WebP images.";
+"reader.burnInEnabled" = "Screen Protection Enabled";
+"reader.burnInDescription" = "Screen has been idle for over 4 hours. Tap to continue reading.";
+"reader.ocrMagnify" = "OCR Text Magnification";
+"reader.aiTranslationLabel" = "AI Translation";
+"reader.ocrFilterExample" = "Sample Text";
+"reader.ocrFilterThreshold" = "Current threshold %d";
+"reader.ocrFilterSmallText" = "Text smaller than this will not be processed";
+"reader.bookmarkEditNote" = "Edit Bookmark Note";
+"reader.bookmarkNotePlaceholder" = "Note (optional)";
+"reader.ocrTextSizeSmall" = "Small";
+"reader.ocrTextSizeStandard" = "Standard";
+"reader.ocrTextSizeLarge" = "Large";
+"reader.ocrTextSizeExtraLarge" = "Extra Large";
+"reader.imageLoadError" = "Image load failed";
+"reader.currentPageOf" = "Page %d / %d";
+"reader.bookmarkPage" = "Page %d";
+
+/* Settings Additional */
+"settings.translationPromptPlaceholder" = "Placeholders: {targetLanguage}, {ocrText}";
+"settings.visionPromptPlaceholder" = "Placeholder: {targetLanguage}";
+"settings.restoreSuccess" = "Restore Successful";
+"settings.restoreSuccessMessage" = "Settings backup has been restored.";
+"settings.restoreFailed" = "Restore Failed";
+
+/* Import Additional */
+"import.accessAddress" = "Access Address";
+"import.copyWebAddress" = "Copy Web Address";
+"import.title" = "Import Service";
+"import.comicMediaLibrary" = "Comic Media Library";
+"import.itemsCount" = "Import %d items";
+"import.importAndParse" = "Import and Parse";
+"import.refreshRemoteLibrary" = "Refresh Remote Library";
+
+/* Settings Additional */
+"settings.invalidUrl" = "Invalid URL format";
+"settings.invalidResponse" = "Invalid response";
+"settings.apiKeyInvalid" = "API Key invalid or no permission";
+"settings.modelNotFound" = "Model %@ not found";
+
+
+/* Comic Additional */
+"comic.unknownSize" = "Unknown size";
+
+/* Statistics Additional */
+"stats.todaySummary" = "Today's Summary";
+"stats.dailyGoalLabel" = "Daily Goal";
+"stats.minutes" = "min";
+"stats.pages" = "pages";
+"stats.completed" = "Done";
+"stats.goalPages" = "%d pages";
+"stats.pagesPerDay" = "pages/day";
+"stats.readingRingsLabel" = "Reading Rings";
+"stats.todayGoal" = "Today / %d";
+"stats.weekGoal" = "Weekly Goal";
+"stats.streakDays" = "Streak Days";
+"stats.thisWeek" = "This Week";
+"stats.minutesPages" = "%d min · %d pages";
+"stats.monthlyRecord" = "Monthly Record";
+"stats.currentStreakDays" = "%d day streak";
+"stats.longestStreakDays" = "Best streak %d days";
+"stats.solidDotMeaning" = "Solid dot means you read that day";
+"stats.topReading" = "Top Reading";
+"stats.noReadingRecords" = "No Reading Records";
+"stats.noReadingRecordsDescription" = "Your most-read comics will appear here once you start reading.";
+"stats.activityDetail" = "%d min · %d / %d pages";
+
+/* Storage Additional */
+"storage.seriesCount" = "Series Count";
+"storage.comicCountLabel" = "Comic Count";
+"storage.imagePages" = "Image Pages";
+"storage.copyAddress" = "Copy Local Library Address";
+"storage.cacheAndTemp" = "Cache & Temp Files";
+"storage.cacheDescription" = "Comic source files are stored in the MReader local library visible in Files; this does not delete source files.";
+"storage.tempExtractCache" = "Temp Extract Cache";
+"storage.clearTempCache" = "Clear Temp Extract Cache";
+"storage.rebuildCoverIndex" = "Check & Rebuild Cover Index";
+"storage.refreshLibraryIndex" = "Refresh Library Index";
+
+/* Background Task */
+"background.processing" = "Processing in Background";
+"background.taskCount" = "%d tasks";
+
+/* Time */
+"time.today" = "Today";
+"time.yesterday" = "Yesterday";
+"time.daysAgo" = "%d days ago";
+"ocr.visualVerification" = "Verify Low-Confidence Text Visually";
+"ocr.visualVerificationDescription" = "Only when local OCR confidence is low, up to three cropped text regions are sent to the configured third-party visual model.";

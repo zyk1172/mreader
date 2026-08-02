@@ -2,14 +2,17 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
-import Vision
+@preconcurrency import Vision
 
 struct OCRPreprocessor {
     struct Options {
         var isRightToLeft: Bool
         var minimumTextHeight: Double
-        var languages: [String] = ["zh-Hans", "zh-Hant", "ja-JP", "en-US"]
+        var languages: [String] = ["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]
     }
+
+    // CIContext 创建成本高，整个 OCR 预处理共享一个
+    nonisolated private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private struct OCRImageVariant {
         let name: String
@@ -39,29 +42,37 @@ struct OCRPreprocessor {
     }
 
     nonisolated static func recognizeText(in image: UIImage, options: Options) async throws -> [TextBlock] {
-        let fullSize = pixelSize(for: image)
+        try await MangaOCRPipeline.recognize(in: image, options: options).bubbleBlocks
+    }
+
+    nonisolated static func recognizeCandidates(in image: UIImage, options: Options) async throws -> [TextBlock] {
+        let normalizedImage = normalizedOrientationImage(image)
+        let fullSize = pixelSize(for: normalizedImage)
         guard fullSize.width > 8, fullSize.height > 8 else { return [] }
 
-        let variants = makeVariants(for: image, fullPixelSize: fullSize)
+        let variants = makeVariants(for: normalizedImage, fullPixelSize: fullSize)
         print("MReader OCR preprocess slices=\(Set(variants.map { "\(Int($0.sliceRect.minY))-\(Int($0.sliceRect.maxY))" }).count) variants=\(variants.count) image=\(Int(fullSize.width))x\(Int(fullSize.height))")
 
         var allBlocks: [TextBlock] = []
         for variant in variants {
-            do {
-                let blocks = try await recognizeVariant(variant, options: options)
-                print("MReader OCR variant=\(variant.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(blocks.count) avgConfidence=\(String(format: "%.2f", averageConfidence(blocks)))")
-                allBlocks.append(contentsOf: blocks)
-            } catch {
-                print("MReader OCR variant failed name=\(variant.name) error=\(error.localizedDescription)")
+            for pass in languagePasses() {
+                do {
+                    let blocks = try await recognizeVariant(
+                        variant,
+                        options: options,
+                        languages: pass.languages,
+                        passName: pass.name
+                    )
+                    print("MReader OCR variant=\(variant.name) languagePass=\(pass.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(blocks.count) avgConfidence=\(String(format: "%.2f", averageConfidence(blocks)))")
+                    allBlocks.append(contentsOf: blocks)
+                } catch {
+                    print("MReader OCR variant failed name=\(variant.name) languagePass=\(pass.name) error=\(error.localizedDescription)")
+                }
             }
         }
 
-        let merged = AITranslator.deduplicatedMangaTextBlocks(
-            allBlocks,
-            isRightToLeft: options.isRightToLeft
-        )
-        print("MReader OCR merged blocks=\(merged.count) from=\(allBlocks.count)")
-        return merged
+        print("MReader OCR raw candidates=\(allBlocks.count)")
+        return allBlocks
     }
 
     nonisolated private static func makeVariants(for image: UIImage, fullPixelSize: CGSize) -> [OCRImageVariant] {
@@ -72,7 +83,7 @@ struct OCRPreprocessor {
             if let enhanced = enhancedImage(slice.image, inverted: false) {
                 variants.append(OCRImageVariant(name: "enhanced", image: enhanced, sliceRect: slice.rect, fullPixelSize: fullPixelSize))
             }
-            if isLikelyDark(slice.image), let inverted = enhancedImage(slice.image, inverted: true) {
+            if let inverted = enhancedImage(slice.image, inverted: true) {
                 variants.append(OCRImageVariant(name: "inverted", image: inverted, sliceRect: slice.rect, fullPixelSize: fullPixelSize))
             }
         }
@@ -134,8 +145,7 @@ struct OCRPreprocessor {
             }
         }
 
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        guard let outputCGImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        guard let outputCGImage = sharedCIContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         return UIImage(cgImage: outputCGImage, scale: image.scale, orientation: image.imageOrientation)
     }
 
@@ -149,8 +159,9 @@ struct OCRPreprocessor {
         let width = cgImage.width
         let height = cgImage.height
         let bytesPerRow = cgImage.bytesPerRow
-        let bitsPerPixel = max(cgImage.bitsPerPixel, 32)
-        let bytesPerPixel = max(bitsPerPixel / 8, 4)
+        // 灰度/索引色图的 bytesPerPixel 可能小于 4，按真实值计算并校验边界，避免越界读取
+        let bytesPerPixel = max(cgImage.bitsPerPixel / 8, 1)
+        let dataLength = CFDataGetLength(data)
         var total: CGFloat = 0
         var count: CGFloat = 0
         let xStep = max(width / 8, 1)
@@ -158,10 +169,15 @@ struct OCRPreprocessor {
         for y in stride(from: yStep / 2, to: height, by: yStep) {
             for x in stride(from: xStep / 2, to: width, by: xStep) {
                 let offset = y * bytesPerRow + x * bytesPerPixel
-                let r = CGFloat(bytes[offset])
-                let g = CGFloat(bytes[offset + min(1, bytesPerPixel - 1)])
-                let b = CGFloat(bytes[offset + min(2, bytesPerPixel - 1)])
-                total += (r + g + b) / 3
+                guard offset + bytesPerPixel <= dataLength else { continue }
+                if bytesPerPixel >= 3 {
+                    let r = CGFloat(bytes[offset])
+                    let g = CGFloat(bytes[offset + 1])
+                    let b = CGFloat(bytes[offset + 2])
+                    total += (r + g + b) / 3
+                } else {
+                    total += CGFloat(bytes[offset])
+                }
                 count += 1
             }
         }
@@ -169,7 +185,12 @@ struct OCRPreprocessor {
         return total / count < 92
     }
 
-    nonisolated private static func recognizeVariant(_ variant: OCRImageVariant, options: Options) async throws -> [TextBlock] {
+    nonisolated private static func recognizeVariant(
+        _ variant: OCRImageVariant,
+        options: Options,
+        languages: [String],
+        passName: String
+    ) async throws -> [TextBlock] {
         try await withCheckedThrowingContinuation { continuation in
             guard let cgImage = variant.image.cgImage else {
                 continuation.resume(returning: [])
@@ -185,22 +206,25 @@ struct OCRPreprocessor {
                 let observations = request.results as? [VNRecognizedTextObservation] ?? []
                 var blocks: [TextBlock] = []
                 for observation in observations {
-                    guard let candidate = observation.topCandidates(1).first else { continue }
                     let rect = mapVisionRect(
                         observation.boundingBox,
                         sliceRect: variant.sliceRect,
                         fullPixelSize: variant.fullPixelSize
                     )
-                    blocks.append(TextBlock(
-                        text: candidate.string,
-                        boundingBox: rect,
-                        confidence: Double(candidate.confidence),
-                        ocrSource: variant.name,
-                        estimatedFontScale: Double(rect.height),
-                        textColorHex: variant.name == "original"
-                            ? representativeTextColorHex(in: cgImage, visionRect: observation.boundingBox)
-                            : nil
-                    ))
+                    let textColor = variant.name == "original"
+                        ? representativeTextColorHex(in: cgImage, visionRect: observation.boundingBox)
+                        : nil
+                    for candidate in observation.topCandidates(3) {
+                        blocks.append(TextBlock(
+                            text: candidate.string,
+                            boundingBox: rect,
+                            confidence: Double(candidate.confidence),
+                            ocrSource: "\(variant.name):\(passName)",
+                            // 竖排列的字号≈列宽，横排行的字号≈行高
+                            estimatedFontScale: Double(min(rect.width, rect.height)),
+                            textColorHex: textColor
+                        ))
+                    }
                 }
                 continuation.resume(returning: AITranslator.sortedTextBlocks(blocks, isRightToLeft: options.isRightToLeft))
             }
@@ -208,13 +232,16 @@ struct OCRPreprocessor {
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
             request.minimumTextHeight = min(max(Float(options.minimumTextHeight * 0.45), 0.0008), 0.04)
-            request.recognitionLanguages = supportedRecognitionLanguages(from: options.languages, request: request)
+            request.recognitionLanguages = supportedRecognitionLanguages(from: languages, request: request)
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(throwing: error)
+            // Vision 识别是重计算，放到全局队列执行，避免长时间占用 Swift 并发协作线程
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try handler.perform([request])
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
@@ -293,6 +320,27 @@ struct OCRPreprocessor {
         let supported = (try? request.supportedRecognitionLanguages()) ?? preferredLanguages
         let filtered = preferredLanguages.filter { supported.contains($0) }
         return filtered.isEmpty ? preferredLanguages : filtered
+    }
+
+    nonisolated static func languagePassesForDiagnostics() -> [[String]] {
+        languagePasses().map(\.languages)
+    }
+
+    nonisolated private static func languagePasses() -> [(name: String, languages: [String])] {
+        [
+            ("zh-ko", ["zh-Hans", "zh-Hant", "ko-KR", "en-US"]),
+            ("ja", ["ja-JP", "en-US"])
+        ]
+    }
+
+    nonisolated private static func normalizedOrientationImage(_ image: UIImage) -> UIImage {
+        guard image.imageOrientation != .up else { return image }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+        }
     }
 
     nonisolated private static func averageConfidence(_ blocks: [TextBlock]) -> Double {

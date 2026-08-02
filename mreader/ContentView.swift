@@ -86,23 +86,23 @@ private enum DeleteRequest: Identifiable {
         case .comic(let comic):
             switch comic.sourceType {
             case .local:
-                return "会删除用户漫画库中的真实文件，并清理书架记录。此操作不能撤销。"
+                return "delete.localComic".localized
             case .komga:
-                return "会调用 Komga 服务器删除该漫画，并清理书架记录。此操作不能撤销。"
+                return "delete.komgaComic".localized
             case .opds:
-                return "只会删除 MReader 中的 OPDS 书架记录和本地缓存，不会删除服务器上的文件。"
+                return "delete.opdsComic".localized
             }
         case .series:
-            return "会删除该系列文件夹及其中漫画，并清理书架记录。此操作不能撤销。"
+            return "delete.series".localized
         case .selection:
-            return "会删除选中漫画或系列对应的真实文件，并清理书架记录。此操作不能撤销。"
+            return "delete.selection".localized
         }
     }
 }
 
 nonisolated struct MReaderSettingsBackup: Codable {
-    var version = 5
-    var openAIAPIKey: String
+    var version = 7
+    var openAIAPIKey: String?
     var openAIBaseURL: String
     var openAIModel: String
     var aiModelPool: String?
@@ -117,6 +117,14 @@ nonisolated struct MReaderSettingsBackup: Codable {
     var isOCRDebugBoxesEnabled: Bool?
     var readingDailyPageGoal: Double?
     var isBurnInProtectionEnabled: Bool?
+    var aiProviders: [AIProviderBackup]?
+    var activeAIProviderID: UUID?
+    var containsCredentials: Bool? = nil
+}
+
+nonisolated struct AIProviderBackup: Codable, Sendable {
+    var profile: AIProviderProfile
+    var apiKey: String?
 }
 
 private struct SettingsRestoreNotice: Identifiable {
@@ -130,6 +138,7 @@ nonisolated struct MediaSourceBackup: Codable {
     var name: String
     var type: MediaSourceType
     var baseURL: String
+    var lanURL: String?
     var username: String?
     var createdAt: Date
     var lastSyncAt: Date?
@@ -141,6 +150,7 @@ nonisolated struct MediaSourceBackup: Codable {
         name = source.name
         type = source.type
         baseURL = source.baseURL
+        lanURL = source.lanURL
         username = source.username
         createdAt = source.createdAt
         lastSyncAt = source.lastSyncAt
@@ -154,6 +164,7 @@ nonisolated struct MediaSourceBackup: Codable {
             name: name,
             type: type,
             baseURL: baseURL,
+            lanURL: lanURL,
             username: username,
             createdAt: createdAt,
             lastSyncAt: lastSyncAt,
@@ -166,24 +177,32 @@ nonisolated struct SettingsBackupDocument: FileDocument, Identifiable {
     static var readableContentTypes: [UTType] { [.json] }
 
     var id = UUID()
-    var backup: MReaderSettingsBackup
+    var data: Data
 
-    init(backup: MReaderSettingsBackup) {
-        self.backup = backup
+    init(data: Data) {
+        self.data = data
     }
 
     init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        backup = try JSONDecoder().decode(MReaderSettingsBackup.self, from: data)
+        self.data = data
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return FileWrapper(regularFileWithContents: try encoder.encode(backup))
+        FileWrapper(regularFileWithContents: data)
     }
+}
+
+private struct BackupPasswordRequest: Identifiable {
+    enum Purpose {
+        case export
+        case restore(Data)
+    }
+
+    let id = UUID()
+    let purpose: Purpose
 }
 
 struct ContentView: View {
@@ -211,7 +230,9 @@ struct ContentView: View {
     @State private var shelfDisplayMode = ShelfDisplayMode.grid
     @State private var shelfFilter = ShelfFilter.all
     @State private var importError: String?
+    @State private var importInfo: String?
     @State private var settingsBackupDocument: SettingsBackupDocument?
+    @State private var backupPasswordRequest: BackupPasswordRequest?
     @State private var renamingComic: ComicBook?
     @State private var renameTitle = ""
     @State private var importingSeriesID: UUID?
@@ -219,15 +240,11 @@ struct ContentView: View {
     @State private var hideKomgaRequest: ComicBook?
     @State private var hiddenKomgaVersion = 0
     @State private var isRefreshingLibraries = false
-    @State private var modelPoolStatuses: [AIModelPoolStatus] = []
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
-    @AppStorage("openai_api_key") private var apiKey = ""
-    @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
-    @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
-    @AppStorage("ai_model_pool") private var modelPoolText = ""
-    @AppStorage("ai_model_pool_enabled") private var isModelPoolEnabled = true
-    @AppStorage("translation_target_language") private var translationTargetLanguage = "中文"
+    @State private var showTranslationPrompt = false
+    @State private var showVisionPrompt = false
+    @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
     @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage(HapticSettings.isEnabledKey) private var isHapticFeedbackEnabled = true
@@ -278,59 +295,13 @@ struct ContentView: View {
                         transaction.disablesAnimations = true
                     }
             }
-            .toolbar {
-                if backgroundTasks.isActive {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        BackgroundTaskIndicator(center: backgroundTasks)
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    shelfActionMenu
-                }
-            }
+            .modifier(shelfToolbarModifiers)
             .onChange(of: selectedPage) { _, _ in
                 HapticManager.shared.play(.light)
             }
-            .sheet(isPresented: $showSettings) {
-                settingsView
-            }
+            .modifier(shelfSheetModifiers)
             .eraseToAnyView()
-            .safeAreaInset(edge: .bottom) {
-                if isSelectionMode {
-                    selectionActionBar
-                }
-            }
-            .fileImporter(
-                isPresented: $isImporting,
-                allowedContentTypes: allowedImportTypes,
-                allowsMultipleSelection: importPickerMode == .files
-            ) { result in
-                if case .success(let urls) = result {
-                    importComicsOrFolder(from: urls, seriesID: importingSeriesID)
-                }
-                importingSeriesID = nil
-            }
-            .fileImporter(
-                isPresented: $isRestoringSettings,
-                allowedContentTypes: [.json],
-                allowsMultipleSelection: false
-            ) { result in
-                restoreSettingsBackup(from: result)
-            }
-            .eraseToAnyView()
-            .fileExporter(
-                isPresented: $isExportingSettings,
-                documents: settingsBackupDocument.map { [$0] } ?? [],
-                contentType: .json
-            ) { result in
-                switch result {
-                case .success:
-                    HapticManager.shared.play(.success)
-                case .failure:
-                    HapticManager.shared.play(.error)
-                    importError = "设置备份导出失败。"
-                }
-            }
+            .modifier(shelfFileModifiers)
             .sheet(isPresented: $isFolderImporting) {
                 FolderPicker { url, scopeBox in
                     importComicsOrFolder(from: [url], seriesID: importingSeriesID, securityBox: scopeBox)
@@ -345,113 +316,483 @@ struct ContentView: View {
                         hasLibraryRoot = true
                         library.runStartupMaintenance()
                     } else {
-                        importError = "无法保存漫画根目录访问权限，请重新选择 Files 中的文件夹。"
+                        importError = "error.libraryRootFailed".localized
                     }
                     scopeBox.release()
                 } onCancel: {}
             }
             .eraseToAnyView()
-            .alert("导入失败", isPresented: Binding(
-                get: { importError != nil },
-                set: { if !$0 { importError = nil } }
-            )) {
-                Button("好", role: .cancel) { importError = nil }
-            } message: {
-                Text(importError ?? "")
-            }
-            .alert(item: $settingsRestoreNotice) { notice in
-                Alert(
-                    title: Text(notice.title),
-                    message: Text(notice.message),
-                    dismissButton: .default(Text("好"))
-                )
-            }
-            .alert("网页服务", isPresented: Binding(
-                get: { webServer.errorMessage != nil },
-                set: { if !$0 { webServer.errorMessage = nil } }
-            )) {
-                Button("好", role: .cancel) { webServer.errorMessage = nil }
-            } message: {
-                Text(webServer.errorMessage ?? "")
-            }
-            .eraseToAnyView()
-            .alert("重命名漫画", isPresented: Binding(
-                get: { renamingComic != nil },
-                set: { if !$0 { renamingComic = nil } }
-            )) {
-                TextField("漫画名称", text: $renameTitle)
-                Button("取消", role: .cancel) { renamingComic = nil }
-                Button("保存") {
-                    if let renamingComic {
-                        library.rename(id: renamingComic.id, title: renameTitle)
-                    }
-                    renamingComic = nil
-                }
-            }
-            .alert("重命名系列", isPresented: Binding(
-                get: { renamingSeries != nil },
-                set: { if !$0 { renamingSeries = nil } }
-            )) {
-                TextField("系列名称", text: $renameTitle)
-                Button("取消", role: .cancel) { renamingSeries = nil }
-                Button("保存") {
-                    if let renamingSeries {
-                        library.renameSeries(id: renamingSeries.id, title: renameTitle)
-                    }
-                    renamingSeries = nil
-                }
-            }
-            .alert("新系列", isPresented: $showNewSeriesAlert) {
-                TextField("系列名称", text: $newSeriesName)
-                Button("取消", role: .cancel) { newSeriesName = "" }
-                Button("创建") {
-                    library.addSeries(title: newSeriesName)
-                    selectedPage = .library
-                    newSeriesName = ""
-                }
-            } message: {
-                Text("创建后可以打开系列并添加章节漫画。")
-            }
-            .alert(
-                "确认删除",
-                isPresented: Binding(
-                    get: { deleteRequest != nil },
-                    set: { if !$0 { deleteRequest = nil } }
-                )
-            ) {
-                Button("删除", role: .destructive) {
-                    performConfirmedDelete()
-                }
-                Button("取消", role: .cancel) {
-                    deleteRequest = nil
-                }
-            } message: {
-                Text(deleteRequest?.message ?? "")
-            }
-            .confirmationDialog(
-                hideKomgaRequest.map { "隐藏“\($0.title)”？" } ?? "隐藏 Komga 漫画？",
-                isPresented: Binding(
-                    get: { hideKomgaRequest != nil },
-                    set: { if !$0 { hideKomgaRequest = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("隐藏", role: .destructive) {
-                    performConfirmedKomgaHide()
-                }
-                Button("取消", role: .cancel) {
-                    hideKomgaRequest = nil
-                }
-            } message: {
-                Text("此操作只会从 MReader 书架隐藏该漫画，不会删除 Komga 服务器文件。")
-            }
+            .modifier(alertModifiers)
             .sheet(isPresented: $showStorageManager) {
                 StorageManagerView(library: library)
             }
             .sheet(isPresented: $showActivity) {
                 ShelfActivityView(comics: library.comics)
             }
+            .sheet(item: $backupPasswordRequest) { request in
+                BackupPasswordView(
+                    isCreatingBackup: {
+                        if case .export = request.purpose { return true }
+                        return false
+                    }(),
+                    onCancel: {
+                        backupPasswordRequest = nil
+                    },
+                    onSubmit: { password in
+                        handleBackupPassword(password, request: request)
+                    }
+                )
+            }
         }
+    }
+
+    private struct AlertModifiers: ViewModifier {
+        @Binding var importError: String?
+        @Binding var importInfo: String?
+        @Binding var settingsRestoreNotice: SettingsRestoreNotice?
+        @Binding var webServerErrorMessage: String?
+        @Binding var renamingComic: ComicBook?
+        @Binding var renameTitle: String
+        @Binding var renamingSeries: ComicSeries?
+        @Binding var showNewSeriesAlert: Bool
+        @Binding var newSeriesName: String
+        @Binding var deleteRequest: DeleteRequest?
+        @Binding var hideKomgaRequest: ComicBook?
+        var library: ComicLibraryStore
+        var performConfirmedDelete: () -> Void
+        var performConfirmedKomgaHide: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .alert("error.importFailed".localized, isPresented: Binding(
+                    get: { importError != nil },
+                    set: { if !$0 { importError = nil } }
+                )) {
+                    Button("common.confirm".localized, role: .cancel) { importError = nil }
+                } message: {
+                    Text(importError ?? "")
+                }
+                .alert("error.importSuccess".localized, isPresented: Binding(
+                    get: { importInfo != nil },
+                    set: { if !$0 { importInfo = nil } }
+                )) {
+                    Button("common.confirm".localized, role: .cancel) { importInfo = nil }
+                } message: {
+                    Text(importInfo ?? "")
+                }
+                .alert(item: $settingsRestoreNotice) { notice in
+                    Alert(
+                        title: Text(notice.title),
+                        message: Text(notice.message),
+                        dismissButton: .default(Text("common.confirm".localized))
+                    )
+                }
+                .alert("import.webServer".localized, isPresented: Binding(
+                    get: { webServerErrorMessage != nil },
+                    set: { if !$0 { webServerErrorMessage = nil } }
+                )) {
+                    Button("common.confirm".localized, role: .cancel) { webServerErrorMessage = nil }
+                } message: {
+                    Text(webServerErrorMessage ?? "")
+                }
+                .alert("comic.rename".localized, isPresented: Binding(
+                    get: { renamingComic != nil },
+                    set: { if !$0 { renamingComic = nil } }
+                )) {
+                    TextField("comic.rename".localized, text: $renameTitle)
+                    Button("nav.cancel".localized, role: .cancel) { renamingComic = nil }
+                    Button("nav.save".localized) {
+                        if let renamingComic {
+                            library.rename(id: renamingComic.id, title: renameTitle)
+                        }
+                        renamingComic = nil
+                    }
+                }
+                .alert("series.rename".localized, isPresented: Binding(
+                    get: { renamingSeries != nil },
+                    set: { if !$0 { renamingSeries = nil } }
+                )) {
+                    TextField("series.name".localized, text: $renameTitle)
+                    Button("nav.cancel".localized, role: .cancel) { renamingSeries = nil }
+                    Button("nav.save".localized) {
+                        if let renamingSeries {
+                            library.renameSeries(id: renamingSeries.id, title: renameTitle)
+                        }
+                        renamingSeries = nil
+                    }
+                }
+                .alert("series.new".localized, isPresented: $showNewSeriesAlert) {
+                    TextField("series.name".localized, text: $newSeriesName)
+                    Button("nav.cancel".localized, role: .cancel) { newSeriesName = "" }
+                    Button("series.create".localized) {
+                        library.addSeries(title: newSeriesName)
+                        showNewSeriesAlert = false
+                        newSeriesName = ""
+                    }
+                } message: {
+                    Text("series.newDescription".localized)
+                }
+                .alert(
+                    "common.confirm".localized,
+                    isPresented: Binding(
+                        get: { deleteRequest != nil },
+                        set: { if !$0 { deleteRequest = nil } }
+                    )
+                ) {
+                    Button("common.delete".localized, role: .destructive) {
+                        performConfirmedDelete()
+                    }
+                    Button("nav.cancel".localized, role: .cancel) {
+                        deleteRequest = nil
+                    }
+                } message: {
+                    Text(deleteRequest?.message ?? "")
+                }
+                .confirmationDialog(
+                    hideKomgaRequest != nil ? "comic.hideConfirm".localizedFormat(hideKomgaRequest!.title) : "comic.hideConfirmDefault".localized,
+                    isPresented: Binding(
+                        get: { hideKomgaRequest != nil },
+                        set: { if !$0 { hideKomgaRequest = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("comic.hide".localized, role: .destructive) {
+                        performConfirmedKomgaHide()
+                    }
+                    Button("nav.cancel".localized, role: .cancel) {
+                        hideKomgaRequest = nil
+                    }
+                } message: {
+                    Text("comic.hideDescription".localized)
+                }
+        }
+    }
+
+    private var alertModifiers: AlertModifiers {
+        AlertModifiers(
+            importError: $importError,
+            importInfo: $importInfo,
+            settingsRestoreNotice: $settingsRestoreNotice,
+            webServerErrorMessage: $webServer.errorMessage,
+            renamingComic: $renamingComic,
+            renameTitle: $renameTitle,
+            renamingSeries: $renamingSeries,
+            showNewSeriesAlert: $showNewSeriesAlert,
+            newSeriesName: $newSeriesName,
+            deleteRequest: $deleteRequest,
+            hideKomgaRequest: $hideKomgaRequest,
+            library: library,
+            performConfirmedDelete: performConfirmedDelete,
+            performConfirmedKomgaHide: performConfirmedKomgaHide
+        )
+    }
+
+    // MARK: - Toolbar Modifier
+
+    private struct ShelfToolbarModifiers: ViewModifier {
+        @ObservedObject var backgroundTasks: BackgroundTaskCenter
+        var shelfActionMenu: ShelfActionMenuContent
+
+        func body(content: Content) -> some View {
+            content
+                .toolbar {
+                    if backgroundTasks.isActive {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            BackgroundTaskIndicator(center: backgroundTasks)
+                        }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        shelfActionMenu
+                    }
+                }
+                .safeAreaInset(edge: .bottom) {
+                    EmptyView()
+                }
+        }
+    }
+
+    private struct ShelfActionMenuContent: View {
+        @Binding var isSelectionMode: Bool
+        @Binding var selectedComicIDs: Set<UUID>
+        @Binding var selectedSeriesIDs: Set<UUID>
+        @Binding var shelfDisplayMode: ShelfDisplayMode
+        @Binding var shelfFilter: ShelfFilter
+        @Binding var showSettings: Bool
+        @Binding var showStorageManager: Bool
+        @Binding var showActivity: Bool
+        @Binding var showNewSeriesAlert: Bool
+        @Binding var selectedPage: MainShelfPage
+        var beginImport: (ImportPickerMode) -> Void
+        var refreshShelfLibraries: () async -> Void
+
+        var body: some View {
+            Menu {
+                Button {
+                    HapticManager.shared.play(.light)
+                    beginImport(.files)
+                } label: {
+                    Label("import.files".localized, systemImage: "doc.badge.plus")
+                }
+                Button {
+                    HapticManager.shared.play(.light)
+                    beginImport(.folder)
+                } label: {
+                    Label("import.folder".localized, systemImage: "folder.badge.plus")
+                }
+                Button {
+                    HapticManager.shared.play(.medium)
+                    selectedPage = .library
+                    Task { await refreshShelfLibraries() }
+                } label: {
+                    Label("storage.refreshIndex".localized, systemImage: "arrow.clockwise")
+                }
+                Button {
+                    HapticManager.shared.play(.light)
+                    selectedPage = .library
+                    showNewSeriesAlert = true
+                } label: {
+                    Label("series.new".localized, systemImage: "folder.badge.plus")
+                }
+                Button {
+                    HapticManager.shared.play(.medium)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                        isSelectionMode.toggle()
+                        selectedComicIDs.removeAll()
+                        selectedSeriesIDs.removeAll()
+                    }
+                } label: {
+                    Label(isSelectionMode ? "nav.done".localized : "common.edit".localized, systemImage: "checkmark.circle")
+                }
+                Divider()
+                Button {
+                    HapticManager.shared.play(.light)
+                    shelfDisplayMode = .grid
+                } label: {
+                    Label("shelf.gridMode".localized, systemImage: "square.grid.2x2")
+                }
+                Button {
+                    HapticManager.shared.play(.light)
+                    shelfDisplayMode = .list
+                } label: {
+                    Label("shelf.listMode".localized, systemImage: "list.bullet")
+                }
+                Divider()
+                Menu {
+                    FilterButton(title: "shelf.all".localized, icon: "books.vertical", filter: .all, current: $shelfFilter)
+                    FilterButton(title: "shelf.inProgress".localized, icon: "clock", filter: .inProgress, current: $shelfFilter)
+                    FilterButton(title: "shelf.locked".localized, icon: "lock", filter: .locked, current: $shelfFilter)
+                    FilterButton(title: "shelf.local".localized, icon: "iphone", filter: .local, current: $shelfFilter)
+                    FilterButton(title: "shelf.komga".localized, icon: "server.rack", filter: .komga, current: $shelfFilter)
+                    FilterButton(title: "shelf.opds".localized, icon: "books.vertical.circle", filter: .opds, current: $shelfFilter)
+                } label: {
+                    Label("shelf.filterCategory".localized, systemImage: "books.vertical")
+                }
+                Divider()
+                Button {
+                    HapticManager.shared.play(.light)
+                    showSettings = true
+                } label: {
+                    Label("nav.settings".localized, systemImage: "gearshape")
+                }
+                Button {
+                    HapticManager.shared.play(.light)
+                    showStorageManager = true
+                } label: {
+                    Label("storage.title".localized, systemImage: "externaldrive")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+        }
+    }
+
+    private struct FilterButton: View {
+        let title: String
+        let icon: String
+        let filter: ShelfFilter
+        @Binding var current: ShelfFilter
+
+        var body: some View {
+            Button {
+                HapticManager.shared.play(.light)
+                current = filter
+            } label: {
+                Label(title, systemImage: current == filter ? "checkmark" : icon)
+            }
+        }
+    }
+
+    private var shelfToolbarModifiers: ShelfToolbarModifiers {
+        ShelfToolbarModifiers(
+            backgroundTasks: backgroundTasks,
+            shelfActionMenu: ShelfActionMenuContent(
+                isSelectionMode: $isSelectionMode,
+                selectedComicIDs: $selectedComicIDs,
+                selectedSeriesIDs: $selectedSeriesIDs,
+                shelfDisplayMode: $shelfDisplayMode,
+                shelfFilter: $shelfFilter,
+                showSettings: $showSettings,
+                showStorageManager: $showStorageManager,
+                showActivity: $showActivity,
+                showNewSeriesAlert: $showNewSeriesAlert,
+                selectedPage: $selectedPage,
+                beginImport: beginImport,
+                refreshShelfLibraries: refreshShelfLibraries
+            )
+        )
+    }
+
+    // MARK: - Sheet Modifier
+
+    private struct ShelfSheetModifiers: ViewModifier {
+        @Binding var showSettings: Bool
+        @Binding var isSelectionMode: Bool
+        @Binding var selectedComicIDs: Set<UUID>
+        @Binding var selectedSeriesIDs: Set<UUID>
+        @Binding var showStorageManager: Bool
+        @Binding var showActivity: Bool
+        var settingsContent: AnyView
+        var library: ComicLibraryStore
+
+        func body(content: Content) -> some View {
+            content
+                .sheet(isPresented: $showSettings) {
+                    settingsContent
+                }
+                .eraseToAnyView()
+                .safeAreaInset(edge: .bottom) {
+                    if isSelectionMode {
+                        SelectionActionBar(
+                            selectedComicIDs: $selectedComicIDs,
+                            selectedSeriesIDs: $selectedSeriesIDs,
+                            isSelectionMode: $isSelectionMode,
+                            library: library
+                        )
+                    }
+                }
+                .sheet(isPresented: $showStorageManager) {
+                    StorageManagerView(library: library)
+                }
+                .sheet(isPresented: $showActivity) {
+                    ShelfActivityView(comics: library.comics)
+                }
+        }
+    }
+
+    private var shelfSheetModifiers: ShelfSheetModifiers {
+        ShelfSheetModifiers(
+            showSettings: $showSettings,
+            isSelectionMode: $isSelectionMode,
+            selectedComicIDs: $selectedComicIDs,
+            selectedSeriesIDs: $selectedSeriesIDs,
+            showStorageManager: $showStorageManager,
+            showActivity: $showActivity,
+            settingsContent: AnyView(settingsView),
+            library: library
+        )
+    }
+
+    private struct SelectionActionBar: View {
+        @Binding var selectedComicIDs: Set<UUID>
+        @Binding var selectedSeriesIDs: Set<UUID>
+        @Binding var isSelectionMode: Bool
+        var library: ComicLibraryStore
+
+        var body: some View {
+            HStack(spacing: 14) {
+                Text("shelf.selectedCount".localizedFormat(selectedComicIDs.count + selectedSeriesIDs.count))
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    HapticManager.shared.play(.medium)
+                    library.rebuildThumbnails(for: selectedComicIDs, seriesIDs: selectedSeriesIDs)
+                    selectedComicIDs.removeAll()
+                    selectedSeriesIDs.removeAll()
+                    isSelectionMode = false
+                } label: {
+                    Label("comic.rebuildThumbnail".localized, systemImage: "photo.on.rectangle.angled")
+                }
+                .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
+                Button(role: .destructive) {
+                    HapticManager.shared.play(.heavy)
+                    selectedComicIDs.removeAll()
+                    selectedSeriesIDs.removeAll()
+                    isSelectionMode = false
+                } label: {
+                    Label("comic.delete".localized, systemImage: "trash")
+                }
+                .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.bar)
+        }
+    }
+
+    // MARK: - File Import/Export Modifier
+
+    private struct ShelfFileModifiers: ViewModifier {
+        @Binding var isImporting: Bool
+        @Binding var isRestoringSettings: Bool
+        @Binding var isExportingSettings: Bool
+        @Binding var importingSeriesID: UUID?
+        @Binding var importError: String?
+        @Binding var settingsBackupDocument: SettingsBackupDocument?
+        var importPickerMode: ImportPickerMode
+        var allowedImportTypes: [UTType]
+        var importComicsOrFolder: ([URL], UUID?) -> Void
+        var restoreSettingsBackup: (Result<[URL], Error>) -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .fileImporter(
+                    isPresented: $isImporting,
+                    allowedContentTypes: allowedImportTypes,
+                    allowsMultipleSelection: importPickerMode == .files
+                ) { result in
+                    if case .success(let urls) = result {
+                        importComicsOrFolder(urls, importingSeriesID)
+                    }
+                    importingSeriesID = nil
+                }
+                .fileImporter(
+                    isPresented: $isRestoringSettings,
+                    allowedContentTypes: [.json],
+                    allowsMultipleSelection: false
+                ) { result in
+                    restoreSettingsBackup(result)
+                }
+                .eraseToAnyView()
+                .fileExporter(
+                    isPresented: $isExportingSettings,
+                    documents: settingsBackupDocument.map { [$0] } ?? [],
+                    contentType: .json
+                ) { result in
+                    if case .success = result {
+                        HapticManager.shared.play(.success)
+                    } else {
+                        HapticManager.shared.play(.error)
+                        importError = "error.backupFailed".localized
+                    }
+                }
+        }
+    }
+
+    private var shelfFileModifiers: ShelfFileModifiers {
+        ShelfFileModifiers(
+            isImporting: $isImporting,
+            isRestoringSettings: $isRestoringSettings,
+            isExportingSettings: $isExportingSettings,
+            importingSeriesID: $importingSeriesID,
+            importError: $importError,
+            settingsBackupDocument: $settingsBackupDocument,
+            importPickerMode: importPickerMode,
+            allowedImportTypes: allowedImportTypes,
+            importComicsOrFolder: { urls, seriesID in importComicsOrFolder(from: urls, seriesID: seriesID) },
+            restoreSettingsBackup: { result in restoreSettingsBackup(from: result) }
+        )
     }
 
     private var allowedImportTypes: [UTType] {
@@ -502,19 +843,72 @@ struct ContentView: View {
                 backupSettingsSection
                 localLibrarySettingsSection
             }
-            .navigationTitle("设置")
+            .navigationTitle("settings.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("完成") {
-                    normalizeStoredModelPool()
+                Button("nav.done".localized) {
                     showSettings = false
                 }
             }
-            .task(id: modelPoolText) {
-                await reloadModelPoolStatuses()
+            .sheet(isPresented: $showTranslationPrompt) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("settings.translationPromptPlaceholder".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $translationPromptTemplate)
+                            .font(.footnote.monospaced())
+                            .scrollContentBackground(.hidden)
+                            .background(Color.secondary.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .padding()
+                    .navigationTitle("settings.translationPrompt".localized)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("nav.cancel".localized) {
+                                translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+                                showTranslationPrompt = false
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("nav.done".localized) {
+                                showTranslationPrompt = false
+                            }
+                        }
+                    }
+                }
             }
-            .onDisappear {
-                normalizeStoredModelPool()
+            .sheet(isPresented: $showVisionPrompt) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("settings.visionPromptPlaceholder".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $visionTranslationPromptTemplate)
+                            .font(.footnote.monospaced())
+                            .scrollContentBackground(.hidden)
+                            .background(Color.secondary.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .padding()
+                    .navigationTitle("settings.visionPrompt".localized)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("nav.cancel".localized) {
+                                visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
+                                showVisionPrompt = false
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("nav.done".localized) {
+                                showVisionPrompt = false
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -524,21 +918,25 @@ struct ContentView: View {
         TabView(selection: $selectedPage) {
             shelfPageContent(for: .continueReading)
                 .tabItem {
-                    Label("立即阅读", systemImage: "book")
+                    Label("tab.continueReading".localized, systemImage: "book")
                 }
                 .tag(MainShelfPage.continueReading)
 
             shelfPageContent(for: .library)
                 .tabItem {
-                    Label("书架", systemImage: "books.vertical")
+                    Label("tab.library".localized, systemImage: "books.vertical")
                 }
                 .tag(MainShelfPage.library)
 
             shelfPageContent(for: .statistics)
                 .tabItem {
-                    Label("阅读统计", systemImage: "chart.bar.doc.horizontal")
+                    Label("tab.statistics".localized, systemImage: "chart.bar.doc.horizontal")
                 }
                 .tag(MainShelfPage.statistics)
+        }
+        .task(id: library.comics.count) {
+            let topComics = Array(continueReadingComics.prefix(3))
+            RemotePagePrefetcher.shared.previewPrefetch(comics: topComics)
         }
     }
 
@@ -560,21 +958,21 @@ struct ContentView: View {
     private var navigationTitle: String {
         switch selectedPage {
         case .continueReading:
-            return "立即阅读"
+            return "tab.continueReading".localized
         case .library:
-            return "MReader 书架"
+            return "shelf.title".localized
         case .statistics:
-            return "阅读统计"
+            return "tab.statistics".localized
         }
     }
 
     private var missingLibraryRootView: some View {
         ContentUnavailableView {
-            Label("选择漫画库", systemImage: "folder")
+            Label("settings.selectLibrary".localized, systemImage: "folder")
         } description: {
-            Text("请选择 Files 中的 Manga 或其他漫画根目录。后续扫描、导入、删除都只基于这个目录。")
+            Text("settings.selectLibraryDescription".localized)
         } actions: {
-            Button("选择漫画根目录") {
+            Button("settings.selectLibraryRoot".localized) {
                 isLibraryRootPicking = true
             }
             .buttonStyle(.borderedProminent)
@@ -584,15 +982,15 @@ struct ContentView: View {
     private var emptyShelfView: some View {
         ScrollView {
             ContentUnavailableView {
-                Label("书架空空如也", systemImage: "books.vertical")
+                Label("shelf.emptyTitle".localized, systemImage: "books.vertical")
             } description: {
-                Text("支持导入图片文件夹、ZIP、CBZ")
+                Text("shelf.emptyDescription".localized)
             } actions: {
-                Button("导入漫画文件") {
+                Button("shelf.importComics".localized) {
                     beginImport(.files)
                 }
                 .buttonStyle(.borderedProminent)
-                Button("导入漫画文件夹") {
+                Button("shelf.importFolder".localized) {
                     beginImport(.folder)
                 }
             }
@@ -607,12 +1005,20 @@ struct ContentView: View {
     private var continueReadingComics: [ComicBook] {
         visibleComics
             .filter { $0.hasBeenOpened || readingActivity.hasActivity(for: $0.id) }
-            .sorted { $0.lastReadAt > $1.lastReadAt }
+            .sorted { lhs, rhs in
+                let lhsFinished = ComicReadingProgress.isFinished(lhs)
+                let rhsFinished = ComicReadingProgress.isFinished(rhs)
+                if lhsFinished != rhsFinished { return !lhsFinished }
+                return lhs.lastReadAt > rhs.lastReadAt
+            }
     }
 
     private func sortedComicsByTitle(_ comics: [ComicBook]) -> [ComicBook] {
         comics.sorted { lhs, rhs in
-            naturalTitleCompare(lhs.title, comicSortTieBreaker(lhs), rhs.title, comicSortTieBreaker(rhs))
+            let lhsFinished = ComicReadingProgress.isFinished(lhs)
+            let rhsFinished = ComicReadingProgress.isFinished(rhs)
+            if lhsFinished != rhsFinished { return !lhsFinished }
+            return naturalTitleCompare(lhs.title, comicSortTieBreaker(lhs), rhs.title, comicSortTieBreaker(rhs))
         }
     }
 
@@ -637,221 +1043,63 @@ struct ContentView: View {
                 : library.series.filter { visibleSeriesIDs.contains($0.id) }
             let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
             let rootComics = sortedComicsByTitle(displayComics.filter { $0.seriesID == nil })
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(shelfTitle)
-                                .font(.title2.weight(.bold))
-                            Spacer()
-                            Text("\(displayComics.count + sortedSeriesItems.count) 项")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                    if shelfDisplayMode == .grid {
+                        LazyVGrid(columns: gridLayout.columns, spacing: 24) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesGridItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }), cardWidth: cardWidth)
+                            }
+                            ForEach(rootComics) { comic in
+                                comicGridItem(comic, cardWidth: cardWidth)
+                            }
                         }
                         .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
-
-                        if shelfDisplayMode == .grid {
-                            LazyVGrid(columns: gridLayout.columns, spacing: 24) {
-                                ForEach(sortedSeriesItems) { series in
-                                    seriesGridItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }), cardWidth: cardWidth)
-                                }
-                                ForEach(rootComics) { comic in
-                                    comicGridItem(comic, cardWidth: cardWidth)
-                                }
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesListItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }))
                             }
-                            .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
-                        } else {
-                            LazyVStack(spacing: 12) {
-                                ForEach(sortedSeriesItems) { series in
-                                    seriesListItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }))
-                                }
-                                ForEach(rootComics) { comic in
-                                    comicListItem(comic)
-                                }
+                            ForEach(rootComics) { comic in
+                                comicListItem(comic)
                             }
-                            .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
                         }
+                        .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 12)
             }
             .refreshable {
                 await refreshShelfLibraries()
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
     }
 
     private func refreshShelfLibraries() async {
         guard !isRefreshingLibraries else { return }
         isRefreshingLibraries = true
-        let taskID = backgroundTasks.begin(title: "刷新远程漫画库")
+        let taskID = backgroundTasks.begin(title: "import.refreshRemoteLibrary".localized)
         defer {
             backgroundTasks.finish(taskID)
             isRefreshingLibraries = false
         }
         HapticManager.shared.play(.light)
-        await library.syncAllLibrariesAsync()
+        await library.syncAllLibrariesAsync(skipPrewarm: true)
         hasLibraryRoot = ComicManager.hasSelectedLibraryRoot()
     }
 
     private var shelfTitle: String {
         switch shelfFilter {
-        case .all: return "书架"
-        case .inProgress: return "正在阅读"
-        case .locked: return "已锁定"
-        case .local: return "本地漫画"
-        case .komga: return "Komga 漫画"
-        case .opds: return "OPDS 漫画"
+        case .all: return "shelf.title".localized
+        case .inProgress: return "shelf.inProgress".localized
+        case .locked: return "shelf.locked".localized
+        case .local: return "shelf.local".localized
+        case .komga: return "shelf.komga".localized
+        case .opds: return "shelf.opds".localized
         }
-    }
-
-    private var shelfActionMenu: some View {
-        Menu {
-            Button {
-                HapticManager.shared.play(.light)
-                beginImport(.files)
-            } label: {
-                Label("导入文件", systemImage: "doc.badge.plus")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                beginImport(.folder)
-            } label: {
-                Label("导入文件夹", systemImage: "folder.badge.plus")
-            }
-
-            Button {
-                HapticManager.shared.play(.medium)
-                selectedPage = .library
-                Task {
-                    await refreshShelfLibraries()
-                }
-            } label: {
-                Label("刷新漫画库", systemImage: "arrow.clockwise")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                selectedPage = .library
-                showNewSeriesAlert = true
-            } label: {
-                Label("新系列", systemImage: "folder.badge.plus")
-            }
-
-            Button {
-                HapticManager.shared.play(.medium)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                    isSelectionMode.toggle()
-                    selectedComicIDs.removeAll()
-                    selectedSeriesIDs.removeAll()
-                }
-            } label: {
-                Label(isSelectionMode ? "完成选择" : "选择", systemImage: "checkmark.circle")
-            }
-
-            Divider()
-
-            Button {
-                HapticManager.shared.play(.light)
-                shelfDisplayMode = .grid
-            } label: {
-                Label("网格", systemImage: "square.grid.2x2")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                shelfDisplayMode = .list
-            } label: {
-                Label("列表", systemImage: "list.bullet")
-            }
-
-            Divider()
-
-            Menu {
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .all
-                } label: {
-                    Label("全部漫画", systemImage: shelfFilter == .all ? "checkmark" : "books.vertical")
-                }
-
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .inProgress
-                } label: {
-                    Label("正在阅读", systemImage: shelfFilter == .inProgress ? "checkmark" : "clock")
-                }
-
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .locked
-                } label: {
-                    Label("已锁定", systemImage: shelfFilter == .locked ? "checkmark" : "lock")
-                }
-
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .local
-                } label: {
-                    Label("本地漫画", systemImage: shelfFilter == .local ? "checkmark" : "iphone")
-                }
-
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .komga
-                } label: {
-                    Label("Komga 漫画", systemImage: shelfFilter == .komga ? "checkmark" : "server.rack")
-                }
-
-                Button {
-                    HapticManager.shared.play(.light)
-                    shelfFilter = .opds
-                } label: {
-                    Label("OPDS 漫画", systemImage: shelfFilter == .opds ? "checkmark" : "books.vertical.circle")
-                }
-            } label: {
-                Label("分类书架", systemImage: "books.vertical")
-            }
-
-            Divider()
-
-            Button {
-                HapticManager.shared.play(.light)
-                showSettings = true
-            } label: {
-                Label("设置", systemImage: "gearshape")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                showStorageManager = true
-            } label: {
-                Label("管理空间", systemImage: "cube.box")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                guard let url = ComicManager.localLibraryURLForOpening() else {
-                    isLibraryRootPicking = true
-                    return
-                }
-                FileOpenPresenter.shared.open(url)
-            } label: {
-                Label("在 Files 中显示", systemImage: "folder")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
-                showActivity = true
-            } label: {
-                Label("书架活动", systemImage: "externaldrive.badge.checkmark")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .hapticTap(.light)
     }
 
     private func comicGridItem(_ comic: ComicBook, cardWidth: CGFloat) -> some View {
@@ -932,26 +1180,33 @@ struct ContentView: View {
             renameTitle = series.title
             renamingSeries = series
         } label: {
-            Label("重命名", systemImage: "pencil")
+            Label("series.rename".localized, systemImage: "pencil")
         }
 
         Button {
             HapticManager.shared.play(.medium)
             library.rebuildThumbnails(for: [], seriesIDs: [series.id])
         } label: {
-            Label("重建缩略图", systemImage: "photo.on.rectangle.angled")
+            Label("series.rebuildThumbnails".localized, systemImage: "photo.on.rectangle.angled")
+        }
+
+        Button {
+            HapticManager.shared.play(.medium)
+            library.markSeriesAsRead(seriesID: series.id)
+        } label: {
+            Label("series.markAllRead".localized, systemImage: "checkmark.circle.fill")
         }
 
         if let folderURL = ComicManager.urlForLibraryPath(series.libraryPath) {
             ShareLink(item: folderURL) {
-                Label("分享", systemImage: "square.and.arrow.up")
+                Label("comic.share".localized, systemImage: "square.and.arrow.up")
             }
 
             Button {
                 HapticManager.shared.play(.light)
                 FileOpenPresenter.shared.open(folderURL)
             } label: {
-                Label("在文件中打开", systemImage: "folder")
+                Label("comic.openInFiles".localized, systemImage: "folder")
             }
         }
 
@@ -959,7 +1214,7 @@ struct ContentView: View {
             HapticManager.shared.play(.heavy)
             deleteRequest = .series(series)
         } label: {
-            Label("删除", systemImage: "trash")
+            Label("comic.delete".localized, systemImage: "trash")
         }
     }
 
@@ -1048,139 +1303,38 @@ struct ContentView: View {
         }
     }
 
-    private var selectionActionBar: some View {
-        HStack(spacing: 14) {
-            Text("已选 \(selectedComicIDs.count + selectedSeriesIDs.count)")
-                .font(.subheadline.weight(.semibold))
-            Spacer()
-            Button {
-                HapticManager.shared.play(.medium)
-                library.rebuildThumbnails(for: selectedComicIDs, seriesIDs: selectedSeriesIDs)
-                selectedComicIDs.removeAll()
-                selectedSeriesIDs.removeAll()
-                isSelectionMode = false
-            } label: {
-                Label("重建缩略图", systemImage: "photo.on.rectangle.angled")
-            }
-            .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
-
-            Button(role: .destructive) {
-                requestDeleteSelectedItems()
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-            .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.bar)
-    }
-
     private var openAISettingsSection: some View {
-        Section(header: Text("OpenAI 兼容接口"), footer: Text("Base URL 填到 /v1 即可，例如 https://api.openai.com/v1 或你的代理服务地址。OCR 模式只发送文字；视觉模式会按设置上传当前页或切片图片。")) {
-            SecureField("输入 OpenAI API Key", text: $apiKey)
-                .textContentType(.password)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-            TextField("Base URL", text: $baseURL)
-                .keyboardType(.URL)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-            TextField("模型", text: $modelName)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("启用轮询模型池", isOn: $isModelPoolEnabled)
-                Text("轮询模型池")
-                TextEditor(text: $modelPoolText)
-                    .font(.footnote.monospaced())
-                    .frame(minHeight: 100)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text("每行或用逗号填写一个模型。自动去除空行和重复项；留空时只使用默认模型。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if modelPoolStatuses.isEmpty {
-                    Text("未配置轮询模型")
-                        .font(.caption)
+        Section(header: Text("settings.openai".localized), footer: Text("settings.openaiDescription".localized)) {
+            NavigationLink {
+                AIProviderSettingsView()
+            } label: {
+                Label("aiProvider.title".localized, systemImage: "cpu")
+            }
+            Button {
+                showTranslationPrompt = true
+            } label: {
+                HStack {
+                    Text("settings.translationPrompt".localized)
+                    Spacer()
+                    Image(systemName: "chevron.right")
                         .foregroundStyle(.secondary)
-                } else {
-                    ForEach(modelPoolStatuses) { status in
-                        HStack(spacing: 8) {
-                            Image(systemName: status.isRateLimited ? "exclamationmark.circle.fill" : (status.isCurrent ? "checkmark.circle.fill" : "circle"))
-                                .foregroundStyle(status.isRateLimited ? .orange : (status.isCurrent ? .green : .secondary))
-                            Text(status.modelName)
-                                .font(.footnote.monospaced())
-                            Spacer()
-                            Text(modelPoolStatusLabel(status))
-                                .font(.caption)
-                                .foregroundStyle(status.isRateLimited ? .orange : .secondary)
-                            Button(status.isCurrent ? "已选择" : "切换") {
-                                Task {
-                                    await AIModelPoolManager.shared.selectModel(status.modelName, poolText: modelPoolText)
-                                    await reloadModelPoolStatuses()
-                                }
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(status.isCurrent || status.isRateLimited || !isModelPoolEnabled)
-                        }
-                    }
                 }
-
-                Button("立即清除限流状态") {
-                    Task {
-                        await AIModelPoolManager.shared.clearRateLimits()
-                        await reloadModelPoolStatuses()
-                    }
-                }
-                .buttonStyle(.bordered)
-                .disabled(!isModelPoolEnabled || AIModelPoolManager.normalizedModels(from: modelPoolText).isEmpty)
             }
-            VStack(alignment: .leading, spacing: 8) {
+            Button {
+                showVisionPrompt = true
+            } label: {
                 HStack {
-                    Text("翻译 Prompt 模板")
+                    Text("settings.visionPrompt".localized)
                     Spacer()
-                    Button("恢复默认") {
-                        translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
-                    }
-                    .buttonStyle(.bordered)
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.secondary)
                 }
-                TextEditor(text: $translationPromptTemplate)
-                    .font(.footnote.monospaced())
-                    .frame(minHeight: 220)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text("可用占位符：{targetLanguage}、{ocrText}")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("视觉翻译 Prompt 模板")
-                    Spacer()
-                    Button("恢复默认") {
-                        visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
-                    }
-                    .buttonStyle(.bordered)
-                }
-                TextEditor(text: $visionTranslationPromptTemplate)
-                    .font(.footnote.monospaced())
-                    .frame(minHeight: 260)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text("可用占位符：{targetLanguage}")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }
 
     private var importServiceSection: some View {
-        Section(header: Text("导入服务")) {
+        Section(header: Text("import.title".localized)) {
             Button {
                 HapticManager.shared.play(.light)
                 showSettings = false
@@ -1188,7 +1342,7 @@ struct ContentView: View {
                     beginImport(.files)
                 }
             } label: {
-                Label("从本机或云盘导入文件", systemImage: "icloud.and.arrow.down")
+                Label("import.files".localized, systemImage: "icloud.and.arrow.down")
             }
 
             Button {
@@ -1198,7 +1352,7 @@ struct ContentView: View {
                     beginImport(.folder)
                 }
             } label: {
-                Label("从本机或云盘导入文件夹", systemImage: "folder.badge.plus")
+                Label("import.folder".localized, systemImage: "folder.badge.plus")
             }
 
             Toggle(isOn: Binding(
@@ -1213,11 +1367,11 @@ struct ContentView: View {
                     }
                 }
             )) {
-                Label("网页上传服务", systemImage: "network")
+                Label("import.webServer".localized, systemImage: "network")
             }
 
             if webServer.isRunning {
-                LabeledContent("访问地址") {
+                LabeledContent("import.accessAddress".localized) {
                     Text(webServer.address)
                         .font(.footnote)
                         .textSelection(.enabled)
@@ -1225,14 +1379,14 @@ struct ContentView: View {
                 Button {
                     UIPasteboard.general.string = webServer.address
                 } label: {
-                    Label("复制网页地址", systemImage: "doc.on.doc")
+                    Label("import.copyWebAddress".localized, systemImage: "doc.on.doc")
                 }
             }
         }
     }
 
     private var mediaSourceSettingsSection: some View {
-        Section(header: Text("漫画媒体库")) {
+        Section(header: Text("import.comicMediaLibrary".localized)) {
             NavigationLink {
                 MediaSourceSettingsView(library: library)
             } label: {
@@ -1242,30 +1396,34 @@ struct ContentView: View {
     }
 
     private var interactionSettingsSection: some View {
-        Section(header: Text("交互")) {
-            Toggle("触感反馈", isOn: $isHapticFeedbackEnabled)
+        Section(header: Text("interaction.title".localized)) {
+            Toggle("interaction.haptic".localized, isOn: $isHapticFeedbackEnabled)
                 .onChange(of: isHapticFeedbackEnabled) { _, newValue in
                     if newValue {
                         HapticManager.shared.play(.success)
                     }
                 }
-            Toggle("4 小时静止屏幕保护", isOn: $isBurnInProtectionEnabled)
+            Toggle("interaction.burnInProtection".localized, isOn: $isBurnInProtectionEnabled)
         }
     }
 
     private var backupSettingsSection: some View {
-        Section(header: Text("备份与恢复"), footer: Text("备份 AI 接口、模型池、翻译显示、阅读目标、交互设置和远程服务器配置。备份包含 API Key、密码或 Token，请妥善保管。漫画文件、阅读进度和缓存不包含在内。")) {
+        Section(header: Text("backup.title".localized), footer: Text("backup.description".localized)) {
             Button {
                 HapticManager.shared.play(.light)
-                settingsBackupDocument = SettingsBackupDocument(
-                    backup: makeSettingsBackup()
-                )
+                exportSettingsBackup(includeCredentials: false)
+            } label: {
+                Label("backup.export".localized, systemImage: "square.and.arrow.up")
+            }
+
+            Button {
+                HapticManager.shared.play(.light)
                 showSettings = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    isExportingSettings = true
+                    backupPasswordRequest = BackupPasswordRequest(purpose: .export)
                 }
             } label: {
-                Label("导出设置备份", systemImage: "square.and.arrow.up")
+                Label("backup.exportEncrypted".localized, systemImage: "lock.doc")
             }
 
             Button {
@@ -1275,15 +1433,15 @@ struct ContentView: View {
                     isRestoringSettings = true
                 }
             } label: {
-                Label("从备份恢复", systemImage: "square.and.arrow.down")
+                Label("backup.import".localized, systemImage: "square.and.arrow.down")
             }
         }
     }
 
     private var localLibrarySettingsSection: some View {
         let address = ComicManager.readableLocalLibraryAddress()
-        return Section(header: Text("本地库")) {
-            LabeledContent("地址") {
+        return Section(header: Text("localLibrary.title".localized)) {
+            LabeledContent("localLibrary.address".localized) {
                 Text(address)
                     .font(.footnote)
                     .textSelection(.enabled)
@@ -1292,12 +1450,18 @@ struct ContentView: View {
             Button {
                 UIPasteboard.general.string = address
             } label: {
-                Label("复制本地库地址", systemImage: "folder")
+                Label("localLibrary.copyAddress".localized, systemImage: "folder")
             }
             Button {
                 isLibraryRootPicking = true
             } label: {
-                Label("更换漫画根目录", systemImage: "folder.badge.gearshape")
+                Label("localLibrary.changeRoot".localized, systemImage: "folder.badge.gearshape")
+            }
+            Button {
+                library.resetReadingPresetDetection()
+                HapticManager.shared.play(.success)
+            } label: {
+                Label("storage.resetDetection".localized, systemImage: "arrow.counterclockwise")
             }
         }
     }
@@ -1365,6 +1529,7 @@ struct ContentView: View {
     }
 
     private func openReader(_ comic: ComicBook) {
+        RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -1379,19 +1544,19 @@ struct ContentView: View {
             renameTitle = comic.title
             renamingComic = comic
         } label: {
-            Label("重命名", systemImage: "pencil")
+            Label("comic.rename".localized, systemImage: "pencil")
         }
 
         if let folderURL = folderURL(for: comic) {
             ShareLink(item: folderURL) {
-                Label("分享", systemImage: "square.and.arrow.up")
+                Label("comic.share".localized, systemImage: "square.and.arrow.up")
             }
 
             Button {
                 HapticManager.shared.play(.light)
                 FileOpenPresenter.shared.open(folderURL)
             } label: {
-                Label("在文件中打开", systemImage: "folder")
+                Label("comic.openInFiles".localized, systemImage: "folder")
             }
         }
 
@@ -1399,14 +1564,23 @@ struct ContentView: View {
             HapticManager.shared.play(.medium)
             library.setLocked(id: comic.id, isLocked: !comic.isLocked)
         } label: {
-            Label(comic.isLocked ? "取消锁定" : "锁定", systemImage: comic.isLocked ? "lock.open" : "lock")
+            Label(comic.isLocked ? "comic.unlock".localized : "comic.lock".localized, systemImage: comic.isLocked ? "lock.open" : "lock")
+        }
+
+        if !ComicReadingProgress.isFinished(comic) {
+            Button {
+                HapticManager.shared.play(.medium)
+                library.markAsRead(id: comic.id)
+            } label: {
+                Label("comic.markAsRead".localized, systemImage: "checkmark.circle")
+            }
         }
 
         Button {
             HapticManager.shared.play(.medium)
             library.rebuildThumbnail(for: comic.id)
         } label: {
-            Label("重建缩略图", systemImage: "photo.on.rectangle.angled")
+            Label("comic.rebuildThumbnail".localized, systemImage: "photo.on.rectangle.angled")
         }
 
         if comic.sourceType == .komga {
@@ -1414,7 +1588,7 @@ struct ContentView: View {
                 HapticManager.shared.play(.medium)
                 hideKomgaRequest = comic
             } label: {
-                Label("隐藏", systemImage: "eye.slash")
+                Label("comic.hide".localized, systemImage: "eye.slash")
             }
         }
 
@@ -1422,7 +1596,7 @@ struct ContentView: View {
             HapticManager.shared.play(.heavy)
             deleteRequest = .comic(comic)
         } label: {
-            Label("删除", systemImage: "trash")
+            Label("comic.delete".localized, systemImage: "trash")
         }
     }
 
@@ -1433,13 +1607,14 @@ struct ContentView: View {
     
     private func importComicsOrFolder(from urls: [URL], seriesID: UUID? = nil, securityBox: SecurityScopeBox? = nil) {
         let taskID = backgroundTasks.begin(
-            title: urls.count > 1 ? "导入 \(urls.count) 个项目" : "导入并解析",
+            title: urls.count > 1 ? "import.itemsCount".localizedFormat(urls.count) : "import.importAndParse".localized,
             detail: urls.first?.lastPathComponent,
             progress: 0
         )
         Task {
             var importedCount = 0
             var failedCount = 0
+            var processedPDFCount = 0
             var failureReason: String?
             defer {
                 securityBox?.release()
@@ -1503,6 +1678,10 @@ struct ContentView: View {
                                 }
                                 importedCount += 1
                             } else {
+                                if childURL.pathExtension.lowercased() == "pdf" {
+                                    processedPDFCount += 1
+                                    continue
+                                }
                                 failedCount += 1
                                 if urls.count == 1 {
                                     failureReason = ComicManager.zipImportFailureReason(for: childURL)
@@ -1519,6 +1698,10 @@ struct ContentView: View {
                     }
                     importedCount += 1
                 } else {
+                    if url.pathExtension.lowercased() == "pdf" {
+                        processedPDFCount += 1
+                        continue
+                    }
                     failedCount += 1
                     if urls.count == 1 {
                         failureReason = ComicManager.zipImportFailureReason(for: url)
@@ -1526,15 +1709,28 @@ struct ContentView: View {
                 }
             }
 
+            if processedPDFCount > 0 {
+                await library.syncLocalLibraryAsync()
+            }
+
             await MainActor.run {
                 if importedCount == 0 && failedCount > 0 {
                     HapticManager.shared.play(.error)
-                    importError = failureReason?.isEmpty == false ? failureReason! : "没有找到可读取的图片，或压缩包/PDF 解析失败。当前支持 ZIP、CBZ、EPUB、PDF 和图片文件夹。"
+                    importError = failureReason?.isEmpty == false ? failureReason! : "import.noReadableImages".localized
                 } else if failedCount > 0 {
                     HapticManager.shared.play(.warning)
-                    importError = "已导入 \(importedCount) 个项目，\(failedCount) 个项目失败。失败项目可能不包含可读取图片或压缩包已损坏。"
+                    if processedPDFCount > 0 {
+                        importError = "import.partialSuccessWithPDF".localizedFormat(importedCount, failedCount)
+                    } else {
+                        importError = "import.partialSuccess".localizedFormat(importedCount, failedCount)
+                    }
                 } else {
                     HapticManager.shared.play(.success)
+                    if processedPDFCount > 0 {
+                        importInfo = processedPDFCount == 1
+                            ? "import.pdfProcessedSingle".localized
+                            : "import.pdfProcessed".localizedFormat(processedPDFCount)
+                    }
                 }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
                     selectedPage = .library
@@ -1565,16 +1761,27 @@ struct ContentView: View {
         url.hasDirectoryPath || ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
     }
 
-    private func makeSettingsBackup() -> MReaderSettingsBackup {
+    private func makeSettingsBackup(includeCredentials: Bool) -> MReaderSettingsBackup {
         let mediaSources = KomgaProvider.loadSources().map { source in
-            MediaSourceBackup(source: source, apiKey: KomgaProvider.apiKey(for: source.id))
+            MediaSourceBackup(
+                source: source,
+                apiKey: includeCredentials ? KomgaProvider.apiKey(for: source.id) : nil
+            )
         }
+        let providerStore = AIProviderStore.shared
+        let providerBackups = providerStore.profiles().map { profile in
+            AIProviderBackup(
+                profile: profile,
+                apiKey: includeCredentials ? providerStore.apiKey(for: profile.id) : nil
+            )
+        }
+        let activeConfiguration = providerStore.activeConfiguration()
         return MReaderSettingsBackup(
-            openAIAPIKey: apiKey,
-            openAIBaseURL: baseURL,
-            openAIModel: modelName,
-            aiModelPool: modelPoolText,
-            isAIModelPoolEnabled: isModelPoolEnabled,
+            openAIAPIKey: includeCredentials ? activeConfiguration?.apiKey : nil,
+            openAIBaseURL: activeConfiguration?.baseURL ?? "https://api.openai.com/v1",
+            openAIModel: activeConfiguration?.model ?? "gpt-4o-mini",
+            aiModelPool: nil,
+            isAIModelPoolEnabled: false,
             translationTargetLanguage: translationTargetLanguage,
             translationPromptTemplate: translationPromptTemplate,
             visionTranslationPromptTemplate: visionTranslationPromptTemplate,
@@ -1584,8 +1791,32 @@ struct ContentView: View {
             isAITranslationBorderProgressEnabled: isAITranslationBorderProgressEnabled,
             isOCRDebugBoxesEnabled: isOCRDebugBoxesEnabled,
             readingDailyPageGoal: readingDailyPageGoal,
-            isBurnInProtectionEnabled: isBurnInProtectionEnabled
+            isBurnInProtectionEnabled: isBurnInProtectionEnabled,
+            aiProviders: providerBackups,
+            activeAIProviderID: providerStore.activeProfileID(),
+            containsCredentials: includeCredentials
         )
+    }
+
+    private func exportSettingsBackup(includeCredentials: Bool, password: String? = nil) {
+        do {
+            let backup = makeSettingsBackup(includeCredentials: includeCredentials)
+            let data: Data
+            if includeCredentials {
+                guard let password else { throw SettingsBackupCodecError.invalidPassword }
+                data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
+            } else {
+                data = try SettingsBackupCodec.encodePlain(backup)
+            }
+            settingsBackupDocument = SettingsBackupDocument(data: data)
+            showSettings = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                isExportingSettings = true
+            }
+        } catch {
+            HapticManager.shared.play(.error)
+            importError = error.localizedDescription
+        }
     }
 
     private func restoreSettingsBackup(from result: Result<[URL], Error>) {
@@ -1598,12 +1829,44 @@ struct ContentView: View {
                 }
             }
             let data = try Data(contentsOf: url)
-            let backup = try JSONDecoder().decode(MReaderSettingsBackup.self, from: data)
-            apiKey = backup.openAIAPIKey
-            baseURL = backup.openAIBaseURL
-            modelName = backup.openAIModel
-            modelPoolText = backup.aiModelPool ?? ""
-            isModelPoolEnabled = backup.isAIModelPoolEnabled ?? true
+            if SettingsBackupCodec.isEncrypted(data) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    backupPasswordRequest = BackupPasswordRequest(purpose: .restore(data))
+                }
+                return
+            }
+            let backup = try SettingsBackupCodec.decode(data)
+            try applySettingsBackup(backup)
+        } catch {
+            HapticManager.shared.play(.error)
+            settingsRestoreNotice = SettingsRestoreNotice(
+                title: "settings.restoreFailed".localized,
+                message: "设置备份恢复失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func applySettingsBackup(_ backup: MReaderSettingsBackup) throws {
+            if let providers = backup.aiProviders, !providers.isEmpty {
+                let providerStore = AIProviderStore.shared
+                try AIProviderStore.shared.replaceProfiles(
+                    providers.map { provider in
+                        (provider.profile, provider.apiKey ?? providerStore.apiKey(for: provider.profile.id))
+                    },
+                    activeProfileID: backup.activeAIProviderID
+                )
+            } else {
+                let legacyProfile = AIProviderProfile.fromLegacySettings(
+                    apiDisplayName: "默认接口",
+                    baseURL: backup.openAIBaseURL,
+                    defaultModel: backup.openAIModel,
+                    poolText: backup.aiModelPool ?? ""
+                )
+                try AIProviderStore.shared.replaceProfiles(
+                    [(legacyProfile, backup.openAIAPIKey ?? "")],
+                    activeProfileID: legacyProfile.id
+                )
+            }
             translationTargetLanguage = backup.translationTargetLanguage
             translationPromptTemplate = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
             visionTranslationPromptTemplate = backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
@@ -1618,13 +1881,24 @@ struct ContentView: View {
                 await library.syncAllLibrariesAsync()
             }
             HapticManager.shared.play(.success)
-            settingsRestoreNotice = SettingsRestoreNotice(title: "恢复成功", message: "设置备份已恢复。")
+            settingsRestoreNotice = SettingsRestoreNotice(title: "settings.restoreSuccess".localized, message: "settings.restoreSuccessMessage".localized)
+    }
+
+    private func handleBackupPassword(_ password: String, request: BackupPasswordRequest) -> String? {
+        do {
+            switch request.purpose {
+            case .export:
+                backupPasswordRequest = nil
+                exportSettingsBackup(includeCredentials: true, password: password)
+            case .restore(let data):
+                let backup = try SettingsBackupCodec.decode(data, password: password)
+                try applySettingsBackup(backup)
+                backupPasswordRequest = nil
+            }
+            return nil
         } catch {
             HapticManager.shared.play(.error)
-            settingsRestoreNotice = SettingsRestoreNotice(
-                title: "恢复失败",
-                message: "设置备份恢复失败：\(error.localizedDescription)"
-            )
+            return error.localizedDescription
         }
     }
 
@@ -1644,31 +1918,53 @@ struct ContentView: View {
         try KomgaProvider.saveSources(sources)
     }
 
-    private func reloadModelPoolStatuses() async {
-        let statuses = await AIModelPoolManager.shared.statuses(poolText: modelPoolText)
-        await MainActor.run {
-            modelPoolStatuses = statuses
-        }
-    }
+}
 
-    private func modelPoolStatusLabel(_ status: AIModelPoolStatus) -> String {
-        if status.isRateLimited {
-            return "已限流，明日 0 点恢复"
-        }
-        if status.isCurrent {
-            return "当前使用中"
-        }
-        return "可用"
-    }
+private struct BackupPasswordView: View {
+    let isCreatingBackup: Bool
+    let onCancel: () -> Void
+    let onSubmit: (String) -> String?
 
-    private func normalizeStoredModelPool() {
-        let normalized = AIModelPoolManager.normalizedModels(from: modelPoolText)
-            .joined(separator: "\n")
-        if modelPoolText != normalized {
-            modelPoolText = normalized
-        }
-    }
+    @State private var password = ""
+    @State private var confirmation = ""
+    @State private var errorMessage: String?
 
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("backup.password".localized, text: $password)
+                        .textContentType(.newPassword)
+                    if isCreatingBackup {
+                        SecureField("backup.passwordConfirm".localized, text: $confirmation)
+                            .textContentType(.newPassword)
+                    }
+                } footer: {
+                    Text("backup.passwordDescription".localized)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+            .navigationTitle(isCreatingBackup ? "backup.encryptTitle".localized : "backup.decryptTitle".localized)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("nav.cancel".localized, action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("nav.done".localized) {
+                        errorMessage = onSubmit(password)
+                    }
+                    .disabled(password.count < 8 || (isCreatingBackup && password != confirmation))
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
 }
 
 @MainActor
@@ -1809,7 +2105,7 @@ fileprivate struct FolderPicker: UIViewControllerRepresentable {
     }
 }
 
-private enum ShelfCardMetrics {
+enum ShelfCardMetrics {
     static let horizontalPadding: CGFloat = 18
     static let columnSpacing: CGFloat = 16
     static let titleHeight: CGFloat = 44
@@ -1823,8 +2119,11 @@ private enum ShelfCardMetrics {
         return floor(max(132, availableWidth / 2))
     }
 
-    static func gridLayout(for containerWidth: CGFloat) -> (columns: [GridItem], cardWidth: CGFloat) {
-        if UIDevice.current.userInterfaceIdiom == .phone {
+    static func gridLayout(
+        for containerWidth: CGFloat,
+        idiom: UIUserInterfaceIdiom = UIDevice.current.userInterfaceIdiom
+    ) -> (columns: [GridItem], cardWidth: CGFloat) {
+        if idiom == .phone {
             let width = cardWidth(for: containerWidth)
             return (
                 [
@@ -1906,10 +2205,12 @@ struct ComicCoverCard: View {
 
             HStack {
                 Text(sourceLabel(for: comic))
-                Text("·")
-                Text(formattedFileSize(comic.fileSize))
+                if comic.sourceType == .local && comic.fileSize > 0 {
+                    Text("·")
+                    Text(formattedFileSize(comic.fileSize))
+                }
                 Spacer()
-                Text("\(comic.totalPages) 页")
+                Text("comic.pagesCount".localizedFormat(comic.totalPages))
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1924,14 +2225,14 @@ struct ComicCoverCard: View {
 }
 
 private func formattedFileSize(_ bytes: Int64) -> String {
-    guard bytes > 0 else { return "未知大小" }
+    guard bytes > 0 else { return "comic.unknownSize".localized }
     return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
 private func sourceLabel(for comic: ComicBook) -> String {
     switch comic.sourceType {
     case .local:
-        return "本地"
+        return "comic.sourceLocal".localized
     case .komga:
         return "Komga"
     case .opds:
@@ -1976,7 +2277,9 @@ struct ComicListRow: View {
                 )
                     .tint(comicProgressTint(comic))
 
-                Text("\(formattedFileSize(comic.fileSize)) · \(comic.totalPages) 页")
+                Text(comic.sourceType == .local && comic.fileSize > 0
+                     ? "\(formattedFileSize(comic.fileSize)) · " + "comic.pagesCount".localizedFormat(comic.totalPages)
+                     : "comic.pagesCount".localizedFormat(comic.totalPages))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -2040,7 +2343,7 @@ struct SeriesListRow: View {
                 )
                 .tint(!comics.isEmpty && comics.allSatisfy(ComicReadingProgress.isFinished) ? Color(red: 52.0 / 255, green: 199.0 / 255, blue: 89.0 / 255) : .accentColor)
 
-                Text("\(comics.count) 章 · \(comics.reduce(0) { $0 + $1.totalPages }) 页")
+                Text("comic.chaptersPages".localizedFormat(comics.count, comics.reduce(0) { $0 + $1.totalPages }))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -2139,9 +2442,9 @@ struct SeriesCard: View {
                 .frame(width: cardWidth, height: ShelfCardMetrics.progressHeight)
 
             HStack {
-                Text("\(comics.count) 章")
+                Text("comic.chaptersCount".localizedFormat(comics.count))
                 Spacer()
-                Text("\(comics.reduce(0) { $0 + $1.totalPages }) 页")
+                Text("comic.pagesCount".localizedFormat(comics.reduce(0) { $0 + $1.totalPages }))
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -2205,11 +2508,11 @@ struct ContinueReadingCard: View {
                 )
                     .tint(comicProgressTint(comic))
 
-                Text(comic.hasBeenOpened ? "阅读进度 \(progressText)" : "尚未阅读")
+                Text(comic.hasBeenOpened ? "comic.readProgress".localized + " \(progressText)" : "comic.notOpened".localized)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text("继续阅读")
+                Text("comic.continueReading".localized)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
@@ -2434,7 +2737,6 @@ struct ReadingStatisticsView: View {
             }
         }
         .background(FitnessPalette.pageBackground.ignoresSafeArea())
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -2466,13 +2768,13 @@ private enum FitnessPalette {
     static let move = Color(red: 1, green: 45.0 / 255, blue: 85.0 / 255)
     static let exercise = Color(red: 167.0 / 255, green: 252.0 / 255, blue: 0)
     static let stand = Color(red: 0, green: 199.0 / 255, blue: 1)
-    static let pageBackground = Color.black
-    static let cardBackground = Color(red: 28.0 / 255, green: 28.0 / 255, blue: 30.0 / 255)
-    static let raisedCardBackground = Color(red: 44.0 / 255, green: 44.0 / 255, blue: 46.0 / 255)
-    static let track = Color(red: 56.0 / 255, green: 56.0 / 255, blue: 58.0 / 255)
-    static let primaryText = Color.white
-    static let secondaryText = Color(red: 235.0 / 255, green: 235.0 / 255, blue: 245.0 / 255).opacity(0.6)
-    static let weakText = Color(red: 235.0 / 255, green: 235.0 / 255, blue: 245.0 / 255).opacity(0.3)
+    static let pageBackground = Color(.systemBackground)
+    static let cardBackground = Color(.secondarySystemBackground)
+    static let raisedCardBackground = Color(.tertiarySystemBackground)
+    static let track = Color(.systemGray4)
+    static let primaryText = Color(.label)
+    static let secondaryText = Color(.secondaryLabel)
+    static let weakText = Color(.tertiaryLabel)
 }
 
 private struct StatisticsCard<Content: View>: View {
@@ -2501,19 +2803,19 @@ private struct TodaySummaryCard: View {
         StatisticsCard {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Label("今日摘要", systemImage: "sun.max.fill")
+                    Label("stats.todaySummary".localized, systemImage: "sun.max.fill")
                         .font(.headline)
                         .foregroundStyle(FitnessPalette.primaryText)
                     Spacer()
-                    Text("目标 \(dailyPageGoal) 页")
+                    Text("stats.goalPages".localizedFormat(Int(dailyPageGoal)))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(FitnessPalette.secondaryText)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 18) {
-                    TodayMetric(value: "\(stats.todayMinutes)", title: "分钟", color: FitnessPalette.move)
-                    TodayMetric(value: "\(stats.todayPages)", title: "页", color: FitnessPalette.exercise)
-                    TodayMetric(value: "\(stats.todayCompletedCount)", title: "完成", color: FitnessPalette.stand)
+                    TodayMetric(value: "\(stats.todayMinutes)", title: "stats.minutes".localized, color: FitnessPalette.move)
+                    TodayMetric(value: "\(stats.todayPages)", title: "stats.pages".localized, color: FitnessPalette.exercise)
+                    TodayMetric(value: "\(stats.todayCompletedCount)", title: "stats.completed".localized, color: FitnessPalette.stand)
                 }
 
                 FitnessProgressBar(progress: stats.todayGoalProgress, tint: FitnessPalette.move)
@@ -2570,10 +2872,10 @@ private struct ReadingGoalCard: View {
         StatisticsCard(isRaised: true) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Label("每日目标", systemImage: "target")
+                    Label("stats.dailyGoalLabel".localized, systemImage: "target")
                         .font(.headline)
                     Spacer()
-                    Text("\(roundedGoal) 页")
+                    Text("stats.goalPages".localizedFormat(roundedGoal))
                         .font(.system(.headline, design: .rounded).weight(.bold))
                         .monospacedDigit()
                 }
@@ -2648,7 +2950,7 @@ private struct ReadingGoalArcControl: View {
                     Text("\(Int(goal.rounded()))")
                         .font(.system(size: 27, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                    Text("页/天")
+                    Text("stats.pagesPerDay".localized)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(FitnessPalette.secondaryText)
                 }
@@ -2695,12 +2997,12 @@ private struct ReadingRingsCard: View {
     var body: some View {
         StatisticsCard {
             VStack(alignment: .leading, spacing: 16) {
-                Label("阅读圆环", systemImage: "circle.circle.fill")
+                Label("stats.readingRingsLabel".localized, systemImage: "circle.circle.fill")
                     .font(.headline)
                 HStack(spacing: 18) {
-                    ReadingRing(progress: stats.todayGoalProgress, tint: FitnessPalette.move, value: "\(stats.todayPages)", caption: "今日 / \(dailyPageGoal)")
-                    ReadingRing(progress: stats.weekGoalProgress, tint: FitnessPalette.exercise, value: "\(Int(stats.weekGoalProgress * 100))%", caption: "本周目标")
-                    ReadingRing(progress: min(Double(stats.currentStreak) / 7, 1), tint: FitnessPalette.stand, value: "\(stats.currentStreak)", caption: "连续天数")
+                    ReadingRing(progress: stats.todayGoalProgress, tint: FitnessPalette.move, value: "\(stats.todayPages)", caption: "stats.todayGoal".localizedFormat(Int(dailyPageGoal)))
+                    ReadingRing(progress: stats.weekGoalProgress, tint: FitnessPalette.exercise, value: "\(Int(stats.weekGoalProgress * 100))%", caption: "stats.weekGoal".localized)
+                    ReadingRing(progress: min(Double(stats.currentStreak) / 7, 1), tint: FitnessPalette.stand, value: "\(stats.currentStreak)", caption: "stats.streakDays".localized)
                 }
             }
         }
@@ -2754,11 +3056,11 @@ private struct SevenDayActivityCard: View {
         StatisticsCard {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Label("本周", systemImage: "chart.bar.fill")
+                    Label("stats.thisWeek".localized, systemImage: "chart.bar.fill")
                         .font(.headline)
                     Spacer()
                     if let selectedActivity {
-                        Text("\(selectedActivity.minutes) 分钟 · \(selectedActivity.pages) 页")
+                        Text("stats.minutesPages".localizedFormat(selectedActivity.minutes, selectedActivity.pages))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(FitnessPalette.secondaryText)
                     }
@@ -2795,7 +3097,7 @@ private struct SevenDayActivityCard: View {
 
     private func weekdayText(for date: Date) -> String {
         let index = Calendar.current.component(.weekday, from: date)
-        return ["日", "一", "二", "三", "四", "五", "六"][max(0, min(index - 1, 6))]
+        return ["day.sunday".localized, "day.monday".localized, "day.tuesday".localized, "day.wednesday".localized, "day.thursday".localized, "day.friday".localized, "day.saturday".localized][max(0, min(index - 1, 6))]
     }
 }
 
@@ -2808,10 +3110,10 @@ private struct ThirtyDayDotsCard: View {
         StatisticsCard {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Label("本月记录", systemImage: "calendar")
+                    Label("stats.monthlyRecord".localized, systemImage: "calendar")
                         .font(.headline)
                     Spacer()
-                    Text("连续 \(currentStreak) 天")
+                    Text("stats.currentStreakDays".localizedFormat(currentStreak))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(FitnessPalette.secondaryText)
                 }
@@ -2823,11 +3125,11 @@ private struct ThirtyDayDotsCard: View {
                 }
 
                 HStack {
-                    Label("最长 \(longestStreak) 天", systemImage: "flame.fill")
+                    Label("stats.longestStreakDays".localizedFormat(longestStreak), systemImage: "flame.fill")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(FitnessPalette.move)
                     Spacer()
-                    Text("实心圆表示当天阅读")
+                    Text("stats.solidDotMeaning".localized)
                         .font(.caption)
                         .foregroundStyle(FitnessPalette.secondaryText)
                 }
@@ -2854,7 +3156,7 @@ private struct CalendarDot: View {
             }
             .frame(width: size, height: size)
             .frame(width: 22, height: 22)
-            .accessibilityLabel(Text("\(day.pages) 页"))
+            .accessibilityLabel(Text("stats.pagesReadShort".localizedFormat(day.pages)))
     }
 }
 
@@ -2864,11 +3166,11 @@ private struct TopReadingComicsCard: View {
     var body: some View {
         StatisticsCard {
             VStack(alignment: .leading, spacing: 14) {
-                Label("阅读最多", systemImage: "books.vertical.fill")
+                Label("stats.topReading".localized, systemImage: "books.vertical.fill")
                     .font(.headline)
 
                 if comics.isEmpty {
-                    ContentUnavailableView("暂无阅读记录", systemImage: "book.closed", description: Text("开始阅读后，这里会显示最常读的漫画。"))
+                    ContentUnavailableView("stats.noReadingRecords".localized, systemImage: "book.closed", description: Text("stats.noReadingRecordsDescription".localized))
                         .frame(minHeight: 150)
                 } else {
                     VStack(spacing: 12) {
@@ -2922,7 +3224,7 @@ private struct TopComicRow: View {
                 )
                 .frame(height: 5)
 
-                Text("\(minutes) 分钟 · \(pages) / \(comic.totalPages) 页")
+                Text("\(minutes) \("stats.minutes".localized) · \(pages) / \(comic.totalPages) \("stats.pages".localized)")
                     .font(.caption)
                     .foregroundStyle(FitnessPalette.secondaryText)
             }
@@ -2977,6 +3279,7 @@ struct CoverImageView: View {
             source = CGImageSourceCreateWithData(data as CFData, nil)
         } else {
             let url = URL(fileURLWithPath: path)
+            guard FileManager.default.fileExists(atPath: path) else { return nil }
             source = CGImageSourceCreateWithURL(url as CFURL, nil)
         }
         guard let source else { return nil }
@@ -3006,10 +3309,10 @@ struct StorageManagerView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section(header: Text("本地库")) {
-                    LabeledContent("系列数量", value: "\(library.series.count)")
-                    LabeledContent("漫画数量", value: "\(library.comics.count)")
-                    LabeledContent("图片页数", value: "\(estimatedPages)")
+                Section(header: Text("localLibrary.title".localized)) {
+                    LabeledContent("storage.seriesCount".localized, value: "\(library.series.count)")
+                    LabeledContent("storage.comicCountLabel".localized, value: "\(library.comics.count)")
+                    LabeledContent("storage.imagePages".localized, value: "\(estimatedPages)")
                     Text(ComicManager.readableLocalLibraryAddress())
                         .font(.footnote)
                         .textSelection(.enabled)
@@ -3017,36 +3320,36 @@ struct StorageManagerView: View {
                     Button {
                         UIPasteboard.general.string = ComicManager.readableLocalLibraryAddress()
                     } label: {
-                        Label("复制本地库地址", systemImage: "doc.on.doc")
+                        Label("storage.copyAddress".localized, systemImage: "doc.on.doc")
                     }
                 }
 
-                Section(header: Text("缓存与临时文件"), footer: Text("漫画源文件只存放在 Files 可见的 MReader 本地库；这里不删除漫画源文件。")) {
-                    LabeledContent("临时解压缓存", value: formattedFileSize(temporaryCacheSize))
+                Section(header: Text("storage.cacheAndTemp".localized), footer: Text("storage.cacheDescription".localized)) {
+                    LabeledContent("storage.tempExtractCache".localized, value: formattedFileSize(temporaryCacheSize))
                     Button(role: .destructive) {
                         ComicManager.clearTemporaryImportCache()
                         temporaryCacheSize = ComicManager.temporaryImportCacheSize()
                     } label: {
-                        Label("清理临时解压缓存", systemImage: "trash")
+                        Label("storage.clearTempCache".localized, systemImage: "trash")
                     }
 
                     Button {
                         library.rebuildAllThumbnails()
                     } label: {
-                        Label("检查并重建封面索引", systemImage: "photo.on.rectangle.angled")
+                        Label("storage.rebuildCoverIndex".localized, systemImage: "photo.on.rectangle.angled")
                     }
 
                     Button {
                         library.syncLocalLibrary()
                     } label: {
-                        Label("刷新漫画库索引", systemImage: "arrow.clockwise")
+                        Label("storage.refreshLibraryIndex".localized, systemImage: "arrow.clockwise")
                     }
                 }
             }
-            .navigationTitle("管理空间")
+            .navigationTitle("storage.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("完成") { dismiss() }
+                Button("nav.done".localized) { dismiss() }
             }
         }
     }
@@ -3059,7 +3362,12 @@ struct ShelfActivityView: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(comics.sorted { $0.lastReadAt > $1.lastReadAt }) { comic in
+                ForEach(comics.sorted { lhs, rhs in
+                    let lhsFinished = ComicReadingProgress.isFinished(lhs)
+                    let rhsFinished = ComicReadingProgress.isFinished(rhs)
+                    if lhsFinished != rhsFinished { return !lhsFinished }
+                    return lhs.lastReadAt > rhs.lastReadAt
+                }) { comic in
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(comic.title)
@@ -3067,8 +3375,8 @@ struct ShelfActivityView: View {
                                 .lineLimit(1)
                             Text(
                                 comic.hasBeenOpened
-                                    ? "读到 \(ComicReadingProgress.completedPages(for: comic)) / \(comic.totalPages)"
-                                    : "尚未阅读"
+                                    ? "comic.readTo".localizedFormat(ComicReadingProgress.completedPages(for: comic), comic.totalPages)
+                                    : "comic.notOpened".localized
                             )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -3080,10 +3388,10 @@ struct ShelfActivityView: View {
                     }
                 }
             }
-            .navigationTitle("书架活动")
+            .navigationTitle("shelf.activity".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("完成") { dismiss() }
+                Button("nav.done".localized) { dismiss() }
             }
         }
     }
@@ -3107,13 +3415,16 @@ struct SeriesDetailView: View {
 
     private var sortedComics: [ComicBook] {
         comics.sorted { lhs, rhs in
-            naturalTitleCompare(lhs.title, sortTieBreaker(for: lhs), rhs.title, sortTieBreaker(for: rhs))
+            let lhsFinished = ComicReadingProgress.isFinished(lhs)
+            let rhsFinished = ComicReadingProgress.isFinished(rhs)
+            if lhsFinished != rhsFinished { return !lhsFinished }
+            return naturalTitleCompare(lhs.title, sortTieBreaker(for: lhs), rhs.title, sortTieBreaker(for: rhs))
         }
     }
 
     private var availableComics: [ComicBook] {
         allComics
-            .filter { $0.seriesID != series.id }
+            .filter { $0.seriesID == nil }
             .sorted { lhs, rhs in
                 naturalTitleCompare(lhs.title, sortTieBreaker(for: lhs), rhs.title, sortTieBreaker(for: rhs))
             }
@@ -3127,18 +3438,18 @@ struct SeriesDetailView: View {
         Group {
             if comics.isEmpty {
                 ContentUnavailableView {
-                    Label("系列为空", systemImage: "books.vertical")
+                    Label("series.empty".localized, systemImage: "books.vertical")
                 } description: {
-                    Text("添加章节漫画后会显示在这里")
+                    Text("series.addChapters".localized)
                 } actions: {
-                    Button("导入章节文件") {
+                    Button("series.addChapterFiles".localized) {
                         onImportFiles()
                     }
                     .buttonStyle(.borderedProminent)
-                    Button("导入章节文件夹") {
+                    Button("series.addChapterFolder".localized) {
                         onImportFolder()
                     }
-                    Button("从书架添加") { showAddSheet = true }
+                    Button("series.addFromShelfButton".localized) { showAddSheet = true }
                 }
             } else {
                 GeometryReader { geometry in
@@ -3175,7 +3486,7 @@ struct SeriesDetailView: View {
                                         HapticManager.shared.play(.medium)
                                         onRemove(comic.id)
                                     } label: {
-                                        Label("移出系列", systemImage: "minus.circle")
+                                        Label("series.removeFromSeries".localized, systemImage: "minus.circle")
                                     }
                                 }
                             }
@@ -3202,7 +3513,7 @@ struct SeriesDetailView: View {
                 Button {
                     closeSeries()
                 } label: {
-                    Label("返回", systemImage: "chevron.backward")
+                    Label("nav.back".localized, systemImage: "chevron.backward")
                 }
                 .disabled(isClosing)
             }
@@ -3211,17 +3522,17 @@ struct SeriesDetailView: View {
                     Button {
                         onImportFiles()
                     } label: {
-                        Label("导入章节文件", systemImage: "doc.badge.plus")
+                        Label("series.addChapterFiles".localized, systemImage: "doc.badge.plus")
                     }
                     Button {
                         onImportFolder()
                     } label: {
-                        Label("导入章节文件夹", systemImage: "folder.badge.plus")
+                        Label("series.addChapterFolder".localized, systemImage: "folder.badge.plus")
                     }
                     Button {
                         showAddSheet = true
                     } label: {
-                        Label("从书架添加", systemImage: "books.vertical")
+                        Label("series.addFromShelfButton".localized, systemImage: "books.vertical")
                     }
                 } label: {
                     Image(systemName: "plus")
@@ -3240,9 +3551,9 @@ struct SeriesDetailView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .navigationTitle("添加章节")
+                .navigationTitle("series.addSheetTitle".localized)
                 .toolbar {
-                    Button("完成") { showAddSheet = false }
+                    Button("nav.done".localized) { showAddSheet = false }
                 }
             }
         }

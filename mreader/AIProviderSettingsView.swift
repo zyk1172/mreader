@@ -1,0 +1,380 @@
+import SwiftUI
+
+struct AIProviderSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var profiles: [AIProviderProfile] = []
+    @State private var activeProfileID: UUID?
+    @State private var editingProfile: AIProviderProfile?
+    @State private var isAddingProfile = false
+    @State private var pendingDelete: AIProviderProfile?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        List {
+            Section {
+                if profiles.isEmpty {
+                    ContentUnavailableView(
+                        "aiProvider.empty".localized,
+                        systemImage: "cpu",
+                        description: Text("aiProvider.emptyDescription".localized)
+                    )
+                } else {
+                    ForEach(profiles) { profile in
+                        HStack(spacing: 12) {
+                            Button {
+                                editingProfile = profile
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: activeProfileID == profile.id
+                                          ? "checkmark.circle.fill"
+                                          : "circle")
+                                        .foregroundStyle(activeProfileID == profile.id ? .green : .secondary)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(profile.name)
+                                            .foregroundStyle(.primary)
+                                        Text(profile.selectedModel)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                        Text(profile.baseURL)
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                ForEach(profile.models, id: \.self) { model in
+                                    Button {
+                                        select(model: model, for: profile)
+                                    } label: {
+                                        Label(
+                                            model,
+                                            systemImage: profile.selectedModel == model
+                                                ? "checkmark"
+                                                : "circle"
+                                        )
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "switch.2")
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 36, height: 36)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .contentShape(Rectangle())
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            if activeProfileID != profile.id {
+                                Button("aiProvider.makeActive".localized) {
+                                    AIProviderStore.shared.setActiveProfile(id: profile.id)
+                                    reload()
+                                    HapticManager.shared.play(.success)
+                                }
+                                .tint(.green)
+                            }
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button("comic.delete".localized, role: .destructive) {
+                                pendingDelete = profile
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("aiProvider.saved".localized)
+            } footer: {
+                Text("aiProvider.sharedModelDescription".localized)
+            }
+
+            Section {
+                Button {
+                    isAddingProfile = true
+                } label: {
+                    Label("aiProvider.add".localized, systemImage: "plus")
+                }
+            }
+        }
+        .navigationTitle("aiProvider.title".localized)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("nav.done".localized) { dismiss() }
+            }
+        }
+        .onAppear(perform: reload)
+        .sheet(item: $editingProfile) { profile in
+            NavigationStack {
+                AIProviderEditorView(profile: profile) {
+                    reload()
+                    editingProfile = nil
+                }
+            }
+        }
+        .sheet(isPresented: $isAddingProfile) {
+            NavigationStack {
+                AIProviderEditorView(profile: nil) {
+                    reload()
+                    isAddingProfile = false
+                }
+            }
+        }
+        .confirmationDialog(
+            "aiProvider.deleteTitle".localized,
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("comic.delete".localized, role: .destructive) {
+                guard let profile = pendingDelete else { return }
+                do {
+                    try AIProviderStore.shared.deleteProfile(id: profile.id)
+                    reload()
+                    HapticManager.shared.play(.heavy)
+                } catch {
+                    errorMessage = error.localizedDescription
+                    HapticManager.shared.play(.error)
+                }
+                pendingDelete = nil
+            }
+            Button("nav.cancel".localized, role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text("aiProvider.deleteMessage".localized)
+        }
+        .alert(
+            "common.error".localized,
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("nav.done".localized, role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func reload() {
+        profiles = AIProviderStore.shared.profiles()
+        activeProfileID = AIProviderStore.shared.activeProfileID()
+    }
+
+    private func select(model: String, for profile: AIProviderProfile) {
+        do {
+            try AIProviderStore.shared.setSelectedModel(model, for: profile.id, activate: true)
+            reload()
+            HapticManager.shared.play(.light)
+        } catch {
+            errorMessage = error.localizedDescription
+            HapticManager.shared.play(.error)
+        }
+    }
+}
+
+private struct AIProviderEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    let onSaved: () -> Void
+
+    @State private var profileID: UUID
+    @State private var createdAt: Date
+    @State private var name: String
+    @State private var baseURL: String
+    @State private var apiKey: String
+    @State private var modelsText: String
+    @State private var selectedModel: String
+    @State private var isTesting = false
+    @State private var testMessage: String?
+    @State private var testFailed = false
+    @State private var validationMessage: String?
+
+    init(profile: AIProviderProfile?, onSaved: @escaping () -> Void) {
+        let id = profile?.id ?? UUID()
+        self.onSaved = onSaved
+        _profileID = State(initialValue: id)
+        _createdAt = State(initialValue: profile?.createdAt ?? Date())
+        _name = State(initialValue: profile?.name ?? "")
+        _baseURL = State(initialValue: profile?.baseURL ?? "https://api.openai.com/v1")
+        _apiKey = State(initialValue: profile.map { AIProviderStore.shared.apiKey(for: $0.id) } ?? "")
+        _modelsText = State(initialValue: profile?.models.joined(separator: "\n") ?? "gpt-4o-mini")
+        _selectedModel = State(initialValue: profile?.selectedModel ?? "gpt-4o-mini")
+    }
+
+    private var normalizedModels: [String] {
+        AIProviderProfile.normalizedModels(from: modelsText)
+    }
+
+    var body: some View {
+        Form {
+            Section("aiProvider.connection".localized) {
+                TextField("aiProvider.name".localized, text: $name)
+                TextField("settings.baseUrl".localized, text: $baseURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("settings.apiKey".localized, text: $apiKey)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+
+            Section {
+                TextEditor(text: $modelsText)
+                    .font(.footnote.monospaced())
+                    .frame(minHeight: 120)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if normalizedModels.isEmpty {
+                    Text("aiProvider.modelRequired".localized)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else {
+                    Picker("aiProvider.currentChildModel".localized, selection: $selectedModel) {
+                        ForEach(normalizedModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                }
+            } header: {
+                Text("aiProvider.childModels".localized)
+            } footer: {
+                Text("aiProvider.childModelsDescription".localized)
+            }
+
+            Section {
+                Button {
+                    testConnection()
+                } label: {
+                    if isTesting {
+                        ProgressView()
+                    } else {
+                        Label("settings.testConnection".localized, systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                }
+                .disabled(isTesting || apiKey.isEmpty || normalizedModels.isEmpty)
+                if let testMessage {
+                    Text(testMessage)
+                        .font(.footnote)
+                        .foregroundStyle(testFailed ? .red : .green)
+                }
+            }
+        }
+        .navigationTitle(name.isEmpty ? "aiProvider.add".localized : name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("nav.cancel".localized) { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("nav.save".localized) { save() }
+            }
+        }
+        .onChange(of: modelsText) { _, _ in
+            if !normalizedModels.contains(selectedModel) {
+                selectedModel = normalizedModels.first ?? ""
+            }
+        }
+        .alert(
+            "common.error".localized,
+            isPresented: Binding(
+                get: { validationMessage != nil },
+                set: { if !$0 { validationMessage = nil } }
+            )
+        ) {
+            Button("nav.done".localized, role: .cancel) {}
+        } message: {
+            Text(validationMessage ?? "")
+        }
+    }
+
+    private func save() {
+        let profile = AIProviderProfile.normalized(
+            id: profileID,
+            name: name,
+            baseURL: baseURL,
+            modelsText: modelsText,
+            selectedModel: selectedModel,
+            createdAt: createdAt,
+            updatedAt: Date()
+        )
+        guard !profile.baseURL.isEmpty else {
+            validationMessage = "settings.invalidUrl".localized
+            return
+        }
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            validationMessage = "aiProvider.apiKeyRequired".localized
+            return
+        }
+        guard !profile.selectedModel.isEmpty else {
+            validationMessage = "aiProvider.modelRequired".localized
+            return
+        }
+        do {
+            try AIProviderStore.shared.save(profile: profile, apiKey: apiKey, activate: true)
+            HapticManager.shared.play(.success)
+            onSaved()
+            dismiss()
+        } catch {
+            validationMessage = error.localizedDescription
+            HapticManager.shared.play(.error)
+        }
+    }
+
+    private func testConnection() {
+        let model = normalizedModels.contains(selectedModel)
+            ? selectedModel
+            : (normalizedModels.first ?? "")
+        isTesting = true
+        testMessage = nil
+        Task {
+            do {
+                var value = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                while value.hasSuffix("/") { value.removeLast() }
+                guard let url = URL(string: value + "/chat/completions") else {
+                    throw AITranslationRequestError.invalidConfiguration("settings.invalidUrl".localized)
+                }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.timeoutInterval = 20
+                request.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "model": model,
+                    "messages": [["role": "user", "content": "Reply with OK."]],
+                    "max_tokens": 8
+                ])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let response = response as? HTTPURLResponse else {
+                    throw AITranslationRequestError.invalidConfiguration("settings.invalidResponse".localized)
+                }
+                guard (200..<300).contains(response.statusCode) else {
+                    let details = String(data: data.prefix(300), encoding: .utf8) ?? ""
+                    throw AITranslationRequestError.server(
+                        model: model,
+                        statusCode: response.statusCode,
+                        message: details
+                    )
+                }
+                testFailed = false
+                testMessage = "settings.connectionSuccess".localizedFormat(model)
+                HapticManager.shared.play(.success)
+            } catch {
+                testFailed = true
+                testMessage = error.localizedDescription
+                HapticManager.shared.play(.error)
+            }
+            isTesting = false
+        }
+    }
+}

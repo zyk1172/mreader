@@ -69,7 +69,7 @@ nonisolated struct KomgaAPIClient: Sendable {
     }
 
     func pageData(bookID: String, pageIndex: Int) async throws -> Data {
-        try await sendData(path: "/api/v1/books/\(bookID)/pages/\(pageIndex + 1)")
+        try await sendData(path: "/api/v1/books/\(bookID)/pages/\(pageIndex + 1)", timeout: 15)
     }
 
     func readProgress(bookID: String) async throws -> KomgaReadProgressDTO? {
@@ -131,8 +131,8 @@ nonisolated struct KomgaAPIClient: Sendable {
         throw MediaSourceError.decodingFailed
     }
 
-    private func sendData(path: String, queryItems: [URLQueryItem] = [], acceptsImage: Bool = true) async throws -> Data {
-        let request = try makeRequest(path: path, queryItems: queryItems, acceptsImage: acceptsImage)
+    private func sendData(path: String, queryItems: [URLQueryItem] = [], acceptsImage: Bool = true, timeout: TimeInterval? = nil) async throws -> Data {
+        let request = try makeRequest(path: path, queryItems: queryItems, acceptsImage: acceptsImage, timeout: timeout)
         return try await send(request)
     }
 
@@ -183,7 +183,7 @@ nonisolated struct KomgaAPIClient: Sendable {
         }
     }
 
-    private func makeRequest(path: String, queryItems: [URLQueryItem], acceptsImage: Bool) throws -> URLRequest {
+    private func makeRequest(path: String, queryItems: [URLQueryItem], acceptsImage: Bool, timeout: TimeInterval? = nil) throws -> URLRequest {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw MediaSourceError.invalidURL
         }
@@ -196,7 +196,7 @@ nonisolated struct KomgaAPIClient: Sendable {
         guard let url = components.url else {
             throw MediaSourceError.invalidURL
         }
-        var request = URLRequest(url: url, timeoutInterval: timeout)
+        var request = URLRequest(url: url, timeoutInterval: timeout ?? self.timeout)
         request.httpMethod = "GET"
         request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

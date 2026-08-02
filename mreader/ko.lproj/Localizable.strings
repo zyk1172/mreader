@@ -1,0 +1,441 @@
+/* Main Tabs */
+"tab.continueReading" = "이어서 읽기";
+"tab.library" = "서재";
+"tab.statistics" = "읽기 통계";
+
+/* Navigation */
+"nav.settings" = "설정";
+"nav.back" = "뒤로";
+"nav.done" = "완료";
+"nav.cancel" = "취소";
+"nav.save" = "저장";
+
+/* Shelf */
+"shelf.title" = "서재";
+"shelf.all" = "전체";
+"shelf.inProgress" = "읽는 중";
+"shelf.locked" = "잠금";
+"shelf.local" = "로컬";
+"shelf.komga" = "Komga";
+"shelf.opds" = "OPDS";
+"shelf.itemCount" = "%d 개";
+"shelf.empty" = "아직 만화가 없습니다";
+"shelf.pullToRefresh" = "당겨서 새로고침";
+"shelf.gridMode" = "그리드";
+"shelf.listMode" = "리스트";
+"shelf.filterCategory" = "필터";
+"shelf.activity" = "서재 활동";
+
+/* Comic Actions */
+"comic.rename" = "이름 변경";
+"comic.share" = "공유";
+"comic.openInFiles" = "파일에서 열기";
+"comic.lock" = "잠금";
+"comic.unlock" = "잠금 해제";
+"comic.rebuildThumbnail" = "썸네일 다시 만들기";
+"comic.hide" = "숨기기";
+"comic.delete" = "삭제";
+"comic.markAsRead" = "읽음으로 표시";
+"comic.addToSeries" = "시리즈에 추가";
+"comic.removeFromSeries" = "시리즈에서 제거";
+
+/* Series */
+"series.title" = "시리즈";
+"series.new" = "새 시리즈";
+"series.name" = "시리즈 이름";
+"series.create" = "생성";
+"series.rename" = "시리즈 이름 변경";
+"series.markAllRead" = "모두 읽음으로 표시";
+"series.rebuildThumbnails" = "썸네일 다시 만들기";
+"series.importFiles" = "챕터 파일 가져오기";
+"series.importFolder" = "챕터 폴더 가져오기";
+"series.addFromShelf" = "서재에서 추가";
+"series.empty" = "시리즈가 비어 있습니다";
+"series.addChapters" = "챕터를 추가하면 여기에 표시됩니다";
+
+/* Reader */
+"reader.settings" = "읽기 설정";
+"reader.jumpToPage" = "이동";
+"reader.pageNumber" = "페이지 번호";
+"reader.currentPage" = "페이지 %d / %d";
+"reader.bookmark" = "북마크";
+"reader.addBookmark" = "페이지 %d에 북마크 추가";
+"reader.noBookmarks" = "북마크 없음";
+"reader.editBookmarkNote" = "북마크 메모 편집";
+"reader.bookmarkNotePlaceholder" = "메모 (선택사항)";
+"reader.deleteBookmark" = "북마크 삭제";
+
+/* Reading Settings */
+"reader.mode" = "읽기 모드";
+"reader.mode.horizontalPage" = "가로 페이지 넘기기";
+"reader.mode.verticalPage" = "세로 페이지 넘기기";
+"reader.mode.continuousScroll" = "연속 스크롤";
+"reader.mode.infiniteScroll" = "무한 스크롤";
+"reader.mode.doublePage" = "두 페이지";
+"reader.direction" = "읽기 방향";
+"reader.direction.leftToRight" = "왼쪽에서 오른쪽";
+"reader.direction.rightToLeft" = "오른쪽에서 왼쪽";
+"reader.animation" = "페이지 넘기기 효과";
+"reader.animation.none" = "없음";
+"reader.animation.slide" = "슬라이드";
+"reader.animation.fade" = "페이드";
+"reader.animation.curl" = "굴림";
+"reader.fitMode" = "이미지 맞춤";
+"reader.fitMode.fitScreen" = "화면 맞춤";
+"reader.fitMode.fitWidth" = "너비 맞춤";
+"reader.fitMode.fitHeight" = "높이 맞춤";
+"reader.fitMode.original" = "원본 크기";
+"reader.scrollSpeed" = "스크롤 속도";
+"reader.scrollSpeed.slow" = "느림";
+"reader.scrollSpeed.standard" = "보통";
+"reader.scrollSpeed.fast" = "빠름";
+
+/* OCR Settings */
+"ocr.enable" = "OCR 텍스트 인식";
+"ocr.autoMagnify" = "자동 텍스트 확대";
+"ocr.magnifySize" = "텍스트 확대 크기";
+"ocr.safeArea" = "가장자리 영역 무시";
+"ocr.aiTranslation" = "AI 번역";
+"ocr.translationMode" = "번역 모드";
+"ocr.translationMode.ocr" = "OCR 텍스트";
+"ocr.translationMode.vision" = "이미지 인식";
+"ocr.autoTranslate" = "현재 페이지 자동 번역";
+"ocr.borderProgress" = "AI 번역 테두리 진행률";
+"ocr.colorStyle" = "번역 텍스트 색상";
+"ocr.colorStyle.contrast" = "고대비";
+"ocr.colorStyle.coolWarm" = "쿨·웜";
+"ocr.colorStyle.jewel" = "젤톤";
+"ocr.targetLanguage" = "번역 대상";
+"translation.language.zh-Hans" = "중국어 간체";
+"translation.language.zh-Hant" = "중국어 번체";
+"translation.language.en" = "영어";
+"translation.language.ja" = "일본어";
+"translation.language.ko" = "한국어";
+"translation.language.fr" = "프랑스어";
+"translation.language.de" = "독일어";
+"translation.language.es" = "스페인어";
+"translation.language.it" = "이탈리아어";
+"translation.language.pt" = "포르투갈어";
+"translation.language.ru" = "러시아어";
+"translation.language.th" = "태국어";
+"translation.language.vi" = "베트남어";
+"translation.language.id" = "인도네시아어";
+"translation.language.ar" = "아랍어";
+"aiProvider.title" = "AI API 설정";
+"aiProvider.saved" = "저장된 설정";
+"aiProvider.empty" = "AI API 설정 없음";
+"aiProvider.emptyDescription" = "OpenAI 호환 API와 하위 모델을 추가하세요.";
+"aiProvider.sharedModelDescription" = "OCR과 비전 번역은 선택한 하나의 하위 모델을 함께 사용하며 자동 전환하지 않습니다.";
+"aiProvider.add" = "API 설정 추가";
+"aiProvider.makeActive" = "현재 설정으로 지정";
+"aiProvider.deleteTitle" = "API 설정을 삭제할까요?";
+"aiProvider.deleteMessage" = "저장된 API Key와 하위 모델도 함께 삭제됩니다.";
+"aiProvider.connection" = "연결";
+"aiProvider.name" = "설정 이름";
+"aiProvider.childModels" = "하위 모델";
+"aiProvider.childModelsDescription" = "한 줄에 모델 하나를 입력하고 OCR과 비전 번역이 함께 사용할 모델을 선택하세요.";
+"aiProvider.currentChildModel" = "현재 하위 모델";
+"aiProvider.modelRequired" = "하위 모델을 하나 이상 추가하고 선택하세요.";
+"aiProvider.apiKeyRequired" = "API Key를 입력하세요.";
+"ocr.filter" = "OCR 필터";
+"ocr.filterDescription" = "웹 주소, 광고, 가장자리의 작은 텍스트는 무시되어 OCR이나 AI 번역에 전송되지 않습니다.";
+"ocr.minTextSize" = "이보다 작은 텍스트 무시";
+"ocr.debug" = "OCR 디버그";
+"ocr.debugDescription" = "비전 번역은 현재 페이지를 서드파티 OpenAI 호환 API에 전송합니다.";
+"ocr.showDebugBoxes" = "OCR 디버그 박스 표시";
+
+/* Settings */
+"settings.title" = "설정";
+"settings.openai" = "OpenAI 호환 API";
+"settings.selectLibrary" = "서재 선택";
+"settings.selectLibraryDescription" = "Files에서 만화 루트 디렉토리를 선택하세요. 스캔, 가져오기, 삭제는 모두 이 디렉토리를 기반으로 합니다.";
+"settings.selectLibraryRoot" = "만화 루트 디렉토리 선택";
+"settings.openaiDescription" = "Base URL을 /v1까지 입력하세요. 예: https://api.openai.com/v1 또는 프록시 서버. OCR 모드는 텍스트만 전송; 비전 모드는 페이지 이미지를 업로드합니다.";
+"settings.apiKey" = "OpenAI API Key 입력";
+"settings.baseUrl" = "Base URL";
+"settings.model" = "모델";
+"settings.testConnection" = "연결 테스트";
+"settings.connectionSuccess" = "연결 성공! 모델 %@ 사용 가능";
+"settings.translationPrompt" = "번역 프롬프트 템플릿";
+"settings.visionPrompt" = "비전 번역 프롬프트 템플릿";
+"settings.resetDefault" = "기본값으로 복원";
+
+/* Media Sources */
+"mediaSources.title" = "원격 미디어 소스";
+"mediaSources.added" = "추가된 소스";
+"mediaSources.noServers" = "원격 서버가 없습니다";
+"mediaSources.add" = "원격 서버 추가";
+"mediaSources.type" = "유형";
+"mediaSources.name" = "표시 이름";
+"mediaSources.serverUrl" = "서버 URL";
+"mediaSources.lanUrl" = "LAN URL (선택사항)";
+"mediaSources.lanPrefix" = "내부: ";
+"mediaSources.username" = "사용자 이름 (Bearer Token은 비워두세요)";
+"mediaSources.apiKey" = "API Key";
+"mediaSources.password" = "비밀번호 또는 Token";
+"mediaSources.testAndSave" = "테스트 후 저장";
+"mediaSources.refresh" = "새로고침";
+"mediaSources.edit" = "편집";
+"mediaSources.remove" = "제거";
+"mediaSources.enable" = "활성화";
+"mediaSources.disable" = "비활성화";
+"mediaSources.hiddenComics" = "숨겨진 Komga 만화";
+"mediaSources.noHidden" = "숨겨진 만화 없음";
+"mediaSources.unhide" = "숨김 해제";
+"mediaSources.komgaDescription" = "Komga API Key는 키체인에만 저장됩니다.";
+"mediaSources.opdsDescription" = "OPDS는 Atom/JSON 카탈로그를 지원합니다. 사용자 이름을 입력하면 Basic 인증; 비워두면 Bearer 토큰으로 사용됩니다.";
+"mediaSources.saveSuccess" = "저장 완료";
+"mediaSources.discoveredKomga" = "Komga 서재 %d개 발견";
+"mediaSources.discoveredOpds" = "OPDS 출판물 %d개 발견";
+"mediaSources.connectSuccess" = "연결 성공: %@, 저장 완료 %@";
+"mediaSources.syncComplete" = "%@, 만화 %d개 동기화 완료";
+"mediaSources.refreshComplete" = "새로고침 완료: %@ 만화 %d개 동기화";
+
+/* Import */
+"import.files" = "기기에서 파일 가져오기";
+"import.folder" = "기기에서 폴더 가져오기";
+"import.webServer" = "웹 서버";
+"import.webServerDescription" = "활성화하면 LAN을 통해 기기에 접근하여 만화를 업로드할 수 있습니다.";
+"import.uploadFiles" = "파일 업로드";
+
+/* Backup */
+"backup.title" = "백업 및 복원";
+"backup.export" = "설정 백업 내보내기";
+"backup.import" = "설정 백업 가져오기";
+"backup.description" = "일반 백업에는 API Key, 비밀번호 또는 Token이 포함되지 않습니다. 자격 증명을 이전할 때는 암호화 백업을 사용하세요.";
+"backup.exportEncrypted" = "암호화된 자격 증명 백업 내보내기";
+"backup.encryptTitle" = "설정 백업 암호화";
+"backup.decryptTitle" = "설정 백업 잠금 해제";
+"backup.password" = "백업 비밀번호";
+"backup.passwordConfirm" = "비밀번호 확인";
+"backup.passwordDescription" = "8자 이상 입력하세요. 비밀번호는 저장되지 않으며 분실 시 복구할 수 없습니다.";
+
+/* Storage */
+"storage.title" = "저장소 관리";
+"storage.comicCount" = "만화 수";
+"storage.coverCache" = "표지 캐시";
+"storage.pageCache" = "페이지 캐시";
+"storage.tempCache" = "임시 압축 해제 캐시";
+"storage.clearTempCache" = "임시 압축 해제 캐시 지우기";
+"storage.rebuildCovers" = "표지 인덱스 확인 및 재생성";
+"storage.refreshIndex" = "서재 인덱스 새로고침";
+"storage.resetDetection" = "만화 유형 감지 초기화";
+
+/* Local Library */
+"localLibrary.title" = "로컬 서재";
+"localLibrary.address" = "주소";
+"localLibrary.copyAddress" = "로컬 서재 주소 복사";
+"localLibrary.changeRoot" = "만화 루트 디렉토리 변경";
+
+/* Interaction */
+"interaction.title" = "상호작용";
+"interaction.haptic" = "햅틱 피드백";
+"interaction.burnInProtection" = "번인 방지";
+"interaction.dailyGoal" = "일일 읽기 페이지 목표";
+
+/* Statistics */
+"stats.title" = "읽기 통계";
+"stats.todaySummary" = "오늘의 요약";
+"stats.readingGoal" = "읽기 목표";
+"stats.readingRings" = "읽기 링";
+"stats.sevenDayActivity" = "7일 활동";
+"stats.thirtyDayDots" = "30일 연속";
+"stats.topComics" = "인기 만화";
+"stats.pagesRead" = "%d 페이지 읽음";
+"stats.dailyGoal" = "일일 목표: %d 페이지";
+"stats.currentStreak" = "현재 연속";
+"stats.longestStreak" = "최장 연속";
+
+/* Common */
+"common.loading" = "로딩 중...";
+"common.error" = "오류";
+"common.success" = "성공";
+"common.confirm" = "확인";
+"common.delete" = "삭제";
+"common.cancel" = "취소";
+"common.save" = "저장";
+"common.edit" = "편집";
+"common.close" = "닫기";
+"common.refresh" = "새로고침";
+"common.retry" = "재시도";
+"common.yes" = "예";
+"common.no" = "아니오";
+"common.filter" = "필터링됨";
+
+/* Error Messages */
+"error.unreachable" = "서버에 연결할 수 없습니다";
+"error.unauthorized" = "인증 실패. 자격 증명을 확인하세요.";
+"error.invalidUrl" = "서버 URL 형식이 올바르지 않습니다";
+"error.timeout" = "연결 시간 초과";
+"error.notFound" = "원격 리소스를 찾을 수 없습니다";
+"error.serverError" = "서버 오류 %d";
+"error.importFailed" = "가져오기 실패";
+"error.importSuccess" = "가져오기 처리 완료";
+"error.backupFailed" = "설정 백업 내보내기 실패";
+
+/* Days of Week */
+"day.monday" = "월";
+"day.tuesday" = "화";
+"day.wednesday" = "수";
+"day.thursday" = "목";
+"day.friday" = "금";
+"day.saturday" = "토";
+"day.sunday" = "일";
+
+/* Translation Languages */
+"lang.chinese" = "중국어";
+"lang.english" = "영어";
+"lang.japanese" = "일본어";
+"lang.korean" = "한국어";
+"lang.simplifiedChinese" = "간체 중국어";
+"lang.traditionalChinese" = "번체 중국어";
+
+/* Vision Prompt Template */
+"visionPrompt.title" = "비전 번역 프롬프트 템플릿";
+"visionPrompt.resetDefault" = "기본값으로 복원";
+
+/* Statistics */
+"stats.pagesReadShort" = "%d페이지";
+
+/* Delete Confirmation */
+"delete.localComic" = "만화 라이브러리의 실제 파일이 삭제되고 서재 기록도 정리됩니다. 이 작업은 되돌릴 수 없습니다.";
+"delete.komgaComic" = "Komga 서버에서 만화가 삭제되고 서재 기록도 정리됩니다. 이 작업은 되돌릴 수 없습니다.";
+"delete.opdsComic" = "MReader의 OPDS 서재 기록과 로컬 캐시만 삭제되며, 서버 파일은 삭제되지 않습니다.";
+"delete.series" = "시리즈 폴더와 해당 만화가 삭제되고 서재 기록도 정리됩니다. 이 작업은 되돌릴 수 없습니다.";
+"delete.selection" = "선택한 만화 또는 시리즈 파일이 삭제되고 서재 기록도 정리됩니다. 이 작업은 되돌릴 수 없습니다.";
+
+/* Error Messages */
+"error.libraryRootFailed" = "만화 루트 디렉토리 접근 권한을 저장할 수 없습니다. Files에서 폴더를 다시 선택하세요.";
+"error.restoreFailed" = "복원 실패";
+
+/* Import Messages */
+"import.noReadableImages" = "읽을 수 있는 이미지를 찾을 수 없거나 압축/PDF 분석에 실패했습니다. ZIP, CBZ, EPUB, PDF, 이미지 폴더를 지원합니다.";
+"import.partialSuccessWithPDF" = "%d개 항목을 가져왔습니다. PDF는 폴더 만화로 처리되었습니다. %d개 항목이 실패했습니다.";
+"import.partialSuccess" = "%d개 항목을 가져왔고, %d개가 실패했습니다. 실패한 항목은 읽을 수 있는 이미지를 포함하지 않거나 압축이 손상되었을 수 있습니다.";
+"import.pdfProcessedSingle" = "PDF를 폴더 만화로 처리했습니다. 서재가 새로고침되었습니다.";
+"import.pdfProcessed" = "PDF %d개를 폴더 만화로 처리했습니다. 서재가 새로고침되었습니다.";
+
+/* Comic Additional */
+"comic.readTo" = "%d / %d 읽음";
+
+/* Shelf Additional */
+"shelf.selectedCount" = "%d 개 선택됨";
+"shelf.emptyTitle" = "서재가 비어 있습니다";
+"shelf.emptyDescription" = "이미지 폴더, ZIP, CBZ 가져오기를 지원합니다";
+"shelf.importComics" = "만화 파일 가져오기";
+"shelf.importFolder" = "만화 폴더 가져오기";
+
+/* Series Additional */
+"series.newDescription" = "생성 후 시리즈를 열어 챕터를 추가할 수 있습니다.";
+"series.addChapterFiles" = "챕터 파일 가져오기";
+"series.addChapterFolder" = "챕터 폴더 가져오기";
+"series.addFromShelfButton" = "서재에서 추가";
+"series.addSheetTitle" = "챕터 추가";
+"series.removeFromSeries" = "시리즈에서 제거";
+
+/* Comic Additional */
+"comic.hideDescription" = "MReader 서재에서만 숨기며, Komga 서버 파일은 삭제하지 않습니다.";
+"comic.sourceLocal" = "로컬";
+"comic.sourceKomga" = "Komga";
+"comic.sourceOpds" = "OPDS";
+"comic.notOpened" = "읽지 않음";
+"comic.continueReading" = "이어서 읽기";
+"comic.readProgress" = "읽기 진행률";
+"comic.pagesCount" = "%d 페이지";
+"comic.chaptersPages" = "%d 챕터 · %d 페이지";
+"comic.chaptersCount" = "%d 챕터";
+
+/* Reader Additional */
+"reader.loadFailed" = "로드 실패";
+"reader.parsing" = "분석 중...";
+"reader.imageLoadFailed" = "이미지 로드 실패";
+"reader.noImagesFound" = "이미지를 찾을 수 없습니다";
+"reader.noImagesDescription" = "JPG, PNG, WebP 이미지가 포함된 만화 폴더를 다시 가져오세요.";
+"reader.burnInEnabled" = "화면 보호 활성화";
+"reader.burnInDescription" = "화면이 4시간 이상 정지했습니다. 탭하여 계속 읽으세요.";
+"reader.ocrMagnify" = "OCR 텍스트 확대";
+"reader.aiTranslationLabel" = "AI 번역";
+"reader.ocrFilterExample" = "샘플 텍스트";
+"reader.ocrFilterThreshold" = "현재 임계값 %d";
+"reader.ocrFilterSmallText" = "이보다 작은 텍스트는 처리되지 않습니다";
+"reader.bookmarkEditNote" = "북마크 메모 편집";
+"reader.bookmarkNotePlaceholder" = "메모 (선택사항)";
+"reader.ocrTextSizeSmall" = "작게";
+"reader.ocrTextSizeStandard" = "보통";
+"reader.ocrTextSizeLarge" = "크게";
+"reader.ocrTextSizeExtraLarge" = "매우 크게";
+"reader.imageLoadError" = "이미지 로드 실패";
+"reader.currentPageOf" = "페이지 %d / %d";
+"reader.bookmarkPage" = "페이지 %d";
+
+/* Settings Additional */
+"settings.translationPromptPlaceholder" = "플레이스홀더: {targetLanguage}, {ocrText}";
+"settings.visionPromptPlaceholder" = "플레이스홀더: {targetLanguage}";
+"settings.restoreSuccess" = "복원 성공";
+"settings.restoreSuccessMessage" = "설정 백업이 복원되었습니다.";
+"settings.restoreFailed" = "복원 실패";
+
+/* Import Additional */
+"import.accessAddress" = "접속 주소";
+"import.copyWebAddress" = "웹 주소 복사";
+"import.title" = "가져오기 서비스";
+"import.comicMediaLibrary" = "만화 미디어 라이브러리";
+"import.itemsCount" = "%d개 항목 가져오기";
+"import.importAndParse" = "가져오기 및 분석";
+"import.refreshRemoteLibrary" = "원격 라이브러리 새로고침";
+
+/* Settings Additional */
+"settings.invalidUrl" = "URL 형식이 올바르지 않습니다";
+"settings.invalidResponse" = "잘못된 응답";
+"settings.apiKeyInvalid" = "API Key가 유효하지 않거나 권한이 없습니다";
+"settings.modelNotFound" = "모델 %@을(를) 찾을 수 없습니다";
+
+
+/* Comic Additional */
+"comic.unknownSize" = "크기 미정";
+
+/* Statistics Additional */
+"stats.todaySummary" = "오늘의 요약";
+"stats.dailyGoalLabel" = "일일 목표";
+"stats.minutes" = "분";
+"stats.pages" = "페이지";
+"stats.completed" = "완료";
+"stats.goalPages" = "%d 페이지";
+"stats.pagesPerDay" = "페이지/일";
+"stats.readingRingsLabel" = "읽기 링";
+"stats.todayGoal" = "오늘 / %d";
+"stats.weekGoal" = "이번 주 목표";
+"stats.streakDays" = "연속 일수";
+"stats.thisWeek" = "이번 주";
+"stats.minutesPages" = "%d 분 · %d 페이지";
+"stats.monthlyRecord" = "월간 기록";
+"stats.currentStreakDays" = "%d일 연속";
+"stats.longestStreakDays" = "최장 %d일 연속";
+"stats.solidDotMeaning" = "실선 원은 해당일에 읽었음을 의미합니다";
+"stats.topReading" = "자주 읽는 만화";
+"stats.noReadingRecords" = "읽기 기록 없음";
+"stats.noReadingRecordsDescription" = "읽기를 시작하면 가장 많이 읽은 만화가 여기에 표시됩니다.";
+"stats.activityDetail" = "%d 분 · %d / %d 페이지";
+
+/* Storage Additional */
+"storage.seriesCount" = "시리즈 수";
+"storage.comicCountLabel" = "만화 수";
+"storage.imagePages" = "이미지 페이지 수";
+"storage.copyAddress" = "로컬 서재 주소 복사";
+"storage.cacheAndTemp" = "캐시 및 임시 파일";
+"storage.cacheDescription" = "만화 소스 파일은 Files에서 볼 수 있는 MReader 로컬 서재에 저장됩니다. 여기서 소스 파일은 삭제되지 않습니다.";
+"storage.tempExtractCache" = "임시 압축 해제 캐시";
+"storage.clearTempCache" = "임시 압축 해제 캐시 지우기";
+"storage.rebuildCoverIndex" = "표지 인덱스 확인 및 재생성";
+"storage.refreshLibraryIndex" = "서재 인덱스 새로고침";
+
+/* Background Task */
+"background.processing" = "백그라운드 처리 중";
+"background.taskCount" = "%d개 작업";
+
+/* Time */
+"time.today" = "오늘";
+"time.yesterday" = "어제";
+"time.daysAgo" = "%d일 전";
+"ocr.visualVerification" = "낮은 신뢰도 텍스트 시각 검증";
+"ocr.visualVerificationDescription" = "로컬 OCR 신뢰도가 낮을 때만 최대 3개의 텍스트 자르기 영역을 설정된 타사 비전 모델로 전송합니다.";
