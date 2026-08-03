@@ -50,44 +50,95 @@ struct OCRPreprocessor {
         let fullSize = pixelSize(for: normalizedImage)
         guard fullSize.width > 8, fullSize.height > 8 else { return [] }
 
-        let variants = makeVariants(for: normalizedImage, fullPixelSize: fullSize)
-        print("MReader OCR preprocess slices=\(Set(variants.map { "\(Int($0.sliceRect.minY))-\(Int($0.sliceRect.maxY))" }).count) variants=\(variants.count) image=\(Int(fullSize.width))x\(Int(fullSize.height))")
-
+        let slices = sliceImage(normalizedImage, fullPixelSize: fullSize)
+        print("MReader OCR preprocess slices=\(slices.count) strategy=adaptive image=\(Int(fullSize.width))x\(Int(fullSize.height))")
         var allBlocks: [TextBlock] = []
-        for variant in variants {
-            for pass in languagePasses() {
-                do {
-                    let blocks = try await recognizeVariant(
-                        variant,
-                        options: options,
-                        languages: pass.languages,
-                        passName: pass.name
-                    )
-                    print("MReader OCR variant=\(variant.name) languagePass=\(pass.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(blocks.count) avgConfidence=\(String(format: "%.2f", averageConfidence(blocks)))")
-                    allBlocks.append(contentsOf: blocks)
-                } catch {
-                    print("MReader OCR variant failed name=\(variant.name) languagePass=\(pass.name) error=\(error.localizedDescription)")
-                }
+        for slice in slices {
+            let original = OCRImageVariant(
+                name: "original",
+                image: slice.image,
+                sliceRect: slice.rect,
+                fullPixelSize: fullSize
+            )
+            var sliceBlocks = await recognize(
+                original,
+                options: options,
+                passes: languagePasses()
+            )
+
+            let originalNeedsFallback = needsEnhancedFallback(sliceBlocks)
+            if originalNeedsFallback,
+               let enhancedImage = enhancedImage(slice.image, inverted: false) {
+                let enhanced = OCRImageVariant(
+                    name: "enhanced",
+                    image: enhancedImage,
+                    sliceRect: slice.rect,
+                    fullPixelSize: fullSize
+                )
+                sliceBlocks.append(contentsOf: await recognize(
+                    enhanced,
+                    options: options,
+                    passes: languagePasses()
+                ))
             }
+
+            let shouldTryInverted = isLikelyDark(slice.image) || needsEnhancedFallback(sliceBlocks)
+            if shouldTryInverted,
+               let invertedImage = enhancedImage(slice.image, inverted: true) {
+                let inverted = OCRImageVariant(
+                    name: "inverted",
+                    image: invertedImage,
+                    sliceRect: slice.rect,
+                    fullPixelSize: fullSize
+                )
+                sliceBlocks.append(contentsOf: await recognize(
+                    inverted,
+                    options: options,
+                    passes: languagePasses()
+                ))
+            }
+            allBlocks.append(contentsOf: sliceBlocks)
         }
 
         print("MReader OCR raw candidates=\(allBlocks.count)")
         return allBlocks
     }
 
-    nonisolated private static func makeVariants(for image: UIImage, fullPixelSize: CGSize) -> [OCRImageVariant] {
-        let slices = sliceImage(image, fullPixelSize: fullPixelSize)
-        var variants: [OCRImageVariant] = []
-        for slice in slices {
-            variants.append(OCRImageVariant(name: "original", image: slice.image, sliceRect: slice.rect, fullPixelSize: fullPixelSize))
-            if let enhanced = enhancedImage(slice.image, inverted: false) {
-                variants.append(OCRImageVariant(name: "enhanced", image: enhanced, sliceRect: slice.rect, fullPixelSize: fullPixelSize))
-            }
-            if let inverted = enhancedImage(slice.image, inverted: true) {
-                variants.append(OCRImageVariant(name: "inverted", image: inverted, sliceRect: slice.rect, fullPixelSize: fullPixelSize))
+    nonisolated private static func recognize(
+        _ variant: OCRImageVariant,
+        options: Options,
+        passes: [(name: String, languages: [String])]
+    ) async -> [TextBlock] {
+        var blocks: [TextBlock] = []
+        for pass in passes {
+            do {
+                let result = try await recognizeVariant(
+                    variant,
+                    options: options,
+                    languages: pass.languages,
+                    passName: pass.name
+                )
+                print("MReader OCR variant=\(variant.name) languagePass=\(pass.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(result.count) avgConfidence=\(String(format: "%.2f", averageConfidence(result)))")
+                blocks.append(contentsOf: result)
+            } catch {
+                print("MReader OCR variant failed name=\(variant.name) languagePass=\(pass.name) error=\(error.localizedDescription)")
             }
         }
-        return variants
+        return blocks
+    }
+
+    nonisolated private static func needsEnhancedFallback(_ candidates: [TextBlock]) -> Bool {
+        let resolved = OCRCandidateResolver.resolve(candidates, isRightToLeft: false).resolvedBlocks
+        guard !resolved.isEmpty else { return true }
+        let confidence = averageConfidence(resolved)
+        let usefulCharacterCount = resolved.reduce(into: 0) { total, block in
+            total += block.text.unicodeScalars.filter {
+                CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+            }.count
+        }
+        let totalCharacterCount = resolved.reduce(0) { $0 + $1.text.unicodeScalars.count }
+        let usefulRatio = Double(usefulCharacterCount) / Double(max(totalCharacterCount, 1))
+        return confidence < 0.58 || usefulRatio < 0.42
     }
 
     nonisolated private static func sliceImage(_ image: UIImage, fullPixelSize: CGSize) -> [(image: UIImage, rect: CGRect)] {

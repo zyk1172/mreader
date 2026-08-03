@@ -1226,6 +1226,29 @@ struct mreaderTests {
         #expect(comic.progressUpdatedAt == .distantPast)
     }
 
+    @Test func translationPrefetchRequiresAutoTranslationAndStaysAhead() {
+        #expect(AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: 3,
+            pageCount: 10,
+            isAutoTranslationEnabled: false
+        ).isEmpty)
+        #expect(AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: 3,
+            pageCount: 10,
+            isAutoTranslationEnabled: true
+        ) == [4, 5])
+        #expect(AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: 8,
+            pageCount: 10,
+            isAutoTranslationEnabled: true
+        ) == [9])
+        #expect(AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: 9,
+            pageCount: 10,
+            isAutoTranslationEnabled: true
+        ).isEmpty)
+    }
+
 }
 
 private actor LibrarySyncProbe {

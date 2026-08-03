@@ -347,18 +347,6 @@ class AITranslator {
 
     static func translateVisionPage(image: UIImage, apiKey: String, baseURL: String, model: String, targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue, promptTemplate: String = defaultVisionTranslationPromptTemplate, isRightToLeft: Bool = false, viewportAspect: CGFloat = 2.0) async throws -> [TextBlock] {
         let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
-        let customRecognitionInstructions: String
-        if promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || promptTemplate == defaultVisionTranslationPromptTemplate {
-            customRecognitionInstructions = ""
-        } else {
-            customRecognitionInstructions = promptTemplate
-                .replacingOccurrences(of: "{targetLanguage}", with: target.modelInstruction)
-                .replacingOccurrences(
-                    of: "{readingOrder}",
-                    with: isRightToLeft ? "从右到左、从上到下" : "从左到右、从上到下"
-                )
-        }
         let recognized = try await recognizeVisionPage(
             image: image,
             apiKey: apiKey,
@@ -366,52 +354,30 @@ class AITranslator {
             model: model,
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
-            additionalInstructions: customRecognitionInstructions
+            translationTarget: target,
+            translationPromptTemplate: promptTemplate
         )
         try Task.checkCancellation()
 
         var translated = recognized
-        do {
+        let missingIndexes = translated.indices.filter {
+            (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !missingIndexes.isEmpty {
+            let missingBlocks = missingIndexes.map { translated[$0] }
             let pageResult = try await translatePage(
-                blocks: recognized,
+                blocks: missingBlocks,
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
                 target: target,
                 promptTemplate: defaultTranslationPromptTemplate
             )
-            for index in translated.indices {
+            for index in missingIndexes {
                 let id = translated[index].id.uuidString.lowercased()
                 if let result = pageResult.translation(for: id) {
                     translated[index].translation = result.translation
                     translated[index].translationLines = result.translationLines
-                }
-            }
-        } catch {
-            print("MReader vision page-level translation fallback reason=\(error.localizedDescription)")
-        }
-
-        let missingIndexes = translated.indices.filter { translated[$0].translation == nil }
-        if !missingIndexes.isEmpty {
-            let pageContext = recognized.enumerated()
-                .map { "\($0.offset + 1). \($0.element.text)" }
-                .joined(separator: "\n")
-            for index in missingIndexes {
-                try Task.checkCancellation()
-                do {
-                    translated[index].translation = try await translate(
-                        text: translated[index].text,
-                        ocrMetadata: ocrMetadata(for: translated[index]),
-                        pageContext: pageContext,
-                        apiKey: apiKey,
-                        baseURL: baseURL,
-                        model: model,
-                        targetLanguage: target.modelInstruction,
-                        promptTemplate: defaultTranslationPromptTemplate,
-                        requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
-                    )
-                } catch {
-                    print("MReader vision item translation failed index=\(index) reason=\(error.localizedDescription)")
                 }
             }
         }
@@ -430,7 +396,9 @@ class AITranslator {
         model: String,
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
-        additionalInstructions: String = ""
+        additionalInstructions: String = "",
+        translationTarget: TranslationTargetLanguage? = nil,
+        translationPromptTemplate: String = defaultVisionTranslationPromptTemplate
     ) async throws -> [TextBlock] {
         try Task.checkCancellation()
         return try await recognizeVisionPageUsingModel(
@@ -440,11 +408,13 @@ class AITranslator {
             model: model,
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
-            additionalInstructions: additionalInstructions
+            additionalInstructions: additionalInstructions,
+            translationTarget: translationTarget,
+            translationPromptTemplate: translationPromptTemplate
         )
     }
 
-    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String) async throws -> [TextBlock] {
+    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
             return try await recognizeVisionSlices(
                 image: image,
@@ -453,7 +423,9 @@ class AITranslator {
                 model: model,
                 isRightToLeft: isRightToLeft,
                 viewportAspect: viewportAspect,
-                additionalInstructions: additionalInstructions
+                additionalInstructions: additionalInstructions,
+                translationTarget: translationTarget,
+                translationPromptTemplate: translationPromptTemplate
             )
         }
         do {
@@ -464,7 +436,9 @@ class AITranslator {
                 baseURL: baseURL,
                 model: model,
                 isRightToLeft: isRightToLeft,
-                additionalInstructions: additionalInstructions
+                additionalInstructions: additionalInstructions,
+                translationTarget: translationTarget,
+                translationPromptTemplate: translationPromptTemplate
             )
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
             return sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
@@ -484,12 +458,14 @@ class AITranslator {
                 model: model,
                 isRightToLeft: isRightToLeft,
                 viewportAspect: viewportAspect,
-                additionalInstructions: additionalInstructions
+                additionalInstructions: additionalInstructions,
+                translationTarget: translationTarget,
+                translationPromptTemplate: translationPromptTemplate
             )
         }
     }
 
-    private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String) async throws -> [TextBlock] {
+    private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         var fallbackBlocks: [TextBlock] = []
@@ -504,7 +480,9 @@ class AITranslator {
                     baseURL: baseURL,
                     model: model,
                     isRightToLeft: isRightToLeft,
-                    additionalInstructions: additionalInstructions
+                    additionalInstructions: additionalInstructions,
+                    translationTarget: translationTarget,
+                    translationPromptTemplate: translationPromptTemplate
                 )
                 fallbackBlocks.append(contentsOf: blocks)
             } catch {
@@ -594,7 +572,7 @@ class AITranslator {
         return corrected
     }
 
-    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String) async throws -> [TextBlock] {
+    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw VisionTranslationError.api("接口地址无效") }
@@ -602,10 +580,22 @@ class AITranslator {
         guard let imageDataURL = encodedVisionImageDataURL(preparedImage) else { throw VisionTranslationError.imageEncodingFailed }
         let inputPixelSize = pixelSize(of: preparedImage)
 
-        let prompt = visionRecognitionPrompt(
-            isRightToLeft: isRightToLeft,
-            additionalInstructions: additionalInstructions
-        )
+        let prompt: String
+        let systemPrompt: String
+        if let translationTarget {
+            prompt = renderVisionPrompt(
+                template: translationPromptTemplate,
+                targetLanguage: translationTarget.modelInstruction,
+                isRightToLeft: isRightToLeft
+            )
+            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。逐个气泡同时返回原文、译文、translationLines、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+        } else {
+            prompt = visionRecognitionPrompt(
+                isRightToLeft: isRightToLeft,
+                additionalInstructions: additionalInstructions
+            )
+            systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。逐个气泡返回原文、分类、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 60
         request.httpMethod = "POST"
@@ -617,7 +607,7 @@ class AITranslator {
             "messages": [
                 [
                     "role": "system",
-                    "content": "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。逐个气泡返回原文、分类、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+                    "content": systemPrompt
                 ],
                 [
                     "role": "user",
@@ -649,12 +639,20 @@ class AITranslator {
         }
         let blocks: [TextBlock]
         do {
-            blocks = try parseVisionRecognitionBlocks(
-                from: content,
-                sourceRect: sourceRect,
-                inputPixelSize: inputPixelSize,
-                isRightToLeft: isRightToLeft
-            )
+            if translationTarget != nil {
+                blocks = try parseVisionTranslationBlocks(
+                    from: content,
+                    sourceRect: sourceRect,
+                    inputPixelSize: inputPixelSize
+                )
+            } else {
+                blocks = try parseVisionRecognitionBlocks(
+                    from: content,
+                    sourceRect: sourceRect,
+                    inputPixelSize: inputPixelSize,
+                    isRightToLeft: isRightToLeft
+                )
+            }
         } catch {
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")

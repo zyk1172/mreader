@@ -437,6 +437,8 @@ struct ReaderView: View {
     @Environment(\.scenePhase) private var scenePhase
     
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
+    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
@@ -457,6 +459,7 @@ struct ReaderView: View {
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
     @State private var isAITranslationInProgress = false
+    @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
@@ -798,9 +801,12 @@ struct ReaderView: View {
             }
             recordReaderOpenIfNeeded()
             preloadPages(around: currentPageIndex)
+            scheduleTranslationPrefetch(around: currentPageIndex)
         }
         .onDisappear {
             RemotePagePrefetcher.shared.cancelAll()
+            translationPrefetchTask?.cancel()
+            translationPrefetchTask = nil
             recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
         }
@@ -827,6 +833,16 @@ struct ReaderView: View {
             let isScrollingMode = readingMode == .continuousScroll || readingMode == .infiniteScroll
             persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: !isScrollingMode)
             preloadPages(around: clampedValue)
+            scheduleTranslationPrefetch(around: clampedValue)
+        }
+        .onChange(of: comic.isAutoTranslationEnabled) { _, isEnabled in
+            if isEnabled {
+                scheduleTranslationPrefetch(around: currentPageIndex)
+            } else {
+                translationPrefetchTask?.cancel()
+                translationPrefetchTask = nil
+                print("MReader AI translation prefetch disabled comic=\(comic.id)")
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background || newPhase == .inactive else { return }
@@ -1511,6 +1527,74 @@ struct ReaderView: View {
             maximumConcurrent: isContinuous ? 1 : 3,
             delay: isContinuous ? 1.0 : 0.15
         )
+    }
+
+    private func scheduleTranslationPrefetch(around index: Int) {
+        translationPrefetchTask?.cancel()
+        translationPrefetchTask = nil
+        guard comic.isAutoTranslationEnabled,
+              comic.isAITranslationEnabled,
+              comic.aiTranslationMode == .vision || comic.isOCREnabled,
+              let configuration = AIProviderStore.shared.activeConfiguration() else {
+            return
+        }
+
+        let candidates = AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: index,
+            pageCount: manager.pages.count,
+            isAutoTranslationEnabled: comic.isAutoTranslationEnabled
+        )
+        guard !candidates.isEmpty else { return }
+        let comicID = comic.id
+        let mode = comic.aiTranslationMode
+        let target = selectedTranslationTarget
+        let isRightToLeft = readingDirection == .rightToLeft
+        let minimumTextHeight = comic.ocrMinimumTextHeight
+        let safeAreaInset = comic.ocrSafeAreaInset
+        let usesVisualVerification = ocrVisualVerificationEnabled
+        let translationPrompt = translationPromptTemplate
+        let visionPrompt = visionTranslationPromptTemplate
+
+        translationPrefetchTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(0.9))
+                while isAITranslationInProgress && !Task.isCancelled {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+                for pageIndex in candidates {
+                    try Task.checkCancellation()
+                    guard comic.id == comicID, comic.isAutoTranslationEnabled else { return }
+                    let page = manager.pages[pageIndex]
+                    guard let image = await ReaderImageCache.shared.loadImage(
+                        for: page.url,
+                        maxPixelSize: 4096
+                    ) else {
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    let request = AITranslationPageRequest(
+                        pageURL: page.url,
+                        image: image,
+                        mode: mode,
+                        configuration: configuration,
+                        target: target,
+                        translationPromptTemplate: translationPrompt,
+                        visionPromptTemplate: visionPrompt,
+                        isRightToLeft: isRightToLeft,
+                        minimumTextHeight: minimumTextHeight,
+                        safeAreaInset: safeAreaInset,
+                        usesVisualOCRVerification: usesVisualVerification,
+                        viewportAspect: 2.0
+                    )
+                    _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
+                    print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
+                }
+            } catch is CancellationError {
+                print("MReader AI translation prefetch cancelled comic=\(comicID)")
+            } catch {
+                print("MReader AI translation prefetch failed comic=\(comicID) reason=\(error.localizedDescription)")
+            }
+        }
     }
 
     private func previousPage() {
@@ -3703,11 +3787,16 @@ struct LocalImageView: View {
         
         translationTask = Task {
             do {
-                switch aiTranslationMode {
-                case .ocr:
+                if aiTranslationMode == .ocr && ocrShowDebugBoxes {
                     try await startOCRTextTranslation(image: image, pageURL: pageURL)
-                case .vision:
-                    try await startVisionImageTranslation(image: image, pageURL: pageURL)
+                } else {
+                    let request = try makeTranslationPageRequest(image: image)
+                    let blocks = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        guard self.url == pageURL else { return }
+                        self.textBlocks = blocks
+                    }
                 }
             } catch {
                 if !Task.isCancelled {
@@ -3727,6 +3816,27 @@ struct LocalImageView: View {
                 self.translationTask = nil
             }
         }
+    }
+
+    private func makeTranslationPageRequest(image: UIImage) throws -> AITranslationPageRequest {
+        guard let activeConfiguration = AIProviderStore.shared.activeConfiguration() else {
+            throw AIProviderStoreError.missingProfile
+        }
+        return AITranslationPageRequest(
+            pageURL: url,
+            image: image,
+            mode: aiTranslationMode,
+            configuration: activeConfiguration,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            translationPromptTemplate: translationPromptTemplate,
+            visionPromptTemplate: visionTranslationPromptTemplate,
+            isRightToLeft: isRightToLeftReading,
+            minimumTextHeight: ocrMinimumTextHeight,
+            safeAreaInset: ocrSafeAreaInset,
+            usesVisualOCRVerification: ocrVisualVerificationEnabled,
+            viewportAspect: visionViewportAspect
+                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
+        )
     }
 
     private func startOCRTextTranslation(image: UIImage, pageURL: URL) async throws {
@@ -3837,28 +3947,6 @@ struct LocalImageView: View {
             }
         }
         try Task.checkCancellation()
-    }
-
-    private func startVisionImageTranslation(image: UIImage, pageURL: URL) async throws {
-        guard let activeConfiguration = AIProviderStore.shared.activeConfiguration() else {
-            throw AIProviderStoreError.missingProfile
-        }
-        let blocks = try await AITranslator.translateVisionPage(
-            image: image,
-            apiKey: activeConfiguration.apiKey,
-            baseURL: activeConfiguration.baseURL,
-            model: activeConfiguration.model,
-            targetLanguage: targetLanguage,
-            promptTemplate: visionTranslationPromptTemplate,
-            isRightToLeft: isRightToLeftReading,
-            viewportAspect: visionViewportAspect
-                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
-        )
-        try Task.checkCancellation()
-        await MainActor.run {
-            guard self.url == pageURL else { return }
-            self.textBlocks = blocks
-        }
     }
 
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
