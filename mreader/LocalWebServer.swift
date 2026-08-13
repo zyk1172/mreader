@@ -2,7 +2,12 @@ import Foundation
 import Network
 import Combine
 
+private enum HTTPRequestReceiveError: Error {
+    case headerTooLarge
+}
+
 private final class HTTPRequestReceiveState {
+    private static let maxHeaderBytes = 64 * 1024
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
     private(set) var header: String?
@@ -17,6 +22,9 @@ private final class HTTPRequestReceiveState {
     func append(_ data: Data) throws {
         if header == nil {
             headerBuffer.append(data)
+            if headerBuffer.count > Self.maxHeaderBytes {
+                throw HTTPRequestReceiveError.headerTooLarge
+            }
             guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
             let headerData = headerBuffer[..<headerEnd.lowerBound]
             header = String(data: headerData, encoding: .utf8) ?? ""
@@ -78,6 +86,7 @@ final class LocalWebServer: ObservableObject {
 
     private var listener: NWListener?
     private var onUpload: ((URL) -> Void)?
+    private var token = ""
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
     private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
@@ -93,6 +102,7 @@ final class LocalWebServer: ObservableObject {
     func start(onUpload: @escaping (URL) -> Void) {
         self.onUpload = onUpload
         stop()
+        token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         Self.clearStaleBodyFiles()
 
         do {
@@ -103,7 +113,7 @@ final class LocalWebServer: ObservableObject {
                     switch state {
                     case .ready:
                         self.isRunning = true
-                        self.address = "http://\(Self.localIPAddress() ?? "127.0.0.1"):\(self.port)"
+                        self.address = "http://\(Self.localIPAddress() ?? "127.0.0.1"):\(self.port)/\(self.token)/"
                         self.errorMessage = nil
                     case .failed(let error):
                         self.isRunning = false
@@ -144,12 +154,15 @@ final class LocalWebServer: ObservableObject {
             if let data, !data.isEmpty {
                 do {
                     try state.append(data)
-                } catch {
+                } catch let receiveError {
                     state.cleanup()
-                    self.sendResponse(
-                        self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(error.localizedDescription)"),
-                        on: connection
-                    )
+                    let response: Data
+                    if case HTTPRequestReceiveError.headerTooLarge = receiveError {
+                        response = self.httpResponse(status: "431 Request Header Fields Too Large", contentType: "text/plain; charset=utf-8", body: "请求头过大")
+                    } else {
+                        response = self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(receiveError.localizedDescription)")
+                    }
+                    self.sendResponse(response, on: connection)
                     return
                 }
             }
@@ -183,18 +196,33 @@ final class LocalWebServer: ObservableObject {
     private func respond(to state: HTTPRequestReceiveState, on connection: NWConnection) {
         let response: Data
         if let requestText = state.header,
-           requestText.hasPrefix("POST /upload") {
-            if state.contentLength > maxUploadSize {
-                response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
+           let request = Self.requestLine(from: requestText) {
+            let uploadPath = "/\(token)/upload"
+            if request.method == "POST", request.path == uploadPath {
+                if state.contentLength > maxUploadSize {
+                    response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
+                } else {
+                    response = handleUpload(header: requestText, bodyURL: state.bodyFileURL)
+                }
+            } else if request.method != "POST",
+                      request.path == "/\(token)" || request.path == "/\(token)/" {
+                response = httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: uploadPage())
             } else {
-                response = handleUpload(header: requestText, bodyURL: state.bodyFileURL)
+                response = httpResponse(status: "403 Forbidden", contentType: "text/plain; charset=utf-8", body: "Forbidden")
             }
         } else {
-            response = httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: uploadPage())
+            response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求格式不正确")
         }
 
         state.cleanup()
         sendResponse(response, on: connection)
+    }
+
+    private static func requestLine(from header: String) -> (method: String, path: String)? {
+        guard let firstLine = header.components(separatedBy: "\r\n").first else { return nil }
+        let parts = firstLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        return (parts[0].uppercased(), parts[1])
     }
 
     private func sendResponse(_ response: Data, on connection: NWConnection) {
@@ -346,7 +374,7 @@ final class LocalWebServer: ObservableObject {
         <body><main>
         <h1>MReader 网页导入</h1>
         <p>选择 ZIP、CBZ、EPUB、PDF 或图片上传。上传完成后 app 会自动加入书架。</p>
-        <form method="post" action="/upload" enctype="multipart/form-data">
+        <form method="post" action="/\(token)/upload" enctype="multipart/form-data">
         <input name="file" type="file" accept=".zip,.cbz,.epub,.pdf,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" required>
         <button type="submit">上传到 MReader</button>
         </form>
@@ -360,7 +388,7 @@ final class LocalWebServer: ObservableObject {
         <body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:32px;background:#f5f5f7;color:#111">
         <main style="max-width:520px;margin:auto;background:white;border-radius:16px;padding:24px">
         <h1>上传完成</h1><p>\(fileName) 已发送到 MReader，可以回到 app 查看导入结果。</p>
-        <p><a href="/">继续上传</a></p>
+        <p><a href="/\(token)/">继续上传</a></p>
         </main></body></html>
         """
     }

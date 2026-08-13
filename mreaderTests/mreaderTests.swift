@@ -83,13 +83,13 @@ struct mreaderTests {
 
     @Test func visionRecognitionFiltersNonContentAndFallsBackToTextGeometry() throws {
         let response = """
-        {"items":[
+        {"coordinateSpace":"normalized","items":[
           {
             "id":"dialogue-1",
             "text":"こんにちは",
             "classification":"dialogue",
             "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
-            "bubbleBox":{"x":-2,"y":0.3,"width":0,"height":0.08},
+            "bubbleBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
             "confidence":0.92
           },
           {
@@ -109,8 +109,8 @@ struct mreaderTests {
 
         #expect(blocks.count == 1)
         #expect(blocks[0].text == "こんにちは")
-        #expect(blocks[0].boundingBox.minX < 0.2)
-        #expect(blocks[0].boundingBox.width > 0.2)
+        #expect(abs(blocks[0].boundingBox.minX - 0.2) < 0.000_1)
+        #expect(abs(blocks[0].boundingBox.width - 0.2) < 0.000_1)
         #expect(blocks[0].translation == nil)
     }
 
@@ -124,6 +124,7 @@ struct mreaderTests {
         #expect(prompt.contains("从右到左"))
         #expect(prompt.contains("不要翻译"))
         #expect(prompt.contains("优先保留竖排文字方向"))
+        #expect(prompt.lowercased().contains("coordinatespace"))
     }
 
     @Test func iPhoneShelfUsesTwoFullWidthColumns() {
@@ -265,6 +266,59 @@ struct mreaderTests {
         #expect(passes.contains(["zh-Hans", "zh-Hant", "ko-KR", "en-US"]))
         #expect(passes.contains(["ja-JP", "en-US"]))
         #expect(!passes.contains(["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]))
+    }
+
+    @Test func ocrAdaptiveLanguagePlanPrioritizesDetectedScript() {
+        let japanese = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["こんにちは、先生"]
+        )
+        let chinese = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["今天一起看漫画"]
+        )
+        let korean = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["안녕하세요"]
+        )
+        let english = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["Hello world"]
+        )
+
+        #expect(japanese.first == ["ja-JP", "en-US"])
+        #expect(chinese.first == ["zh-Hans", "zh-Hant", "en-US"])
+        #expect(korean.first == ["ko-KR", "en-US"])
+        #expect(english.first == ["en-US"])
+    }
+
+    @Test func localOCRCacheKeyTracksRecognitionSettings() {
+        let pageURL = URL(fileURLWithPath: "/tmp/mreader-ocr-cache-test.jpg")
+        let image = UIImage()
+        let base = OCRRecognitionCacheRequest(
+            pageURL: pageURL,
+            fallbackImage: image,
+            options: OCRPreprocessor.Options(isRightToLeft: false, minimumTextHeight: 0.006)
+        )
+        let changedDirection = OCRRecognitionCacheRequest(
+            pageURL: pageURL,
+            fallbackImage: image,
+            options: OCRPreprocessor.Options(isRightToLeft: true, minimumTextHeight: 0.006)
+        )
+        let changedThreshold = OCRRecognitionCacheRequest(
+            pageURL: pageURL,
+            fallbackImage: image,
+            options: OCRPreprocessor.Options(isRightToLeft: false, minimumTextHeight: 0.01)
+        )
+        let changedMode = OCRRecognitionCacheRequest(
+            pageURL: pageURL,
+            fallbackImage: image,
+            options: OCRPreprocessor.Options(
+                isRightToLeft: false,
+                minimumTextHeight: 0.006,
+                recognitionMode: .maximumAccuracy
+            )
+        )
+
+        #expect(base.cacheKey != changedDirection.cacheKey)
+        #expect(base.cacheKey != changedThreshold.cacheKey)
+        #expect(base.cacheKey != changedMode.cacheKey)
     }
 
     @Test func mangaOCRPipelineKeepsEveryDiagnosticStage() {
@@ -570,8 +624,11 @@ struct mreaderTests {
             translationColorStyle: nil,
             isAITranslationBorderProgressEnabled: true,
             isOCRDebugBoxesEnabled: false,
+            isOCRVisualVerificationEnabled: true,
+            ocrLocalRecognitionMode: OCRRecognitionMode.maximumAccuracy.rawValue,
             readingDailyPageGoal: 100,
             isBurnInProtectionEnabled: true,
+            isICloudMetadataSyncEnabled: true,
             aiProviders: [AIProviderBackup(profile: profile, apiKey: "provider-key")],
             activeAIProviderID: profile.id
         )
@@ -582,7 +639,10 @@ struct mreaderTests {
         )
         let provider = try #require(decoded.aiProviders?.first)
 
-        #expect(decoded.version == 7)
+        #expect(decoded.version == 8)
+        #expect(decoded.isOCRVisualVerificationEnabled == true)
+        #expect(decoded.ocrLocalRecognitionMode == OCRRecognitionMode.maximumAccuracy.rawValue)
+        #expect(decoded.isICloudMetadataSyncEnabled == true)
         #expect(decoded.activeAIProviderID == profile.id)
         #expect(provider.profile.id == profile.id)
         #expect(provider.profile.models == ["ocr-model", "vision-model", "shared-model"])
@@ -784,18 +844,22 @@ struct mreaderTests {
         #expect(normalized == rect)
     }
 
-    @Test func visionPixelCoordinatesMapFromCompressedInputPixels() {
-        let rect = CGRect(x: 512, y: 128, width: 1_024, height: 256)
+    @Test func visionSmallPixelCoordinatesWithoutMarkerAreRejected() throws {
+        // 报告中的场景：2048×2048 输入上模型返回 x=20,y=25,width=40,height=30（全部小于 100 的像素）。
+        // 新协议不再猜测“是百分比/是像素”，缺少显式 normalized 标记即整条拒绝，避免被放大几十倍。
+        let response = """
+        {"items": [{"text": "原文", "translation": "译文", "bubbleBox": {"x": 20, "y": 25, "width": 40, "height": 30}}]}
+        """
 
-        let normalized = AITranslator.normalizedVisionRectForDiagnostics(
-            rect,
-            inputPixelSize: CGSize(width: 2_048, height: 512)
-        )
-
-        #expect(abs(normalized.minX - 0.25) < 0.000_1)
-        #expect(abs(normalized.minY - 0.25) < 0.000_1)
-        #expect(abs(normalized.width - 0.5) < 0.000_1)
-        #expect(abs(normalized.height - 0.5) < 0.000_1)
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: response,
+                inputPixelSize: CGSize(width: 2_048, height: 2_048)
+            )
+            Issue.record("缺少 normalized 标记的像素坐标应被拒绝")
+        } catch {
+            // 期望：抛出坐标协议错误
+        }
     }
 
     @Test func openAICompatibleContentArrayIsAccepted() throws {
@@ -861,11 +925,12 @@ struct mreaderTests {
         let response = """
         ```json
         {
+          "coordinateSpace": "normalized",
           "items": [{
             "text": "原文",
             "translation": "第一行
         第二行",
-            "bubbleBox": {"x": 512, "y": 128, "width": 1024, "height": 256}
+            "bubbleBox": {"x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5}
           }]
         }
         ```
@@ -884,30 +949,29 @@ struct mreaderTests {
         #expect(abs(blocks[0].boundingBox.height - 0.5) < 0.000_1)
     }
 
-    @Test func visionThousandScaleCoordinatesAreRecognized() throws {
-        // Qwen-VL 等模型常用 0~1000 归一化坐标；坐标超过输入像素时按 1000 基准解析
+    @Test func visionThousandScaleCoordinatesWithoutMarkerAreRejected() throws {
+        // 0~1000 归一化不再被自动猜测；没有显式 normalized 标记的 100/700 等坐标（值 > 1）应被拒绝
         let response = """
         {"items": [{"text": "原文", "translation": "译文", "bubbleBox": {"x": 100, "y": 700, "width": 800, "height": 250}}]}
         """
 
-        let blocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
-            from: response,
-            inputPixelSize: CGSize(width: 900, height: 600)
-        )
-
-        #expect(blocks.count == 1)
-        #expect(abs(blocks[0].boundingBox.minX - 0.1) < 0.000_1)
-        #expect(abs(blocks[0].boundingBox.minY - 0.7) < 0.000_1)
-        #expect(abs(blocks[0].boundingBox.width - 0.8) < 0.000_1)
-        #expect(abs(blocks[0].boundingBox.height - 0.25) < 0.000_1)
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: response,
+                inputPixelSize: CGSize(width: 900, height: 600)
+            )
+            Issue.record("0~1000 坐标缺少 normalized 标记应被拒绝")
+        } catch {
+            // 期望：抛出坐标协议错误
+        }
     }
 
-    @Test func visionMixedCoordinateItemsShareOneDivisor() throws {
-        // 同一响应内的坐标基准必须统一：不能一部分按归一化、一部分按像素解析
+    @Test func visionAllItemsShareExplicitNormalizedSpace() throws {
+        // 同一响应内所有坐标都在显式 normalized 空间内，统一按 0...1 解析
         let response = """
-        {"items": [
-          {"text": "杂点", "translation": "杂点译文", "bubbleBox": {"x": 1, "y": 1, "width": 1, "height": 1}},
-          {"text": "对白", "translation": "对白译文", "bubbleBox": {"x": 512, "y": 128, "width": 1024, "height": 256}}
+        {"coordinateSpace": "normalized", "items": [
+          {"text": "杂点", "translation": "杂点译文", "bubbleBox": {"x": 0.01, "y": 0.01, "width": 0.05, "height": 0.05}},
+          {"text": "对白", "translation": "对白译文", "bubbleBox": {"x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5}}
         ]}
         """
 
@@ -916,9 +980,9 @@ struct mreaderTests {
             inputPixelSize: CGSize(width: 2_048, height: 512)
         )
 
-        #expect(blocks.count == 1)
-        #expect(blocks[0].translation == "对白译文")
-        #expect(abs(blocks[0].boundingBox.minX - 0.25) < 0.000_1)
+        #expect(blocks.count == 2)
+        #expect(blocks[1].translation == "对白译文")
+        #expect(abs(blocks[1].boundingBox.minX - 0.25) < 0.000_1)
     }
 
     @Test func translationSanitizerStripsAnnouncementPrefixInsteadOfRejecting() {
@@ -1249,6 +1313,71 @@ struct mreaderTests {
         ).isEmpty)
     }
 
+    @Test func guidedPanelOrderingFollowsReadingDirection() {
+        let left = CGRect(x: 0.05, y: 0.05, width: 0.4, height: 0.35)
+        let right = CGRect(x: 0.55, y: 0.05, width: 0.4, height: 0.35)
+        let bottom = CGRect(x: 0.1, y: 0.55, width: 0.8, height: 0.35)
+
+        #expect(PanelDetectionService.sortedPanelsForDiagnostics([bottom, right, left], isRightToLeft: false) == [left, right, bottom])
+        #expect(PanelDetectionService.sortedPanelsForDiagnostics([bottom, left, right], isRightToLeft: true) == [right, left, bottom])
+    }
+
+    @Test @MainActor func comicSyncIdentityIsStableAcrossComicIDs() {
+        let first = ComicBook(
+            title: "Chapter 1",
+            bookmarkData: Data(),
+            totalPages: 20,
+            libraryPath: "/private/device-a/MReader/Series/Chapter 1.cbz"
+        )
+        var second = first
+        second.id = UUID()
+        second.libraryPath = "/private/device-b/MReader/Series/Chapter 1.cbz"
+
+        #expect(ComicSyncIdentity.value(for: first) == ComicSyncIdentity.value(for: second))
+    }
+
+    @Test func offlineComicRecordRoundTrips() throws {
+        let record = OfflineComicRecord(
+            comicID: UUID(),
+            sourceID: UUID(),
+            sourceTypeRaw: ComicSourceType.komga.rawValue,
+            remoteID: "book-42",
+            pageCount: 128,
+            fileName: nil,
+            completedAt: Date(timeIntervalSince1970: 1234)
+        )
+        let decoded = try JSONDecoder().decode(OfflineComicRecord.self, from: JSONEncoder().encode(record))
+        #expect(decoded.comicID == record.comicID)
+        #expect(decoded.remoteID == "book-42")
+        #expect(decoded.pageCount == 128)
+    }
+
+    @Test func continuousPrefetchFollowsScrollDirectionWithinBounds() {
+        let down = ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: 5,
+            pageCount: 20,
+            readingDirection: .rightToLeft,
+            readingMode: .continuousScroll,
+            scrollDirection: 1,
+            forwardCount: 3,
+            backwardCount: 1,
+            includesCurrentPage: true
+        )
+        let up = ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: 1,
+            pageCount: 4,
+            readingDirection: .leftToRight,
+            readingMode: .continuousScroll,
+            scrollDirection: -1,
+            forwardCount: 3,
+            backwardCount: 1,
+            includesCurrentPage: false
+        )
+
+        #expect(down == [5, 6, 7, 8, 4])
+        #expect(up == [0, 2])
+    }
+
 }
 
 private actor LibrarySyncProbe {
@@ -1260,6 +1389,144 @@ private actor LibrarySyncProbe {
 
     func record(_ scope: LibrarySyncScope) {
         invocationScopes.append(scope)
+    }
+
+    // MARK: - 代码审查回归测试
+
+    @Test func opdsAuthorizationNotForwardedToCrossOriginHost() {
+        // OPDS feed 可能给出指向第三方域名的 cover/acquisition URL：
+        // 同源（scheme+host+port 一致）才转发凭据，跨域绝不携带 Authorization。
+        #expect(
+            OPDSAuthorizationPolicy.shouldForward(
+                sourceBaseURL: "https://my-komga.example.com",
+                to: URL(string: "https://my-komga.example.com/book.cbz")!
+            )
+        )
+        #expect(
+            OPDSAuthorizationPolicy.shouldForward(
+                sourceBaseURL: "https://my-komga.example.com",
+                to: URL(string: "https://evil.example.com/book.cbz")!
+            ) == false
+        )
+        #expect(
+            OPDSAuthorizationPolicy.shouldForward(
+                sourceBaseURL: "http://my-komga.example.com:8080",
+                to: URL(string: "http://my-komga.example.com/book.cbz")!
+            ) == false
+        )
+        #expect(
+            OPDSAuthorizationPolicy.shouldForward(
+                sourceBaseURL: "http://my-komga.example.com:8080",
+                to: URL(string: "http://my-komga.example.com:8080/book.cbz")!
+            )
+        )
+        #expect(
+            OPDSAuthorizationPolicy.shouldForward(
+                sourceBaseURL: "https://my-komga.example.com",
+                to: URL(string: "http://my-komga.example.com/book.cbz")!
+            ) == false
+        )
+    }
+
+    @Test func readingProgressMergePreservesBackwardReRead() {
+        // Komga 之前记录到 300 页，用户在本地重读到 50 页（updatedAt 更新）。
+        // 合并必须保留 50 作为当前阅读位置，而不是 max(300, 50) = 300。
+        let existing = ComicBook(
+            title: "test",
+            bookmarkData: Data(),
+            totalPages: 400,
+            currentPageIndex: 50,
+            furthestPageIndex: 300,
+            progressUpdatedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let incoming = ComicBook(
+            title: "test",
+            bookmarkData: Data(),
+            totalPages: 400,
+            currentPageIndex: 300,
+            furthestPageIndex: 300,
+            progressUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let resolution = ReadingProgressMergePolicy.resolve(
+            existing: existing,
+            incoming: incoming,
+            totalPages: 400
+        )
+        #expect(resolution.currentPageIndex == 50)
+        #expect(resolution.furthestPageIndex == 300)
+    }
+
+    @Test func readingProgressMergeTakesNewerRemoteWhenAhead() {
+        // 反向场景：远端更新晚于本地且更靠后时，当前页取远端位置。
+        let existing = ComicBook(
+            title: "test",
+            bookmarkData: Data(),
+            totalPages: 400,
+            currentPageIndex: 50,
+            furthestPageIndex: 300,
+            progressUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let incoming = ComicBook(
+            title: "test",
+            bookmarkData: Data(),
+            totalPages: 400,
+            currentPageIndex: 320,
+            furthestPageIndex: 320,
+            progressUpdatedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let resolution = ReadingProgressMergePolicy.resolve(
+            existing: existing,
+            incoming: incoming,
+            totalPages: 400
+        )
+        #expect(resolution.currentPageIndex == 320)
+        #expect(resolution.furthestPageIndex == 320)
+    }
+
+    @Test func ocrCoordinateMapperOriginalDoesNotUpscale() {
+        // “原始尺寸”语义：小图 1:1（1 image pixel = 1 point），不再等同 fitScreen。
+        let transform = OCRCoordinateMapper.displayTransform(
+            sourcePixelSize: CGSize(width: 400, height: 300),
+            containerSize: CGSize(width: 1_000, height: 1_000),
+            fitMode: .original
+        )
+        #expect(transform.imageRect.width == 400)
+        #expect(transform.imageRect.height == 300)
+
+        // 大图则等比缩小到容器内，而不是溢出
+        let large = OCRCoordinateMapper.displayTransform(
+            sourcePixelSize: CGSize(width: 2_000, height: 4_000),
+            containerSize: CGSize(width: 1_000, height: 1_000),
+            fitMode: .original
+        )
+        #expect(large.imageRect.width == 500)
+        #expect(large.imageRect.height == 1_000)
+    }
+
+    @Test func settingsBackupPlainEncodeRefusesCredentials() {
+        // 明文设置备份不允许携带任何 API Key / 凭据；带凭据必须走加密。
+        let backup = MReaderSettingsBackup(
+            openAIAPIKey: "sk-test",
+            openAIBaseURL: "https://api.openai.com/v1",
+            openAIModel: "gpt-4o-mini",
+            translationTargetLanguage: "中文",
+            isHapticFeedbackEnabled: true,
+            containsCredentials: true
+        )
+        #expect(throws: (any Error).self) {
+            _ = try SettingsBackupCodec.encodePlain(backup)
+        }
+
+        // 不带凭据的备份可以明文编码
+        let plain = MReaderSettingsBackup(
+            openAIAPIKey: nil,
+            openAIBaseURL: "https://api.openai.com/v1",
+            openAIModel: "gpt-4o-mini",
+            translationTargetLanguage: "中文",
+            isHapticFeedbackEnabled: true,
+            containsCredentials: false
+        )
+        #expect((try? SettingsBackupCodec.encodePlain(plain)) != nil)
     }
 }
 

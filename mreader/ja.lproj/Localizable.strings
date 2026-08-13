@@ -62,7 +62,6 @@
 "reader.addBookmark" = "ページ %d にブックマーク追加";
 "reader.noBookmarks" = "ブックマークなし";
 "reader.editBookmarkNote" = "ブックマークメモを編集";
-"reader.bookmarkNotePlaceholder" = "メモ（任意）";
 "reader.deleteBookmark" = "ブックマーク削除";
 
 /* Reading Settings */
@@ -91,6 +90,11 @@
 "reader.scrollSpeed.fast" = "速い";
 
 /* OCR Settings */
+"ocr.localMode" = "オンデバイス OCR";
+"ocr.localMode.adaptive" = "適応高速化";
+"ocr.localMode.accurate" = "最高精度";
+"ocr.localMode.onDevice" = "Apple Vision · このデバイス上で処理";
+"ocr.localMode.description" = "適応モードは言語を端末内で判定して重複認識を減らします。最高精度は対応する全言語パスを使用します。";
 "ocr.enable" = "OCR テキスト認識";
 "ocr.autoMagnify" = "自動テキスト拡大";
 "ocr.magnifySize" = "テキスト拡大サイズ";
@@ -100,6 +104,9 @@
 "ocr.translationMode.ocr" = "OCR テキスト";
 "ocr.translationMode.vision" = "画像認識";
 "ocr.autoTranslate" = "現在のページを自動翻訳";
+"ocr.appleTranslation" = "Apple 原生翻译";
+"error.libraryLoad" = "ライブラリデータの不具合";
+"ocr.appleTranslationFooter" = "普通の会話は Apple の端末内・低遅延翻訳を使います。利用できない場合や未翻訳のまま残る場合はクラウド AI に自動フォールバックします。";
 "ocr.borderProgress" = "AI 翻訳ボーダー進捗";
 "ocr.colorStyle" = "翻訳テキスト配色";
 "ocr.colorStyle.contrast" = "ハイコントラスト";
@@ -216,7 +223,6 @@
 "storage.coverCache" = "カバーキャッシュ";
 "storage.pageCache" = "ページキャッシュ";
 "storage.tempCache" = "一時解凍キャッシュ";
-"storage.clearTempCache" = "一時解凍キャッシュをクリア";
 "storage.rebuildCovers" = "カバーインデックスを確認・再構築";
 "storage.refreshIndex" = "ライブラリインデックスを更新";
 "storage.resetDetection" = "漫画タイプ検出をリセット";
@@ -235,7 +241,6 @@
 
 /* Statistics */
 "stats.title" = "読書統計";
-"stats.todaySummary" = "今日の概要";
 "stats.readingGoal" = "読書目標";
 "stats.readingRings" = "読書リング";
 "stats.sevenDayActivity" = "7日間の活動";
@@ -439,3 +444,31 @@
 "time.daysAgo" = "%d日前";
 "ocr.visualVerification" = "低信頼テキストを視覚モデルで確認";
 "ocr.visualVerificationDescription" = "ローカル OCR の信頼度が低い場合のみ、最大3件の文字切り抜きを設定済みの外部視覚モデルへ送信します。";
+"reader.mode.guidedPanel" = "コマ読み・自動トリミング";
+"offline.download" = "オフライン用にダウンロード";
+"offline.cancel" = "ダウンロードをキャンセル";
+"offline.remove" = "オフラインキャッシュを削除";
+"offline.available" = "オフラインで利用可能";
+"offline.queued" = "ダウンロード待ち";
+"offline.empty" = "オフライン漫画はありません";
+"ocr.index.build" = "OCR 全文索引を作成";
+"ocr.index.cancel" = "OCR 索引を再作成";
+"ocr.search.title" = "OCR 全文検索";
+"ocr.search.prompt" = "漫画のセリフを検索";
+"ocr.search.placeholder" = "セリフ、ナレーション、効果音";
+"ocr.search.page" = "%d ページ";
+"sync.metadata.title" = "データと同期";
+"sync.metadata.icloud" = "読書進捗を iCloud で同期";
+"sync.metadata.lastSync" = "最終同期";
+"sync.metadata.description" = "iCloud のメタデータ同期と設定バックアップを管理します。漫画ファイルはアップロードしません。";
+"sync.metadata.localOnly" = "選択中のライブラリは iCloud Drive 内にないため、メタデータはこの端末だけに保存されます。";
+"storage.generatedCache" = "表紙・OCR・AI キャッシュ";
+"storage.totalCache" = "消去可能なキャッシュ合計";
+"storage.clearReaderCaches" = "閲覧キャッシュを消去";
+"storage.offlineCache" = "オフライン漫画の使用量";
+"storage.maintenance" = "ライブラリのメンテナンス";
+"offline.title" = "オフライン漫画";
+"comic.unlockReason" = "「%@」を開く、またはロックを解除するには認証してください。";
+"comic.lockUnavailable" = "このデバイスでは認証を利用できません。";
+"mediaSources.removeConfirmTitle" = "メディアソースを削除しますか？";
+"mediaSources.removeConfirmMessage" = "「%@」とローカル本棚の記録を削除します。サーバー上のファイルは削除されません。";

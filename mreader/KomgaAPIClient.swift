@@ -104,6 +104,8 @@ nonisolated struct KomgaAPIClient: Sendable {
 
         var pagedItems: [T] = []
         var page = 0
+        // 安全上限：500 × 200 = 100,000 项，远超正常书库；到顶时显式记录而不是静默截断
+        let maximumPages = 200
         repeat {
             var items = queryItems
             if !items.contains(where: { $0.name == "page" }) {
@@ -116,7 +118,12 @@ nonisolated struct KomgaAPIClient: Sendable {
                 break
             }
             page += 1
-        } while page < 20
+        } while page < maximumPages
+        if page >= maximumPages {
+            #if DEBUG
+            print("Komga 分页达到安全上限 maximumPages=\(maximumPages)，结果可能被截断 path=\(path)")
+            #endif
+        }
         return pagedItems
     }
 
@@ -152,8 +159,10 @@ nonisolated struct KomgaAPIClient: Sendable {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MediaSourceError.invalidResponse
             }
+            #if DEBUG
             let preview = String(data: data.prefix(500), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
             print("Komga HTTP \(httpResponse.statusCode) \(request.url?.absoluteString ?? "<unknown>") response=\(preview)")
+            #endif
             switch httpResponse.statusCode {
             case 200..<300:
                 return data

@@ -2,6 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 import ImageIO
+import Combine
+import LocalAuthentication
 
 fileprivate final class SecurityScopeBox: @unchecked Sendable {
     private var url: URL?
@@ -101,7 +103,7 @@ private enum DeleteRequest: Identifiable {
 }
 
 nonisolated struct MReaderSettingsBackup: Codable {
-    var version = 7
+    var version = 8
     var openAIAPIKey: String?
     var openAIBaseURL: String
     var openAIModel: String
@@ -115,8 +117,11 @@ nonisolated struct MReaderSettingsBackup: Codable {
     var translationColorStyle: String?
     var isAITranslationBorderProgressEnabled: Bool?
     var isOCRDebugBoxesEnabled: Bool?
+    var isOCRVisualVerificationEnabled: Bool? = nil
+    var ocrLocalRecognitionMode: String? = nil
     var readingDailyPageGoal: Double?
     var isBurnInProtectionEnabled: Bool?
+    var isICloudMetadataSyncEnabled: Bool? = nil
     var aiProviders: [AIProviderBackup]?
     var activeAIProviderID: UUID?
     var containsCredentials: Bool? = nil
@@ -210,6 +215,9 @@ struct ContentView: View {
     @StateObject private var webServer = LocalWebServer()
     @ObservedObject private var readingActivity = ReadingActivityStore.shared
     @ObservedObject private var backgroundTasks = BackgroundTaskCenter.shared
+    @ObservedObject private var offlineDownloads = OfflineDownloadManager.shared
+    @ObservedObject private var ocrIndexer = OCRLibraryIndexer.shared
+    @ObservedObject private var iCloudSync = ICloudMetadataSyncService.shared
 
     @State private var isImporting = false
     @State private var isFolderImporting = false
@@ -241,9 +249,11 @@ struct ContentView: View {
     @State private var hiddenKomgaVersion = 0
     @State private var isRefreshingLibraries = false
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
+    @State private var libraryLoadNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
     @State private var showTranslationPrompt = false
     @State private var showVisionPrompt = false
+    @State private var showOCRSearch = false
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
     @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
@@ -251,8 +261,11 @@ struct ContentView: View {
     @AppStorage("translation_color_style") private var translationColorStyleRaw = "contrast"
     @AppStorage("ai_translation_border_progress_enabled") private var isAITranslationBorderProgressEnabled = true
     @AppStorage("ocr_show_debug_boxes") private var isOCRDebugBoxesEnabled = false
+    @AppStorage("ocr_visual_verification_enabled") private var isOCRVisualVerificationEnabled = false
+    @AppStorage("ocr_local_recognition_mode") private var ocrLocalRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("reading_daily_page_goal") private var readingDailyPageGoal = 40.0
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
+    @AppStorage(ICloudMetadataSyncService.enabledKey) private var isICloudMetadataSyncEnabled = false
     @Namespace private var seriesAnimationNamespace
 
     @State private var renamingSeries: ComicSeries?
@@ -323,6 +336,20 @@ struct ContentView: View {
             }
             .eraseToAnyView()
             .modifier(alertModifiers)
+            .task(id: library.libraryLoadIssues) {
+                guard !library.libraryLoadIssues.isEmpty else { return }
+                libraryLoadNotice = SettingsRestoreNotice(
+                    title: "error.libraryLoad".localized,
+                    message: library.libraryLoadIssues.joined(separator: "\n")
+                )
+            }
+            .alert(item: $libraryLoadNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("common.confirm".localized))
+                )
+            }
             .sheet(isPresented: $showStorageManager) {
                 StorageManagerView(library: library)
             }
@@ -342,6 +369,31 @@ struct ContentView: View {
                         handleBackupPassword(password, request: request)
                     }
                 )
+            }
+            .sheet(isPresented: $showOCRSearch) {
+                OCRSearchView(comics: visibleComics) { result in
+                    guard var comic = library.comics.first(where: { $0.id == result.comicID }) else { return }
+                    comic.currentPageIndex = min(max(result.pageIndex, 0), max(comic.totalPages - 1, 0))
+                    comic.progressUpdatedAt = Date()
+                    library.update(comic)
+                    openReader(comic)
+                }
+            }
+            .task {
+                iCloudSync.start { payload in
+                    library.applySyncedMetadata(payload)
+                    readingActivity.mergeSyncedDays(payload.activityDays)
+                }
+                if let payload = await iCloudSync.pull() {
+                    library.applySyncedMetadata(payload)
+                    readingActivity.mergeSyncedDays(payload.activityDays)
+                }
+            }
+            .onReceive(library.$comics.debounce(for: .seconds(2), scheduler: RunLoop.main)) { comics in
+                iCloudSync.push(comics: comics, activityDays: readingActivity.days)
+            }
+            .onReceive(readingActivity.$days.debounce(for: .seconds(2), scheduler: RunLoop.main)) { days in
+                iCloudSync.push(comics: library.comics, activityDays: days)
             }
         }
     }
@@ -522,6 +574,7 @@ struct ContentView: View {
         @Binding var showActivity: Bool
         @Binding var showNewSeriesAlert: Bool
         @Binding var selectedPage: MainShelfPage
+        @Binding var showOCRSearch: Bool
         var beginImport: (ImportPickerMode) -> Void
         var refreshShelfLibraries: () async -> Void
 
@@ -545,6 +598,12 @@ struct ContentView: View {
                     Task { await refreshShelfLibraries() }
                 } label: {
                     Label("storage.refreshIndex".localized, systemImage: "arrow.clockwise")
+                }
+                Button {
+                    HapticManager.shared.play(.light)
+                    showOCRSearch = true
+                } label: {
+                    Label("ocr.search.title".localized, systemImage: "text.magnifyingglass")
                 }
                 Button {
                     HapticManager.shared.play(.light)
@@ -638,6 +697,7 @@ struct ContentView: View {
                 showActivity: $showActivity,
                 showNewSeriesAlert: $showNewSeriesAlert,
                 selectedPage: $selectedPage,
+                showOCRSearch: $showOCRSearch,
                 beginImport: beginImport,
                 refreshShelfLibraries: refreshShelfLibraries
             )
@@ -651,10 +711,9 @@ struct ContentView: View {
         @Binding var isSelectionMode: Bool
         @Binding var selectedComicIDs: Set<UUID>
         @Binding var selectedSeriesIDs: Set<UUID>
-        @Binding var showStorageManager: Bool
-        @Binding var showActivity: Bool
         var settingsContent: AnyView
         var library: ComicLibraryStore
+        var requestDeleteSelectedItems: () -> Void
 
         func body(content: Content) -> some View {
             content
@@ -668,15 +727,10 @@ struct ContentView: View {
                             selectedComicIDs: $selectedComicIDs,
                             selectedSeriesIDs: $selectedSeriesIDs,
                             isSelectionMode: $isSelectionMode,
-                            library: library
+                            library: library,
+                            requestDeleteSelectedItems: requestDeleteSelectedItems
                         )
                     }
-                }
-                .sheet(isPresented: $showStorageManager) {
-                    StorageManagerView(library: library)
-                }
-                .sheet(isPresented: $showActivity) {
-                    ShelfActivityView(comics: library.comics)
                 }
         }
     }
@@ -687,10 +741,9 @@ struct ContentView: View {
             isSelectionMode: $isSelectionMode,
             selectedComicIDs: $selectedComicIDs,
             selectedSeriesIDs: $selectedSeriesIDs,
-            showStorageManager: $showStorageManager,
-            showActivity: $showActivity,
             settingsContent: AnyView(settingsView),
-            library: library
+            library: library,
+            requestDeleteSelectedItems: requestDeleteSelectedItems
         )
     }
 
@@ -699,6 +752,7 @@ struct ContentView: View {
         @Binding var selectedSeriesIDs: Set<UUID>
         @Binding var isSelectionMode: Bool
         var library: ComicLibraryStore
+        var requestDeleteSelectedItems: () -> Void
 
         var body: some View {
             HStack(spacing: 14) {
@@ -716,10 +770,7 @@ struct ContentView: View {
                 }
                 .disabled(selectedComicIDs.isEmpty && selectedSeriesIDs.isEmpty)
                 Button(role: .destructive) {
-                    HapticManager.shared.play(.heavy)
-                    selectedComicIDs.removeAll()
-                    selectedSeriesIDs.removeAll()
-                    isSelectionMode = false
+                    requestDeleteSelectedItems()
                 } label: {
                     Label("comic.delete".localized, systemImage: "trash")
                 }
@@ -840,7 +891,7 @@ struct ContentView: View {
                 mediaSourceSettingsSection
                 importServiceSection
                 interactionSettingsSection
-                backupSettingsSection
+                dataAndSyncSettingsSection
                 localLibrarySettingsSection
             }
             .navigationTitle("settings.title".localized)
@@ -1015,9 +1066,6 @@ struct ContentView: View {
 
     private func sortedComicsByTitle(_ comics: [ComicBook]) -> [ComicBook] {
         comics.sorted { lhs, rhs in
-            let lhsFinished = ComicReadingProgress.isFinished(lhs)
-            let rhsFinished = ComicReadingProgress.isFinished(rhs)
-            if lhsFinished != rhsFinished { return !lhsFinished }
             return naturalTitleCompare(lhs.title, comicSortTieBreaker(lhs), rhs.title, comicSortTieBreaker(rhs))
         }
     }
@@ -1330,6 +1378,13 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Picker("ocr.localMode".localized, selection: $ocrLocalRecognitionModeRaw) {
+                ForEach(OCRRecognitionMode.allCases, id: \.rawValue) { mode in
+                    Text(mode.localizationKey.localized).tag(mode.rawValue)
+                }
+            }
+            Toggle("ocr.visualVerification".localized, isOn: $isOCRVisualVerificationEnabled)
+            Toggle("ocr.showDebugBoxes".localized, isOn: $isOCRDebugBoxesEnabled)
         }
     }
 
@@ -1407,8 +1462,32 @@ struct ContentView: View {
         }
     }
 
-    private var backupSettingsSection: some View {
-        Section(header: Text("backup.title".localized), footer: Text("backup.description".localized)) {
+    private var dataAndSyncSettingsSection: some View {
+        Section(header: Text("sync.metadata.title".localized), footer: Text("sync.metadata.description".localized)) {
+            Toggle("sync.metadata.icloud".localized, isOn: $isICloudMetadataSyncEnabled)
+                .onChange(of: isICloudMetadataSyncEnabled) { _, enabled in
+                    if enabled {
+                        Task {
+                            if let payload = await iCloudSync.pull() {
+                                library.applySyncedMetadata(payload)
+                                readingActivity.mergeSyncedDays(payload.activityDays)
+                            }
+                            iCloudSync.push(comics: library.comics, activityDays: readingActivity.days)
+                        }
+                    }
+                }
+            if isICloudMetadataSyncEnabled && !iCloudSync.usesICloudDrive {
+                Text("sync.metadata.localOnly".localized)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let date = iCloudSync.lastSyncAt {
+                LabeledContent("sync.metadata.lastSync".localized, value: date.formatted(date: .abbreviated, time: .shortened))
+            }
+            if let error = iCloudSync.lastError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+            Divider()
             Button {
                 HapticManager.shared.play(.light)
                 exportSettingsBackup(includeCredentials: false)
@@ -1463,6 +1542,15 @@ struct ContentView: View {
             } label: {
                 Label("storage.resetDetection".localized, systemImage: "arrow.counterclockwise")
             }
+            Button {
+                HapticManager.shared.play(.light)
+                showSettings = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    showStorageManager = true
+                }
+            } label: {
+                Label("storage.title".localized, systemImage: "externaldrive")
+            }
         }
     }
 
@@ -1507,21 +1595,6 @@ struct ContentView: View {
         hideKomgaRequest = nil
     }
 
-    private func deleteSelectedItems() {
-        HapticManager.shared.play(.heavy)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            for seriesID in selectedSeriesIDs {
-                library.deleteSeries(id: seriesID)
-            }
-            for comicID in selectedComicIDs {
-                library.delete(id: comicID)
-            }
-            selectedComicIDs.removeAll()
-            selectedSeriesIDs.removeAll()
-            isSelectionMode = false
-        }
-    }
-
     private func readerDestination(for comic: ComicBook) -> some View {
         ReaderContainerView(comic: comic) { updatedComic in
             library.update(updatedComic)
@@ -1529,11 +1602,46 @@ struct ContentView: View {
     }
 
     private func openReader(_ comic: ComicBook) {
+        if comic.isLocked {
+            authenticateLockedComic(comic) {
+                openAuthorizedReader(comic)
+            }
+            return
+        }
+        openAuthorizedReader(comic)
+    }
+
+    private func openAuthorizedReader(_ comic: ComicBook) {
         RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             selectedReaderComic = comic
+        }
+    }
+
+    private func authenticateLockedComic(_ comic: ComicBook, onSuccess: @escaping () -> Void) {
+        let context = LAContext()
+        var authorizationError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authorizationError) else {
+            importError = authorizationError?.localizedDescription ?? "comic.lockUnavailable".localized
+            HapticManager.shared.play(.error)
+            return
+        }
+        Task {
+            do {
+                guard try await context.evaluatePolicy(
+                    .deviceOwnerAuthentication,
+                    localizedReason: "comic.unlockReason".localizedFormat(comic.title)
+                ) else { return }
+                HapticManager.shared.play(.success)
+                onSuccess()
+            } catch let error as LAError where error.code == .userCancel || error.code == .appCancel || error.code == .systemCancel {
+                return
+            } catch {
+                importError = error.localizedDescription
+                HapticManager.shared.play(.error)
+            }
         }
     }
 
@@ -1562,7 +1670,13 @@ struct ContentView: View {
 
         Button {
             HapticManager.shared.play(.medium)
-            library.setLocked(id: comic.id, isLocked: !comic.isLocked)
+            if comic.isLocked {
+                authenticateLockedComic(comic) {
+                    library.setLocked(id: comic.id, isLocked: false)
+                }
+            } else {
+                library.setLocked(id: comic.id, isLocked: true)
+            }
         } label: {
             Label(comic.isLocked ? "comic.unlock".localized : "comic.lock".localized, systemImage: comic.isLocked ? "lock.open" : "lock")
         }
@@ -1581,6 +1695,37 @@ struct ContentView: View {
             library.rebuildThumbnail(for: comic.id)
         } label: {
             Label("comic.rebuildThumbnail".localized, systemImage: "photo.on.rectangle.angled")
+        }
+
+        Button {
+            HapticManager.shared.play(.medium)
+            if ocrIndexer.activeComicID == comic.id {
+                ocrIndexer.cancel()
+            } else {
+                ocrIndexer.start(comic)
+            }
+        } label: {
+            if ocrIndexer.activeComicID == comic.id {
+                Label("ocr.index.cancel".localized, systemImage: "xmark.circle")
+            } else {
+                Label("ocr.index.build".localized, systemImage: "text.magnifyingglass")
+            }
+        }
+
+        if comic.sourceType == .komga || comic.sourceType == .opds {
+            if offlineDownloads.activeComicIDs.contains(comic.id) || offlineDownloads.queuedComicIDs.contains(comic.id) {
+                Button { offlineDownloads.cancel(comic) } label: {
+                    Label("offline.cancel".localized, systemImage: "xmark.circle")
+                }
+            } else if offlineDownloads.isAvailableOffline(comic) {
+                Button(role: .destructive) { offlineDownloads.remove(comic) } label: {
+                    Label("offline.remove".localized, systemImage: "externaldrive.badge.xmark")
+                }
+            } else {
+                Button { offlineDownloads.download(comic) } label: {
+                    Label("offline.download".localized, systemImage: "arrow.down.circle")
+                }
+            }
         }
 
         if comic.sourceType == .komga {
@@ -1790,8 +1935,11 @@ struct ContentView: View {
             translationColorStyle: translationColorStyleRaw,
             isAITranslationBorderProgressEnabled: isAITranslationBorderProgressEnabled,
             isOCRDebugBoxesEnabled: isOCRDebugBoxesEnabled,
+            isOCRVisualVerificationEnabled: isOCRVisualVerificationEnabled,
+            ocrLocalRecognitionMode: ocrLocalRecognitionModeRaw,
             readingDailyPageGoal: readingDailyPageGoal,
             isBurnInProtectionEnabled: isBurnInProtectionEnabled,
+            isICloudMetadataSyncEnabled: isICloudMetadataSyncEnabled,
             aiProviders: providerBackups,
             activeAIProviderID: providerStore.activeProfileID(),
             containsCredentials: includeCredentials
@@ -1874,8 +2022,11 @@ struct ContentView: View {
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw
             isAITranslationBorderProgressEnabled = backup.isAITranslationBorderProgressEnabled ?? isAITranslationBorderProgressEnabled
             isOCRDebugBoxesEnabled = backup.isOCRDebugBoxesEnabled ?? isOCRDebugBoxesEnabled
+            isOCRVisualVerificationEnabled = backup.isOCRVisualVerificationEnabled ?? isOCRVisualVerificationEnabled
+            ocrLocalRecognitionModeRaw = backup.ocrLocalRecognitionMode ?? ocrLocalRecognitionModeRaw
             readingDailyPageGoal = min(max(backup.readingDailyPageGoal ?? readingDailyPageGoal, 0), 5_000)
             isBurnInProtectionEnabled = backup.isBurnInProtectionEnabled ?? isBurnInProtectionEnabled
+            isICloudMetadataSyncEnabled = backup.isICloudMetadataSyncEnabled ?? isICloudMetadataSyncEnabled
             try restoreMediaSources(from: backup.mediaSources ?? [])
             Task {
                 await library.syncAllLibrariesAsync()
@@ -3299,8 +3450,10 @@ struct CoverImageView: View {
 
 struct StorageManagerView: View {
     @ObservedObject var library: ComicLibraryStore
+    @ObservedObject private var offlineDownloads = OfflineDownloadManager.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var temporaryCacheSize = ComicManager.temporaryImportCacheSize()
+    @State private var cacheSnapshot = CacheStorageSnapshot.zero
+    @State private var isClearingCaches = false
 
     private var estimatedPages: Int {
         library.comics.reduce(0) { $0 + $1.totalPages }
@@ -3325,14 +3478,50 @@ struct StorageManagerView: View {
                 }
 
                 Section(header: Text("storage.cacheAndTemp".localized), footer: Text("storage.cacheDescription".localized)) {
-                    LabeledContent("storage.tempExtractCache".localized, value: formattedFileSize(temporaryCacheSize))
+                    LabeledContent("storage.pageCache".localized, value: formattedFileSize(cacheSnapshot.remotePages))
+                    LabeledContent("storage.generatedCache".localized, value: formattedFileSize(cacheSnapshot.generatedAssets))
+                    LabeledContent("storage.tempExtractCache".localized, value: formattedFileSize(cacheSnapshot.temporaryFiles))
+                    LabeledContent("storage.totalCache".localized, value: formattedFileSize(cacheSnapshot.readerCacheTotal))
                     Button(role: .destructive) {
-                        ComicManager.clearTemporaryImportCache()
-                        temporaryCacheSize = ComicManager.temporaryImportCacheSize()
+                        clearReaderCaches()
                     } label: {
-                        Label("storage.clearTempCache".localized, systemImage: "trash")
+                        Label("storage.clearReaderCaches".localized, systemImage: "trash")
                     }
+                    .disabled(isClearingCaches || cacheSnapshot.readerCacheTotal == 0)
+                }
 
+                Section(header: Text("offline.title".localized)) {
+                    LabeledContent("storage.offlineCache".localized, value: formattedFileSize(cacheSnapshot.offlineComics))
+                    if offlineComics.isEmpty {
+                        Text("offline.empty".localized)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(offlineComics) { comic in
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(comic.title).lineLimit(1)
+                                    if offlineDownloads.activeComicIDs.contains(comic.id) {
+                                        ProgressView(value: offlineDownloads.progress[comic.id] ?? 0)
+                                    } else if offlineDownloads.queuedComicIDs.contains(comic.id) {
+                                        Text("offline.queued".localized).font(.caption).foregroundStyle(.secondary)
+                                    } else {
+                                        Text("offline.available".localized).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Button(role: .destructive) {
+                                    offlineDownloads.remove(comic)
+                                    refreshCacheSnapshot()
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .accessibilityLabel("offline.remove".localized)
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("storage.maintenance".localized)) {
                     Button {
                         library.rebuildAllThumbnails()
                     } label: {
@@ -3340,7 +3529,7 @@ struct StorageManagerView: View {
                     }
 
                     Button {
-                        library.syncLocalLibrary()
+                        Task { await library.syncAllLibrariesAsync() }
                     } label: {
                         Label("storage.refreshLibraryIndex".localized, systemImage: "arrow.clockwise")
                     }
@@ -3351,6 +3540,50 @@ struct StorageManagerView: View {
             .toolbar {
                 Button("nav.done".localized) { dismiss() }
             }
+            .task {
+                offlineDownloads.removeOrphanedRecords(validComicIDs: Set(library.comics.map(\.id)))
+                await loadCacheSnapshot()
+            }
+        }
+    }
+
+    private var offlineComics: [ComicBook] {
+        library.comics
+            .filter {
+                offlineDownloads.records[$0.id] != nil ||
+                offlineDownloads.activeComicIDs.contains($0.id) ||
+                offlineDownloads.queuedComicIDs.contains($0.id)
+            }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    private func refreshCacheSnapshot() {
+        Task { await loadCacheSnapshot() }
+    }
+
+    private func loadCacheSnapshot() async {
+        cacheSnapshot = await Task.detached(priority: .utility) {
+            CacheStorageManager.snapshot()
+        }.value
+    }
+
+    private func clearReaderCaches() {
+        guard !isClearingCaches else { return }
+        isClearingCaches = true
+        HapticManager.shared.play(.heavy)
+        Task {
+            await Task.detached(priority: .utility) {
+                CacheStorageManager.clearReaderCaches()
+            }.value
+            NotificationCenter.default.post(name: .mreaderClearReaderMemoryCaches, object: nil)
+            await RemotePageCache.shared.clearMemoryCache()
+            await AITranslationPageCoordinator.shared.clearCache()
+            await OCRRecognitionCache.shared.clearCache()
+            await PanelDetectionService.shared.clearCache()
+            library.rebuildAllThumbnails()
+            await loadCacheSnapshot()
+            isClearingCaches = false
+            HapticManager.shared.play(.success)
         }
     }
 }
@@ -3415,9 +3648,6 @@ struct SeriesDetailView: View {
 
     private var sortedComics: [ComicBook] {
         comics.sorted { lhs, rhs in
-            let lhsFinished = ComicReadingProgress.isFinished(lhs)
-            let rhsFinished = ComicReadingProgress.isFinished(rhs)
-            if lhsFinished != rhsFinished { return !lhsFinished }
             return naturalTitleCompare(lhs.title, sortTieBreaker(for: lhs), rhs.title, sortTieBreaker(for: rhs))
         }
     }

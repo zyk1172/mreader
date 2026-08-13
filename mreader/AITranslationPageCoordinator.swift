@@ -27,6 +27,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     let visionPromptTemplate: String
     let isRightToLeft: Bool
     let minimumTextHeight: Double
+    let ocrRecognitionMode: OCRRecognitionMode
     let safeAreaInset: Double
     let usesVisualOCRVerification: Bool
     let viewportAspect: CGFloat
@@ -40,7 +41,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            "v3",
+            "v4",
             sourceIdentity,
             mode.rawValue,
             configuration.profileID.uuidString,
@@ -49,6 +50,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             target.rawValue,
             isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", minimumTextHeight),
+            ocrRecognitionMode.rawValue,
             String(format: "%.4f", safeAreaInset),
             usesVisualOCRVerification ? "visual-review" : "local-only",
             String(format: "%.3f", Double(viewportAspect)),
@@ -59,7 +61,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     }
 }
 
-private struct CachedTranslationBlock: Codable, Sendable {
+nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let id: UUID
     let text: String
     let translation: String?
@@ -106,7 +108,7 @@ private struct CachedTranslationBlock: Codable, Sendable {
     }
 }
 
-private struct CachedPoint: Codable, Sendable {
+nonisolated private struct CachedPoint: Codable, Sendable {
     let x: Double
     let y: Double
 
@@ -118,7 +120,7 @@ private struct CachedPoint: Codable, Sendable {
     var point: CGPoint { CGPoint(x: x, y: y) }
 }
 
-private struct CachedTranslationPage: Codable, Sendable {
+nonisolated private struct CachedTranslationPage: Codable, Sendable {
     let createdAt: Date
     let blocks: [CachedTranslationBlock]
 }
@@ -170,6 +172,15 @@ actor AITranslationPageCoordinator {
         let key = request.cacheKey
         if memoryCache[key] != nil { return true }
         return fileManager.fileExists(atPath: fileURL(forKey: key).path)
+    }
+
+    func clearCache() {
+        for task in inFlight.values { task.cancel() }
+        inFlight.removeAll()
+        memoryCache.removeAll()
+        memoryOrder.removeAll()
+        try? fileManager.removeItem(at: cacheDirectory)
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
     private func cachedBlocks(forKey key: String) -> [TextBlock]? {
@@ -259,19 +270,23 @@ nonisolated enum AITranslationPagePipeline {
     }
 
     private static func translateOCR(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
-        let ocrImage = await OCRPreprocessor.highResolutionImage(
-            from: request.pageURL,
-            fallback: request.image
-        ) ?? request.image
-        let localResult = try await MangaOCRPipeline.recognize(
-            in: ocrImage,
-            options: OCRPreprocessor.Options(
-                isRightToLeft: request.isRightToLeft,
-                minimumTextHeight: request.minimumTextHeight
-            )
+        let options = OCRPreprocessor.Options(
+            isRightToLeft: request.isRightToLeft,
+            minimumTextHeight: request.minimumTextHeight,
+            recognitionMode: request.ocrRecognitionMode
         )
+        let cacheRequest = OCRRecognitionCacheRequest(
+            pageURL: request.pageURL,
+            fallbackImage: request.image,
+            options: options
+        )
+        let localResult = try await OCRRecognitionCache.shared.result(for: cacheRequest)
         let resolvedBlocks: [TextBlock]
         if request.usesVisualOCRVerification {
+            let ocrImage = await OCRPreprocessor.highResolutionImage(
+                from: request.pageURL,
+                fallback: request.image
+            ) ?? request.image
             resolvedBlocks = await AITranslator.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: localResult.resolvedBlocks,

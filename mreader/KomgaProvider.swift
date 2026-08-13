@@ -379,9 +379,13 @@ nonisolated enum KomgaProvider {
         try await client.deleteBook(bookID: bookID)
     }
 
-    static func syncEnabledSources() async -> [KomgaSourceSyncResult] {
+    static func syncEnabledSources(sourceIDs: Set<UUID>? = nil) async -> [KomgaSourceSyncResult] {
         var results: [KomgaSourceSyncResult] = []
-        for source in loadSources().filter({ $0.type == .komga && $0.isEnabled }) {
+        var sources = loadSources().filter { $0.type == .komga && $0.isEnabled }
+        if let sourceIDs {
+            sources = sources.filter { sourceIDs.contains($0.id) }
+        }
+        for source in sources {
             do {
                 let payload = try await syncSource(source)
                 var updatedSource = source

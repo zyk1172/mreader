@@ -24,6 +24,7 @@ struct MediaSourceSettingsView: View {
     @State private var isEditing = false
     @State private var editStatusMessage: String?
     @State private var editStatusIsError = false
+    @State private var sourcePendingRemoval: MediaSource?
 
     var body: some View {
         NavigationStack {
@@ -75,7 +76,7 @@ struct MediaSourceSettingsView: View {
                                     .buttonStyle(.bordered)
 
                                     Button(role: .destructive) {
-                                        remove(source)
+                                        sourcePendingRemoval = source
                                     } label: {
                                         Label("mediaSources.remove".localized, systemImage: "trash")
                                     }
@@ -190,6 +191,16 @@ struct MediaSourceSettingsView: View {
             .onAppear {
                 reloadSources()
                 reloadHiddenComics()
+            }
+            .alert(item: $sourcePendingRemoval) { source in
+                Alert(
+                    title: Text("mediaSources.removeConfirmTitle".localized),
+                    message: Text("mediaSources.removeConfirmMessage".localizedFormat(source.name)),
+                    primaryButton: .destructive(Text("mediaSources.remove".localized)) {
+                        remove(source)
+                    },
+                    secondaryButton: .cancel()
+                )
             }
             .sheet(item: $editingSource) { source in
                 NavigationStack {
@@ -336,12 +347,19 @@ struct MediaSourceSettingsView: View {
         Task {
             let syncedCount: Int
             if source.type == .opds {
-                syncedCount = await library.syncOPDSSources()
+                syncedCount = await library.syncOPDSSource(id: source.id)
             } else {
-                syncedCount = await library.syncKomgaSources()
+                syncedCount = await library.syncKomgaSource(id: source.id)
             }
-            statusIsError = false
-            statusMessage = "mediaSources.refreshComplete".localizedFormat(syncedCount, source.type == .opds ? "OPDS" : "Komga")
+            if let error = library.mediaSyncErrors[source.type] {
+                statusIsError = true
+                statusMessage = error
+                HapticManager.shared.play(.error)
+            } else {
+                statusIsError = false
+                statusMessage = "mediaSources.refreshComplete".localizedFormat(syncedCount, source.type == .opds ? "OPDS" : "Komga")
+                HapticManager.shared.play(.success)
+            }
             reloadSources()
             reloadHiddenComics()
         }
@@ -429,6 +447,11 @@ struct MediaSourceSettingsView: View {
                 try KomgaProvider.updateSource(updatedSource)
                 reloadSources()
                 reloadHiddenComics()
+                if source.type == .opds {
+                    _ = await library.syncOPDSSources()
+                } else if source.type == .komga {
+                    _ = await library.syncKomgaSources()
+                }
                 editStatusIsError = false
                 editStatusMessage = "mediaSources.saveSuccess".localized
                 HapticManager.shared.play(.success)

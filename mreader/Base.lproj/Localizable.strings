@@ -87,6 +87,11 @@
 "reader.scrollSpeed.fast" = "Fast";
 
 /* OCR Settings */
+"ocr.localMode" = "On-Device OCR";
+"ocr.localMode.adaptive" = "Adaptive";
+"ocr.localMode.accurate" = "Maximum Accuracy";
+"ocr.localMode.onDevice" = "Apple Vision · Processed on this device";
+"ocr.localMode.description" = "Adaptive mode detects the page language locally and minimizes repeated recognition. Maximum Accuracy uses every compatible language pass.";
 "ocr.enable" = "OCR Text Recognition";
 "ocr.autoMagnify" = "Auto Text Magnification";
 "ocr.magnifySize" = "Magnify Text Size";
@@ -96,6 +101,9 @@
 "ocr.translationMode.ocr" = "OCR Text";
 "ocr.translationMode.vision" = "Vision Image";
 "ocr.autoTranslate" = "Auto Translate Current Page";
+"ocr.appleTranslation" = "Apple 原生翻译";
+"error.libraryLoad" = "Library Data Issue";
+"ocr.appleTranslationFooter" = "Use Apple on-device low-latency translation for ordinary dialogue. Falls back to cloud AI when unavailable or incomplete.";
 "ocr.borderProgress" = "AI Translation Border Progress";
 "ocr.colorStyle" = "Translation Text Color";
 "ocr.targetLanguage" = "Translate To";
@@ -270,3 +278,31 @@
 "time.daysAgo" = "%d days ago";
 "ocr.visualVerification" = "Verify Low-Confidence Text Visually";
 "ocr.visualVerificationDescription" = "Only when local OCR confidence is low, up to three cropped text regions are sent to the configured third-party visual model.";
+"reader.mode.guidedPanel" = "Guided Panels & Auto Crop";
+"offline.download" = "Download for Offline Reading";
+"offline.cancel" = "Cancel Download";
+"offline.remove" = "Remove Offline Copy";
+"offline.available" = "Available Offline";
+"offline.queued" = "Waiting to download";
+"offline.empty" = "No offline comics";
+"ocr.index.build" = "Build OCR Full-Text Index";
+"ocr.index.cancel" = "Rebuild OCR Index";
+"ocr.search.title" = "OCR Full-Text Search";
+"ocr.search.prompt" = "Search comic dialogue";
+"ocr.search.placeholder" = "Dialogue, narration, or sound effect";
+"ocr.search.page" = "Page %d";
+"sync.metadata.title" = "Data & Sync";
+"sync.metadata.icloud" = "Sync Reading Progress with iCloud";
+"sync.metadata.lastSync" = "Last Sync";
+"sync.metadata.description" = "Manage iCloud metadata sync and settings backups here. Comic source files are never uploaded.";
+"sync.metadata.localOnly" = "The selected library is not in iCloud Drive, so metadata stays on this device. Choose an iCloud Drive folder for cross-device sync.";
+"storage.generatedCache" = "Covers, OCR & AI Cache";
+"storage.totalCache" = "Clearable Cache Total";
+"storage.clearReaderCaches" = "Clear Reading Caches";
+"storage.offlineCache" = "Offline Comics";
+"storage.maintenance" = "Library Maintenance";
+"offline.title" = "Offline Comics";
+"comic.unlockReason" = "Authenticate to open or unlock %@.";
+"comic.lockUnavailable" = "Device authentication is unavailable.";
+"mediaSources.removeConfirmTitle" = "Remove Media Source?";
+"mediaSources.removeConfirmMessage" = "Remove %@ and its local shelf records? Files on the server will not be deleted.";

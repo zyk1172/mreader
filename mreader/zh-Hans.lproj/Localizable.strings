@@ -62,7 +62,6 @@
 "reader.addBookmark" = "添加书签到第 %d 页";
 "reader.noBookmarks" = "暂无书签";
 "reader.editBookmarkNote" = "编辑书签备注";
-"reader.bookmarkNotePlaceholder" = "备注（可选）";
 "reader.deleteBookmark" = "删除书签";
 
 /* Reading Settings */
@@ -91,6 +90,11 @@
 "reader.scrollSpeed.fast" = "快";
 
 /* OCR Settings */
+"ocr.localMode" = "本地 OCR";
+"ocr.localMode.adaptive" = "自适应加速";
+"ocr.localMode.accurate" = "最高精度";
+"ocr.localMode.onDevice" = "Apple Vision · 完全在本机处理";
+"ocr.localMode.description" = "自适应模式会在本机判断页面语言并减少重复识别；最高精度会运行全部兼容语言通道。";
 "ocr.enable" = "OCR 文字识别";
 "ocr.autoMagnify" = "自动文字放大";
 "ocr.magnifySize" = "放大文字大小";
@@ -100,6 +104,9 @@
 "ocr.translationMode.ocr" = "OCR 文本";
 "ocr.translationMode.vision" = "视觉图片";
 "ocr.autoTranslate" = "自动翻译当前页";
+"ocr.appleTranslation" = "Apple 原生翻译";
+"error.libraryLoad" = "书架数据异常";
+"ocr.appleTranslationFooter" = "普通对白使用 Apple 端侧低延迟翻译；不可用或未覆盖时自动回退云端 AI。";
 "ocr.borderProgress" = "AI 翻译边框进度";
 "ocr.colorStyle" = "翻译文字配色";
 "ocr.colorStyle.contrast" = "高对比";
@@ -216,7 +223,6 @@
 "storage.coverCache" = "封面缓存";
 "storage.pageCache" = "页面缓存";
 "storage.tempCache" = "临时解压缓存";
-"storage.clearTempCache" = "清理临时解压缓存";
 "storage.rebuildCovers" = "检查并重建封面索引";
 "storage.refreshIndex" = "刷新漫画库索引";
 "storage.resetDetection" = "重置漫画类型检测记录";
@@ -235,7 +241,6 @@
 
 /* Statistics */
 "stats.title" = "阅读统计";
-"stats.todaySummary" = "今日概览";
 "stats.readingGoal" = "阅读目标";
 "stats.readingRings" = "阅读环";
 "stats.sevenDayActivity" = "7天活动";
@@ -439,3 +444,31 @@
 "time.daysAgo" = "%d天前";
 "ocr.visualVerification" = "低置信度视觉复核";
 "ocr.visualVerificationDescription" = "仅在本地 OCR 置信度较低时，将最多 3 个文字裁剪区域发送到已配置的第三方视觉模型。";
+"reader.mode.guidedPanel" = "分镜阅读与自动裁边";
+"offline.download" = "下载离线阅读";
+"offline.cancel" = "取消下载";
+"offline.remove" = "移除离线缓存";
+"offline.available" = "可离线阅读";
+"offline.queued" = "等待下载";
+"offline.empty" = "暂无离线漫画";
+"ocr.index.build" = "建立 OCR 全文索引";
+"ocr.index.cancel" = "重新建立 OCR 索引";
+"ocr.search.title" = "OCR 全文搜索";
+"ocr.search.prompt" = "搜索漫画对白";
+"ocr.search.placeholder" = "输入对白、旁白或拟声词";
+"ocr.search.page" = "第 %d 页";
+"sync.metadata.title" = "数据与同步";
+"sync.metadata.icloud" = "iCloud 同步阅读进度";
+"sync.metadata.lastSync" = "上次同步";
+"sync.metadata.description" = "在这里管理 iCloud 元数据同步和设置备份。漫画源文件不会上传。";
+"sync.metadata.localOnly" = "当前漫画根目录不在 iCloud Drive，元数据只保存在本机。将根目录选在 iCloud Drive 后可跨设备同步。";
+"storage.generatedCache" = "封面、OCR 与 AI 缓存";
+"storage.totalCache" = "可清理缓存合计";
+"storage.clearReaderCaches" = "清理阅读缓存";
+"storage.offlineCache" = "离线漫画占用";
+"storage.maintenance" = "漫画库维护";
+"offline.title" = "离线漫画";
+"comic.unlockReason" = "验证身份后打开或解锁《%@》。";
+"comic.lockUnavailable" = "当前设备无法进行身份验证。";
+"mediaSources.removeConfirmTitle" = "移除媒体源？";
+"mediaSources.removeConfirmMessage" = "将移除“%@”及其本地书架记录，服务器上的文件不会被删除。";

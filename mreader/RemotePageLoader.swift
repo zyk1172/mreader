@@ -109,6 +109,10 @@ nonisolated enum RemotePageLoader {
 
     static func imageData(forRemotePageURL url: URL) async -> Data? {
         guard let request = RemotePageRequest(url: url) else { return nil }
+        if let offline = OfflinePageStore.data(for: request.cacheKey), !offline.isEmpty {
+            print("MReader offline page hit page=\(request.pageIndex) key=\(request.cacheKey.logDescription)")
+            return offline
+        }
         return await RemotePageCache.shared.data(for: request.cacheKey, priority: .current)
     }
 
@@ -195,11 +199,22 @@ enum RemotePagePriority: Sendable {
 nonisolated private func remoteCacheLimits() -> (memoryLimitMB: Int, diskLimitMB: Int) {
     let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
     if ramGB >= 6 {
-        return (450, 800)
+        return (450, 2_048)
     } else if ramGB >= 4 {
-        return (200, 400)
+        return (240, 1_024)
     } else {
-        return (100, 250)
+        return (120, 512)
+    }
+}
+
+nonisolated private func remotePrefetchBudgetBytes() -> Int64 {
+    let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+    if ramGB >= 6 {
+        return 500 * 1024 * 1024
+    } else if ramGB >= 4 {
+        return 300 * 1024 * 1024
+    } else {
+        return 160 * 1024 * 1024
     }
 }
 
@@ -229,6 +244,7 @@ actor RemotePageCache {
 
         let diskURL = RemotePageLoader.pageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
         if let data = try? Data(contentsOf: diskURL), !data.isEmpty {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: diskURL.path)
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
             cachedKeys.insert(cacheKey)
             print("MReader remote cache disk hit page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
@@ -383,7 +399,7 @@ final class RemotePagePrefetcher {
     private var previewTasks: [UUID: [URL: Task<Void, Never>]] = [:]
     private var previewComicIDs: [UUID] = []
     private var lastDiskPruneDate = Date.distantPast
-    private let prefetchBudgetBytes: Int64 = 250 * 1024 * 1024
+    private let prefetchBudgetBytes: Int64 = remotePrefetchBudgetBytes()
     private let previewBudgetBytes: Int64 = 60 * 1024 * 1024
     private let unknownPageEstimateBytes: Int64 = 24 * 1024 * 1024
 
@@ -392,11 +408,28 @@ final class RemotePagePrefetcher {
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
-        ) { _ in
-            Task {
-                await RemotePageCache.shared.clearMemoryCache()
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleMemoryWarning()
             }
         }
+    }
+
+    /// Handles a system memory warning. Besides clearing the decoded-page memory
+    /// cache, it cancels every in-flight preload/prefetch task (the current reader
+    /// window in `tasks` plus all `previewTasks`) and empties those dictionaries, so
+    /// a stale preload cannot repopulate the cache right after it was just cleared.
+    private func handleMemoryWarning() {
+        for task in tasks.values {
+            task.cancel()
+        }
+        tasks.removeAll()
+        cancelAllPreview()
+        Task {
+            await RemotePageCache.shared.clearMemoryCache()
+        }
+        print("MReader memory warning: cancelled in-flight preloads and cleared memory cache")
     }
 
     func previewPrefetch(comics: [ComicBook]) {
@@ -514,26 +547,16 @@ final class RemotePagePrefetcher {
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
         let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
-        let forwardStep: Int
-        if isContinuous {
-            forwardStep = scrollDirection >= 0 ? 1 : -1
-        } else {
-            forwardStep = readingDirection == .rightToLeft ? -1 : 1
-        }
-        let backwardStep = -forwardStep
-        let offsets: [Int]
-        if isContinuous {
-            offsets = [0, forwardStep, forwardStep * 2, forwardStep * 3, forwardStep * 4, forwardStep * 5, forwardStep * 6, forwardStep * 7, forwardStep * 8, forwardStep * 9, forwardStep * 10, backwardStep]
-        } else {
-            offsets = [0, forwardStep, forwardStep * 2, forwardStep * 3, forwardStep * 4, forwardStep * 5, forwardStep * 6, forwardStep * 7, backwardStep, backwardStep * 2]
-        }
-        var seen = Set<Int>()
-        return offsets.compactMap { offset in
-            let index = currentPageIndex + offset
-            guard index >= 0, index < pageCount, !seen.contains(index) else { return nil }
-            seen.insert(index)
-            return index
-        }
+        return ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: currentPageIndex,
+            pageCount: pageCount,
+            readingDirection: readingDirection,
+            readingMode: readingMode,
+            scrollDirection: scrollDirection,
+            forwardCount: isContinuous ? 10 : 7,
+            backwardCount: isContinuous ? 1 : 2,
+            includesCurrentPage: true
+        )
     }
 
     func prewarm(pages: [ComicPage], currentPageIndex: Int, readingDirection: ReadingDirection, readingMode: ReadingMode) {

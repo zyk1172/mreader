@@ -34,8 +34,11 @@ enum OCRCoordinateMapper {
             fitScale = widthScale
         case .fitHeight:
             fitScale = heightScale
-        case .fitScreen, .original:
+        case .fitScreen:
             fitScale = min(widthScale, heightScale)
+        case .original:
+            // 原始尺寸：不放大；小图 1:1，大图等比缩小适配容器
+            fitScale = min(1, min(widthScale, heightScale))
         }
 
         let baseSize = CGSize(

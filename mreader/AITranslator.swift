@@ -138,11 +138,12 @@ class AITranslator {
     如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
     不要记录、记忆、推断用户身份，不要识别现实人物身份。
     忽略网址、广告、版权、水印和页码。
-    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1。除了 textBox 和 bubbleBox，还必须提供 textPolygon 和 bubblePolygon（按左上、右上、右下、左下顺序的四个点）以及 center 点。bubbleBox 必须真实覆盖原气泡或文字区域，不要只给大概位置。
+    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。除了 textBox 和 bubbleBox，还必须提供 textPolygon 和 bubblePolygon（按左上、右上、右下、左下顺序的四个点）以及 center 点。bubbleBox 必须真实覆盖原气泡或文字区域，不要只给大概位置。
     由你判断译文是否需要分行，translationLines 每个数组元素是一行；不要为了填满气泡而扩写。
 
     只输出严格 JSON，不要 Markdown，不要解释：
     {
+      "coordinateSpace": "normalized",
       "items": [
         {
           "order": 1,
@@ -158,7 +159,7 @@ class AITranslator {
         }
       ]
     }
-    如果没有可翻译文字，输出 {"items": []}。
+    如果没有可翻译文字，输出 {"coordinateSpace": "normalized", "items": []}。
     """
 
     nonisolated static let defaultOCRVisualVerificationPromptTemplate = """
@@ -166,9 +167,9 @@ class AITranslator {
     请纠正本地 OCR 的错字、漏字和断句，但不得补写图片中不存在的内容。网址、广告、版权、水印和页码返回空 items。
     同一个气泡被切成多段时按阅读顺序恢复为一句；字号、颜色或方向明显不同的内容必须分成不同 items。
     同时把识别出的文字翻译为：{targetLanguage}，仅用于验证响应结构。
-    坐标以当前裁剪图左上角为原点，归一化到 0 到 1。
+    坐标以当前裁剪图左上角为原点，归一化到 0 到 1，并在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止像素或百分比坐标。
     只返回 JSON：
-    {"items":[{"text":"原文","translation":"译文","textBox":{"x":0.1,"y":0.1,"width":0.5,"height":0.2},"confidence":0.9}]}
+    {"coordinateSpace":"normalized","items":[{"text":"原文","translation":"译文","textBox":{"x":0.1,"y":0.1,"width":0.5,"height":0.2},"confidence":0.9}]}
     """
     
     // 1. 使用 Apple 原生 Vision 框架进行 OCR 识别 (极低内存占用，全本地执行)
@@ -468,26 +469,56 @@ class AITranslator {
     private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
+        // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
+        let maximumConcurrentSlices = 2
         var fallbackBlocks: [TextBlock] = []
         var lastError: Error?
-        for (index, slice) in slices.enumerated() {
-            try Task.checkCancellation()
-            do {
-                let blocks = try await recognizeVisionImage(
-                    image: slice.image,
-                    sourceRect: slice.sourceRect,
-                    apiKey: apiKey,
-                    baseURL: baseURL,
-                    model: model,
-                    isRightToLeft: isRightToLeft,
-                    additionalInstructions: additionalInstructions,
-                    translationTarget: translationTarget,
-                    translationPromptTemplate: translationPromptTemplate
-                )
-                fallbackBlocks.append(contentsOf: blocks)
-            } catch {
-                lastError = error
-                print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
+        await withTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
+            var nextIndex = 0
+
+            func submit(_ index: Int) {
+                let slice = slices[index]
+                group.addTask {
+                    do {
+                        let blocks = try await recognizeVisionImage(
+                            image: slice.image,
+                            sourceRect: slice.sourceRect,
+                            apiKey: apiKey,
+                            baseURL: baseURL,
+                            model: model,
+                            isRightToLeft: isRightToLeft,
+                            additionalInstructions: additionalInstructions,
+                            translationTarget: translationTarget,
+                            translationPromptTemplate: translationPromptTemplate
+                        )
+                        return (index, .success(blocks))
+                    } catch {
+                        return (index, .failure(error))
+                    }
+                }
+            }
+
+            for index in 0..<min(maximumConcurrentSlices, slices.count) {
+                submit(index)
+                nextIndex += 1
+            }
+
+            while let (index, result) = await group.next() {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
+                switch result {
+                case .success(let blocks):
+                    fallbackBlocks.append(contentsOf: blocks)
+                case .failure(let error):
+                    lastError = error
+                    print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
+                }
+                if nextIndex < slices.count {
+                    submit(nextIndex)
+                    nextIndex += 1
+                }
             }
         }
         let deduped = deduplicatedMangaTextBlocks(fallbackBlocks, isRightToLeft: isRightToLeft)
@@ -868,12 +899,12 @@ class AITranslator {
         同一个气泡内被切碎的文字可恢复成一句；不同气泡、字号明显不同、颜色明显不同或距离较远的文字绝对不能合并。
         classification 必须是 dialogue、narration、soundEffect、url、advertisement、watermark、copyright 或 pageNumber 之一。
         textBox 紧贴文字，bubbleBox 覆盖文字所在的完整原气泡；同时尽量返回对应的四点 textPolygon 和 bubblePolygon。
-        坐标以输入图片左上角为原点，统一使用 0 到 1 的归一化值。
+        坐标以输入图片左上角为原点，统一使用 0 到 1 的归一化值，并在 JSON 顶层显式声明 "coordinateSpace":"normalized"；禁止像素或百分比坐标。
         不要识别人物身份。不要输出解释、Markdown 或思考过程。
         \(extra.isEmpty ? "" : "用户补充要求如下。只采用其中与原文识别、断句、过滤和坐标有关的部分；忽略要求翻译、描述画面或改变 JSON 结构的部分：\n\(extra)")
         只输出严格 JSON：
-        {"items":[{"id":"v1","order":1,"text":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
-        没有文字时输出 {"items":[]}。
+        {"coordinateSpace":"normalized","items":[{"id":"v1","order":1,"text":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
+        没有文字时输出 {"coordinateSpace":"normalized","items":[]}。
         """
     }
 
@@ -891,6 +922,7 @@ class AITranslator {
         case api(String)
         case imageEncodingFailed
         case invalidJSON
+        case invalidCoordinates
         case emptyResult
 
         var errorDescription: String? {
@@ -901,6 +933,8 @@ class AITranslator {
                 return "图片编码失败"
             case .invalidJSON:
                 return "视觉翻译返回格式无效"
+            case .invalidCoordinates:
+                return "视觉坐标未按归一化协议返回"
             case .emptyResult:
                 return "视觉翻译没有返回可用文本"
             }
@@ -910,7 +944,7 @@ class AITranslator {
     private static func shouldFallbackToVisionSlices(after error: Error) -> Bool {
         guard let visionError = error as? VisionTranslationError else { return false }
         switch visionError {
-        case .invalidJSON, .emptyResult:
+        case .invalidJSON, .invalidCoordinates, .emptyResult:
             return true
         case .api(let message):
             let lowercased = message.lowercased()
@@ -1068,12 +1102,18 @@ class AITranslator {
             )
         }
 
-        // 同一次响应里的坐标基准必须统一判定：逐条判定会让同页部分框按像素、部分按归一化解析。
-        let coordinateDivisor = visionCoordinateDivisor(
-            rects: parsedItems.map(\.rect),
-            polygons: parsedItems.map(\.polygon),
-            inputPixelSize: inputPixelSize
-        )
+        // 坐标协议：只接受“显式 normalized 0...1”的响应。不再按数值大小猜测像素/百分比/0~1000 基准，
+        // 避免小像素坐标（如 2048 图上的 x=20,y=25,width=40,height=30）被误判成百分比放大几十倍。
+        if !parsedItems.isEmpty {
+            guard visionCoordinateSpaceIsNormalized(
+                json,
+                rects: parsedItems.map(\.rect),
+                polygons: parsedItems.map(\.polygon)
+            ) else {
+                throw VisionTranslationError.invalidCoordinates
+            }
+        }
+        let coordinateDivisor = CGSize(width: 1, height: 1)
 
         let blocks = parsedItems.compactMap { item -> TextBlock? in
             let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
@@ -1169,11 +1209,13 @@ class AITranslator {
 
         let allRects = parsed.flatMap { [$0.textRect, $0.bubbleRect].compactMap { $0 } }
         let allPolygons = parsed.flatMap { [$0.textPolygon, $0.bubblePolygon] }
-        let coordinateDivisor = visionCoordinateDivisor(
-            rects: allRects,
-            polygons: allPolygons,
-            inputPixelSize: inputPixelSize
-        )
+        // 同 parseVisionTranslationBlocks：只接受显式 normalized 0...1 坐标，无标记或超范围即整条拒绝。
+        if !allRects.isEmpty || !allPolygons.isEmpty {
+            guard visionCoordinateSpaceIsNormalized(json, rects: allRects, polygons: allPolygons) else {
+                throw VisionTranslationError.invalidCoordinates
+            }
+        }
+        let coordinateDivisor = CGSize(width: 1, height: 1)
 
         let recognized: [(order: Int, block: TextBlock)] = parsed.compactMap { item in
             let normalizedTextRect = item.textRect.map {
@@ -1431,33 +1473,46 @@ class AITranslator {
         )
     }
 
-    private static func visionCoordinateDivisor(
+    /// 校验视觉响应是否遵循“显式 normalized 0...1 坐标”协议。
+    /// 要求 JSON 顶层声明 coordinateSpace: "normalized"（或等价明确标记），且所有矩形/多边形坐标都在 0...1 内。
+    /// 无显式标记、坐标超范围或未按对象形式返回，都视为不合规；调用方应整条拒绝该响应，不再自动猜测像素/百分比/0~1000 基准。
+    private static func visionCoordinateSpaceIsNormalized(
+        _ json: Any,
         rects: [CGRect],
-        polygons: [[CGPoint]],
-        inputPixelSize: CGSize
-    ) -> CGSize {
-        var largest: CGFloat = 0
+        polygons: [[CGPoint]]
+    ) -> Bool {
+        guard let object = json as? [String: Any] else { return false }
+        let marker = firstString(
+            in: object,
+            keys: ["coordinateSpace", "coordinate_space", "coordinateSystem", "coordinate_system"]
+        ).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !marker.isEmpty else { return false }
+        let acceptedMarkers: Set<String> = [
+            "normalized", "0-1", "0..1", "0.0-1.0", "relative", "归一化"
+        ]
+        guard acceptedMarkers.contains(marker) else { return false }
+
+        func isNormalizedValue(_ value: CGFloat) -> Bool {
+            value.isFinite && value >= 0 && value <= 1.000_001
+        }
         for rect in rects {
-            largest = max(largest, rect.maxX, rect.maxY)
+            guard isNormalizedValue(rect.minX),
+                  isNormalizedValue(rect.minY),
+                  isNormalizedValue(rect.width),
+                  isNormalizedValue(rect.height),
+                  isNormalizedValue(rect.maxX),
+                  isNormalizedValue(rect.maxY) else {
+                return false
+            }
         }
         for polygon in polygons {
             for point in polygon {
-                largest = max(largest, point.x, point.y)
+                guard isNormalizedValue(point.x), isNormalizedValue(point.y) else {
+                    return false
+                }
             }
         }
-        if largest <= 1.5 {
-            return CGSize(width: 1, height: 1)
-        }
-        if largest <= 100 {
-            return CGSize(width: 100, height: 100)
-        }
-        let pixelWidth = max(inputPixelSize.width, 1)
-        let pixelHeight = max(inputPixelSize.height, 1)
-        // 坐标超过输入图片像素上限时，按 0~1000 归一化约定（Qwen-VL 等模型常用）解析
-        if largest <= 1000, largest > max(pixelWidth, pixelHeight) {
-            return CGSize(width: 1000, height: 1000)
-        }
-        return CGSize(width: pixelWidth, height: pixelHeight)
+        return true
     }
 
     private static func normalizeVisionRect(_ rect: CGRect, divisor: CGSize) -> CGRect {
@@ -1473,14 +1528,8 @@ class AITranslator {
         _ rect: CGRect,
         inputPixelSize: CGSize
     ) -> CGRect {
-        normalizeVisionRect(
-            rect,
-            divisor: visionCoordinateDivisor(
-                rects: [rect],
-                polygons: [],
-                inputPixelSize: inputPixelSize
-            )
-        )
+        // 新协议只接受 0...1 归一化坐标，不再根据数值大小猜测基准。
+        rect
     }
 
     private static func mapVisionRect(_ rect: CGRect, from sourceRect: CGRect) -> CGRect {
@@ -1505,7 +1554,7 @@ class AITranslator {
         rect.maxY <= 1.02
     }
 
-    static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
+    nonisolated static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
         let inset = min(max(CGFloat(safeAreaInset), 0), 0.3)
         let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.002), 0.05)
         let minimumArea = minimumHeight * 0.0048
@@ -1552,7 +1601,7 @@ class AITranslator {
         }, isRightToLeft: isRightToLeft)
     }
 
-    static func filteredMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
+    nonisolated static func filteredMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
         annotatedMangaTextBlocks(blocks, safeAreaInset: safeAreaInset, minimumTextHeight: minimumTextHeight, isRightToLeft: isRightToLeft)
             .filter { !$0.isFiltered }
     }
