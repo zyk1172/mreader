@@ -31,8 +31,9 @@ nonisolated enum OPDSProvider {
         return try OPDSXMLFeedParser.parse(data: data, baseURL: baseURL).publications
     }
 
-    static func addSource(name: String, baseURL: String, username: String?, credential: String) async throws -> MediaSource {
+    static func addSource(name: String, baseURL: String, username: String?, credential: String, lanURL: String? = nil) async throws -> MediaSource {
         var source = try makeSource(name: name, baseURL: baseURL, username: username)
+        source.lanURL = lanURL
         _ = try await OPDSClient(source: source, credential: credential).publications(limit: 1)
         source.lastSyncAt = Date()
         try KomgaProvider.saveAPIKey(credential, for: source.id)
@@ -43,14 +44,21 @@ nonisolated enum OPDSProvider {
         return source
     }
 
-    static func syncEnabledSources() async -> [OPDSSourceSyncResult] {
+    static func syncEnabledSources(sourceIDs: Set<UUID>? = nil) async -> [OPDSSourceSyncResult] {
         var results: [OPDSSourceSyncResult] = []
-        for source in KomgaProvider.loadSources().filter({ $0.type == .opds && $0.isEnabled }) {
+        var sources = KomgaProvider.loadSources().filter { $0.type == .opds && $0.isEnabled }
+        if let sourceIDs {
+            sources = sources.filter { sourceIDs.contains($0.id) }
+        }
+        for source in sources {
             do {
                 guard let credential = KomgaProvider.apiKey(for: source.id) else {
                     throw MediaSourceError.apiKeyMissing
                 }
-                let publications = try await OPDSClient(source: source, credential: credential).publications()
+                var resolvedSource = source
+                let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+                resolvedSource.baseURL = resolvedURL
+                let publications = try await OPDSClient(source: resolvedSource, credential: credential).publications()
                 let comics = publications.map { makeComic(source: source, publication: $0) }
                 var updatedSource = source
                 updatedSource.lastSyncAt = Date()
@@ -98,8 +106,14 @@ nonisolated enum OPDSProvider {
         }
 
         do {
+            if let offlineURL = OfflinePageStore.opdsFile(sourceID: sourceID, publicationID: comic.remoteCoverID ?? remoteURL.absoluteString) {
+                return await ComicManager.loadDownloadedRemotePages(from: offlineURL)
+            }
+            var resolvedSource = source
+            let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+            resolvedSource.baseURL = resolvedURL
             let publicationID = comic.remoteCoverID ?? remoteURL.absoluteString
-            let localURL = try await OPDSClient(source: source, credential: credential).download(
+            let localURL = try await OPDSClient(source: resolvedSource, credential: credential).download(
                 remoteURL,
                 publicationID: publicationID
             )
@@ -108,6 +122,23 @@ nonisolated enum OPDSProvider {
             print("OPDS 漫画下载失败 \(comic.title): \(error.localizedDescription)")
             return nil
         }
+    }
+
+    static func downloadFile(for comic: ComicBook) async throws -> URL {
+        guard comic.sourceType == .opds,
+              let sourceID = comic.mediaSourceID,
+              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let remoteURLString = comic.sourceURL,
+              let remoteURL = URL(string: remoteURLString),
+              let credential = KomgaProvider.apiKey(for: sourceID) else {
+            throw MediaSourceError.invalidResponse
+        }
+        var resolvedSource = source
+        resolvedSource.baseURL = await KomgaProvider.resolveBestURL(source: source)
+        return try await OPDSClient(source: resolvedSource, credential: credential).download(
+            remoteURL,
+            publicationID: comic.remoteCoverID ?? remoteURL.absoluteString
+        )
     }
 
     static func removeCachedFiles(sourceID: UUID) {
@@ -205,6 +236,32 @@ nonisolated enum OPDSProvider {
     }
 }
 
+/// Same-origin policy for forwarding OPDS source credentials.
+///
+/// OPDS feeds may embed absolute URLs (covers, acquisitions, navigation) pointing at third-party
+/// hosts. Authorization (Basic/Bearer) must only ever be forwarded to the same origin (scheme +
+/// host + effective port) as the configured source, so a malicious feed cannot exfiltrate the
+/// source's credentials to another domain.
+nonisolated enum OPDSAuthorizationPolicy {
+    static func shouldForward(sourceBaseURL: String, to url: URL) -> Bool {
+        guard let baseURL = URL(string: sourceBaseURL) else { return false }
+        guard url.scheme?.lowercased() == baseURL.scheme?.lowercased() else { return false }
+        guard url.host?.lowercased() == baseURL.host?.lowercased() else { return false }
+        return effectivePort(of: url) == effectivePort(of: baseURL)
+    }
+
+    /// Resolves nil ports to the scheme's default port (80 for http, 443 for https) so that
+    /// `http://host` and `http://host:80` compare equal.
+    static func effectivePort(of url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+}
+
 nonisolated private struct OPDSClient: Sendable {
     let source: MediaSource
     let credential: String
@@ -257,7 +314,9 @@ nonisolated private struct OPDSClient: Sendable {
         }
 
         var request = URLRequest(url: url)
-        applyAuthorization(to: &request)
+        if shouldForwardAuthorization(to: request.url!) {
+            applyAuthorization(to: &request)
+        }
         request.timeoutInterval = 120
         let (temporaryURL, response) = try await URLSession.shared.download(for: request)
         try validate(response)
@@ -295,13 +354,27 @@ nonisolated private struct OPDSClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("application/opds+json, application/atom+xml;profile=opds-catalog, application/atom+xml, application/json, */*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 45
-        applyAuthorization(to: &request)
+        if shouldForwardAuthorization(to: request.url!) {
+            applyAuthorization(to: &request)
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MediaSourceError.invalidResponse
         }
         try validate(httpResponse)
         return (data, httpResponse)
+    }
+
+    /// Returns true only when `url` matches `source.baseURL` on scheme, host (case-insensitive),
+    /// and effective port. Cross-origin URLs (e.g. third-party cover/acquisition links embedded in
+    /// an OPDS feed) remain reachable but never receive the source's Basic/Bearer credentials.
+    private func shouldForwardAuthorization(to url: URL) -> Bool {
+        Self.shouldForwardAuthorization(sourceBaseURL: source.baseURL, to: url)
+    }
+
+    /// Static form of the same-origin authorization check (delegates to OPDSAuthorizationPolicy).
+    nonisolated static func shouldForwardAuthorization(sourceBaseURL: String, to url: URL) -> Bool {
+        OPDSAuthorizationPolicy.shouldForward(sourceBaseURL: sourceBaseURL, to: url)
     }
 
     private func applyAuthorization(to request: inout URLRequest) {

@@ -91,13 +91,13 @@ nonisolated enum KomgaProvider {
         try data.write(to: sourcesURL, options: .atomic)
     }
 
-    static func addKomgaSource(name: String, baseURL: String, apiKey: String) async throws -> MediaSource {
+    static func addKomgaSource(name: String, baseURL: String, apiKey: String, lanURL: String? = nil) async throws -> MediaSource {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayName = trimmedName.isEmpty ? "Komga" : trimmedName
         let client = try KomgaAPIClient(baseURLString: baseURL, apiKey: apiKey)
         _ = try await client.testConnection()
         var sources = loadSources()
-        var source = MediaSource(name: displayName, type: .komga, baseURL: client.baseURL.absoluteString, lastSyncAt: nil, isEnabled: true)
+        var source = MediaSource(name: displayName, type: .komga, baseURL: client.baseURL.absoluteString, lanURL: lanURL, lastSyncAt: nil, isEnabled: true)
         source.lastSyncAt = Date()
         try saveAPIKey(apiKey, for: source.id)
         sources.removeAll { $0.type == .komga && $0.baseURL == source.baseURL }
@@ -242,7 +242,97 @@ nonisolated enum KomgaProvider {
         return try await client.testConnection()
     }
 
+    private static var resolvedURLCache: [UUID: (url: String, timestamp: Date)] = [:]
+    private static let resolvedURLCacheTTL: TimeInterval = 600
+
+    static func resolveBestURL(source: MediaSource, timeout: TimeInterval = 4) async -> String {
+        if let cached = resolvedURLCache[source.id],
+           Date().timeIntervalSince(cached.timestamp) < resolvedURLCacheTTL {
+            return cached.url
+        }
+        if let persisted = UserDefaults.standard.string(forKey: "resolvedURL_\(source.id.uuidString)") {
+            resolvedURLCache[source.id] = (url: persisted, timestamp: Date())
+            _ = Task { @MainActor in
+                let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
+                resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
+                UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+            }
+            return persisted
+        }
+        let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
+        resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
+        UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+        return resolved
+    }
+
+    static func invalidateResolvedURL(for sourceID: UUID) {
+        resolvedURLCache[sourceID] = nil
+        UserDefaults.standard.removeObject(forKey: "resolvedURL_\(sourceID.uuidString)")
+    }
+
+    static func forceRefreshAllURLs() {
+        resolvedURLCache.removeAll()
+        let sources = loadSources()
+        for source in sources {
+            UserDefaults.standard.removeObject(forKey: "resolvedURL_\(source.id.uuidString)")
+        }
+    }
+
+    static func prewarmResolvedURLs() async {
+        let sources = loadSources().filter { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
+        await withTaskGroup(of: Void.self) { group in
+            for source in sources {
+                group.addTask {
+                    let url = await resolveBestURL(source: source, timeout: 4)
+                    let isLan = source.lanURL == url
+                    print("MReader URL resolved source=\(source.name) url=\(url) isLAN=\(isLan)")
+                }
+            }
+        }
+    }
+
+    private static func resolveBestURLUncached(source: MediaSource, timeout: TimeInterval) async -> String {
+        guard let lanURLString = source.lanURL,
+              let lanURL = URL(string: lanURLString),
+              let wanURL = URL(string: source.baseURL) else {
+            return source.baseURL
+        }
+        let lanReachable = await isReachable(lanURL, timeout: timeout)
+        if lanReachable {
+            return lanURLString
+        }
+        let wanReachable = await isReachable(wanURL, timeout: timeout)
+        if wanReachable {
+            return source.baseURL
+        }
+        return source.baseURL
+    }
+
+    static func resolvedBaseURL(for source: MediaSource) async -> String {
+        await resolveBestURL(source: source)
+    }
+
+    private static func isReachable(_ url: URL, timeout: TimeInterval) async -> Bool {
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return false
+            }
+            let reachable = (200..<500).contains(httpResponse.statusCode)
+            return reachable
+        } catch {
+            return false
+        }
+    }
+
     static func remoteReadProgress(for comic: ComicBook) async throws -> Int? {
+        try await remoteReadingProgressSnapshot(for: comic)?.pageIndex
+    }
+
+    static func remoteReadingProgressSnapshot(for comic: ComicBook) async throws -> RemoteReadingProgressSnapshot? {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
@@ -250,8 +340,13 @@ nonisolated enum KomgaProvider {
             return nil
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
-        return (try await client.book(bookID: bookID)).readProgress?.resolvedPageIndex
+        let resolvedURL = await resolveBestURL(source: source)
+        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
+        guard let progress = try await client.book(bookID: bookID).readProgress,
+              let pageIndex = progress.resolvedPageIndex else {
+            return nil
+        }
+        return RemoteReadingProgressSnapshot(pageIndex: pageIndex, updatedAt: progress.resolvedUpdatedAt)
     }
 
     static func updateReadProgress(for comic: ComicBook) async throws {
@@ -262,8 +357,13 @@ nonisolated enum KomgaProvider {
             return
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
-        try await client.updateReadProgress(bookID: bookID, pageIndex: comic.currentPageIndex, totalPages: comic.totalPages)
+        let resolvedURL = await resolveBestURL(source: source)
+        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
+        try await client.updateReadProgress(
+            bookID: bookID,
+            pageIndex: ReadingProgressMergePolicy.serverPageIndex(for: comic),
+            totalPages: comic.totalPages
+        )
     }
 
     static func deleteBook(_ comic: ComicBook) async throws {
@@ -274,13 +374,18 @@ nonisolated enum KomgaProvider {
             throw MediaSourceError.notFound
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+        let resolvedURL = await resolveBestURL(source: source)
+        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
         try await client.deleteBook(bookID: bookID)
     }
 
-    static func syncEnabledSources() async -> [KomgaSourceSyncResult] {
+    static func syncEnabledSources(sourceIDs: Set<UUID>? = nil) async -> [KomgaSourceSyncResult] {
         var results: [KomgaSourceSyncResult] = []
-        for source in loadSources().filter({ $0.type == .komga && $0.isEnabled }) {
+        var sources = loadSources().filter { $0.type == .komga && $0.isEnabled }
+        if let sourceIDs {
+            sources = sources.filter { sourceIDs.contains($0.id) }
+        }
+        for source in sources {
             do {
                 let payload = try await syncSource(source)
                 var updatedSource = source
@@ -309,7 +414,8 @@ nonisolated enum KomgaProvider {
             return KomgaSourceSyncPayload(comics: [], isAuthoritative: true)
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+        let resolvedURL = await resolveBestURL(source: source)
+        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
         let libraries = try await client.libraries()
         var comics: [ComicBook] = []
         var seenBookIDs = Set<String>()
@@ -409,8 +515,11 @@ nonisolated enum KomgaProvider {
     }
 
     private static func applyRemoteProgress(from book: KomgaBookDTO, pageCount: Int, to comic: inout ComicBook) {
-        guard book.readProgress != nil else { return }
+        guard let progress = book.readProgress else { return }
         comic.currentPageIndex = remotePageIndex(book: book, pageCount: pageCount)
+        comic.furthestPageIndex = comic.currentPageIndex
+        comic.progressUpdatedAt = progress.resolvedUpdatedAt
+        comic.lastReadAt = max(comic.lastReadAt, progress.resolvedUpdatedAt)
         comic.hasBeenOpened = true
     }
 

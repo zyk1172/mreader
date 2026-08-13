@@ -4,8 +4,25 @@ import UIKit
 
 nonisolated enum RemoteImageLoader {
     private static var cacheRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MReaderRemoteCovers", isDirectory: true)
+    }
+
+    private static var legacyCacheRoot: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MReaderRemoteImageCache", isDirectory: true)
+    }
+
+    static func migrateLegacyCoversIfNeeded() {
+        let legacyRoot = legacyCacheRoot
+        let newRoot = cacheRoot
+        guard FileManager.default.fileExists(atPath: legacyRoot.path) else { return }
+        do {
+            try FileManager.default.moveItem(at: legacyRoot, to: newRoot)
+            print("MReader migrated legacy cover cache to Application Support")
+        } catch {
+            print("MReader cover cache migration failed: \(error.localizedDescription)")
+        }
     }
 
     static func cachedCoverPath(sourceID: UUID, bookID: String) -> String? {
@@ -92,6 +109,10 @@ nonisolated enum RemotePageLoader {
 
     static func imageData(forRemotePageURL url: URL) async -> Data? {
         guard let request = RemotePageRequest(url: url) else { return nil }
+        if let offline = OfflinePageStore.data(for: request.cacheKey), !offline.isEmpty {
+            print("MReader offline page hit page=\(request.pageIndex) key=\(request.cacheKey.logDescription)")
+            return offline
+        }
         return await RemotePageCache.shared.data(for: request.cacheKey, priority: .current)
     }
 
@@ -175,28 +196,57 @@ enum RemotePagePriority: Sendable {
     case prefetch
 }
 
+nonisolated private func remoteCacheLimits() -> (memoryLimitMB: Int, diskLimitMB: Int) {
+    let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+    if ramGB >= 6 {
+        return (450, 2_048)
+    } else if ramGB >= 4 {
+        return (240, 1_024)
+    } else {
+        return (120, 512)
+    }
+}
+
+nonisolated private func remotePrefetchBudgetBytes() -> Int64 {
+    let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+    if ramGB >= 6 {
+        return 500 * 1024 * 1024
+    } else if ramGB >= 4 {
+        return 300 * 1024 * 1024
+    } else {
+        return 160 * 1024 * 1024
+    }
+}
+
 actor RemotePageCache {
     static let shared = RemotePageCache()
 
     private let memoryCache = NSCache<NSString, NSData>()
-    private let diskLimitBytes: Int64 = 200 * 1024 * 1024
+    private var cachedKeys: Set<String> = []
+    private let diskLimitBytes: Int64
+    private let memoryLimitMB: Int
     private var activeDownloads: [PageCacheKey: Task<Data?, Never>] = [:]
 
     private init() {
+        let limits = remoteCacheLimits()
+        memoryLimitMB = limits.memoryLimitMB
+        diskLimitBytes = Int64(limits.diskLimitMB) * 1024 * 1024
         memoryCache.countLimit = 0
-        memoryCache.totalCostLimit = 180 * 1024 * 1024
+        memoryCache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
     }
 
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {
         let cacheKey = memoryKey(for: key)
         if let cached = memoryCache.object(forKey: cacheKey as NSString) {
-            print("MReader remote cache memory hit page=\(key.pageIndex) key=\(key.logDescription) memoryLimitMB=180")
+            print("MReader remote cache memory hit page=\(key.pageIndex) key=\(key.logDescription) memoryLimitMB=\(memoryLimitMB)")
             return cached as Data
         }
 
         let diskURL = RemotePageLoader.pageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
         if let data = try? Data(contentsOf: diskURL), !data.isEmpty {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: diskURL.path)
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+            cachedKeys.insert(cacheKey)
             print("MReader remote cache disk hit page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
             return data
         }
@@ -221,6 +271,7 @@ actor RemotePageCache {
         activeDownloads[key] = nil
         if let data {
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+            cachedKeys.insert(cacheKey)
             print("MReader remote cache stored page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
         }
         return data
@@ -228,7 +279,32 @@ actor RemotePageCache {
 
     func clearMemoryCache() {
         memoryCache.removeAllObjects()
+        cachedKeys.removeAll()
         print("MReader remote cache memory cleared")
+    }
+
+    func retainMemoryPages(_ keysToKeep: Set<PageCacheKey>) {
+        let memoryKeysToKeep = Set(keysToKeep.map(memoryKey(for:)))
+        let keysToRemove = cachedKeys.subtracting(memoryKeysToKeep)
+        var evictedCount = 0
+        for key in keysToRemove {
+            memoryCache.removeObject(forKey: key as NSString)
+            cachedKeys.remove(key)
+            evictedCount += 1
+        }
+        if evictedCount > 0 {
+            print("MReader remote cache evicted \(evictedCount) old pages from memory")
+        }
+    }
+
+    func storeForDiagnostics(_ data: Data, for key: PageCacheKey) {
+        let cacheKey = memoryKey(for: key)
+        memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+        cachedKeys.insert(cacheKey)
+    }
+
+    func containsInMemoryForDiagnostics(_ key: PageCacheKey) -> Bool {
+        memoryCache.object(forKey: memoryKey(for: key) as NSString) != nil
     }
 
     func cancelDownloadsOutside(_ keys: Set<PageCacheKey>) {
@@ -297,7 +373,8 @@ actor RemotePageCache {
                 return nil
             }
             print("MReader remote cache network request page=\(key.pageIndex) key=\(key.logDescription)")
-            let client = try KomgaAPIClient(baseURLString: source.baseURL, apiKey: apiKey)
+            let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+            let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
             let data = try await client.pageData(bookID: key.bookID, pageIndex: key.pageIndex)
             if Task.isCancelled { return nil }
             try FileManager.default.createDirectory(at: diskURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -307,6 +384,7 @@ actor RemotePageCache {
             print("Komga 页面不存在 book=\(key.bookID) page=\(key.pageIndex)")
             return nil
         } catch {
+            KomgaProvider.invalidateResolvedURL(for: key.sourceID)
             print("Komga 页面加载失败 page=\(key.pageIndex): \(error.localizedDescription)")
             return nil
         }
@@ -318,8 +396,11 @@ final class RemotePagePrefetcher {
     static let shared = RemotePagePrefetcher()
 
     private var tasks: [URL: Task<Void, Never>] = [:]
+    private var previewTasks: [UUID: [URL: Task<Void, Never>]] = [:]
+    private var previewComicIDs: [UUID] = []
     private var lastDiskPruneDate = Date.distantPast
-    private let prefetchBudgetBytes: Int64 = 120 * 1024 * 1024
+    private let prefetchBudgetBytes: Int64 = remotePrefetchBudgetBytes()
+    private let previewBudgetBytes: Int64 = 60 * 1024 * 1024
     private let unknownPageEstimateBytes: Int64 = 24 * 1024 * 1024
 
     private init() {
@@ -327,11 +408,85 @@ final class RemotePagePrefetcher {
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
-        ) { _ in
-            Task {
-                await RemotePageCache.shared.clearMemoryCache()
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleMemoryWarning()
             }
         }
+    }
+
+    /// Handles a system memory warning. Besides clearing the decoded-page memory
+    /// cache, it cancels every in-flight preload/prefetch task (the current reader
+    /// window in `tasks` plus all `previewTasks`) and empties those dictionaries, so
+    /// a stale preload cannot repopulate the cache right after it was just cleared.
+    private func handleMemoryWarning() {
+        for task in tasks.values {
+            task.cancel()
+        }
+        tasks.removeAll()
+        cancelAllPreview()
+        Task {
+            await RemotePageCache.shared.clearMemoryCache()
+        }
+        print("MReader memory warning: cancelled in-flight preloads and cleared memory cache")
+    }
+
+    func previewPrefetch(comics: [ComicBook]) {
+        cancelAllPreview()
+        let remoteComics = comics.prefix(3).filter { $0.sourceType == .komga || $0.sourceType == .opds }
+        previewComicIDs = remoteComics.map(\.id)
+        for comic in remoteComics {
+            prefetchPreviewPages(for: comic)
+        }
+        print("MReader preview prefetch started for \(previewComicIDs.count) comics")
+    }
+
+    private func prefetchPreviewPages(for comic: ComicBook) {
+        guard let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID ?? (comic.sourceType == .opds ? comic.remoteCoverID : nil) else { return }
+        let currentPage = comic.currentPageIndex
+        let indices = [currentPage - 1, currentPage, currentPage + 1, currentPage + 2, currentPage + 3].filter { $0 >= 0 && $0 < comic.totalPages }
+        var estimatedBytes: Int64 = 0
+        var comicTasks: [URL: Task<Void, Never>] = [:]
+        for pageIndex in indices {
+            let key = PageCacheKey(sourceID: sourceID, bookID: bookID, pageIndex: pageIndex)
+            let cost = unknownPageEstimateBytes
+            guard estimatedBytes + cost <= previewBudgetBytes / 3 else { break }
+            estimatedBytes += cost
+            let task = Task(priority: .utility) { [key] in
+                _ = await RemotePageCache.shared.data(for: key, priority: .prefetch)
+            }
+            let pageURL = URL(string: "mreader-komga-page://\(sourceID.uuidString)/\(RemoteImageLoader.safeFileName(bookID))/\(pageIndex)")!
+            comicTasks[pageURL] = task
+        }
+        previewTasks[comic.id] = comicTasks
+    }
+
+    func cancelPreviewForNonOpened(comicID: UUID) {
+        for id in previewComicIDs where id != comicID {
+            cancelPreview(comicID: id)
+        }
+        previewComicIDs = previewComicIDs.filter { $0 == comicID }
+        print("MReader preview prefetch cancelled non-opened, kept comicID=\(comicID)")
+    }
+
+    func cancelAllPreview() {
+        for (_, comicTasks) in previewTasks {
+            for task in comicTasks.values {
+                task.cancel()
+            }
+        }
+        previewTasks.removeAll()
+        previewComicIDs.removeAll()
+    }
+
+    private func cancelPreview(comicID: UUID) {
+        guard let comicTasks = previewTasks[comicID] else { return }
+        for task in comicTasks.values {
+            task.cancel()
+        }
+        previewTasks.removeValue(forKey: comicID)
     }
 
     func updateWindow(currentPageIndex: Int, pages: [ComicPage], readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int = 1) {
@@ -358,6 +513,7 @@ final class RemotePagePrefetcher {
 
         Task {
             await RemotePageCache.shared.cancelDownloadsOutside(keepKeys)
+            await RemotePageCache.shared.retainMemoryPages(keepKeys)
         }
 
         print("MReader remote prefetch current=\(currentPageIndex) candidatePages=\(candidateIndices) budgetedPages=\(budgetedIndices) budgetBytes=\(prefetchBudgetBytes) mode=\(readingMode.rawValue) direction=\(readingDirection.rawValue)")
@@ -379,6 +535,7 @@ final class RemotePagePrefetcher {
     }
 
     func cancelAll() {
+        cancelAllPreview()
         guard !tasks.isEmpty else { return }
         let pages = tasks.keys.compactMap { RemotePageLoader.pageIndex(forRemotePageURL: $0) }.sorted()
         for task in tasks.values {
@@ -389,20 +546,32 @@ final class RemotePagePrefetcher {
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
-        let forwardStep: Int
-        if readingMode == .continuousScroll || readingMode == .infiniteScroll {
-            forwardStep = scrollDirection >= 0 ? 1 : -1
-        } else {
-            forwardStep = readingDirection == .rightToLeft ? -1 : 1
-        }
-        let backwardStep = -forwardStep
-        let offsets = [0, backwardStep, backwardStep * 2, forwardStep, forwardStep * 2, forwardStep * 3, forwardStep * 4, forwardStep * 5]
-        var seen = Set<Int>()
-        return offsets.compactMap { offset in
-            let index = currentPageIndex + offset
-            guard index >= 0, index < pageCount, !seen.contains(index) else { return nil }
-            seen.insert(index)
-            return index
+        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
+        return ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: currentPageIndex,
+            pageCount: pageCount,
+            readingDirection: readingDirection,
+            readingMode: readingMode,
+            scrollDirection: scrollDirection,
+            forwardCount: isContinuous ? 10 : 7,
+            backwardCount: isContinuous ? 1 : 2,
+            includesCurrentPage: true
+        )
+    }
+
+    func prewarm(pages: [ComicPage], currentPageIndex: Int, readingDirection: ReadingDirection, readingMode: ReadingMode) {
+        guard pages.indices.contains(currentPageIndex),
+              RemotePageLoader.isRemotePageURL(pages[currentPageIndex].url) else { return }
+        let candidateIndices = windowIndices(currentPageIndex: currentPageIndex, pageCount: pages.count, readingDirection: readingDirection, readingMode: readingMode, scrollDirection: 1)
+        let urls = candidateIndices.prefix(5).map { pages[$0].url }
+        for url in urls {
+            guard tasks[url] == nil else { continue }
+            tasks[url] = Task(priority: .userInitiated) { [url] in
+                await RemotePageLoader.prefetchImageData(forRemotePageURL: url)
+                await MainActor.run {
+                    self.tasks[url] = nil
+                }
+            }
         }
     }
 

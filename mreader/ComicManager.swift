@@ -1,3 +1,4 @@
+import CryptoKit
 import PDFKit
 import SwiftUI
 import ZIPFoundation
@@ -180,6 +181,15 @@ class ComicManager {
                     logger.error("load-archive-failed path=\(url.lastPathComponent, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                     return nil
                 }
+            }
+            if url.pathExtension.lowercased() == "pdf" {
+                // PDF 章节：原 PDF 文件保留，仅把页面按需渲染到临时缓存后读取，绝不改写或删除原文件。
+                guard let extractedURL = extractImagesFromPDFSynchronously(url) else { return nil }
+                let sortedURLs = getAllImages(from: extractedURL)
+                    .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+                let pages = sortedURLs.enumerated().map { ComicPage(index: $0, url: $1) }
+                logMemory("load-pages-end \(url.lastPathComponent) count=\(pages.count)")
+                return pages.isEmpty ? nil : LoadResult(url: url, accessToken: accessToken, pages: pages)
             }
             guard let pageSourceURL = pageSourceURL(for: url) else {
                 return nil
@@ -621,20 +631,46 @@ class ComicManager {
         }.value
     }
 
-    nonisolated private static func importPDFAlreadyInLibrary(_ pdfURL: URL) -> ImportResult? {
-        let extractedURL = extractImagesFromPDFSynchronously(pdfURL)
-        guard let extractedURL else { return nil }
-        let libraryRoot = pdfURL.deletingLastPathComponent()
-        let targetFolder = uniqueFolder(in: libraryRoot, preferredName: sanitizedFolderName(pdfURL.deletingPathExtension().lastPathComponent))
-        do {
-            try FileManager.default.moveItem(at: extractedURL, to: targetFolder)
-        } catch {
-            try? FileManager.default.removeItem(at: extractedURL)
-            return nil
+    /// 只读地把原 PDF 的某一页渲染为 JPEG Data。仅读取源 PDF，绝不改写或删除原文件。
+    nonisolated private static func renderPDFPageJPEGData(from pdfURL: URL, pageIndex: Int, scale: CGFloat = 1.5) -> Data? {
+        guard let document = PDFDocument(url: pdfURL),
+              document.pageCount > 0,
+              let page = document.page(at: pageIndex) else { return nil }
+        let pageRect = page.bounds(for: .mediaBox)
+        let size = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let image = renderer.image { ctx in
+            UIColor.white.set()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            ctx.cgContext.translateBy(x: 0.0, y: size.height)
+            ctx.cgContext.scaleBy(x: scale, y: -scale)
+            page.draw(with: .mediaBox, to: ctx.cgContext)
         }
-        try? FileManager.default.removeItem(at: pdfURL)
+        return image.jpegData(compressionQuality: 0.85)
+    }
 
-        return importResultForLocalFolder(targetFolder)
+    /// 为本地库中的 PDF 生成“只读”章节结果：保留原 PDF 文件与路径，章节按 PDF 类型登记，
+    /// 阅读时由 loadPages 通过 PDFDocument(url:) 按页渲染到临时缓存读取。扫描/封面重建过程绝不删除或改写原 PDF。
+    nonisolated private static func pdfChapterResult(from pdfURL: URL) -> ImportResult? {
+        guard let document = PDFDocument(url: pdfURL), document.pageCount > 0 else { return nil }
+        guard let bookmark = createBookmark(for: pdfURL) else { return nil }
+        let coverPath = cacheCoverData(
+            renderPDFPageJPEGData(from: pdfURL, pageIndex: 0),
+            cacheKey: coverCacheKey(for: pdfURL, suffix: "pdf-cover"),
+            forceOverwrite: true
+        )
+        return ImportResult(
+            title: pdfURL.deletingPathExtension().lastPathComponent,
+            pagesCount: document.pageCount,
+            bookmarkData: bookmark,
+            coverImagePath: coverPath,
+            fileSize: folderSize(pdfURL),
+            libraryPath: pdfURL.path,
+            chapterTypeRaw: ChapterType.pdf.rawValue,
+            chapterPath: pdfURL.path
+        )
     }
 
     nonisolated private static func extractImagesFromPDFSynchronously(_ pdfURL: URL) -> URL? {
@@ -887,8 +923,12 @@ class ComicManager {
                 return cacheCoverData(data, cacheKey: coverCacheKey(for: url, suffix: firstEntry.path), forceOverwrite: true)
             }
             if url.pathExtension.lowercased() == "pdf" {
-                guard let converted = importPDFAlreadyInLibrary(url) else { return nil }
-                return converted.coverImagePath
+                // 封面重建同样只读：仅渲染原 PDF 首页到封面缓存，绝不删除或改写原文件。
+                return cacheCoverData(
+                    renderPDFPageJPEGData(from: url, pageIndex: 0),
+                    cacheKey: coverCacheKey(for: url, suffix: "pdf-cover"),
+                    forceOverwrite: true
+                )
             }
             return cacheCoverImage(from: firstImageURL(from: url), cacheKey: coverCacheKey(for: url, suffix: "folder"), forceOverwrite: true)
         } catch {
@@ -1086,12 +1126,13 @@ class ComicManager {
             chapterType = .folder
             pageSourceURL = url
         } else if ext == "pdf" {
-            guard let converted = importPDFAlreadyInLibrary(url) else { return nil }
+            // 扫描只读：PDF 作为 PDF 章节保留原文件与路径，不转换、不删除原 PDF。
+            guard let result = pdfChapterResult(from: url) else { return nil }
             return ScannedChapter(
-                title: converted.title,
-                chapterType: .folder,
-                path: converted.libraryPath,
-                importResult: converted
+                title: result.title,
+                chapterType: .pdf,
+                path: result.libraryPath,
+                importResult: result
             )
         } else if supportedArchiveExtensions.contains(ext) {
             guard canReadArchiveExtension(ext) else {
@@ -1546,6 +1587,13 @@ class ComicManager {
         throw ArchiveReadError.noImages
     }
 
+    nonisolated private static func archiveCacheKey(path: String, fileSize: UInt64, modified: TimeInterval) -> String {
+        // 持久缓存 key 必须是跨启动稳定的标识：不能用 hashValue，改用 SHA256(path+size+modified)
+        let raw = "\(path)#\(fileSize)#\(Int(modified))"
+        let digest = SHA256.hash(data: Data(raw.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     nonisolated private static func compatibleZIPArchive(
         url: URL,
         pathEncoding: String.Encoding?
@@ -1572,7 +1620,7 @@ class ComicManager {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = UInt(bitPattern: url.standardizedFileURL.path.hashValue)
+        let key = archiveCacheKey(path: url.standardizedFileURL.path, fileSize: fileSize, modified: modified)
         let cacheRoot = archiveCompatibilityCacheRoot()
         try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
         let normalizedURL = cacheRoot.appendingPathComponent(
@@ -1652,7 +1700,7 @@ class ComicManager {
         let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = UInt(bitPattern: sourceURL.standardizedFileURL.path.hashValue)
+        let key = archiveCacheKey(path: sourceURL.standardizedFileURL.path, fileSize: fileSize, modified: modified)
         let cacheRoot = archiveCompatibilityCacheRoot()
         try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
         let patchedURL = cacheRoot.appendingPathComponent(

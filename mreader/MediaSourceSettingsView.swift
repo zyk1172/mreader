@@ -8,19 +8,30 @@ struct MediaSourceSettingsView: View {
     @State private var sourceType = MediaSourceType.komga
     @State private var name = "Komga"
     @State private var baseURL = ""
+    @State private var lanURL = ""
     @State private var username = ""
     @State private var apiKey = ""
     @State private var isTesting = false
     @State private var statusMessage: String?
     @State private var statusIsError = false
     @State private var hiddenComics: [HiddenKomgaComic] = []
+    @State private var editingSource: MediaSource?
+    @State private var editName = ""
+    @State private var editBaseURL = ""
+    @State private var editLanURL = ""
+    @State private var editUsername = ""
+    @State private var editApiKey = ""
+    @State private var isEditing = false
+    @State private var editStatusMessage: String?
+    @State private var editStatusIsError = false
+    @State private var sourcePendingRemoval: MediaSource?
 
     var body: some View {
         NavigationStack {
             Form {
-                Section(header: Text("已添加媒体库")) {
+                Section(header: Text("mediaSources.added".localized)) {
                     if sources.filter({ $0.type == .komga || $0.type == .opds }).isEmpty {
-                        Text("还没有远程漫画服务器")
+                        Text("mediaSources.noServers".localized)
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(sources.filter { $0.type == .komga || $0.type == .opds }) { source in
@@ -38,6 +49,12 @@ struct MediaSourceSettingsView: View {
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                             .textSelection(.enabled)
+                                        if let lan = source.lanURL, !lan.isEmpty {
+                                            Text("mediaSources.lanPrefix".localized + lan)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .textSelection(.enabled)
+                                        }
                                     }
                                     Spacer()
                                     Toggle("", isOn: enabledBinding(for: source))
@@ -47,14 +64,21 @@ struct MediaSourceSettingsView: View {
                                     Button {
                                         refresh(source)
                                     } label: {
-                                        Label("刷新", systemImage: "arrow.clockwise")
+                                        Label("mediaSources.refresh".localized, systemImage: "arrow.clockwise")
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    Button {
+                                        startEditing(source)
+                                    } label: {
+                                        Label("mediaSources.edit".localized, systemImage: "pencil")
                                     }
                                     .buttonStyle(.bordered)
 
                                     Button(role: .destructive) {
-                                        remove(source)
+                                        sourcePendingRemoval = source
                                     } label: {
-                                        Label("移除", systemImage: "trash")
+                                        Label("mediaSources.remove".localized, systemImage: "trash")
                                     }
                                     .buttonStyle(.bordered)
                                 }
@@ -65,12 +89,12 @@ struct MediaSourceSettingsView: View {
                 }
 
                 Section(
-                    header: Text("添加远程服务器"),
+                    header: Text("mediaSources.add".localized),
                     footer: Text(sourceType == .komga
-                        ? "Komga API Key 仅保存到 Keychain。"
-                        : "OPDS 支持 Atom/JSON 目录。填写用户名时使用 Basic 认证；用户名留空时凭据作为 Bearer Token。")
+                        ? "mediaSources.komgaDescription".localized
+                        : "mediaSources.opdsDescription".localized)
                 ) {
-                    Picker("类型", selection: $sourceType) {
+                    Picker("mediaSources.type".localized, selection: $sourceType) {
                         Text("Komga").tag(MediaSourceType.komga)
                         Text("OPDS").tag(MediaSourceType.opds)
                     }
@@ -79,25 +103,33 @@ struct MediaSourceSettingsView: View {
                         name = newValue == .opds ? "OPDS" : "Komga"
                         username = ""
                         apiKey = ""
+                        lanURL = ""
                         statusMessage = nil
                     }
-                    TextField("显示名称", text: $name)
+                    TextField("mediaSources.name".localized, text: $name)
                         .textInputAutocapitalization(.never)
                     TextField(
                         sourceType == .komga
-                            ? "服务器地址，例如 http://192.168.2.240:25600"
-                            : "OPDS 地址，例如 https://example.com/opds",
+                            ? "mediaSources.serverUrl".localized
+                            : "mediaSources.serverUrl".localized,
                         text: $baseURL
                     )
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    TextField(
+                        "mediaSources.lanUrl".localized,
+                        text: $lanURL
+                    )
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     if sourceType == .opds {
-                        TextField("用户名（Bearer Token 模式可留空）", text: $username)
+                        TextField("mediaSources.username".localized, text: $username)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
-                    SecureField(sourceType == .komga ? "API Key" : "密码或 Token", text: $apiKey)
+                    SecureField(sourceType == .komga ? "mediaSources.apiKey".localized : "mediaSources.password".localized, text: $apiKey)
                         .textContentType(.password)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -108,7 +140,7 @@ struct MediaSourceSettingsView: View {
                         if isTesting {
                             ProgressView()
                         } else {
-                            Label("测试连接并保存", systemImage: "checkmark.shield")
+                            Label("mediaSources.testAndSave".localized, systemImage: "checkmark.shield")
                         }
                     }
                     .disabled(
@@ -124,9 +156,9 @@ struct MediaSourceSettingsView: View {
                     }
                 }
 
-                Section(header: Text("已隐藏的 Komga 漫画")) {
+                Section(header: Text("mediaSources.hiddenComics".localized)) {
                     if hiddenComics.isEmpty {
-                        Text("暂无隐藏的 Komga 漫画")
+                        Text("mediaSources.noHidden".localized)
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(hiddenComics) { item in
@@ -139,7 +171,7 @@ struct MediaSourceSettingsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button("取消隐藏") {
+                                Button("mediaSources.unhide".localized) {
                                     unhide(item)
                                 }
                                 .buttonStyle(.bordered)
@@ -149,16 +181,90 @@ struct MediaSourceSettingsView: View {
                     }
                 }
             }
-            .navigationTitle("远程漫画媒体库")
+            .navigationTitle("mediaSources.title".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("完成") {
+                Button("nav.done".localized) {
                     dismiss()
                 }
             }
             .onAppear {
                 reloadSources()
                 reloadHiddenComics()
+            }
+            .alert(item: $sourcePendingRemoval) { source in
+                Alert(
+                    title: Text("mediaSources.removeConfirmTitle".localized),
+                    message: Text("mediaSources.removeConfirmMessage".localizedFormat(source.name)),
+                    primaryButton: .destructive(Text("mediaSources.remove".localized)) {
+                        remove(source)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .sheet(item: $editingSource) { source in
+                NavigationStack {
+                    Form {
+                        Section(header: Text("mediaSources.edit".localized)) {
+                            TextField("mediaSources.name".localized, text: $editName)
+                                .textInputAutocapitalization(.never)
+                            TextField(
+                                source.type == .komga
+                                    ? "mediaSources.serverUrl".localized
+                                    : "mediaSources.serverUrl".localized,
+                                text: $editBaseURL
+                            )
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            TextField(
+                                "mediaSources.lanUrl".localized,
+                                text: $editLanURL
+                            )
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            if source.type == .opds {
+                                TextField("mediaSources.username".localized, text: $editUsername)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            SecureField(source.type == .komga ? "mediaSources.apiKey".localized : "mediaSources.password".localized, text: $editApiKey)
+                                .textContentType(.password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+
+                            Button {
+                                testAndSaveEdit(source: source)
+                            } label: {
+                                if isEditing {
+                                    ProgressView()
+                                } else {
+                                    Label("mediaSources.testAndSave".localized, systemImage: "checkmark.shield")
+                                }
+                            }
+                            .disabled(
+                                isEditing
+                                    || editBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            )
+
+                            if let editStatusMessage {
+                                Text(editStatusMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(editStatusIsError ? .red : .secondary)
+                            }
+                        }
+                    }
+                    .navigationTitle("mediaSources.edit".localized)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("nav.cancel".localized) {
+                                editingSource = nil
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -183,6 +289,7 @@ struct MediaSourceSettingsView: View {
         statusIsError = false
         let sourceName = name
         let server = baseURL
+        let lan = lanURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let account = username
         let key = apiKey
         let selectedSourceType = sourceType
@@ -193,8 +300,8 @@ struct MediaSourceSettingsView: View {
                 switch selectedSourceType {
                 case .komga:
                     let libraries = try await KomgaProvider.testConnection(baseURL: server, apiKey: key)
-                    source = try await KomgaProvider.addKomgaSource(name: sourceName, baseURL: server, apiKey: key)
-                    resultDescription = "发现 \(libraries.count) 个 Komga 书库"
+                    source = try await KomgaProvider.addKomgaSource(name: sourceName, baseURL: server, apiKey: key, lanURL: lan.isEmpty ? nil : lan)
+                    resultDescription = "mediaSources.discoveredKomga".localizedFormat(libraries.count)
                 case .opds:
                     let publicationCount = try await OPDSProvider.testConnection(
                         baseURL: server,
@@ -205,17 +312,19 @@ struct MediaSourceSettingsView: View {
                         name: sourceName,
                         baseURL: server,
                         username: account,
-                        credential: key
+                        credential: key,
+                        lanURL: lan.isEmpty ? nil : lan
                     )
-                    resultDescription = "发现 \(publicationCount) 本 OPDS 出版物"
+                    resultDescription = "mediaSources.discoveredOpds".localizedFormat(publicationCount)
                 case .local:
                     throw MediaSourceError.invalidResponse
                 }
                 reloadSources()
                 reloadHiddenComics()
                 apiKey = ""
+                lanURL = ""
                 statusIsError = false
-                statusMessage = "连接成功：\(resultDescription)，已保存 \(source.name)"
+                statusMessage = "mediaSources.connectSuccess".localizedFormat(resultDescription, source.name)
                 HapticManager.shared.play(.success)
                 let syncedCount: Int
                 if selectedSourceType == .opds {
@@ -223,7 +332,7 @@ struct MediaSourceSettingsView: View {
                 } else {
                     syncedCount = await library.syncKomgaSources()
                 }
-                statusMessage = "\(resultDescription)，已同步 \(syncedCount) 本漫画"
+                statusMessage = "mediaSources.syncComplete".localizedFormat(resultDescription, syncedCount)
             } catch {
                 statusIsError = true
                 statusMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -238,12 +347,19 @@ struct MediaSourceSettingsView: View {
         Task {
             let syncedCount: Int
             if source.type == .opds {
-                syncedCount = await library.syncOPDSSources()
+                syncedCount = await library.syncOPDSSource(id: source.id)
             } else {
-                syncedCount = await library.syncKomgaSources()
+                syncedCount = await library.syncKomgaSource(id: source.id)
             }
-            statusIsError = false
-            statusMessage = "刷新完成：已同步 \(syncedCount) 本 \(source.type == .opds ? "OPDS" : "Komga") 漫画"
+            if let error = library.mediaSyncErrors[source.type] {
+                statusIsError = true
+                statusMessage = error
+                HapticManager.shared.play(.error)
+            } else {
+                statusIsError = false
+                statusMessage = "mediaSources.refreshComplete".localizedFormat(syncedCount, source.type == .opds ? "OPDS" : "Komga")
+                HapticManager.shared.play(.success)
+            }
             reloadSources()
             reloadHiddenComics()
         }
@@ -279,5 +395,73 @@ struct MediaSourceSettingsView: View {
         KomgaProvider.unhideComic(key: item.key)
         reloadHiddenComics()
         library.refreshVisibility()
+    }
+
+    private func startEditing(_ source: MediaSource) {
+        editName = source.name
+        editBaseURL = source.baseURL
+        editLanURL = source.lanURL ?? ""
+        editUsername = source.username ?? ""
+        editApiKey = ""
+        editStatusMessage = nil
+        editStatusIsError = false
+        editingSource = source
+    }
+
+    private func testAndSaveEdit(source: MediaSource) {
+        isEditing = true
+        editStatusMessage = nil
+        editStatusIsError = false
+        let editedName = editName
+        let editedBaseURL = editBaseURL
+        let editedLanURL = editLanURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editedUsername = editUsername
+        let editedKey = editApiKey
+        Task {
+            do {
+                var updatedSource = source
+                updatedSource.name = editedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                updatedSource.baseURL = editedBaseURL
+                updatedSource.lanURL = editedLanURL.isEmpty ? nil : editedLanURL
+                if source.type == .opds {
+                    updatedSource.username = editedUsername.isEmpty ? nil : editedUsername
+                }
+                if !editedKey.isEmpty {
+                    try KomgaProvider.saveAPIKey(editedKey, for: source.id)
+                }
+                switch source.type {
+                case .komga:
+                    let key = editedKey.isEmpty ? (KomgaProvider.apiKey(for: source.id) ?? "") : editedKey
+                    let client = try KomgaAPIClient(baseURLString: editedBaseURL, apiKey: key)
+                    _ = try await client.testConnection()
+                case .opds:
+                    let credential = editedKey.isEmpty ? (KomgaProvider.apiKey(for: source.id) ?? "") : editedKey
+                    _ = try await OPDSProvider.testConnection(
+                        baseURL: editedBaseURL,
+                        username: editedUsername.isEmpty ? source.username : editedUsername,
+                        credential: credential
+                    )
+                case .local:
+                    break
+                }
+                try KomgaProvider.updateSource(updatedSource)
+                reloadSources()
+                reloadHiddenComics()
+                if source.type == .opds {
+                    _ = await library.syncOPDSSources()
+                } else if source.type == .komga {
+                    _ = await library.syncKomgaSources()
+                }
+                editStatusIsError = false
+                editStatusMessage = "mediaSources.saveSuccess".localized
+                HapticManager.shared.play(.success)
+                editingSource = nil
+            } catch {
+                editStatusIsError = true
+                editStatusMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                HapticManager.shared.play(.error)
+            }
+            isEditing = false
+        }
     }
 }

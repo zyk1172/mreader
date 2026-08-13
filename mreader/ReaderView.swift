@@ -23,9 +23,9 @@ struct ReaderContainerView: View {
                     onComicUpdate(updatedComic)
                 }
             } else if loadFailed {
-                ContentUnavailableView("加载失败", systemImage: "exclamationmark.triangle")
+                ContentUnavailableView("reader.loadFailed".localized, systemImage: "exclamationmark.triangle")
             } else {
-                ProgressView("正在解析...")
+                ProgressView("reader.parsing".localized)
             }
         }
         .onAppear {
@@ -45,10 +45,18 @@ struct ReaderContainerView: View {
                 }
                 if let result {
                     if comic.sourceType == .komga,
-                       let remotePage = try? await KomgaProvider.remoteReadProgress(for: comic),
-                       remotePage > comic.currentPageIndex {
+                       let remoteProgress = try? await KomgaProvider.remoteReadingProgressSnapshot(for: comic) {
                         let maxIndex = max(0, result.pages.count - 1)
-                        comic.currentPageIndex = min(remotePage, maxIndex)
+                        comic.furthestPageIndex = min(
+                            max(comic.furthestPageIndex, remoteProgress.pageIndex),
+                            maxIndex
+                        )
+                        if remoteProgress.updatedAt > comic.progressUpdatedAt {
+                            comic.currentPageIndex = min(remoteProgress.pageIndex, maxIndex)
+                            comic.progressUpdatedAt = remoteProgress.updatedAt
+                            comic.scrollProgress = 0
+                            comic.scrollPageProgress = 0
+                        }
                         onComicUpdate(comic)
                     }
                     if comic.sourceType == .opds, comic.totalPages != result.pages.count {
@@ -57,6 +65,7 @@ struct ReaderContainerView: View {
                         comic.currentPageIndex = min(comic.currentPageIndex, max(0, result.pages.count - 1))
                         onComicUpdate(comic)
                     }
+                    await prewarmInitialScrollingPage(in: result)
                     manager.applyLoadedPages(result)
                     isLoaded = true
                 } else {
@@ -71,6 +80,21 @@ struct ReaderContainerView: View {
             }
         }
     }
+
+    private func prewarmInitialScrollingPage(in result: ComicManager.LoadResult) async {
+        let mode = ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
+        guard mode == .continuousScroll || mode == .infiniteScroll,
+              !result.pages.isEmpty else {
+            return
+        }
+        let index = min(max(comic.currentPageIndex, 0), result.pages.count - 1)
+        let start = ContinuousClock.now
+        _ = await ReaderImageCache.shared.loadImage(
+            for: result.pages[index].url,
+            maxPixelSize: 8192
+        )
+        print("MReader initial scrolling page prewarmed page=\(index) elapsed=\(start.duration(to: .now))")
+    }
 }
 
 enum ReadingMode: String, CaseIterable {
@@ -79,6 +103,7 @@ enum ReadingMode: String, CaseIterable {
     case continuousScroll
     case infiniteScroll
     case doublePage
+    case guidedPanel
 }
 
 enum ReadingDirection: String, CaseIterable {
@@ -138,20 +163,88 @@ private struct InitialReadingPreset {
     )
 }
 
+nonisolated private func deviceMemoryBytes() -> UInt64 {
+    ProcessInfo.processInfo.physicalMemory
+}
+
+nonisolated private func cacheLimits() -> (memoryLimitMB: Int, preloadMB: Int) {
+    let ramGB = Double(deviceMemoryBytes()) / (1024 * 1024 * 1024)
+    if ramGB >= 6 {
+        return (750, 600)
+    } else if ramGB >= 4 {
+        return (340, 260)
+    } else {
+        return (180, 130)
+    }
+}
+
+private actor ReaderImageDecodeLimiter {
+    static let shared = ReaderImageDecodeLimiter(maximumConcurrentDecodes: 2)
+
+    private let maximumConcurrentDecodes: Int
+    private var activeDecodes = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(maximumConcurrentDecodes: Int) {
+        self.maximumConcurrentDecodes = max(1, maximumConcurrentDecodes)
+    }
+
+    func acquire() async {
+        if activeDecodes < maximumConcurrentDecodes {
+            activeDecodes += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            activeDecodes = max(0, activeDecodes - 1)
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 @MainActor
 private final class ReaderImageCache {
     static let shared = ReaderImageCache()
 
+    private struct PreloadCandidate {
+        let url: URL
+        let key: String
+        let cost: Int
+        let maxPixelSize: CGFloat
+    }
+
     private let cache = NSCache<NSString, UIImage>()
-    private var loadingKeys: Set<String> = []
+    private var inFlightLoads: [String: Task<UIImage?, Never>] = [:]
     private var loadingCosts: [String: Int] = [:]
-    private let preloadBudgetBytes = 220 * 1024 * 1024
+    private var scheduledPreload: Task<Void, Never>?
+    private var preloadQueue: [PreloadCandidate] = []
+    private var activePreloadCount = 0
+    private var maximumConcurrentPreloads = 2
+    private var preloadKeys: Set<String> = []
+    private let preloadBudgetBytes: Int
 
     private init() {
+        let limits = cacheLimits()
+        preloadBudgetBytes = limits.preloadMB * 1024 * 1024
         cache.countLimit = 0
-        cache.totalCostLimit = 260 * 1024 * 1024
+        cache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task {
+                await ReaderImageCache.clearSharedMemoryCache()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: .mreaderClearReaderMemoryCaches,
             object: nil,
             queue: .main
         ) { _ in
@@ -170,54 +263,122 @@ private final class ReaderImageCache {
         if let cached = cache.object(forKey: key as NSString) {
             return cached
         }
-        let image = await Task.detached(priority: .userInitiated) {
+        if let existingTask = inFlightLoads[key] {
+            return await existingTask.value
+        }
+
+        let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
+        let task = Task.detached(priority: .userInitiated) {
             await decodeReaderImage(from: url, maxPixelSize: maxPixelSize)
-        }.value
+        }
+        inFlightLoads[key] = task
+        loadingCosts[key] = estimatedCost
+        let image = await task.value
+        inFlightLoads[key] = nil
+        loadingCosts[key] = nil
         if let image {
             cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
         }
+        drainPreloadQueue()
         return image
     }
 
-    func preload(_ urls: [URL], maxPixelSize: CGFloat = 4096) {
-        var estimatedBytes = loadingCosts.values.reduce(0, +)
-        guard estimatedBytes < preloadBudgetBytes else { return }
+    func preload(
+        _ urls: [URL],
+        maxPixelSize: CGFloat = 4096,
+        maximumConcurrent: Int = 2,
+        delay: TimeInterval = 0.25
+    ) {
+        scheduledPreload?.cancel()
+        var seenURLs = Set<URL>()
+        let uniqueURLs = urls.filter { seenURLs.insert($0).inserted }
+        scheduledPreload = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.startPreloading(
+                uniqueURLs,
+                maxPixelSize: maxPixelSize,
+                maximumConcurrent: maximumConcurrent
+            )
+        }
+    }
+
+    private func startPreloading(_ urls: [URL], maxPixelSize: CGFloat, maximumConcurrent: Int) {
+        let desiredKeys = Set(urls.map { cacheKey(for: $0, maxPixelSize: maxPixelSize) })
+        for staleKey in preloadKeys.subtracting(desiredKeys) {
+            inFlightLoads[staleKey]?.cancel()
+        }
+
         let candidates = urls
             .map { url in
-                (url, cacheKey(for: url, maxPixelSize: maxPixelSize), estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize))
+                PreloadCandidate(
+                    url: url,
+                    key: cacheKey(for: url, maxPixelSize: maxPixelSize),
+                    cost: estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize),
+                    maxPixelSize: maxPixelSize
+                )
             }
-            .filter { cachedImage(for: $0.0, maxPixelSize: maxPixelSize) == nil && !loadingKeys.contains($0.1) }
-            .filter { _, _, size in
-                let shouldStart = estimatedBytes == 0 || estimatedBytes + size <= preloadBudgetBytes
-                if shouldStart {
-                    estimatedBytes += size
-                }
-                return shouldStart
+            .filter { cachedImage(for: $0.url, maxPixelSize: maxPixelSize) == nil && inFlightLoads[$0.key] == nil }
+
+        preloadQueue = candidates
+        maximumConcurrentPreloads = max(1, maximumConcurrent)
+        let queuedBytes = candidates.reduce(0) { $0 + $1.cost }
+        print("MReader decoded image preload budget=\(preloadBudgetBytes) queuedBytes=\(queuedBytes) queued=\(candidates.count)")
+        drainPreloadQueue()
+    }
+
+    private func drainPreloadQueue() {
+        while activePreloadCount < maximumConcurrentPreloads, !preloadQueue.isEmpty {
+            let candidate = preloadQueue[0]
+            guard cache.object(forKey: candidate.key as NSString) == nil,
+                  inFlightLoads[candidate.key] == nil else {
+                preloadQueue.removeFirst()
+                continue
             }
+            let activeBytes = loadingCosts.values.reduce(0, +)
+            guard activeBytes == 0 || activeBytes + candidate.cost <= preloadBudgetBytes else {
+                return
+            }
+            preloadQueue.removeFirst()
 
-        guard !candidates.isEmpty else { return }
-        print("MReader decoded image preload budget=\(preloadBudgetBytes) selectedBytes=\(estimatedBytes) selected=\(candidates.count)")
-
-        for (url, key, cost) in candidates {
-            loadingKeys.insert(key)
-            loadingCosts[key] = cost
-            Task { @MainActor in
-                let image = await Task.detached(priority: .utility) {
-                    await decodeReaderImage(from: url, maxPixelSize: maxPixelSize)
-                }.value
-                loadingKeys.remove(key)
-                loadingCosts[key] = nil
+            activePreloadCount += 1
+            preloadKeys.insert(candidate.key)
+            loadingCosts[candidate.key] = candidate.cost
+            let task: Task<UIImage?, Never> = Task.detached(priority: .utility) {
+                guard !Task.isCancelled else { return nil }
+                let image = await decodeReaderImage(from: candidate.url, maxPixelSize: candidate.maxPixelSize)
+                return Task.isCancelled ? nil : image
+            }
+            inFlightLoads[candidate.key] = task
+            Task { @MainActor [weak self] in
+                let image = await task.value
+                guard let self else { return }
+                self.inFlightLoads[candidate.key] = nil
+                self.loadingCosts[candidate.key] = nil
+                self.preloadKeys.remove(candidate.key)
+                self.activePreloadCount = max(0, self.activePreloadCount - 1)
                 if let image {
-                    cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
+                    self.cache.setObject(image, forKey: candidate.key as NSString, cost: image.cacheCost)
                 }
+                self.drainPreloadQueue()
             }
         }
     }
 
     func clearMemoryCache() {
+        scheduledPreload?.cancel()
+        scheduledPreload = nil
+        preloadQueue.removeAll()
+        for key in preloadKeys {
+            inFlightLoads[key]?.cancel()
+            inFlightLoads[key] = nil
+            loadingCosts[key] = nil
+        }
+        preloadKeys.removeAll()
+        activePreloadCount = 0
         cache.removeAllObjects()
-        loadingKeys.removeAll()
-        loadingCosts.removeAll()
         print("MReader decoded image cache memory cleared")
     }
 
@@ -270,7 +431,8 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
     } else {
         remoteData = nil
     }
-    return autoreleasepool { () -> UIImage? in
+    await ReaderImageDecodeLimiter.shared.acquire()
+    let image = autoreleasepool { () -> UIImage? in
         let source: CGImageSource?
         if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
             source = CGImageSourceCreateWithData(data as CFData, nil)
@@ -292,6 +454,8 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         }
         return UIImage(contentsOfFile: url.path)
     }
+    await ReaderImageDecodeLimiter.shared.release()
+    return image
 }
 
 nonisolated private func imagePixelSize(from data: Data) -> CGSize? {
@@ -326,10 +490,15 @@ struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     
-    @AppStorage("translation_target_language") private var translationTargetLanguage = "中文"
+    @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
+    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
+    @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
+    @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
+    @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @State private var currentPageIndex: Int
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
@@ -337,7 +506,6 @@ struct ReaderView: View {
     @State private var ocrMagnifyRequestID = UUID()
     @State private var isOCRMagnificationVisible = false
     @State private var pageTurnDirection = 1
-    @State private var didRestoreScrollPosition = false
     @State private var jumpPageText = ""
     @State private var scrollJumpRequestID = UUID()
     @State private var didRecordReaderOpen = false
@@ -345,7 +513,9 @@ struct ReaderView: View {
     @State private var lastSavedScrollPageProgress: Double
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
-    @State private var isAITranslationInProgress = false
+    @State private var activeTranslationCount = 0
+    private var isAITranslationInProgress: Bool { activeTranslationCount > 0 }
+    @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
@@ -353,6 +523,9 @@ struct ReaderView: View {
     @State private var lastReaderInteractionAt = Date()
     @State private var isBurnInProtectionLocked = false
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
+    @State private var editingBookmark: ComicBookmark?
+    @State private var bookmarkNoteText = ""
+    @State private var showBookmarkNoteAlert = false
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -376,6 +549,10 @@ struct ReaderView: View {
 
     private var aiTranslationMode: AITranslationMode {
         comic.aiTranslationMode
+    }
+
+    private var selectedTranslationTarget: TranslationTargetLanguage {
+        TranslationTargetLanguage.migrateLegacyValue(translationTargetLanguage)
     }
 
     private var isOCRMagnificationActive: Bool {
@@ -434,8 +611,24 @@ struct ReaderView: View {
             Color.black.ignoresSafeArea()
 
             if manager.pages.isEmpty {
-                ContentUnavailableView("没有找到图片", systemImage: "photo.on.rectangle.angled", description: Text("请重新导入包含 JPG、PNG 或 WebP 图片的漫画文件夹。"))
+                ContentUnavailableView("reader.noImagesFound".localized, systemImage: "photo.on.rectangle.angled", description: Text("reader.noImagesDescription".localized))
                     .foregroundStyle(.white)
+            } else if readingMode == .guidedPanel {
+                GuidedPanelReader(
+                    pages: manager.pages,
+                    currentPageIndex: $currentPageIndex,
+                    readingDirection: readingDirection,
+                    comic: comic,
+                    translateRequestID: translateRequestID,
+                    ocrMagnifyRequestID: ocrMagnifyRequestID,
+                    isOCRMagnificationVisible: isOCRMagnificationActive,
+                    targetLanguage: selectedTranslationTarget.rawValue,
+                    onTranslationStateChange: updateAITranslationProgress,
+                    areControlsVisible: showControls,
+                    onShowControls: showControlsIfNeeded,
+                    onHideControls: hideControls
+                )
+                .ignoresSafeArea()
             } else if readingMode == .horizontalPage || readingMode == .verticalPage {
                 AnimatedPageReader(
                     pages: manager.pages,
@@ -449,7 +642,7 @@ struct ReaderView: View {
                     translateRequestID: translateRequestID,
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
-                    targetLanguage: translationTargetLanguage,
+                    targetLanguage: selectedTranslationTarget.rawValue,
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -469,7 +662,7 @@ struct ReaderView: View {
                     translateRequestID: translateRequestID,
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
-                    targetLanguage: translationTargetLanguage,
+                    targetLanguage: selectedTranslationTarget.rawValue,
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -487,7 +680,7 @@ struct ReaderView: View {
                     translateRequestID: translateRequestID,
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
-                    targetLanguage: translationTargetLanguage,
+                    targetLanguage: selectedTranslationTarget.rawValue,
                     scrollJumpRequestID: scrollJumpRequestID,
                     scrollProgress: comic.scrollProgress,
                     scrollPageProgress: comic.scrollPageProgress,
@@ -566,11 +759,12 @@ struct ReaderView: View {
                 .zIndex(20)
             }
 
-            if showControls && comic.isOCREnabled {
+            if showControls {
                 VStack {
                     Spacer()
                     HStack(spacing: 10) {
                         Spacer()
+                        if comic.isOCREnabled {
                         Button {
                             HapticManager.shared.play(.light)
                             isOCRMagnificationVisible.toggle()
@@ -590,7 +784,8 @@ struct ReaderView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("OCR文字放大")
+                        .accessibilityLabel("reader.ocrMagnify".localized)
+                        }
 
                         if comic.isAITranslationEnabled {
                         Button {
@@ -609,7 +804,7 @@ struct ReaderView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("AI翻译")
+                        .accessibilityLabel("reader.aiTranslationLabel".localized)
                         }
                     }
                     .padding(.trailing, 18)
@@ -625,9 +820,9 @@ struct ReaderView: View {
                         VStack(spacing: 14) {
                             Image(systemName: "lock.display")
                                 .font(.system(size: 38, weight: .medium))
-                            Text("屏幕保护已启用")
+                            Text("reader.burnInEnabled".localized)
                                 .font(.headline)
-                            Text("页面静止超过 4 小时。轻点屏幕继续阅读。")
+                            Text("reader.burnInDescription".localized)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -654,7 +849,25 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
+        .alert("reader.bookmarkEditNote".localized, isPresented: $showBookmarkNoteAlert) {
+            TextField("reader.bookmarkNotePlaceholder".localized, text: $bookmarkNoteText)
+            Button("nav.cancel".localized, role: .cancel) {
+                editingBookmark = nil
+                bookmarkNoteText = ""
+            }
+            Button("nav.save".localized) {
+                if let bookmark = editingBookmark {
+                    updateBookmarkNote(bookmark: bookmark, note: bookmarkNoteText)
+                }
+                editingBookmark = nil
+                bookmarkNoteText = ""
+            }
+        }
         .onAppear {
+            let migratedLanguage = selectedTranslationTarget.rawValue
+            if translationTargetLanguage != migratedLanguage {
+                translationTargetLanguage = migratedLanguage
+            }
             recordReaderInteraction()
             applyEPUBPresetBeforeFirstOpen()
             Task {
@@ -662,9 +875,12 @@ struct ReaderView: View {
             }
             recordReaderOpenIfNeeded()
             preloadPages(around: currentPageIndex)
+            scheduleTranslationPrefetch(around: currentPageIndex)
         }
         .onDisappear {
             RemotePagePrefetcher.shared.cancelAll()
+            translationPrefetchTask?.cancel()
+            translationPrefetchTask = nil
             recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
         }
@@ -691,6 +907,16 @@ struct ReaderView: View {
             let isScrollingMode = readingMode == .continuousScroll || readingMode == .infiniteScroll
             persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: !isScrollingMode)
             preloadPages(around: clampedValue)
+            scheduleTranslationPrefetch(around: clampedValue)
+        }
+        .onChange(of: comic.isAutoTranslationEnabled) { _, isEnabled in
+            if isEnabled {
+                scheduleTranslationPrefetch(around: currentPageIndex)
+            } else {
+                translationPrefetchTask?.cancel()
+                translationPrefetchTask = nil
+                print("MReader AI translation prefetch disabled comic=\(comic.id)")
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background || newPhase == .inactive else { return }
@@ -728,13 +954,13 @@ struct ReaderView: View {
                 .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
 
             HStack {
-                Picker("阅读模式", selection: readingModeRaw) {
+                Picker("reader.mode".localized, selection: readingModeRaw) {
                     Label("翻页", systemImage: "book").tag(ReadingMode.horizontalPage.rawValue)
                     Label("滚动", systemImage: "scroll").tag(ReadingMode.continuousScroll.rawValue)
                 }
                 .pickerStyle(.segmented)
 
-                Picker("阅读方向", selection: readingDirectionRaw) {
+                Picker("reader.direction".localized, selection: readingDirectionRaw) {
                     Image(systemName: "arrow.left").tag(ReadingDirection.rightToLeft.rawValue)
                     Image(systemName: "arrow.right").tag(ReadingDirection.leftToRight.rawValue)
                 }
@@ -752,7 +978,7 @@ struct ReaderView: View {
                 HapticManager.shared.play(.light)
                 dismiss()
             } label: {
-                Label("返回", systemImage: "chevron.backward")
+                Label("nav.back".localized, systemImage: "chevron.backward")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(minWidth: 72, minHeight: 40, alignment: .leading)
@@ -779,7 +1005,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 40)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("阅读设置")
+            .accessibilityLabel("reader.settings".localized)
         }
         .contentShape(Rectangle())
     }
@@ -787,20 +1013,20 @@ struct ReaderView: View {
     private var comicSettingsSheet: some View {
         NavigationStack {
             Form {
-                Section(header: Text("本漫画翻译")) {
-                    Toggle("OCR 文字识别", isOn: Binding(
+                Section(header: Text("ocr.aiTranslation".localized)) {
+                    Toggle("ocr.enable".localized, isOn: Binding(
                         get: { comic.isOCREnabled },
                         set: { newValue in updateComic { $0.isOCREnabled = newValue } }
                     ))
 
-                    Toggle("自动文字放大", isOn: Binding(
+                    Toggle("ocr.autoMagnify".localized, isOn: Binding(
                         get: { comic.isAutoOCRMagnificationEnabled },
                         set: { newValue in updateComic { $0.isAutoOCRMagnificationEnabled = newValue } }
                     ))
                     .disabled(!comic.isOCREnabled)
 
                     HStack {
-                        Text("放大文字大小")
+                        Text("ocr.magnifySize".localized)
                         Slider(value: Binding(
                             get: { normalizedOCRTextScale(comic.ocrTextScale) },
                             set: { newValue in updateComic { $0.ocrTextScale = newValue } }
@@ -812,7 +1038,7 @@ struct ReaderView: View {
                     .disabled(!comic.isOCREnabled)
 
                     HStack {
-                        Text("忽略边缘区域")
+                        Text("ocr.safeArea".localized)
                         Slider(value: Binding(
                             get: { comic.ocrSafeAreaInset },
                             set: { newValue in updateComic { $0.ocrSafeAreaInset = newValue } }
@@ -823,12 +1049,12 @@ struct ReaderView: View {
                     }
                     .disabled(!comic.isOCREnabled)
 
-                    Toggle("AI 翻译", isOn: Binding(
+                    Toggle("ocr.aiTranslation".localized, isOn: Binding(
                         get: { comic.isAITranslationEnabled },
                         set: { newValue in updateComic { $0.isAITranslationEnabled = newValue } }
                     ))
 
-                    Picker("翻译模式", selection: Binding(
+                    Picker("ocr.translationMode".localized, selection: Binding(
                         get: { comic.aiTranslationMode },
                         set: { newValue in
                             updateComic {
@@ -839,42 +1065,45 @@ struct ReaderView: View {
                             }
                         }
                     )) {
-                        Text("OCR 文本").tag(AITranslationMode.ocr)
-                        Text("视觉图片").tag(AITranslationMode.vision)
+                        Text("ocr.translationMode.ocr".localized).tag(AITranslationMode.ocr)
+                        Text("ocr.translationMode.vision".localized).tag(AITranslationMode.vision)
                     }
                     .pickerStyle(.segmented)
                     .disabled(!comic.isAITranslationEnabled)
 
-                    Toggle("自动翻译当前页", isOn: Binding(
+                    Toggle("ocr.autoTranslate".localized, isOn: Binding(
                         get: { comic.isAutoTranslationEnabled },
                         set: { newValue in updateComic { $0.isAutoTranslationEnabled = newValue } }
                     ))
                     .disabled(!comic.isAITranslationEnabled || (aiTranslationMode == .ocr && !comic.isOCREnabled))
 
-                    Toggle("AI 翻译边框进度", isOn: $aiTranslationBorderProgressEnabled)
+                    Toggle("ocr.appleTranslation".localized, isOn: $useAppleLowLatency)
+                        .disabled(!comic.isAITranslationEnabled || aiTranslationMode != .ocr)
+                    Text("ocr.appleTranslationFooter".localized)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("ocr.borderProgress".localized, isOn: $aiTranslationBorderProgressEnabled)
                         .disabled(!comic.isAITranslationEnabled)
 
-                    Picker("翻译文字配色", selection: $translationColorStyleRaw) {
+                    Picker("ocr.colorStyle".localized, selection: $translationColorStyleRaw) {
                         ForEach(TranslationColorStyle.allCases, id: \.rawValue) { style in
                             Text(style.title).tag(style.rawValue)
                         }
                     }
                     .disabled(!comic.isAITranslationEnabled)
 
-                    Picker("翻译为", selection: $translationTargetLanguage) {
-                        Text("中文").tag("中文")
-                        Text("英文").tag("英文")
-                        Text("日文").tag("日文")
-                        Text("韩文").tag("韩文")
-                        Text("简体中文").tag("简体中文")
-                        Text("繁体中文").tag("繁体中文")
+                    Picker("ocr.targetLanguage".localized, selection: $translationTargetLanguage) {
+                        ForEach(TranslationTargetLanguage.allCases) { language in
+                            Text(language.localizedTitle).tag(language.rawValue)
+                        }
                     }
                 }
 
-                Section(header: Text("OCR 过滤"), footer: Text("网页地址、广告标注、页边极小字会被忽略，不送去 OCR 放大或 AI 翻译。")) {
+                Section(header: Text("ocr.filter".localized), footer: Text("ocr.filterDescription".localized)) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("不处理小字大小")
+                            Text("ocr.minTextSize".localized)
                             Slider(value: Binding(
                                 get: { comic.ocrMinimumTextHeight },
                                 set: { newValue in updateComic { $0.ocrMinimumTextHeight = newValue } }
@@ -882,7 +1111,7 @@ struct ReaderView: View {
                         }
 
                         HStack(alignment: .center, spacing: 12) {
-                            Text("示例文字")
+                            Text("reader.ocrFilterExample".localized)
                                 .font(.system(size: ocrMinimumPreviewFontSize, weight: .semibold))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
@@ -890,9 +1119,9 @@ struct ReaderView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("当前阈值 \(Int(comic.ocrMinimumTextHeight * 1000))")
+                                Text("reader.ocrFilterThreshold".localizedFormat(Int(comic.ocrMinimumTextHeight * 1000)))
                                     .font(.caption.monospacedDigit())
-                                Text("比示例更小的字不处理")
+                                Text("reader.ocrFilterSmallText".localized)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -901,81 +1130,122 @@ struct ReaderView: View {
                     .disabled(!comic.isOCREnabled)
                 }
 
-                Section(header: Text("OCR 调试"), footer: Text("视觉图片识别翻译会把当前页或兜底切片发送到第三方 OpenAI 兼容接口。")) {
-                    Toggle("显示 OCR 调试框", isOn: $ocrShowDebugBoxes)
-                        .disabled(!comic.isOCREnabled)
-                }
-
-                Section(header: Text("跳转")) {
+                Section(header: Text("reader.jumpToPage".localized)) {
                     HStack {
-                        TextField("页码", text: $jumpPageText)
+                        TextField("reader.pageNumber".localized, text: $jumpPageText)
                             .keyboardType(.numberPad)
                             .textFieldStyle(.roundedBorder)
-                        Button("跳转") {
+                        Button("reader.jumpToPage".localized) {
                             jumpToPage()
                         }
                         .buttonStyle(.borderedProminent)
                     }
-                    Text("当前 \(currentPageIndex + 1) / \(manager.pages.count)")
+                    Text("reader.currentPageOf".localizedFormat(currentPageIndex + 1, manager.pages.count))
                         .foregroundStyle(.secondary)
                 }
 
-                Section(header: Text("阅读")) {
-                    Picker("阅读模式", selection: readingModeRaw) {
-                        Label("水平翻页", systemImage: "book").tag(ReadingMode.horizontalPage.rawValue)
-                        Label("垂直翻页", systemImage: "arrow.up.and.down").tag(ReadingMode.verticalPage.rawValue)
-                        Label("连续滚动", systemImage: "scroll").tag(ReadingMode.continuousScroll.rawValue)
-                        Label("无限滚动", systemImage: "infinity").tag(ReadingMode.infiniteScroll.rawValue)
-                        Label("双页模式", systemImage: "book.pages").tag(ReadingMode.doublePage.rawValue)
+                Section(header: Text("reader.bookmark".localized)) {
+                    Button {
+                        addBookmark()
+                    } label: {
+                        Label("reader.addBookmark".localizedFormat(currentPageIndex + 1), systemImage: "bookmark.fill")
                     }
 
-                    Picker("阅读方向", selection: readingDirectionRaw) {
-                        Label("从左到右", systemImage: "arrow.right").tag(ReadingDirection.leftToRight.rawValue)
-                        Label("从右到左", systemImage: "arrow.left").tag(ReadingDirection.rightToLeft.rawValue)
+                    if comic.bookmarks.isEmpty {
+                        Text("reader.noBookmarks".localized)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(comic.bookmarks.sorted(by: { $0.pageIndex < $1.pageIndex })) { bookmark in
+                            HStack(spacing: 12) {
+                                Button {
+                                    currentPageIndex = bookmark.pageIndex
+                                    showComicSettings = false
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Label("reader.bookmarkPage".localizedFormat(bookmark.pageIndex + 1), systemImage: "bookmark")
+                                        if !bookmark.note.isEmpty {
+                                            Text(bookmark.note)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    removeBookmark(bookmark: bookmark)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 36, height: 36)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .contextMenu {
+                                Button {
+                                    editingBookmark = bookmark
+                                    bookmarkNoteText = bookmark.note
+                                    showBookmarkNoteAlert = true
+                                } label: {
+                                    Label("reader.editBookmarkNote".localized, systemImage: "pencil")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("reader.mode".localized)) {
+                    Picker("reader.mode".localized, selection: readingModeRaw) {
+                        Label("reader.mode.horizontalPage".localized, systemImage: "book").tag(ReadingMode.horizontalPage.rawValue)
+                        Label("reader.mode.verticalPage".localized, systemImage: "arrow.up.and.down").tag(ReadingMode.verticalPage.rawValue)
+                        Label("reader.mode.continuousScroll".localized, systemImage: "scroll").tag(ReadingMode.continuousScroll.rawValue)
+                        Label("reader.mode.infiniteScroll".localized, systemImage: "infinity").tag(ReadingMode.infiniteScroll.rawValue)
+                        Label("reader.mode.doublePage".localized, systemImage: "book.pages").tag(ReadingMode.doublePage.rawValue)
+                        Label("reader.mode.guidedPanel".localized, systemImage: "rectangle.split.2x2").tag(ReadingMode.guidedPanel.rawValue)
                     }
 
-                    Picker("翻页动画", selection: pageTurnAnimationRaw) {
-                        Label("无动画", systemImage: "circle.slash").tag(PageTurnAnimation.none.rawValue)
-                        Label("滑动", systemImage: "rectangle.portrait.on.rectangle.portrait").tag(PageTurnAnimation.slide.rawValue)
-                        Label("淡入淡出", systemImage: "square.stack.3d.up").tag(PageTurnAnimation.fade.rawValue)
-                        Label("卷曲", systemImage: "book.pages").tag(PageTurnAnimation.curl.rawValue)
+                    Picker("reader.direction".localized, selection: readingDirectionRaw) {
+                        Label("reader.direction.leftToRight".localized, systemImage: "arrow.right").tag(ReadingDirection.leftToRight.rawValue)
+                        Label("reader.direction.rightToLeft".localized, systemImage: "arrow.left").tag(ReadingDirection.rightToLeft.rawValue)
                     }
 
-                    Picker("图片适配", selection: imageFitModeRaw) {
-                        Label("适应屏幕", systemImage: "rectangle.inset.filled").tag(ImageFitMode.fitScreen.rawValue)
-                        Label("适应宽度", systemImage: "arrow.left.and.right").tag(ImageFitMode.fitWidth.rawValue)
-                        Label("适应高度", systemImage: "arrow.up.and.down").tag(ImageFitMode.fitHeight.rawValue)
-                        Label("原始尺寸", systemImage: "1.magnifyingglass").tag(ImageFitMode.original.rawValue)
+                    Picker("reader.animation".localized, selection: pageTurnAnimationRaw) {
+                        Label("reader.animation.none".localized, systemImage: "circle.slash").tag(PageTurnAnimation.none.rawValue)
+                        Label("reader.animation.slide".localized, systemImage: "rectangle.portrait.on.rectangle.portrait").tag(PageTurnAnimation.slide.rawValue)
+                        Label("reader.animation.fade".localized, systemImage: "square.stack.3d.up").tag(PageTurnAnimation.fade.rawValue)
+                        Label("reader.animation.curl".localized, systemImage: "book.pages").tag(PageTurnAnimation.curl.rawValue)
                     }
 
-                    Picker("滚动速度", selection: scrollSpeedRaw) {
-                        Label("慢", systemImage: "tortoise").tag(ScrollSpeed.slow.rawValue)
-                        Label("标准", systemImage: "circle").tag(ScrollSpeed.standard.rawValue)
-                        Label("快", systemImage: "hare").tag(ScrollSpeed.fast.rawValue)
+                    Picker("reader.fitMode".localized, selection: imageFitModeRaw) {
+                        Label("reader.fitMode.fitScreen".localized, systemImage: "rectangle.inset.filled").tag(ImageFitMode.fitScreen.rawValue)
+                        Label("reader.fitMode.fitWidth".localized, systemImage: "arrow.left.and.right").tag(ImageFitMode.fitWidth.rawValue)
+                        Label("reader.fitMode.fitHeight".localized, systemImage: "arrow.up.and.down").tag(ImageFitMode.fitHeight.rawValue)
+                        Label("reader.fitMode.original".localized, systemImage: "1.magnifyingglass").tag(ImageFitMode.original.rawValue)
+                    }
+
+                    Picker("reader.scrollSpeed".localized, selection: scrollSpeedRaw) {
+                        Label("reader.scrollSpeed.slow".localized, systemImage: "tortoise").tag(ScrollSpeed.slow.rawValue)
+                        Label("reader.scrollSpeed.standard".localized, systemImage: "circle").tag(ScrollSpeed.standard.rawValue)
+                        Label("reader.scrollSpeed.fast".localized, systemImage: "hare").tag(ScrollSpeed.fast.rawValue)
                     }
                 }
             }
             .navigationTitle(comic.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("完成") { showComicSettings = false }
+                Button("nav.done".localized) { showComicSettings = false }
             }
         }
     }
 
     private func initializeReadingPresetIfNeeded() async {
         guard !comic.hasInitializedReadingPreset else { return }
-        guard comic.currentPageIndex == 0 else {
-            await MainActor.run {
-                comic.hasInitializedReadingPreset = true
-                onComicUpdate(comic)
-            }
-            return
-        }
 
         let preset = await detectInitialReadingPreset()
         await MainActor.run {
-            guard !comic.hasInitializedReadingPreset, comic.currentPageIndex == 0 else { return }
+            guard !comic.hasInitializedReadingPreset else { return }
             comic.readingModeRaw = preset.readingMode.rawValue
             comic.pageTurnAnimationRaw = preset.pageTurnAnimation.rawValue
             comic.imageFitModeRaw = preset.imageFitMode.rawValue
@@ -1091,11 +1361,20 @@ struct ReaderView: View {
 
     private func pagePixelSize(for url: URL) async -> CGSize? {
         if RemotePageLoader.isRemotePageURL(url) {
+            if let request = RemotePageLoader.RemotePageRequest(url: url) {
+                let cachedURL = RemotePageLoader.pageCacheURL(sourceID: request.sourceID, bookID: request.bookID, pageIndex: request.pageIndex)
+                if let data = try? Data(contentsOf: cachedURL) {
+                    return imagePixelSize(from: data)
+                }
+            }
             guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
             return imagePixelSize(from: data)
         }
-        if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
-            return imagePixelSize(from: data)
+        if ComicManager.isArchivePageURL(url) {
+            return await Task.detached(priority: .utility) {
+                guard let data = ComicManager.imageData(forArchivePageURL: url) else { return nil }
+                return imagePixelSize(from: data)
+            }.value
         }
         return await Task.detached(priority: .utility) {
             imagePixelSize(from: url)
@@ -1109,7 +1388,8 @@ struct ReaderView: View {
             comic.isAutoOCRMagnificationEnabled = false
             isOCRMagnificationVisible = false
         }
-        if !comic.isOCREnabled || !comic.isAITranslationEnabled {
+        if !comic.isAITranslationEnabled ||
+            (comic.aiTranslationMode == .ocr && !comic.isOCREnabled) {
             comic.isAutoTranslationEnabled = false
         }
         onComicUpdate(comic)
@@ -1122,13 +1402,13 @@ struct ReaderView: View {
     private var ocrTextSizeLabel: String {
         switch normalizedOCRTextScale(comic.ocrTextScale) {
         case ..<0.2:
-            return "小"
+            return "reader.ocrTextSizeSmall".localized
         case ..<0.55:
-            return "标准"
+            return "reader.ocrTextSizeStandard".localized
         case ..<0.82:
-            return "大"
+            return "reader.ocrTextSizeLarge".localized
         default:
-            return "特大"
+            return "reader.ocrTextSizeExtraLarge".localized
         }
     }
 
@@ -1156,6 +1436,33 @@ struct ReaderView: View {
         showComicSettings = false
     }
 
+    private func addBookmark() {
+        guard !comic.bookmarks.contains(where: { $0.pageIndex == currentPageIndex }) else {
+            HapticManager.shared.play(.warning)
+            return
+        }
+        HapticManager.shared.play(.medium)
+        let bookmark = ComicBookmark(pageIndex: currentPageIndex)
+        comic.bookmarks.append(bookmark)
+        editingBookmark = bookmark
+        bookmarkNoteText = ""
+        showBookmarkNoteAlert = true
+        onComicUpdate(comic)
+    }
+
+    private func removeBookmark(bookmark: ComicBookmark) {
+        HapticManager.shared.play(.light)
+        comic.bookmarks.removeAll { $0.id == bookmark.id }
+        onComicUpdate(comic)
+    }
+
+    private func updateBookmarkNote(bookmark: ComicBookmark, note: String) {
+        guard let index = comic.bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
+        HapticManager.shared.play(.light)
+        comic.bookmarks[index].note = note
+        onComicUpdate(comic)
+    }
+
     private func recordReaderOpenIfNeeded() {
         guard !didRecordReaderOpen else { return }
         didRecordReaderOpen = true
@@ -1177,9 +1484,10 @@ struct ReaderView: View {
     }
 
     private func updateAITranslationProgress(_ isInProgress: Bool) {
-        guard isAITranslationInProgress != isInProgress else { return }
+        let next = max(0, activeTranslationCount + (isInProgress ? 1 : -1))
+        guard next != activeTranslationCount else { return }
         withAnimation(.easeInOut(duration: 0.18)) {
-            isAITranslationInProgress = isInProgress
+            activeTranslationCount = next
         }
     }
 
@@ -1205,6 +1513,8 @@ struct ReaderView: View {
         lastSavedScrollProgress = clampedProgress
         lastSavedScrollPageProgress = clampedPageProgress
         comic.currentPageIndex = clampedPageIndex
+        comic.furthestPageIndex = max(comic.furthestPageIndex, clampedPageIndex)
+        comic.progressUpdatedAt = now
         comic.hasBeenOpened = true
         comic.scrollProgress = clampedProgress
         comic.scrollPageProgress = clampedPageProgress
@@ -1230,9 +1540,10 @@ struct ReaderView: View {
 
     private func preloadPages(around index: Int) {
         guard !manager.pages.isEmpty else { return }
+        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
+        let scrollDirection = index >= lastPrefetchPageIndex ? 1 : -1
+        lastPrefetchPageIndex = index
         if comic.sourceType == .komga {
-            let scrollDirection = index >= lastPrefetchPageIndex ? 1 : -1
-            lastPrefetchPageIndex = index
             RemotePagePrefetcher.shared.updateWindow(
                 currentPageIndex: index,
                 pages: manager.pages,
@@ -1240,14 +1551,98 @@ struct ReaderView: View {
                 readingMode: readingMode,
                 scrollDirection: scrollDirection
             )
-            return
         }
-        let preferredIndices = [index, index + 1, index + 2, index + 3, index - 1, index - 2]
+
+        let preferredIndices = ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: index,
+            pageCount: manager.pages.count,
+            readingDirection: readingDirection,
+            readingMode: readingMode,
+            scrollDirection: scrollDirection,
+            forwardCount: isContinuous ? 6 : 4,
+            backwardCount: 2,
+            includesCurrentPage: false
+        )
         let urls = preferredIndices.compactMap { pageIndex -> URL? in
             guard manager.pages.indices.contains(pageIndex) else { return nil }
             return manager.pages[pageIndex].url
         }
-        ReaderImageCache.shared.preload(urls, maxPixelSize: readingMode == .continuousScroll || readingMode == .infiniteScroll ? 8192 : 4096)
+        ReaderImageCache.shared.preload(
+            urls,
+            maxPixelSize: isContinuous ? 8192 : 4096,
+            maximumConcurrent: isContinuous ? 2 : 3,
+            delay: isContinuous ? 0.05 : 0.1
+        )
+    }
+
+    private func scheduleTranslationPrefetch(around index: Int) {
+        translationPrefetchTask?.cancel()
+        translationPrefetchTask = nil
+        guard comic.isAutoTranslationEnabled,
+              comic.isAITranslationEnabled,
+              comic.aiTranslationMode == .vision || comic.isOCREnabled,
+              let configuration = AIProviderStore.shared.activeConfiguration() else {
+            return
+        }
+
+        let candidates = AITranslationPrefetchPolicy.pageIndices(
+            currentPageIndex: index,
+            pageCount: manager.pages.count,
+            isAutoTranslationEnabled: comic.isAutoTranslationEnabled
+        )
+        guard !candidates.isEmpty else { return }
+        let comicID = comic.id
+        let mode = comic.aiTranslationMode
+        let target = selectedTranslationTarget
+        let isRightToLeft = readingDirection == .rightToLeft
+        let minimumTextHeight = comic.ocrMinimumTextHeight
+        let safeAreaInset = comic.ocrSafeAreaInset
+        let usesVisualVerification = ocrVisualVerificationEnabled
+        let ocrRecognitionMode = OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive
+        let translationPrompt = translationPromptTemplate
+        let visionPrompt = visionTranslationPromptTemplate
+
+        translationPrefetchTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(0.9))
+                while isAITranslationInProgress && !Task.isCancelled {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+                for pageIndex in candidates {
+                    try Task.checkCancellation()
+                    guard comic.id == comicID, comic.isAutoTranslationEnabled else { return }
+                    let page = manager.pages[pageIndex]
+                    guard let image = await ReaderImageCache.shared.loadImage(
+                        for: page.url,
+                        maxPixelSize: 4096
+                    ) else {
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    let request = AITranslationPageRequest(
+                        pageURL: page.url,
+                        image: image,
+                        mode: mode,
+                        configuration: configuration,
+                        target: target,
+                        translationPromptTemplate: translationPrompt,
+                        visionPromptTemplate: visionPrompt,
+                        isRightToLeft: isRightToLeft,
+                        minimumTextHeight: minimumTextHeight,
+                        ocrRecognitionMode: ocrRecognitionMode,
+                        safeAreaInset: safeAreaInset,
+                        usesVisualOCRVerification: usesVisualVerification,
+                        viewportAspect: 2.0
+                    )
+                    _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
+                    print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
+                }
+            } catch is CancellationError {
+                print("MReader AI translation prefetch cancelled comic=\(comicID)")
+            } catch {
+                print("MReader AI translation prefetch failed comic=\(comicID) reason=\(error.localizedDescription)")
+            }
+        }
     }
 
     private func previousPage() {
@@ -1740,8 +2135,13 @@ private struct ScrollViewAccessor: UIViewRepresentable {
             guard self.scrollView !== scrollView else { return }
             self.scrollView = scrollView
             contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
-                DispatchQueue.main.async {
-                    self?.onScroll()
+                guard let self else { return }
+                if Thread.isMainThread {
+                    self.onScroll()
+                } else {
+                    DispatchQueue.main.async {
+                        self.onScroll()
+                    }
                 }
             }
         }
@@ -1860,6 +2260,7 @@ struct ContinuousScrollReader: View {
     @State private var visiblePageUpdateWorkItem: DispatchWorkItem?
     @State private var lastStableContentOffsetY: CGFloat = 0
     @State private var allowTopOffsetUntil = Date.distantPast
+    @State private var lastPageFrameCommitDate = Date.distantPast
 
     var body: some View {
         GeometryReader { viewportProxy in
@@ -1869,6 +2270,8 @@ struct ContinuousScrollReader: View {
                         ForEach(pages) { page in
                             LocalImageView(
                                 url: page.url,
+                                comicID: comic.id,
+                                pageIndex: page.index,
                                 isOCREnabled: comic.isOCREnabled,
                                 isAITranslationEnabled: comic.isAITranslationEnabled,
                                 isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
@@ -1884,6 +2287,7 @@ struct ContinuousScrollReader: View {
                                 imageFitMode: .fitWidth,
                                 visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
                                 placeholderHeight: max(viewportProxy.size.height, viewportProxy.size.width * 1.35),
+                                imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
                                 onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
@@ -1943,13 +2347,22 @@ struct ContinuousScrollReader: View {
                     scheduleVisiblePageUpdate(delay: 0.02)
                 }
                 .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
+                    guard pageHeights != heights else { return }
                     pageHeights = heights
                 }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
+                    let now = Date()
+                    guard pageFrames != frames else { return }
+                    guard !didRestorePosition || now.timeIntervalSince(lastPageFrameCommitDate) >= 0.08 else {
+                        return
+                    }
+                    lastPageFrameCommitDate = now
                     pageFrames = frames
                     scheduleVisiblePageUpdate(delay: 0.04)
                 }
                 .onDisappear {
+                    visiblePageUpdateWorkItem?.cancel()
+                    visiblePageUpdateWorkItem = nil
                     updateCurrentPageFromVisibleFrames()
                 }
             }
@@ -2010,8 +2423,9 @@ struct ContinuousScrollReader: View {
     }
 
     private func scheduleVisiblePageUpdate(delay: TimeInterval = 0.12) {
-        visiblePageUpdateWorkItem?.cancel()
+        guard visiblePageUpdateWorkItem == nil else { return }
         let workItem = DispatchWorkItem {
+            visiblePageUpdateWorkItem = nil
             updateCurrentPageFromVisibleFrames()
         }
         visiblePageUpdateWorkItem = workItem
@@ -2111,6 +2525,170 @@ struct ContinuousScrollReader: View {
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: restoreY), animated: false)
         scheduleVisiblePageUpdate(delay: 0.04)
         return true
+    }
+}
+
+struct GuidedPanelReader: View {
+    let pages: [ComicPage]
+    @Binding var currentPageIndex: Int
+    let readingDirection: ReadingDirection
+    let comic: ComicBook
+    let translateRequestID: UUID
+    let ocrMagnifyRequestID: UUID
+    let isOCRMagnificationVisible: Bool
+    let targetLanguage: String
+    let onTranslationStateChange: (Bool) -> Void
+    let areControlsVisible: Bool
+    let onShowControls: () -> Void
+    let onHideControls: () -> Void
+
+    @State private var layout: PanelPageLayout?
+    @State private var sourceSize: CGSize = .zero
+    @State private var panelIndex = 0
+    @State private var isDetecting = false
+
+    private var currentPage: ComicPage? {
+        guard pages.indices.contains(currentPageIndex) else { return nil }
+        return pages[currentPageIndex]
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let page = currentPage {
+                    LocalImageView(
+                        url: page.url,
+                        comicID: comic.id,
+                        pageIndex: page.index,
+                        isOCREnabled: comic.isOCREnabled,
+                        isAITranslationEnabled: comic.isAITranslationEnabled,
+                        isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+                        aiTranslationModeRaw: comic.aiTranslationModeRaw,
+                        translateRequestID: translateRequestID,
+                        ocrMagnifyRequestID: ocrMagnifyRequestID,
+                        isOCRMagnificationVisible: isOCRMagnificationVisible,
+                        ocrTextScale: comic.ocrTextScale,
+                        ocrSafeAreaInset: comic.ocrSafeAreaInset,
+                        ocrMinimumTextHeight: comic.ocrMinimumTextHeight,
+                        isRightToLeftReading: readingDirection == .rightToLeft,
+                        targetLanguage: targetLanguage,
+                        imageFitMode: .fitScreen,
+                        isPageTapGestureEnabled: false,
+                        isLongPressTranslationEnabled: areControlsVisible,
+                        onTranslationStateChange: onTranslationStateChange,
+                        onPreviousPage: previousPanel,
+                        onNextPage: nextPanel,
+                        areControlsVisible: areControlsVisible,
+                        onShowControls: onShowControls,
+                        onHideControls: onHideControls
+                    )
+                    .scaleEffect(panelTransform(in: proxy.size).scale)
+                    .offset(panelTransform(in: proxy.size).offset)
+                    .animation(.easeInOut(duration: 0.34), value: panelIndex)
+                    .animation(.easeInOut(duration: 0.28), value: currentPageIndex)
+                    .task(id: page.url) { await detectPanels(for: page) }
+                }
+
+                if isDetecting {
+                    ProgressView().tint(.white).allowsHitTesting(false)
+                }
+
+                if !areControlsVisible {
+                    HStack(spacing: 0) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { previousPanel() }
+                        Color.clear.frame(width: proxy.size.width * 0.30).allowsHitTesting(false)
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { nextPanel() }
+                    }
+                }
+            }
+            .clipped()
+        }
+    }
+
+    private func detectPanels(for page: ComicPage) async {
+        isDetecting = true
+        defer { isDetecting = false }
+        guard let image = await ReaderImageCache.shared.loadImage(for: page.url, maxPixelSize: 6144) else {
+            layout = nil
+            sourceSize = .zero
+            return
+        }
+        sourceSize = CGSize(
+            width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
+            height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
+        )
+        layout = await PanelDetectionService.shared.layout(
+            for: page.url,
+            image: image,
+            isRightToLeft: readingDirection == .rightToLeft
+        )
+        panelIndex = min(panelIndex, max((layout?.panels.count ?? 1) - 1, 0))
+    }
+
+    private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
+        guard viewport.width > 0, viewport.height > 0,
+              sourceSize.width > 0, sourceSize.height > 0,
+              let layout else { return (1, .zero) }
+        let normalized = layout.panelRects.indices.contains(panelIndex)
+            ? layout.panelRects[panelIndex]
+            : layout.contentBounds.cgRect
+        let imageAspect = sourceSize.width / sourceSize.height
+        let viewportAspect = viewport.width / viewport.height
+        let displaySize: CGSize
+        if imageAspect > viewportAspect {
+            displaySize = CGSize(width: viewport.width, height: viewport.width / imageAspect)
+        } else {
+            displaySize = CGSize(width: viewport.height * imageAspect, height: viewport.height)
+        }
+        let imageOrigin = CGPoint(
+            x: (viewport.width - displaySize.width) / 2,
+            y: (viewport.height - displaySize.height) / 2
+        )
+        let panel = CGRect(
+            x: imageOrigin.x + normalized.minX * displaySize.width,
+            y: imageOrigin.y + normalized.minY * displaySize.height,
+            width: max(normalized.width * displaySize.width, 1),
+            height: max(normalized.height * displaySize.height, 1)
+        )
+        let scale = min(max(min(viewport.width * 0.92 / panel.width, viewport.height * 0.92 / panel.height), 1), 4.8)
+        return (
+            scale,
+            CGSize(
+                width: (viewport.width / 2 - panel.midX) * scale,
+                height: (viewport.height / 2 - panel.midY) * scale
+            )
+        )
+    }
+
+    private func previousPanel() {
+        if panelIndex > 0 {
+            panelIndex -= 1
+            HapticManager.shared.play(.light)
+        } else if currentPageIndex > 0 {
+            currentPageIndex -= 1
+            panelIndex = Int.max
+            HapticManager.shared.play(.light)
+        } else {
+            HapticManager.shared.play(.warning)
+        }
+    }
+
+    private func nextPanel() {
+        let count = max(layout?.panels.count ?? 1, 1)
+        if panelIndex + 1 < count {
+            panelIndex += 1
+            HapticManager.shared.play(.light)
+        } else if currentPageIndex + 1 < pages.count {
+            currentPageIndex += 1
+            panelIndex = 0
+            HapticManager.shared.play(.light)
+        } else {
+            HapticManager.shared.play(.warning)
+        }
     }
 }
 
@@ -2262,9 +2840,13 @@ struct AnimatedPageReader: View {
     private func pageView(index: Int) -> some View {
         LocalImageView(
             url: pages[index].url,
+            comicID: comic.id,
+            pageIndex: index,
             isOCREnabled: comic.isOCREnabled,
             isAITranslationEnabled: comic.isAITranslationEnabled,
-            isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
+            // 卷曲动画的“被揭示页”不在此触发自动翻译，避免拖拽松手时白做；
+            // 下一页的翻译由 Reader 层 scheduleTranslationPrefetch 统一预取。
+            isAutoTranslationEnabled: index == currentPageIndex ? comic.isAutoTranslationEnabled : false,
             aiTranslationModeRaw: comic.aiTranslationModeRaw,
             translateRequestID: translateRequestID,
             ocrMagnifyRequestID: ocrMagnifyRequestID,
@@ -2374,6 +2956,8 @@ struct DoublePageReader: View {
     private func pageView(index: Int) -> some View {
         LocalImageView(
             url: pages[index].url,
+            comicID: comic.id,
+            pageIndex: index,
             isOCREnabled: comic.isOCREnabled,
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
@@ -2686,6 +3270,8 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
 
 struct LocalImageView: View {
     let url: URL
+    var comicID: UUID? = nil
+    var pageIndex: Int? = nil
     let isOCREnabled: Bool
     let isAITranslationEnabled: Bool
     let isAutoTranslationEnabled: Bool
@@ -2701,6 +3287,7 @@ struct LocalImageView: View {
     let imageFitMode: ImageFitMode
     var visionViewportAspect: CGFloat? = nil
     var placeholderHeight: CGFloat? = nil
+    var imageLoadDelay: TimeInterval = 0
     var showsLoadingIndicator: Bool = true
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
@@ -2724,21 +3311,26 @@ struct LocalImageView: View {
     // AI 相关的状态
     @State private var textBlocks: [TextBlock] = []
     @State private var ocrTextBlocks: [TextBlock] = []
-    @State private var debugTextBlocks: [TextBlock] = []
-    @State private var recognizedBlocksCache: [TextBlock]?
-    @State private var recognizedBlocksCacheKey: String?
+    @State private var debugRawBlocks: [TextBlock] = []
+    @State private var debugLineBlocks: [TextBlock] = []
+    @State private var debugBubbleBlocks: [TextBlock] = []
+    @State private var debugRejectedBlocks: [TextBlock] = []
+    @State private var recognizedPipelineCache: OCRPipelineResult?
+    @State private var recognizedPipelineCacheKey: String?
     @State private var isTranslating = false
     @State private var isRecognizingOCR = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
-    @AppStorage("openai_api_key") private var apiKey = ""
-    @AppStorage("openai_base_url") private var baseURL = "https://api.openai.com/v1"
-    @AppStorage("openai_model") private var modelName = "gpt-4o-mini"
-    @AppStorage("ai_model_pool") private var modelPoolText = ""
-    @AppStorage("ai_model_pool_enabled") private var isModelPoolEnabled = true
+    @State private var translationGeneration = UUID()
+    @State private var ocrMagnificationTask: Task<Void, Never>?
+    @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
+    @State private var appleTranslationRequests: [AppleTranslationBlockRequest] = []
+    @State private var appleTranslationGeneration = UUID()
     @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
+    @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
+    @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
 
     private var aiTranslationMode: AITranslationMode {
@@ -2747,6 +3339,10 @@ struct LocalImageView: View {
 
     private var canTranslate: Bool {
         isAITranslationEnabled && (aiTranslationMode == .vision || isOCREnabled)
+    }
+
+    private var imageLoadTaskID: String {
+        "\(url.absoluteString)#delay=\(Int((imageLoadDelay * 1_000).rounded()))"
     }
 
     var body: some View {
@@ -2778,7 +3374,7 @@ struct LocalImageView: View {
                     Color.clear
                 }
             } else if loadFailed {
-                ContentUnavailableView("图片加载失败", systemImage: "exclamationmark.triangle", description: Text(url.lastPathComponent))
+                ContentUnavailableView("reader.imageLoadFailed".localized, systemImage: "exclamationmark.triangle", description: Text(url.lastPathComponent))
                     .foregroundStyle(.white)
             }
         }
@@ -2793,6 +3389,28 @@ struct LocalImageView: View {
                     .background(.black.opacity(0.62), in: Capsule())
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
+            }
+        }
+        .background {
+            if useAppleLowLatency, aiTranslationMode == .ocr, !appleTranslationRequests.isEmpty {
+                let bridgeGeneration = appleTranslationGeneration
+                let bridgeTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage).rawValue
+                AppleTranslationBridge(
+                    sourceLanguage: nil,
+                    targetLanguage: Locale.Language(identifier: bridgeTarget),
+                    requests: appleTranslationRequests,
+                    onResult: { results in
+                        for (id, text) in results {
+                            guard let index = self.textBlocks.firstIndex(where: { $0.id == id }) else { continue }
+                            self.textBlocks[index].translation = text
+                            self.textBlocks[index].translationLines = [text]
+                        }
+                    },
+                    onMissing: { missing in
+                        self.cloudFallbackForMissing(missing, generation: bridgeGeneration, pageURL: self.url)
+                    }
+                )
+                .id(appleTranslationGeneration)
             }
         }
         .frame(height: reservedDisplayHeight)
@@ -2810,10 +3428,24 @@ struct LocalImageView: View {
                     }
             }
         }
-        .task(id: url) { await loadImage() }
+        .task(id: imageLoadTaskID) {
+            guard uiImage == nil else { return }
+            if imageLoadDelay > 0 {
+                do {
+                    try await Task.sleep(for: .seconds(imageLoadDelay))
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await loadImage()
+        }
         .onDisappear {
             translationTask?.cancel()
             translationTask = nil
+            translationGeneration = UUID()
+            ocrMagnificationTask?.cancel()
+            ocrMagnificationTask = nil
             if isTranslating {
                 isTranslating = false
                 onTranslationStateChange(false)
@@ -2846,6 +3478,27 @@ struct LocalImageView: View {
                 textBlocks.removeAll()
             }
         }
+        .onChange(of: targetLanguage) { _, _ in
+            textBlocks.removeAll()
+            if isAutoTranslationEnabled {
+                startTranslation()
+            }
+        }
+        .onChange(of: aiTranslationModeRaw) { _, _ in
+            textBlocks.removeAll()
+            if isAutoTranslationEnabled {
+                startTranslation()
+            }
+        }
+        .onChange(of: ocrRecognitionModeRaw) { _, _ in
+            recognizedPipelineCacheKey = nil
+            recognizedPipelineCache = nil
+            ocrTextBlocks.removeAll()
+            textBlocks.removeAll()
+            if isOCRMagnificationVisible {
+                startOCRMagnification()
+            }
+        }
     }
 
     @ViewBuilder
@@ -2866,9 +3519,21 @@ struct LocalImageView: View {
                 .scaledToFit()
                 .frame(maxHeight: .infinity)
         case .original:
+            // “原始尺寸”：不放大显示。小图按原生像素 1:1 显示，超出容器则等比缩小到容器内。
+            let nativeWidth = max(image.size.width * image.scale, 1)
+            let nativeHeight = max(image.size.height * image.scale, 1)
+            let scaleFactor = min(
+                1,
+                min(
+                    max(viewportWidth, 1) / nativeWidth,
+                    max(viewportSize.height, 1) / nativeHeight
+                )
+            )
             Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
+                .frame(width: max(nativeWidth * scaleFactor, 1), height: max(nativeHeight * scaleFactor, 1))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -2892,10 +3557,14 @@ struct LocalImageView: View {
             ForEach(items) { item in
                 ColorfulTranslatedText(
                     segments: item.blocks.compactMap {
-                        let value = ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let value = displayTranslation(for: $0)
                         return value.isEmpty ? nil : value
                     },
-                    fontSize: translationFontSize(for: item.blocks, in: item.rect),
+                    fontSize: translationFontSize(
+                        for: item.blocks,
+                        in: item.rect,
+                        containerSize: size
+                    ),
                     style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast
                 )
                 .frame(width: item.rect.width)
@@ -2908,10 +3577,17 @@ struct LocalImageView: View {
         let candidates = textBlocks.filter {
             ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
-        return AITranslator.deduplicatedMangaTextBlocks(
-            candidates,
-            isRightToLeft: isRightToLeftReading
-        )
+        return AITranslator.sortedTextBlocks(candidates, isRightToLeft: isRightToLeftReading)
+    }
+
+    private func displayTranslation(for block: TextBlock) -> String {
+        let lines = block.translationLines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !lines.isEmpty {
+            return lines.joined(separator: "\n")
+        }
+        return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @ViewBuilder
@@ -2938,169 +3614,175 @@ struct LocalImageView: View {
     @ViewBuilder
     private func ocrDebugOverlay(in size: CGSize) -> some View {
         if ocrShowDebugBoxes, isOCREnabled {
-            ForEach(debugTextBlocks) { block in
-                let rect = CGRect(
-                    x: block.boundingBox.minX * size.width,
-                    y: block.boundingBox.minY * size.height,
-                    width: max(block.boundingBox.width * size.width, 12),
-                    height: max(block.boundingBox.height * size.height, 10)
-                )
-                let color = block.isFiltered ? Color.red : Color.green
-                ZStack(alignment: .topLeading) {
-                    Rectangle()
-                        .stroke(color, lineWidth: 1.2)
-                    Text(debugLabel(for: block))
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .lineLimit(3)
-                        .padding(2)
-                        .background(color.opacity(0.84))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: rect.width, height: rect.height)
-                .position(x: rect.midX, y: rect.midY)
-            }
+            ocrDebugStage(debugRawBlocks, stage: "RAW", color: .yellow, in: size)
+            ocrDebugStage(debugLineBlocks, stage: "LINE", color: .blue, in: size)
+            ocrDebugStage(debugBubbleBlocks, stage: "BUBBLE", color: .green, in: size)
+            ocrDebugStage(debugRejectedBlocks, stage: "REJECT", color: .red, in: size)
         }
     }
 
-    private func debugLabel(for block: TextBlock) -> String {
+    @ViewBuilder
+    private func ocrDebugStage(
+        _ blocks: [TextBlock],
+        stage: String,
+        color: Color,
+        in size: CGSize
+    ) -> some View {
+        ForEach(blocks) { block in
+            let rect = overlayRect(for: block, in: size, scaleMultiplier: 1)
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .strokeBorder(color, lineWidth: 1.2)
+                Text(debugLabel(for: block, stage: stage))
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .lineLimit(3)
+                    .padding(2)
+                    .background(color.opacity(0.86))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func debugLabel(for block: TextBlock, stage: String) -> String {
         let confidence = Int((block.confidence * 100).rounded())
         if block.isFiltered {
-            return "\(confidence)% \(block.filterReason ?? "过滤")\n\(block.text)"
+            return "\(stage) \(confidence)% \(block.filterReason ?? "common.filter".localized)\n\(block.text)"
         }
-        return "\(confidence)% \(block.ocrSource)\n\(block.text)"
+        return "\(stage) \(confidence)% \(block.ocrSource)\n\(block.text)"
     }
 
     private func overlayRect(for block: TextBlock, in size: CGSize, scaleMultiplier: CGFloat) -> CGRect {
-        let width = max(block.boundingBox.width * size.width * scaleMultiplier, 44)
-        let height = max(block.boundingBox.height * size.height * scaleMultiplier, 24)
-        let x = block.boundingBox.midX * size.width
-        let y = block.boundingBox.midY * size.height
-        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+        let mapped = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: ocrDisplayTransform(in: size)
+        )
+        let width = max(mapped.width * scaleMultiplier, 44)
+        let height = max(mapped.height * scaleMultiplier, 24)
+        return CGRect(
+            x: mapped.midX - width / 2,
+            y: mapped.midY - height / 2,
+            width: width,
+            height: height
+        )
+    }
+
+    private func ocrDisplayTransform(in size: CGSize) -> OCRDisplayTransform {
+        let sourceSize: CGSize
+        if let cgImage = uiImage?.cgImage {
+            sourceSize = CGSize(width: cgImage.width, height: cgImage.height)
+        } else if let uiImage {
+            sourceSize = CGSize(
+                width: uiImage.size.width * uiImage.scale,
+                height: uiImage.size.height * uiImage.scale
+            )
+        } else {
+            sourceSize = size
+        }
+        let fitMode: OCRImageFitMode
+        switch imageFitMode {
+        case .fitScreen: fitMode = .fitScreen
+        case .fitWidth: fitMode = .fitWidth
+        case .fitHeight: fitMode = .fitHeight
+        case .original: fitMode = .original
+        }
+        // 覆盖层附着在图片上，外层 scaleEffect/offset 会同时作用于两者。
+        return OCRCoordinateMapper.displayTransform(
+            sourcePixelSize: sourceSize,
+            containerSize: size,
+            fitMode: fitMode
+        )
     }
 
     private func translationBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
         let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
         let original = overlayRect(for: block, in: size, scaleMultiplier: magnificationScale)
         let safeMargin: CGFloat = 12
-        let maxWidth = max(96, min(size.width - safeMargin * 2, isOCRMagnificationVisible ? 260 : 230))
-        let widthMultiplier: CGFloat = isOCRMagnificationVisible ? 1.32 : 1.08
-        let translatedText = (block.translation ?? block.text).trimmingCharacters(in: .whitespacesAndNewlines)
-        let characterCount = max(translatedText.count, 1)
-        let contentDrivenWidth = min(max(CGFloat(sqrt(Double(characterCount))) * 25, 84), maxWidth)
-        let width = min(max(original.width * widthMultiplier, contentDrivenWidth), maxWidth)
-        let estimatedCharactersPerLine = max(Int((width - 12) / 13), 1)
-        let estimatedLineCount = max(1, Int(ceil(Double(characterCount) / Double(estimatedCharactersPerLine))))
-        let contentDrivenHeight = CGFloat(estimatedLineCount) * 21 + 10
-        let maxHeight = max(56, min(size.height * 0.38, 168))
-        let height = min(max(original.height * 1.2, contentDrivenHeight, 34), maxHeight)
-        let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
-        let y = min(max(original.midY, safeMargin + height / 2), size.height - safeMargin - height / 2)
-        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+        let imageBounds = ocrDisplayTransform(in: size).imageRect
+        let maxWidth = max(44, min(imageBounds.width - safeMargin * 2, isOCRMagnificationVisible ? 230 : 210))
+        let translatedText = displayTranslation(for: block)
+        return OCRBubbleLayoutEngine.measuredBubbleRect(
+            text: translatedText.isEmpty ? block.text : translatedText,
+            fontSize: preferredTranslationFontSize(for: block, in: size),
+            sourceRect: original,
+            bounds: imageBounds,
+            maximumWidth: maxWidth,
+            lineSpacing: 2,
+            margin: safeMargin
+        )
     }
 
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
         let initialItems = visibleTranslationBlocks.map { block in
             TranslationLayoutItem(blocks: [block], rect: translationBubbleRect(for: block, in: size))
         }
-        var denseGroups: [TranslationLayoutItem] = []
-        for item in initialItems {
-            if let index = denseGroups.firstIndex(where: { existing in
-                existing.rect.insetBy(dx: -8, dy: -8).intersects(item.rect) &&
-                existing.blocks.count < 4
-            }) {
-                let mergedBlocks = denseGroups[index].blocks + item.blocks
-                var mergedRect = denseGroups[index].rect.union(item.rect)
-                mergedRect.size.height = min(max(mergedRect.height, CGFloat(mergedBlocks.count) * 30), 150)
-                mergedRect.size.width = min(max(mergedRect.width, 96), max(size.width - 24, 96))
-                denseGroups[index] = TranslationLayoutItem(blocks: mergedBlocks, rect: clampedTranslationRect(mergedRect, safeMargin: 12, in: size))
-            } else {
-                denseGroups.append(item)
-            }
-        }
 
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
-        for item in denseGroups {
+        let transform = ocrDisplayTransform(in: size)
+        for item in initialItems {
             let original = item.rect
             let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
-            let anchor = CGPoint(
-                x: sourceRect.midX * size.width,
-                y: sourceRect.midY * size.height
+            let mappedSourceRect = OCRCoordinateMapper.displayRect(
+                forNormalizedPageRect: sourceRect,
+                using: transform
             )
-            let rect = nonOverlappingTranslationRect(original, anchor: anchor, occupiedRects: occupiedRects, in: size)
+            let rect = OCRBubbleLayoutEngine.nonOverlappingRect(
+                original,
+                anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
+                occupiedRects: occupiedRects,
+                bounds: transform.imageRect
+            )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect))
         }
         return items
     }
 
-    private func nonOverlappingTranslationRect(_ original: CGRect, anchor: CGPoint, occupiedRects: [CGRect], in size: CGSize) -> CGRect {
-        guard !occupiedRects.contains(where: { $0.intersects(original) }) else {
-            let safeMargin: CGFloat = 12
-            let stepY = max(original.height * 0.85, 22)
-            let stepX = max(original.width * 0.45, 32)
-            var candidates = [original]
-            for distance in 1...5 {
-                let dy = CGFloat(distance) * stepY
-                let dx = CGFloat(distance) * stepX
-                candidates.append(original.offsetBy(dx: 0, dy: -dy))
-                candidates.append(original.offsetBy(dx: 0, dy: dy))
-                candidates.append(original.offsetBy(dx: -dx, dy: 0))
-                candidates.append(original.offsetBy(dx: dx, dy: 0))
-                candidates.append(original.offsetBy(dx: -dx * 0.65, dy: -dy * 0.65))
-                candidates.append(original.offsetBy(dx: dx * 0.65, dy: -dy * 0.65))
-                candidates.append(original.offsetBy(dx: -dx * 0.65, dy: dy * 0.65))
-                candidates.append(original.offsetBy(dx: dx * 0.65, dy: dy * 0.65))
-            }
-
-            return candidates
-                .map { clampedTranslationRect($0, safeMargin: safeMargin, in: size) }
-                .min { lhs, rhs in
-                    translationLayoutScore(lhs, anchor: anchor, occupiedRects: occupiedRects) <
-                        translationLayoutScore(rhs, anchor: anchor, occupiedRects: occupiedRects)
-                } ?? original
-        }
-        return original
-    }
-
-    private func clampedTranslationRect(_ rect: CGRect, safeMargin: CGFloat, in size: CGSize) -> CGRect {
-        let x = min(max(rect.midX, safeMargin + rect.width / 2), size.width - safeMargin - rect.width / 2)
-        let y = min(max(rect.midY, safeMargin + rect.height / 2), size.height - safeMargin - rect.height / 2)
-        return CGRect(x: x - rect.width / 2, y: y - rect.height / 2, width: rect.width, height: rect.height)
-    }
-
-    private func translationLayoutScore(_ rect: CGRect, anchor: CGPoint, occupiedRects: [CGRect]) -> CGFloat {
-        let overlapPenalty = occupiedRects.reduce(CGFloat.zero) { partial, occupied in
-            let overlap = rect.intersection(occupied)
-            guard !overlap.isNull else { return partial }
-            return partial + overlap.width * overlap.height * 90
-        }
-        let distance = hypot(rect.midX - anchor.x, rect.midY - anchor.y)
-        return distance + overlapPenalty
-    }
-
     private func ocrBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
         let rectScale = 1 + (ocrTextSizeFactor - 1) * 0.28
         let original = overlayRect(for: block, in: size, scaleMultiplier: rectScale)
         let safeMargin: CGFloat = 12
-        let maxWidth = max(100, size.width - safeMargin * 2)
+        let imageBounds = ocrDisplayTransform(in: size).imageRect
+        let maxWidth = max(44, imageBounds.width - safeMargin * 2)
         let width = min(max(original.width, 72), maxWidth)
         let characterCount = max(block.text.count, 1)
         let charactersPerLine = max(Int(width / max(uniformOCRFontSize * 0.72, 1)), 1)
         let lineCount = max(1, Int(ceil(Double(characterCount) / Double(charactersPerLine))))
-        let height = min(max(CGFloat(lineCount) * uniformOCRFontSize * 1.3 + 8, 34), 140)
-        let x = min(max(original.midX, safeMargin + width / 2), size.width - safeMargin - width / 2)
-        let y = min(max(original.midY, safeMargin + height / 2), size.height - safeMargin - height / 2)
-        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+        let height = min(
+            max(CGFloat(lineCount) * uniformOCRFontSize * 1.3 + 8, 34),
+            min(140, max(imageBounds.height - safeMargin * 2, 34))
+        )
+        return OCRBubbleLayoutEngine.clamped(
+            CGRect(
+                x: original.midX - width / 2,
+                y: original.midY - height / 2,
+                width: width,
+                height: height
+            ),
+            to: imageBounds,
+            margin: safeMargin
+        )
     }
 
     private func ocrLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
+        let transform = ocrDisplayTransform(in: size)
         for block in ocrTextBlocks {
             let original = ocrBubbleRect(for: block, in: size)
-            let anchor = CGPoint(x: block.boundingBox.midX * size.width, y: block.boundingBox.midY * size.height)
-            let rect = nonOverlappingTranslationRect(original, anchor: anchor, occupiedRects: occupiedRects, in: size)
+            let mappedSourceRect = OCRCoordinateMapper.displayRect(
+                forNormalizedPageRect: block.boundingBox,
+                using: transform
+            )
+            let rect = OCRBubbleLayoutEngine.nonOverlappingRect(
+                original,
+                anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
+                occupiedRects: occupiedRects,
+                bounds: transform.imageRect
+            )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(blocks: [block], rect: rect))
         }
@@ -3111,6 +3793,9 @@ struct LocalImageView: View {
         await MainActor.run {
             translationTask?.cancel()
             translationTask = nil
+            translationGeneration = UUID()
+            ocrMagnificationTask?.cancel()
+            ocrMagnificationTask = nil
             if isTranslating {
                 isTranslating = false
                 onTranslationStateChange(false)
@@ -3124,10 +3809,13 @@ struct LocalImageView: View {
                 uiImage = cachedImage
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
-                debugTextBlocks.removeAll()
+                debugRawBlocks.removeAll()
+                debugLineBlocks.removeAll()
+                debugBubbleBlocks.removeAll()
+                debugRejectedBlocks.removeAll()
                 translationErrorMessage = nil
-                recognizedBlocksCache = nil
-                recognizedBlocksCacheKey = nil
+                recognizedPipelineCache = nil
+                recognizedPipelineCacheKey = nil
                 scale = 1
                 lastScale = 1
                 offset = .zero
@@ -3149,10 +3837,13 @@ struct LocalImageView: View {
             uiImage = nil
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
-            debugTextBlocks.removeAll()
+            debugRawBlocks.removeAll()
+            debugLineBlocks.removeAll()
+            debugBubbleBlocks.removeAll()
+            debugRejectedBlocks.removeAll()
             translationErrorMessage = nil
-            recognizedBlocksCache = nil
-            recognizedBlocksCacheKey = nil
+            recognizedPipelineCache = nil
+            recognizedPipelineCacheKey = nil
             scale = 1
             lastScale = 1
             offset = .zero
@@ -3229,16 +3920,31 @@ struct LocalImageView: View {
         11 + CGFloat(normalizedOCRScale) * 8
     }
 
-    private func translationFontSize(for blocks: [TextBlock], in bubbleRect: CGRect) -> CGFloat {
+    private func preferredTranslationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
+        let imageRect = ocrDisplayTransform(in: size).imageRect
+        let displayedReference = max(min(imageRect.width, imageRect.height), 1)
+        let sourceFontSize = CGFloat(block.estimatedFontScale) * displayedReference
+        return OCRBubbleLayoutEngine.preferredTranslationFontSize(
+            sourceFontSize: sourceFontSize
+        )
+    }
+
+    private func translationFontSize(
+        for blocks: [TextBlock],
+        in bubbleRect: CGRect,
+        containerSize: CGSize
+    ) -> CGFloat {
         let segments = blocks.compactMap { block -> String? in
             let text = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : text
         }
-        guard !segments.isEmpty else { return 12 }
+        guard !segments.isEmpty else { return 10 }
         let availableWidth = max(bubbleRect.width - 14, 24)
         let availableHeight = max(bubbleRect.height - 10, 20)
-        let requestedMaximum: CGFloat = isOCRMagnificationVisible ? 28 : 25
-        var lower: CGFloat = 11
+        let requestedMaximum = blocks
+            .map { preferredTranslationFontSize(for: $0, in: containerSize) }
+            .max() ?? 10
+        var lower = max(min(requestedMaximum * 0.72, requestedMaximum), 8)
         var upper = requestedMaximum
         for _ in 0..<8 {
             let candidate = (lower + upper) / 2
@@ -3253,20 +3959,28 @@ struct LocalImageView: View {
                 upper = candidate
             }
         }
-        return min(max(lower, 11), requestedMaximum)
+        return min(max(lower, 8), requestedMaximum)
     }
 
     private func translationTextFits(_ segments: [String], fontSize: CGFloat, width: CGFloat, height: CGFloat) -> Bool {
-        let charactersPerLine = max(Int(width / max(fontSize * 0.86, 1)), 1)
-        let lines = segments.reduce(0) { partial, segment in
-            let explicitLines = segment.split(separator: "\n", omittingEmptySubsequences: false)
-            let segmentLines = explicitLines.reduce(0) { lineTotal, line in
-                lineTotal + max(1, Int(ceil(Double(max(line.count, 1)) / Double(charactersPerLine))))
-            }
-            return partial + segmentLines
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineSpacing = 2
+        let requiredTextHeight = segments.reduce(CGFloat.zero) { partial, segment in
+            let measured = (segment as NSString).boundingRect(
+                with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
+                    .paragraphStyle: paragraphStyle
+                ],
+                context: nil
+            )
+            return partial + ceil(measured.height)
         }
         let segmentSpacing = CGFloat(max(segments.count - 1, 0)) * 7
-        let requiredHeight = CGFloat(max(lines, 1)) * fontSize * 1.24 + segmentSpacing
+        let requiredHeight = requiredTextHeight + segmentSpacing
         return requiredHeight <= height
     }
 
@@ -3281,18 +3995,37 @@ struct LocalImageView: View {
         return min(max(ocrTextScale, 0), 1)
     }
 
-    private func preparedTextBlocks(from blocks: [TextBlock]) -> [TextBlock] {
+    private func preparedOCRResult(from result: OCRPipelineResult) -> OCRPipelineResult {
         let annotated = AITranslator.annotatedMangaTextBlocks(
-            blocks,
+            result.resolvedBlocks,
             safeAreaInset: ocrSafeAreaInset,
             minimumTextHeight: ocrMinimumTextHeight,
             isRightToLeft: isRightToLeftReading
         )
-        if ocrShowDebugBoxes {
-            debugTextBlocks = annotated
-        }
         let filtered = annotated.filter { !$0.isFiltered }
-        return AITranslator.groupedMangaTextBlocks(filtered, isRightToLeft: isRightToLeftReading)
+        let segmentation = MangaTextSegmenter.segment(
+            filtered,
+            isRightToLeft: isRightToLeftReading
+        )
+        let rejected = result.rejectedBlocks + annotated.filter(\.isFiltered)
+        if ocrShowDebugBoxes {
+            debugRawBlocks = result.rawBlocks
+            debugLineBlocks = segmentation.lines
+            debugBubbleBlocks = segmentation.bubbles
+            debugRejectedBlocks = rejected
+        } else {
+            debugRawBlocks.removeAll()
+            debugLineBlocks.removeAll()
+            debugBubbleBlocks.removeAll()
+            debugRejectedBlocks.removeAll()
+        }
+        return OCRPipelineResult(
+            rawBlocks: result.rawBlocks,
+            resolvedBlocks: filtered,
+            lineBlocks: segmentation.lines,
+            bubbleBlocks: segmentation.bubbles,
+            rejectedBlocks: rejected
+        )
     }
 
     private var preferredDecodeMaxPixelSize: CGFloat {
@@ -3302,20 +4035,34 @@ struct LocalImageView: View {
     private func startOCRMagnification() {
         guard isOCREnabled, isOCRMagnificationVisible, !isRecognizingOCR, let image = uiImage else { return }
         isRecognizingOCR = true
+        let pageURL = url
 
-        Task {
+        ocrMagnificationTask?.cancel()
+        ocrMagnificationTask = Task {
             do {
-                let recognizedBlocks = try await recognizedTextBlocks(for: image)
-                let blocks = preparedTextBlocks(from: recognizedBlocks)
+                let recognizedResult = try await recognizedPipelineResult(for: image)
+                let blocks = preparedOCRResult(from: recognizedResult).bubbleBlocks
                 await MainActor.run {
-                    self.ocrTextBlocks = blocks
                     self.isRecognizingOCR = false
+                    // 识别期间翻了页：丢弃旧页结果，并为当前页重新识别
+                    guard self.url == pageURL else {
+                        if self.isOCRMagnificationVisible {
+                            self.startOCRMagnification()
+                        }
+                        return
+                    }
+                    self.ocrTextBlocks = blocks
                 }
             } catch {
                 await MainActor.run {
-                    self.ocrTextBlocks.removeAll()
                     self.isRecognizingOCR = false
+                    if self.url == pageURL {
+                        self.ocrTextBlocks.removeAll()
+                    }
                 }
+            }
+            await MainActor.run {
+                self.ocrMagnificationTask = nil
             }
         }
     }
@@ -3325,77 +4072,206 @@ struct LocalImageView: View {
         translationTask?.cancel()
         guard canTranslate, let image = uiImage else { return }
         let pageURL = url
+        let generation = UUID()
+        translationGeneration = generation
         translationErrorMessage = nil
         isTranslating = true
         onTranslationStateChange(true)
-        
+
         translationTask = Task {
             do {
-                switch aiTranslationMode {
-                case .ocr:
-                    try await startOCRTextTranslation(image: image, pageURL: pageURL)
-                case .vision:
-                    try await startVisionImageTranslation(image: image, pageURL: pageURL)
+                if aiTranslationMode == .ocr && ocrShowDebugBoxes {
+                    try await startOCRTextTranslation(image: image, pageURL: pageURL, generation: generation)
+                } else if useAppleLowLatency, aiTranslationMode == .ocr {
+                    try await startAppleLowLatencyTranslation(image: image, pageURL: pageURL, generation: generation)
+                } else {
+                    let request = try makeTranslationPageRequest(image: image)
+                    let blocks = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        guard self.translationGeneration == generation, self.url == pageURL else { return }
+                        self.textBlocks = blocks
+                    }
                 }
             } catch {
                 if !Task.isCancelled {
                     print("翻译异常: \(error)")
                     await MainActor.run {
+                        guard self.translationGeneration == generation else { return }
                         self.translationErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                         HapticManager.shared.play(.error)
                     }
                 }
             }
+            // 无论任务是否被新任务取代，都要归还“进行中”计数，避免进度边框卡住；
+            // 只有最新代际才允许清理翻译状态（isTranslating / translationTask）。
             await MainActor.run {
-                if !Task.isCancelled && self.translationErrorMessage == nil {
+                self.onTranslationStateChange(false)
+                guard self.translationGeneration == generation else { return }
+                if self.translationErrorMessage == nil {
                     HapticManager.shared.play(.success)
                 }
                 self.isTranslating = false
-                self.onTranslationStateChange(false)
                 self.translationTask = nil
             }
         }
     }
 
-    private func startOCRTextTranslation(image: UIImage, pageURL: URL) async throws {
-        let recognizedBlocks = try await recognizedTextBlocks(for: image)
+    /// Apple 原生翻译路径：本地 OCR → 先显示未翻译气泡 → AppleTranslationBridge 批量翻译 → 云端兜底。
+    private func startAppleLowLatencyTranslation(image: UIImage, pageURL: URL, generation: UUID) async throws {
+        let recognizedResult = try await recognizedPipelineResult(for: image)
         try Task.checkCancellation()
-        let blocks = preparedTextBlocks(from: recognizedBlocks)
-        await MainActor.run { self.textBlocks = blocks }
+        let blocks = preparedOCRResult(from: recognizedResult).bubbleBlocks
+        let bridgeGeneration = UUID()
+        await MainActor.run {
+            guard self.translationGeneration == generation, self.url == pageURL else { return }
+            self.textBlocks = blocks
+            self.appleTranslationRequests = blocks.map { AppleTranslationBlockRequest(id: $0.id, text: $0.text) }
+            self.appleTranslationGeneration = bridgeGeneration
+        }
+    }
+
+    /// Apple 翻译缺失项 → 整页云端 AI 兜底（只翻译缺失的 id）。
+    @MainActor
+    private func cloudFallbackForMissing(_ missingIDs: [UUID], generation: UUID, pageURL: URL) {
+        guard !missingIDs.isEmpty else { return }
+        Task {
+            let missingBlocks = textBlocks.filter {
+                missingIDs.contains($0.id) &&
+                ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            guard !missingBlocks.isEmpty,
+                  let activeConfiguration = AIProviderStore.shared.activeConfiguration() else { return }
+            let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+            do {
+                let pageResult = try await AITranslator.translatePage(
+                    blocks: missingBlocks,
+                    apiKey: activeConfiguration.apiKey,
+                    baseURL: activeConfiguration.baseURL,
+                    model: activeConfiguration.model,
+                    target: requestTarget,
+                    promptTemplate: translationPromptTemplate
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    guard self.translationGeneration == generation, self.url == pageURL else { return }
+                    for id in missingIDs {
+                        guard let index = self.textBlocks.firstIndex(where: { $0.id == id }),
+                              let value = pageResult.translation(for: id.uuidString.lowercased()) else { continue }
+                        self.textBlocks[index].translation = value.translation
+                        self.textBlocks[index].translationLines = value.translationLines
+                    }
+                }
+            } catch {
+                print("Apple 翻译云端兜底失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func makeTranslationPageRequest(image: UIImage) throws -> AITranslationPageRequest {
+        guard let activeConfiguration = AIProviderStore.shared.activeConfiguration() else {
+            throw AIProviderStoreError.missingProfile
+        }
+        return AITranslationPageRequest(
+            pageURL: url,
+            image: image,
+            mode: aiTranslationMode,
+            configuration: activeConfiguration,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            translationPromptTemplate: translationPromptTemplate,
+            visionPromptTemplate: visionTranslationPromptTemplate,
+            isRightToLeft: isRightToLeftReading,
+            minimumTextHeight: ocrMinimumTextHeight,
+            ocrRecognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive,
+            safeAreaInset: ocrSafeAreaInset,
+            usesVisualOCRVerification: ocrVisualVerificationEnabled,
+            viewportAspect: visionViewportAspect
+                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
+        )
+    }
+
+    private func startOCRTextTranslation(image: UIImage, pageURL: URL, generation: UUID) async throws {
+        let recognizedResult = try await recognizedPipelineResult(for: image)
+        try Task.checkCancellation()
+        let blocks = preparedOCRResult(from: recognizedResult).bubbleBlocks
+        await MainActor.run {
+            guard self.translationGeneration == generation else { return }
+            self.textBlocks = blocks
+        }
         guard !blocks.isEmpty else { return }
 
-        let requestAPIKey = apiKey
-        let requestBaseURL = baseURL
-        let requestModelName = modelName
-        let requestModelPoolText = modelPoolText
-        let requestIsModelPoolEnabled = isModelPoolEnabled
-        let requestTargetLanguage = targetLanguage
+        guard let activeConfiguration = AIProviderStore.shared.activeConfiguration() else {
+            throw AIProviderStoreError.missingProfile
+        }
+        let requestAPIKey = activeConfiguration.apiKey
+        let requestBaseURL = activeConfiguration.baseURL
+        let requestModelName = activeConfiguration.model
+        let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let requestPromptTemplate = translationPromptTemplate
-        let maximumConcurrentRequests = min(3, blocks.count)
+        var translatedIndexes = Set<Int>()
+
+        if AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: blocks.count) {
+            do {
+                let pageResult = try await AITranslator.translatePage(
+                    blocks: blocks,
+                    apiKey: requestAPIKey,
+                    baseURL: requestBaseURL,
+                    model: requestModelName,
+                    target: requestTarget,
+                    promptTemplate: requestPromptTemplate
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    guard self.translationGeneration == generation, self.url == pageURL else { return }
+                    for index in blocks.indices {
+                        let id = blocks[index].id.uuidString.lowercased()
+                        guard let translated = pageResult.translation(for: id),
+                              self.textBlocks.indices.contains(index) else {
+                            continue
+                        }
+                        self.textBlocks[index].translation = translated.translation
+                        self.textBlocks[index].translationLines = translated.translationLines
+                        translatedIndexes.insert(index)
+                    }
+                }
+            } catch {
+                print("MReader OCR page translation fallback reason=\(error.localizedDescription)")
+            }
+        }
+
+        try Task.checkCancellation()
+        let missingIndexes = blocks.indices.filter { !translatedIndexes.contains($0) }
+        guard !missingIndexes.isEmpty else { return }
+        let maximumConcurrentRequests = min(3, missingIndexes.count)
 
         await withTaskGroup(of: (Int, String?, String?).self) { group in
             var nextIndex = 0
 
-            func submit(_ index: Int) {
-                let block = blocks[index]
+            func submit(_ missingIndex: Int) {
+                let blockIndex = missingIndexes[missingIndex]
+                let block = blocks[blockIndex]
+                // 整页对白按阅读顺序作为上下文，帮助模型正确断句、统一称呼和语气
+                let pageContext = blocks.count > 1
+                    ? AITranslator.pageContextDescription(blocks: blocks, currentIndex: blockIndex)
+                    : ""
                 group.addTask {
                     do {
                         let translatedText = try await AITranslator.translate(
                             text: block.text,
                             ocrMetadata: AITranslator.ocrMetadata(for: block),
+                            pageContext: pageContext,
                             apiKey: requestAPIKey,
                             baseURL: requestBaseURL,
                             model: requestModelName,
-                            modelPoolText: requestModelPoolText,
-                            isModelPoolEnabled: requestIsModelPoolEnabled,
-                            targetLanguage: requestTargetLanguage,
-                            promptTemplate: requestPromptTemplate
+                            targetLanguage: requestTarget.modelInstruction,
+                            promptTemplate: requestPromptTemplate,
+                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
                         )
-                        return (index, translatedText, nil)
+                        return (blockIndex, translatedText, nil)
                     } catch {
                         let message = (error as? LocalizedError)?.errorDescription
                             ?? error.localizedDescription
-                        return (index, nil, message)
+                        return (blockIndex, nil, message)
                     }
                 }
             }
@@ -3411,14 +4287,14 @@ struct LocalImageView: View {
                     return
                 }
                 await MainActor.run {
-                    guard self.url == pageURL, textBlocks.indices.contains(index) else { return }
+                    guard self.translationGeneration == generation, self.url == pageURL, textBlocks.indices.contains(index) else { return }
                     if let translatedText {
                         textBlocks[index].translation = translatedText
                     } else if let errorMessage {
                         translationErrorMessage = errorMessage
                     }
                 }
-                if nextIndex < blocks.count {
+                if nextIndex < missingIndexes.count {
                     submit(nextIndex)
                     nextIndex += 1
                 }
@@ -3427,39 +4303,61 @@ struct LocalImageView: View {
         try Task.checkCancellation()
     }
 
-    private func startVisionImageTranslation(image: UIImage, pageURL: URL) async throws {
-        let blocks = try await AITranslator.translateVisionPage(
-            image: image,
-            apiKey: apiKey,
-            baseURL: baseURL,
-            model: modelName,
-            modelPoolText: modelPoolText,
-            isModelPoolEnabled: isModelPoolEnabled,
-            targetLanguage: targetLanguage,
-            promptTemplate: visionTranslationPromptTemplate,
+    private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
+        let activeConfiguration = AIProviderStore.shared.activeConfiguration()
+        let activeModel = activeConfiguration?.model ?? "none"
+        let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#model=\(activeModel)"
+        if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
+            return recognizedPipelineCache
+        }
+        let options = OCRPreprocessor.Options(
             isRightToLeft: isRightToLeftReading,
-            viewportAspect: visionViewportAspect
-                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
+            minimumTextHeight: ocrMinimumTextHeight,
+            recognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive
         )
-        try Task.checkCancellation()
+        let cacheRequest = OCRRecognitionCacheRequest(
+            pageURL: url,
+            fallbackImage: image,
+            options: options
+        )
+        let localResult = try await OCRRecognitionCache.shared.result(for: cacheRequest)
+        if let comicID, let pageIndex {
+            await OCRSearchIndex.shared.index(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                blocks: localResult.bubbleBlocks
+            )
+        }
+        let result: OCRPipelineResult
+        if ocrVisualVerificationEnabled, let activeConfiguration {
+            let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
+            let corrected = await AITranslator.visualVerifyOCRRegions(
+                image: ocrImage,
+                blocks: localResult.resolvedBlocks,
+                apiKey: activeConfiguration.apiKey,
+                baseURL: activeConfiguration.baseURL,
+                model: activeConfiguration.model,
+                isRightToLeft: isRightToLeftReading
+            )
+            let segmentation = MangaTextSegmenter.segment(
+                corrected,
+                isRightToLeft: isRightToLeftReading
+            )
+            result = OCRPipelineResult(
+                rawBlocks: localResult.rawBlocks,
+                resolvedBlocks: corrected,
+                lineBlocks: segmentation.lines,
+                bubbleBlocks: segmentation.bubbles,
+                rejectedBlocks: localResult.rejectedBlocks
+            )
+        } else {
+            result = localResult
+        }
         await MainActor.run {
-            guard self.url == pageURL else { return }
-            self.textBlocks = blocks
+            self.recognizedPipelineCacheKey = key
+            self.recognizedPipelineCache = result
         }
-    }
-
-    private func recognizedTextBlocks(for image: UIImage) async throws -> [TextBlock] {
-        let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)"
-        if recognizedBlocksCacheKey == key, let recognizedBlocksCache {
-            return recognizedBlocksCache
-        }
-        let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
-        let blocks = try await AITranslator.recognizeText(in: ocrImage, isRightToLeft: isRightToLeftReading, minimumTextHeight: ocrMinimumTextHeight)
-        await MainActor.run {
-            self.recognizedBlocksCacheKey = key
-            self.recognizedBlocksCache = blocks
-        }
-        return blocks
+        return result
     }
 }
 
@@ -3477,9 +4375,9 @@ private enum TranslationColorStyle: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .contrast: return "高对比"
-        case .coolWarm: return "冷暖分明"
-        case .jewel: return "宝石色"
+        case .contrast: return "ocr.colorStyle.contrast".localized
+        case .coolWarm: return "ocr.colorStyle.coolWarm".localized
+        case .jewel: return "ocr.colorStyle.jewel".localized
         }
     }
 

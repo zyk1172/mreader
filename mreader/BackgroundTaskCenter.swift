@@ -88,8 +88,8 @@ struct BackgroundTaskIndicator: View {
                 }
                 .frame(width: 25, height: 25)
             }
-            .accessibilityLabel("后台处理中")
-            .accessibilityValue("\(center.tasks.count) 个任务")
+            .accessibilityLabel("background.processing".localized)
+            .accessibilityValue("background.taskCount".localizedFormat(center.tasks.count))
         }
     }
 }

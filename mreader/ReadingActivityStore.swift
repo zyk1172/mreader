@@ -22,7 +22,7 @@ nonisolated enum ReadingActivityAccumulator {
     }
 }
 
-nonisolated struct ReadingActivityDay: Codable, Identifiable, Sendable {
+nonisolated struct ReadingActivityDay: Codable, Identifiable, Equatable, Sendable {
     var dateKey: String
     var seconds: Int
     var pages: Int
@@ -117,6 +117,30 @@ final class ReadingActivityStore: ObservableObject {
         days.reduce(0) { $0 + ($1.comicPages[comicID] ?? 0) }
     }
 
+    func mergeSyncedDays(_ incomingDays: [ReadingActivityDay]) {
+        var merged = Dictionary(uniqueKeysWithValues: days.map { ($0.dateKey, $0) })
+        for incoming in incomingDays {
+            guard var existing = merged[incoming.dateKey] else {
+                merged[incoming.dateKey] = incoming
+                continue
+            }
+            existing.seconds = max(existing.seconds, incoming.seconds)
+            existing.pages = max(existing.pages, incoming.pages)
+            existing.completedComicIDs.formUnion(incoming.completedComicIDs)
+            for (comicID, seconds) in incoming.comicSeconds {
+                existing.comicSeconds[comicID] = max(existing.comicSeconds[comicID] ?? 0, seconds)
+            }
+            for (comicID, pages) in incoming.comicPages {
+                existing.comicPages[comicID] = max(existing.comicPages[comicID] ?? 0, pages)
+            }
+            merged[incoming.dateKey] = existing
+        }
+        let updated = merged.values.sorted { $0.dateKey < $1.dateKey }
+        guard updated != days else { return }
+        days = updated
+        save()
+    }
+
     nonisolated static func dateKey(for date: Date, calendar: Calendar = .current) -> String {
         let components = calendar.dateComponents([.year, .month, .day], from: date)
         return String(
@@ -152,7 +176,7 @@ final class ReadingActivityStore: ObservableObject {
 nonisolated enum ComicReadingProgress {
     static func completedPages(for comic: ComicBook) -> Int {
         guard comic.hasBeenOpened, comic.totalPages > 0 else { return 0 }
-        return min(max(comic.currentPageIndex + 1, 0), comic.totalPages)
+        return min(max(comic.furthestPageIndex + 1, 0), comic.totalPages)
     }
 
     static func fraction(for comic: ComicBook) -> Double {

@@ -69,7 +69,7 @@ nonisolated struct KomgaAPIClient: Sendable {
     }
 
     func pageData(bookID: String, pageIndex: Int) async throws -> Data {
-        try await sendData(path: "/api/v1/books/\(bookID)/pages/\(pageIndex + 1)")
+        try await sendData(path: "/api/v1/books/\(bookID)/pages/\(pageIndex + 1)", timeout: 15)
     }
 
     func readProgress(bookID: String) async throws -> KomgaReadProgressDTO? {
@@ -104,6 +104,8 @@ nonisolated struct KomgaAPIClient: Sendable {
 
         var pagedItems: [T] = []
         var page = 0
+        // 安全上限：500 × 200 = 100,000 项，远超正常书库；到顶时显式记录而不是静默截断
+        let maximumPages = 200
         repeat {
             var items = queryItems
             if !items.contains(where: { $0.name == "page" }) {
@@ -116,7 +118,12 @@ nonisolated struct KomgaAPIClient: Sendable {
                 break
             }
             page += 1
-        } while page < 20
+        } while page < maximumPages
+        if page >= maximumPages {
+            #if DEBUG
+            print("Komga 分页达到安全上限 maximumPages=\(maximumPages)，结果可能被截断 path=\(path)")
+            #endif
+        }
         return pagedItems
     }
 
@@ -131,8 +138,8 @@ nonisolated struct KomgaAPIClient: Sendable {
         throw MediaSourceError.decodingFailed
     }
 
-    private func sendData(path: String, queryItems: [URLQueryItem] = [], acceptsImage: Bool = true) async throws -> Data {
-        let request = try makeRequest(path: path, queryItems: queryItems, acceptsImage: acceptsImage)
+    private func sendData(path: String, queryItems: [URLQueryItem] = [], acceptsImage: Bool = true, timeout: TimeInterval? = nil) async throws -> Data {
+        let request = try makeRequest(path: path, queryItems: queryItems, acceptsImage: acceptsImage, timeout: timeout)
         return try await send(request)
     }
 
@@ -152,8 +159,10 @@ nonisolated struct KomgaAPIClient: Sendable {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MediaSourceError.invalidResponse
             }
+            #if DEBUG
             let preview = String(data: data.prefix(500), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
             print("Komga HTTP \(httpResponse.statusCode) \(request.url?.absoluteString ?? "<unknown>") response=\(preview)")
+            #endif
             switch httpResponse.statusCode {
             case 200..<300:
                 return data
@@ -183,7 +192,7 @@ nonisolated struct KomgaAPIClient: Sendable {
         }
     }
 
-    private func makeRequest(path: String, queryItems: [URLQueryItem], acceptsImage: Bool) throws -> URLRequest {
+    private func makeRequest(path: String, queryItems: [URLQueryItem], acceptsImage: Bool, timeout: TimeInterval? = nil) throws -> URLRequest {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw MediaSourceError.invalidURL
         }
@@ -196,7 +205,7 @@ nonisolated struct KomgaAPIClient: Sendable {
         guard let url = components.url else {
             throw MediaSourceError.invalidURL
         }
-        var request = URLRequest(url: url, timeoutInterval: timeout)
+        var request = URLRequest(url: url, timeoutInterval: timeout ?? self.timeout)
         request.httpMethod = "GET"
         request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
