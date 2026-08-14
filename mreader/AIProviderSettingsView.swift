@@ -173,7 +173,8 @@ struct AIProviderSettingsView: View {
 
     private func select(model: String, for profile: AIProviderProfile) {
         do {
-            try AIProviderStore.shared.setSelectedModel(model, for: profile.id, activate: true)
+            // 快捷切换只改“文本翻译模型”，不要覆盖用户单独配置的视觉模型（审查 #8）
+            try AIProviderStore.shared.setSelectedTextModel(model, for: profile.id, activate: true)
             reload()
             HapticManager.shared.play(.light)
         } catch {
@@ -402,10 +403,26 @@ private struct AIProviderEditorView: View {
                         "max_tokens": 8
                     ]
                 } else {
+                    // 文本模型测试直接走真实整页翻译协议（审查 #2）：
+                    // 只有 parser 能通过才显示“兼容”，避免“连接成功但读漫画报错”。
+                    let testItems = [
+                        AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
+                        AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
+                    ]
+                    let prompt = try AIPageTranslationPromptBuilder.prompt(
+                        items: testItems,
+                        sourceLanguage: nil,
+                        target: .simplifiedChinese,
+                        styleInstructions: AITranslator.defaultTranslationStyleInstructions
+                    )
                     body = [
                         "model": model,
-                        "messages": [["role": "user", "content": "Reply with OK."]],
-                        "max_tokens": 8
+                        "messages": [
+                            ["role": "system", "content": "你只做漫画整页翻译。必须保留输入 id，只输出严格 JSON。"],
+                            ["role": "user", "content": prompt]
+                        ],
+                        "temperature": 0.15,
+                        "max_tokens": 200
                     ]
                 }
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -420,6 +437,34 @@ private struct AIProviderEditorView: View {
                         statusCode: response.statusCode,
                         message: details
                     )
+                }
+                if kind == .text {
+                    let decoded = AIChatResponseDecoder.decode(data)
+                    guard let content = decoded.content else {
+                        testFailed = true
+                        testMessage = "settings.textProtocolNoContent".localized
+                        HapticManager.shared.play(.error)
+                        return
+                    }
+                    do {
+                        let result = try AIPageTranslationParser.parse(
+                            content,
+                            expectedItems: [
+                                AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
+                                AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
+                            ],
+                            target: .simplifiedChinese
+                        )
+                        guard !result.items.isEmpty else {
+                            throw AIPageTranslationParserError.emptyResult
+                        }
+                    } catch {
+                        testFailed = true
+                        let excerpt = String(content.prefix(300))
+                        testMessage = "settings.textProtocolIncompatible".localizedFormat(model, excerpt)
+                        HapticManager.shared.play(.error)
+                        return
+                    }
                 }
                 testFailed = false
                 let kindLabel = kind == .text

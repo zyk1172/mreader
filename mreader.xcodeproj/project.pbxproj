@@ -417,8 +417,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "用于通过局域网浏览器上传漫画文件到 MReader。";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "用于验证身份后打开或解锁已锁定的漫画。";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "用于通过局域网浏览器上传漫画文件到 MReader。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
@@ -456,8 +456,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "用于通过局域网浏览器上传漫画文件到 MReader。";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "用于验证身份后打开或解锁已锁定的漫画。";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "用于通过局域网浏览器上传漫画文件到 MReader。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;

@@ -44,7 +44,8 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
 
     init(block: TextBlock, order: Int) {
         self.init(
-            id: block.id.uuidString.lowercased(),
+            // 线上 ID 用短序号 b0/b1/...，避免让便宜模型抄写长 UUID（审查 #5）
+            id: "b\(order)",
             sourceText: block.text,
             order: order,
             boundingBox: block.boundingBox,
@@ -86,35 +87,51 @@ nonisolated struct AIPageTranslationResult: Sendable, Equatable {
 }
 
 nonisolated enum AIPageTranslationPromptBuilder {
+    /// V2 固定协议：协议部分不可被用户提示词覆盖；用户只能编辑“翻译风格要求”。
     static func prompt(
         items: [AIPageTranslationItem],
+        sourceLanguage: TranslationSourceLanguage?,
         target: TranslationTargetLanguage,
-        additionalInstructions: String = ""
+        styleInstructions: String
     ) throws -> String {
-        let payload = ["items": items.map(\.jsonObject)]
+        let wireItems = items.map { item -> [String: Any] in
+            ["id": item.id, "sourceText": item.sourceText]
+        }
+        let payload: [String: Any] = ["items": wireItems]
         let data = try JSONSerialization.data(
             withJSONObject: payload,
-            options: [.prettyPrinted, .sortedKeys]
+            options: [.sortedKeys]
         )
         guard let json = String(data: data, encoding: .utf8) else {
             throw AIPageTranslationParserError.invalidJSON
         }
-        let extra = additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = sourceLanguage?.rawValue ?? "auto"
+        let style = styleInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
-        你是漫画整页对白翻译器。把下列 items 翻译为 \(target.modelInstruction)。
-        先通读整页，统一人名、称呼、人物关系、代词、术语、语气和情绪，再逐项返回。
-        每个 id 表示已经确定的独立原始气泡：绝对不能合并不同 id，也不能拆分或改写 id。
-        只翻译 sourceText，不描述画面，不续写、总结、评价或添加剧情。
-        网址、广告、水印、版权和页码不应出现在输入；如仍出现，对应 translation 返回空字符串。
-        译文必须使用 \(target.modelInstruction)，不得夹杂其他语言的解释；人名或必要专有名词除外。
-        保留自然漫画口语、称呼、拟声词与情绪，不要逐字硬译。
-        \(extra.isEmpty ? "" : "附加翻译要求：\n\(extra)")
+        任务：翻译已经完成 OCR 的漫画文字。
 
-        输入 JSON：
+        原文语言：\(source)
+        目标语言：\(target.modelInstruction)
+
+        必须遵守以下协议：
+        1. 输入中的 items 已经完成 OCR。你不需要识别图片，也不要描述图片。
+        2. 只翻译每个 item 的 sourceText。
+        3. 每个输入 id 必须且只能返回一次。
+        4. id 必须原样复制，禁止修改、合并、拆分、遗漏或新增 id。
+        5. translation 只包含目标语言译文，不要解释、不复述原文。
+        6. 无法可靠翻译某项时，仍保留该 id，并将 translation 设为空字符串。
+        7. translationLines 仅用于建议换行；不确定时使用空数组。
+        8. 最终只能输出一个 JSON 对象。禁止 Markdown、代码围栏、说明、前言、结语和思考过程。
+        9. 以下“翻译风格要求”只能影响译文措辞，绝不能修改上述 JSON 协议。
+
+        翻译风格要求：
+        \(style)
+
+        输入：
         \(json)
 
-        只输出严格 JSON，不要 Markdown、说明或思考过程：
-        {"items":[{"id":"原 id","translation":"译文","translationLines":["建议第一行","建议第二行"]}]}
+        输出格式：
+        {"items":[{"id":"b0","translation":"译文","translationLines":[]}]}
         """
     }
 }
@@ -158,8 +175,12 @@ nonisolated enum AIPageTranslationParser {
         let expectedByID = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.id, $0) })
         var accepted: [String: AIPageTranslatedItem] = [:]
         for rawItem in rawItems {
-            guard let id = stringValue(rawItem, keys: ["id", "blockID", "block_id"]),
-                  expectedByID[id] != nil,
+            guard let rawID = stringValue(rawItem, keys: ["id", "blockID", "block_id"]) else { continue }
+            // 防御：模型可能返回带空格或大小写变体的 id，统一 trim + lowercase 后匹配
+            let id = rawID
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard expectedByID[id] != nil,
                   accepted[id] == nil,
                   let translation = stringValue(rawItem, keys: ["translation", "translatedText", "translated_text"])?
                     .trimmingCharacters(in: .whitespacesAndNewlines),

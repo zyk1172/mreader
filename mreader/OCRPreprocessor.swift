@@ -102,7 +102,7 @@ struct OCRPreprocessor {
                 let locatorBlocks = await recognize(
                     locator,
                     options: options,
-                    passes: [("script", options.languages)],
+                    passes: [("script", effectiveLanguages(for: options))],
                     level: .fast,
                     usesLanguageCorrection: false,
                     maximumCandidates: 1
@@ -539,11 +539,36 @@ struct OCRPreprocessor {
             }
         }
         if latinCount > 0 {
-            return RecognitionPlan(primary: english, fallback: options.isRightToLeft ? japanese : chinese)
+            let allowed = effectiveLanguages(for: options)
+            let primary: (name: String, languages: [String])
+            if let preference = options.sourceLanguagePreference,
+               [.french, .german, .spanish, .italian, .portuguese,
+                .vietnamese, .indonesian, .english].contains(preference) {
+                primary = (
+                    preference.rawValue,
+                    filteredLanguages(preference.recognitionLanguageIdentifiers, allowed: allowed)
+                )
+            } else {
+                primary = english
+            }
+            return RecognitionPlan(primary: primary, fallback: options.isRightToLeft ? japanese : chinese)
         }
 
         let defaults = languagePasses()
         return RecognitionPlan(primary: defaults[0], fallback: defaults[1])
+    }
+
+    /// 用户显式指定原文语言时，优先使用该语言的识别标识（并保留默认语言作兜底），
+    /// 让法语/德语等设置真正贯彻到 Apple Vision OCR（审查 #10）。
+    nonisolated private static func effectiveLanguages(for options: Options) -> [String] {
+        guard let preference = options.sourceLanguagePreference, preference != .automatic else {
+            return options.languages
+        }
+        var merged = preference.recognitionLanguageIdentifiers
+        for language in options.languages where !merged.contains(language) {
+            merged.append(language)
+        }
+        return merged
     }
 
     nonisolated private static func filteredLanguages(_ preferred: [String], allowed: [String]) -> [String] {

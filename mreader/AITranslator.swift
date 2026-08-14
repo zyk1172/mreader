@@ -51,6 +51,10 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     case invalidConfiguration(String)
     case server(model: String, statusCode: Int?, message: String)
     case invalidResponse(model: String)
+    case invalidResponseEnvelope(model: String, contentType: String?, excerpt: String)
+    case missingAssistantContent(model: String, finishReason: String?)
+    case invalidTranslationJSON(model: String, excerpt: String)
+    case incompleteResponse(model: String, finishReason: String)
 
     var errorDescription: String? {
         switch self {
@@ -63,7 +67,117 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
             return "模型 \(model) 请求失败：\(message)"
         case .invalidResponse(let model):
             return "模型 \(model) 返回了无法识别的响应"
+        case .invalidResponseEnvelope(let model, let contentType, let excerpt):
+            let type = contentType ?? "未知类型"
+            return "模型 \(model) 返回了无法识别的响应包（\(type)）：\(excerpt)"
+        case .missingAssistantContent(let model, let finishReason):
+            if let finishReason {
+                return "模型 \(model) 返回了推理内容但没有最终答案（finish_reason=\(finishReason)）"
+            }
+            return "模型 \(model) 没有返回最终回答内容"
+        case .invalidTranslationJSON(let model, let excerpt):
+            return "模型 \(model) 返回的翻译 JSON 无效：\(excerpt)"
+        case .incompleteResponse(let model, let finishReason):
+            return "模型 \(model) 响应不完整（finish_reason=\(finishReason)）"
         }
+    }
+
+    /// 是否属于“格式/协议类”失败：可以触发缩小 batch 或逐气泡兜底。
+    var isFormatFailure: Bool {
+        switch self {
+        case .invalidResponseEnvelope, .missingAssistantContent,
+             .invalidTranslationJSON, .incompleteResponse:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// 统一解析 OpenAI 兼容接口的响应包，支持：
+/// - Chat Completions: choices[].message.content (String / Array)
+/// - legacy: choices[].text
+/// - Responses: 顶层 output_text / output[].content[].text
+/// - reasoning_content（只标记，不当作译文）
+nonisolated enum AIChatResponseDecoder {
+    struct Decoded: Sendable {
+        let content: String?
+        let finishReason: String?
+        let hasReasoningOnly: Bool
+    }
+
+    static func decode(_ data: Data) -> Decoded {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return Decoded(content: nil, finishReason: nil, hasReasoningOnly: false)
+        }
+        let topFinish = (json["finish_reason"] as? String) ?? (json["finishReason"] as? String)
+
+        // Responses 顶层 output_text
+        if let outputText = json["output_text"] as? String,
+           !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Decoded(content: outputText, finishReason: topFinish, hasReasoningOnly: false)
+        }
+
+        // Responses 嵌套 output[].content[].text / output[].text
+        if let output = json["output"] as? [[String: Any]] {
+            let texts = output.compactMap { item -> String? in
+                if let contentArray = item["content"] as? [[String: Any]] {
+                    let joined = contentArray.compactMap { part -> String? in
+                        if let type = part["type"] as? String, type == "output_text",
+                           let t = part["text"] as? String {
+                            return t
+                        }
+                        if let t = part["text"] as? String { return t }
+                        return nil
+                    }.joined(separator: "\n")
+                    return joined.isEmpty ? nil : joined
+                }
+                if let t = item["text"] as? String, !t.isEmpty { return t }
+                return nil
+            }.joined(separator: "\n")
+            if !texts.isEmpty {
+                return Decoded(content: texts, finishReason: topFinish, hasReasoningOnly: false)
+            }
+        }
+
+        guard let choices = json["choices"] as? [[String: Any]], let choice = choices.first else {
+            return Decoded(content: nil, finishReason: topFinish, hasReasoningOnly: false)
+        }
+        let finishReason = (choice["finish_reason"] as? String) ?? topFinish
+
+        if let text = choice["text"] as? String,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Decoded(content: text, finishReason: finishReason, hasReasoningOnly: false)
+        }
+
+        if let message = choice["message"] as? [String: Any] {
+            if let content = message["content"] as? String, !content.isEmpty {
+                return Decoded(content: content, finishReason: finishReason, hasReasoningOnly: false)
+            }
+            if let content = message["content"] as? [[String: Any]] {
+                let joined = content.compactMap { part -> String? in
+                    if let text = part["text"] as? String { return text }
+                    if let content = part["content"] as? String { return content }
+                    if let value = part["value"] as? String { return value }
+                    return nil
+                }.joined(separator: "\n")
+                if !joined.isEmpty {
+                    return Decoded(content: joined, finishReason: finishReason, hasReasoningOnly: false)
+                }
+            }
+            if let content = message["content"],
+               JSONSerialization.isValidJSONObject(content),
+               let data = try? JSONSerialization.data(withJSONObject: content),
+               let value = String(data: data, encoding: .utf8) {
+                return Decoded(content: value, finishReason: finishReason, hasReasoningOnly: false)
+            }
+            let hasReasoning = ((message["reasoning_content"] as? String)?.isEmpty == false)
+                || ((message["reasoning"] as? String)?.isEmpty == false)
+            if hasReasoning {
+                return Decoded(content: nil, finishReason: finishReason, hasReasoningOnly: true)
+            }
+        }
+        return Decoded(content: nil, finishReason: finishReason, hasReasoningOnly: false)
     }
 }
 
@@ -107,29 +221,17 @@ class AITranslator {
         return symbolCount > max(3, trimmed.unicodeScalars.count / 2)
     }
 
-    nonisolated static let defaultTranslationPromptTemplate = """
-    你是一个漫画对白翻译助手。请只翻译我提供的 OCR 文本，不要续写、总结、评价或添加剧情。
-    请保持原文的语气、称呼、人物关系、情绪和漫画对白的自然口语感。
-    OCR 可能把同一句话切成数段。只有当片段距离接近、字号和颜色一致时，才按阅读顺序还原为一句通顺对白；距离较远、字号不同或颜色不同的片段绝对不能合并。
-    网址、广告、版权、水印和页码不要翻译。
-    如果同一气泡包含多句独立对白，请每句之间保留一个空行。
-    如果原文有断句、气泡顺序或拟声词，请保留对应结构。
-    不要记录、记忆、推断用户身份，也不要输出与翻译无关的内容。
-    如果文本包含成人、暴力、敏感或私人内容，只进行中性、准确翻译，不要扩写、润色成更露骨内容，也不要添加新的细节。
-    请将以下文本翻译为：{targetLanguage}
-
-    整页对白（按阅读顺序，仅用于理解上下文，禁止翻译或输出这些内容）：
-    {pageContext}
-
-    OCR 文本：
-    {ocrText}
-
-    OCR 属性：
-    {ocrMetadata}
-
-    输出要求：
-    只输出“OCR 文本”一栏的翻译结果，不要输出上下文里其他句子的翻译。
+    /// 新版“翻译风格要求”：JSON 协议固定进 AIPageTranslationPromptBuilder，
+    /// 用户只编辑这一段影响译文措辞，不能再覆盖协议（审查 #4）。
+    nonisolated static let defaultTranslationStyleInstructions = """
+    保持人物称呼、人物关系、代词、术语和语气在整页内一致。
+    译文使用自然的漫画对白表达，不要机械逐字翻译。
+    保留必要的拟声词、停顿、语气词和情绪。
+    不要续写、总结、解释剧情，也不要添加原文不存在的信息。
     """
+
+    /// 兼容旧引用：默认“提示词”即新版翻译风格要求（协议已固定进 PromptBuilder）。
+    nonisolated static let defaultTranslationPromptTemplate = defaultTranslationStyleInstructions
 
     nonisolated static let defaultVisionTranslationPromptTemplate = """
     你是一个漫画图片文字识别与翻译助手。请只处理图片中的文字，不要描述画面、人物、动作、身体、场景或剧情，不要评价、总结、续写或添加任何新细节。
@@ -206,7 +308,8 @@ class AITranslator {
         baseURL: String,
         model: String,
         target: TranslationTargetLanguage,
-        promptTemplate: String = defaultTranslationPromptTemplate
+        promptTemplate: String = defaultTranslationPromptTemplate,
+        sourceLanguage: TranslationSourceLanguage? = nil
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -220,6 +323,7 @@ class AITranslator {
             model: model,
             target: target,
             promptTemplate: promptTemplate,
+            sourceLanguage: sourceLanguage,
             requestTimeout: AITranslationRequestPolicy.pageRequestTimeout
         )
     }
@@ -231,6 +335,7 @@ class AITranslator {
         model: String,
         target: TranslationTargetLanguage,
         promptTemplate: String,
+        sourceLanguage: TranslationSourceLanguage?,
         requestTimeout: TimeInterval
     ) async throws -> AIPageTranslationResult {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
@@ -241,20 +346,13 @@ class AITranslator {
             throw AITranslationRequestError.invalidConfiguration("接口地址无效")
         }
 
-        let additionalInstructions: String
-        if promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || promptTemplate == defaultTranslationPromptTemplate {
-            additionalInstructions = ""
-        } else {
-            additionalInstructions = promptTemplate
-                .replacingOccurrences(of: "{targetLanguage}", with: target.modelInstruction)
-                .replacingOccurrences(of: "{ocrText}", with: "（见输入 JSON）")
-                .replacingOccurrences(of: "{ocrMetadata}", with: "（见输入 JSON）")
-                .replacingOccurrences(of: "{pageContext}", with: "（输入 JSON 已按整页阅读顺序排列）")
-        }
+        // V2：固定 JSON 协议在 PromptBuilder 内，用户模板只作为“翻译风格要求”传入，
+        // 旧整页/逐气泡提示词不再被原样注入新协议（审查 #3/#4）。
         let prompt = try AIPageTranslationPromptBuilder.prompt(
             items: items,
+            sourceLanguage: sourceLanguage,
             target: target,
-            additionalInstructions: additionalInstructions
+            styleInstructions: promptTemplate
         )
 
         var request = URLRequest(url: url)
@@ -286,16 +384,33 @@ class AITranslator {
         if let message = apiErrorMessage(from: data) {
             throw AITranslationRequestError.server(model: model, statusCode: nil, message: message)
         }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = assistantContent(from: json) else {
-            throw AITranslationRequestError.invalidResponse(model: model)
+        let decoded = AIChatResponseDecoder.decode(data)
+        guard let content = decoded.content,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if decoded.hasReasoningOnly || decoded.finishReason != nil {
+                throw AITranslationRequestError.missingAssistantContent(
+                    model: model,
+                    finishReason: decoded.finishReason
+                )
+            }
+            let contentType = (response as? HTTPURLResponse)?.mimeType
+            let excerpt = String(data: data.prefix(300), encoding: .utf8)
+                ?? "<non-utf8 \(data.count) bytes>"
+            throw AITranslationRequestError.invalidResponseEnvelope(
+                model: model,
+                contentType: contentType,
+                excerpt: excerpt
+            )
         }
         do {
             return try AIPageTranslationParser.parse(content, expectedItems: items, target: target)
         } catch {
             let excerpt = content.replacingOccurrences(of: "\n", with: " ").prefix(300)
             print("MReader AI page translation invalid response model=\(model) excerpt=\(excerpt)")
-            throw error
+            throw AITranslationRequestError.invalidTranslationJSON(
+                model: model,
+                excerpt: String(excerpt)
+            )
         }
     }
 
@@ -337,12 +452,17 @@ class AITranslator {
             throw AITranslationRequestError.server(model: model, statusCode: nil, message: message)
         }
 
-        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let content = assistantContent(from: json),
+        let decoded = AIChatResponseDecoder.decode(data)
+        if let content = decoded.content,
            let translation = sanitizedTranslationText(from: content, sourceText: text) {
             return translation
         }
-
+        if decoded.hasReasoningOnly {
+            throw AITranslationRequestError.missingAssistantContent(
+                model: model,
+                finishReason: decoded.finishReason
+            )
+        }
         throw AITranslationRequestError.invalidResponse(model: model)
     }
 
@@ -355,7 +475,8 @@ class AITranslator {
         targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue,
         promptTemplate: String = defaultVisionTranslationPromptTemplate,
         isRightToLeft: Bool = false,
-        viewportAspect: CGFloat = 2.0
+        viewportAspect: CGFloat = 2.0,
+        sourceLanguage: TranslationSourceLanguage? = nil
     ) async throws -> [TextBlock] {
         let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let recognized = try await recognizeVisionPage(
@@ -383,11 +504,12 @@ class AITranslator {
                 baseURL: baseURL,
                 model: textFallbackModel,
                 target: target,
-                promptTemplate: defaultTranslationPromptTemplate
+                promptTemplate: defaultTranslationPromptTemplate,
+                sourceLanguage: sourceLanguage
             )
-            for index in missingIndexes {
-                let id = translated[index].id.uuidString.lowercased()
-                if let result = pageResult.translation(for: id) {
+            // 线上 ID 是 b0/b1/...（顺序 = missingBlocks 中的位置）
+            for (position, index) in missingIndexes.enumerated() {
+                if let result = pageResult.translation(for: "b\(position)") {
                     translated[index].translation = result.translation
                     translated[index].translationLines = result.translationLines
                 }
@@ -736,39 +858,8 @@ class AITranslator {
     }
 
     private static func assistantContent(from json: [String: Any]) -> String? {
-        if let outputText = json["output_text"] as? String,
-           !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return outputText
-        }
-        guard let choices = json["choices"] as? [[String: Any]],
-              let choice = choices.first else {
-            return nil
-        }
-        if let text = choice["text"] as? String,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return text
-        }
-        guard let message = choice["message"] as? [String: Any] else { return nil }
-        if let content = message["content"] as? String {
-            return content
-        }
-        if let content = message["content"] as? [[String: Any]] {
-            let joined = content.compactMap { part -> String? in
-                if let text = part["text"] as? String { return text }
-                if let content = part["content"] as? String { return content }
-                if let value = part["value"] as? String { return value }
-                return nil
-            }
-            .joined(separator: "\n")
-            return joined.isEmpty ? nil : joined
-        }
-        if let content = message["content"],
-           JSONSerialization.isValidJSONObject(content),
-           let data = try? JSONSerialization.data(withJSONObject: content),
-           let value = String(data: data, encoding: .utf8) {
-            return value
-        }
-        return nil
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+        return AIChatResponseDecoder.decode(data).content
     }
 
     static func assistantContentForDiagnostics(from data: Data) -> String? {

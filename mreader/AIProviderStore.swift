@@ -308,16 +308,39 @@ final class AIProviderStore {
         defaults.set(id.uuidString, forKey: Keys.activeProfileID)
     }
 
+    /// 兼容旧调用：把同一模型同时设为文本与视觉角色。
     func setSelectedModel(_ model: String, for profileID: UUID, activate: Bool = true) throws {
-        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        try setSelectedTextModel(model, for: profileID, activate: activate)
+        try setSelectedVisionModel(model, for: profileID, activate: false)
+    }
+
+    /// 只修改文本翻译模型（列表页快捷切换只改它，避免覆盖用户单独配置的视觉模型，审查 #8）。
+    func setSelectedTextModel(_ model: String, for profileID: UUID, activate: Bool = true) throws {
         var allProfiles = profiles()
         guard let index = allProfiles.firstIndex(where: { $0.id == profileID }) else {
             throw AIProviderStoreError.missingProfile
         }
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard allProfiles[index].models.contains(trimmedModel) else {
             throw AIProviderStoreError.missingModel
         }
         allProfiles[index].selectedTextModel = trimmedModel
+        allProfiles[index].updatedAt = Date()
+        try persist(allProfiles)
+        if activate {
+            setActiveProfile(id: profileID)
+        }
+    }
+
+    func setSelectedVisionModel(_ model: String, for profileID: UUID, activate: Bool = true) throws {
+        var allProfiles = profiles()
+        guard let index = allProfiles.firstIndex(where: { $0.id == profileID }) else {
+            throw AIProviderStoreError.missingProfile
+        }
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard allProfiles[index].models.contains(trimmedModel) else {
+            throw AIProviderStoreError.missingModel
+        }
         allProfiles[index].selectedVisionModel = trimmedModel
         allProfiles[index].updatedAt = Date()
         try persist(allProfiles)

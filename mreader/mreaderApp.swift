@@ -11,6 +11,7 @@ import SwiftUI
 struct mreaderApp: App {
     init() {
         RemoteImageLoader.migrateLegacyCoversIfNeeded()
+        migrateLegacyTranslationPromptIfNeeded()
         let defaults = UserDefaults.standard
         let legacyAPIKey = defaults.string(forKey: "openai_api_key") ?? ""
         do {
@@ -30,6 +31,22 @@ struct mreaderApp: App {
         } catch {
             print("MReader AI legacy configuration migration failed: \(error.localizedDescription)")
         }
+    }
+
+    /// V2 提示词迁移（审查 #4）：旧 `translation_prompt_template` 是“整页/逐气泡完整提示词”，
+    /// 与新固定 JSON 协议冲突。一次性备份到 `translation_prompt_legacy_backup` 并移除旧键，
+    /// 让 AppStorage 回落为默认“翻译风格要求”，不再把旧提示词注入新协议。
+    private func migrateLegacyTranslationPromptIfNeeded() {
+        let defaults = UserDefaults.standard
+        let key = "translation_prompt_template"
+        guard let legacy = defaults.string(forKey: key),
+              !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              legacy != AITranslator.defaultTranslationStyleInstructions else {
+            return
+        }
+        defaults.set(legacy, forKey: "translation_prompt_legacy_backup")
+        defaults.removeObject(forKey: key)
+        print("MReader migrated legacy translation prompt to translation_prompt_legacy_backup")
     }
 
     var body: some Scene {

@@ -278,7 +278,8 @@ nonisolated enum AITranslationPagePipeline {
                 targetLanguage: request.target.rawValue,
                 promptTemplate: request.visionPromptTemplate,
                 isRightToLeft: request.isRightToLeft,
-                viewportAspect: request.viewportAspect
+                viewportAspect: request.viewportAspect,
+                sourceLanguage: request.sourceLanguagePreference
             )
         }
     }
@@ -326,15 +327,89 @@ nonisolated enum AITranslationPagePipeline {
         ).bubbles
         guard !translated.isEmpty else { return [] }
 
-        try await applyBatchTranslation(to: &translated, indexes: Array(translated.indices), request: request)
+        try await applyBatchTranslationSafely(to: &translated, indexes: Array(translated.indices), request: request)
         let missing = translated.indices.filter {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if !missing.isEmpty {
-            try await applyBatchTranslation(to: &translated, indexes: missing, request: request)
+            try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: request)
         }
         return translated.filter {
             !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// 整页 JSON 翻译，失败时若属于“格式/协议类”错误，则缩小为逐气泡纯文本兜底（审查 #7），
+    /// 让格式遵循能力差但翻译能力正常的便宜模型仍然可用。
+    private static func applyBatchTranslationSafely(
+        to blocks: inout [TextBlock],
+        indexes: [Int],
+        request: AITranslationPageRequest
+    ) async throws {
+        do {
+            try await applyBatchTranslation(to: &blocks, indexes: indexes, request: request)
+        } catch let error as AITranslationRequestError where error.isFormatFailure {
+            print("MReader OCR 整页翻译格式失败，逐气泡兜底: \(error.localizedDescription)")
+            try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)
+        }
+    }
+
+    private static func applyPerBubbleTranslation(
+        to blocks: inout [TextBlock],
+        indexes: [Int],
+        request: AITranslationPageRequest
+    ) async throws {
+        guard !indexes.isEmpty else { return }
+        let maximumConcurrentRequests = min(3, indexes.count)
+        let configuration = request.configuration
+        let target = request.target
+        await withTaskGroup(of: (Int, String?).self) { group in
+            var nextIndex = 0
+
+            func submit(_ localIndex: Int) {
+                let index = indexes[localIndex]
+                let block = blocks[index]
+                let pageContext = blocks.count > 1
+                    ? AITranslator.pageContextDescription(blocks: blocks, currentIndex: index)
+                    : ""
+                group.addTask {
+                    do {
+                        let text = try await AITranslator.translate(
+                            text: block.text,
+                            ocrMetadata: AITranslator.ocrMetadata(for: block),
+                            pageContext: pageContext,
+                            apiKey: configuration.apiKey,
+                            baseURL: configuration.baseURL,
+                            model: configuration.textModel,
+                            targetLanguage: target.modelInstruction,
+                            promptTemplate: request.translationPromptTemplate,
+                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
+                        )
+                        return (index, text)
+                    } catch {
+                        return (index, nil)
+                    }
+                }
+            }
+
+            while nextIndex < maximumConcurrentRequests {
+                submit(nextIndex)
+                nextIndex += 1
+            }
+            while let (index, translatedText) = await group.next() {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    return
+                }
+                if let translatedText, blocks.indices.contains(index) {
+                    blocks[index].translation = translatedText
+                    blocks[index].translationLines = [translatedText]
+                }
+                if nextIndex < indexes.count {
+                    submit(nextIndex)
+                    nextIndex += 1
+                }
+            }
         }
     }
 
@@ -351,11 +426,12 @@ nonisolated enum AITranslationPagePipeline {
             baseURL: request.configuration.baseURL,
             model: request.configuration.textModel,
             target: request.target,
-            promptTemplate: request.translationPromptTemplate
+            promptTemplate: request.translationPromptTemplate,
+            sourceLanguage: request.sourceLanguagePreference
         )
-        for index in indexes {
-            let id = blocks[index].id.uuidString.lowercased()
-            guard let value = result.translation(for: id) else { continue }
+        // 线上 ID 是 b0/b1/...，顺序 = requestedBlocks（即 indexes）中的位置
+        for (position, index) in indexes.enumerated() {
+            guard let value = result.translation(for: "b\(position)") else { continue }
             blocks[index].translation = value.translation
             blocks[index].translationLines = value.translationLines
         }
