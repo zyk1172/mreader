@@ -147,6 +147,8 @@
 "settings.testTextConnection" = "测试文本模型";
 "settings.testVisionConnection" = "测试视觉模型";
 "settings.imageEncodingFailed" = "测试图片编码失败";
+"settings.textProtocolNoContent" = "HTTP 接口正常，但响应中没有文本内容。";
+"settings.textProtocolIncompatible" = "HTTP 接口正常，但模型 %@ 不兼容 MReader 整页翻译协议：%@";
 "ocr.sourceLanguage" = "原文语言";
 "translation.source.auto" = "自动";
 "aiProvider.currentChildModel" = "当前子模型";
@@ -219,6 +221,7 @@
 "backup.import" = "导入设置备份";
 "backup.description" = "普通备份不包含 API Key、密码或 Token。需要迁移凭证时，请使用密码加密备份。漫画文件、阅读进度和缓存不包含在内。";
 "backup.exportEncrypted" = "导出加密凭证备份";
+"backup.exportWithCredentials" = "导出含密钥的加密备份";
 "backup.encryptTitle" = "加密设置备份";
 "backup.decryptTitle" = "解锁设置备份";
 "backup.password" = "备份密码";
@@ -468,7 +471,7 @@
 "sync.metadata.title" = "数据与同步";
 "sync.metadata.icloud" = "iCloud 同步阅读进度";
 "sync.metadata.lastSync" = "上次同步";
-"sync.metadata.description" = "在这里管理 iCloud 元数据同步和设置备份。漫画源文件不会上传。";
+"sync.metadata.description" = "在这里管理 iCloud 元数据同步和备份。备份将包含 API 密钥，并以密码加密保存；漫画源文件不会上传。";
 "sync.metadata.localOnly" = "当前漫画根目录不在 iCloud Drive，元数据只保存在本机。将根目录选在 iCloud Drive 后可跨设备同步。";
 "storage.generatedCache" = "封面、OCR 与 AI 缓存";
 "storage.totalCache" = "可清理缓存合计";

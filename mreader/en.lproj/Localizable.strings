@@ -147,6 +147,8 @@
 "settings.testTextConnection" = "Test Text Model";
 "settings.testVisionConnection" = "Test Vision Model";
 "settings.imageEncodingFailed" = "Failed to encode test image";
+"settings.textProtocolNoContent" = "HTTP response has no text content.";
+"settings.textProtocolIncompatible" = "HTTP OK, but model %@ is incompatible with MReader page-translation protocol: %@";
 "ocr.sourceLanguage" = "Source Language";
 "translation.source.auto" = "Auto";
 "aiProvider.currentChildModel" = "Current Child Model";
@@ -219,6 +221,7 @@
 "backup.import" = "Import Settings Backup";
 "backup.description" = "Standard backups exclude API keys, passwords, and tokens. Use an encrypted credential backup when moving credentials. Comics, progress, and cache are not included.";
 "backup.exportEncrypted" = "Export Encrypted Credential Backup";
+"backup.exportWithCredentials" = "Export Encrypted Backup (includes API keys)";
 "backup.encryptTitle" = "Encrypt Settings Backup";
 "backup.decryptTitle" = "Unlock Settings Backup";
 "backup.password" = "Backup Password";
@@ -468,7 +471,7 @@
 "sync.metadata.title" = "Data & Sync";
 "sync.metadata.icloud" = "Sync Reading Progress with iCloud";
 "sync.metadata.lastSync" = "Last Sync";
-"sync.metadata.description" = "Manage iCloud metadata sync and settings backups here. Comic source files are never uploaded.";
+"sync.metadata.description" = "Manage iCloud metadata sync and backups here. Backups now include API keys and are always password-encrypted; comic source files are never uploaded.";
 "sync.metadata.localOnly" = "The selected library is not in iCloud Drive, so metadata stays on this device. Choose an iCloud Drive folder for cross-device sync.";
 "storage.generatedCache" = "Covers, OCR & AI Cache";
 "storage.totalCache" = "Clearable Cache Total";

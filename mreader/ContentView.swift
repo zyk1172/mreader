@@ -1490,19 +1490,12 @@ struct ContentView: View {
             Divider()
             Button {
                 HapticManager.shared.play(.light)
-                exportSettingsBackup(includeCredentials: false)
-            } label: {
-                Label("backup.export".localized, systemImage: "square.and.arrow.up")
-            }
-
-            Button {
-                HapticManager.shared.play(.light)
                 showSettings = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     backupPasswordRequest = BackupPasswordRequest(purpose: .export)
                 }
             } label: {
-                Label("backup.exportEncrypted".localized, systemImage: "lock.doc")
+                Label("backup.exportWithCredentials".localized, systemImage: "lock.doc")
             }
 
             Button {
@@ -1906,23 +1899,24 @@ struct ContentView: View {
         url.hasDirectoryPath || ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
     }
 
-    private func makeSettingsBackup(includeCredentials: Bool) -> MReaderSettingsBackup {
+    /// 备份现在必须携带密钥（API Key / 媒体源 Key），并始终以密码加密导出。
+    private func makeSettingsBackup() -> MReaderSettingsBackup {
         let mediaSources = KomgaProvider.loadSources().map { source in
             MediaSourceBackup(
                 source: source,
-                apiKey: includeCredentials ? KomgaProvider.apiKey(for: source.id) : nil
+                apiKey: KomgaProvider.apiKey(for: source.id)
             )
         }
         let providerStore = AIProviderStore.shared
         let providerBackups = providerStore.profiles().map { profile in
             AIProviderBackup(
                 profile: profile,
-                apiKey: includeCredentials ? providerStore.apiKey(for: profile.id) : nil
+                apiKey: providerStore.apiKey(for: profile.id)
             )
         }
         let activeConfiguration = providerStore.activeConfiguration()
         return MReaderSettingsBackup(
-            openAIAPIKey: includeCredentials ? activeConfiguration?.apiKey : nil,
+            openAIAPIKey: activeConfiguration?.apiKey,
             openAIBaseURL: activeConfiguration?.baseURL ?? "https://api.openai.com/v1",
             openAIModel: activeConfiguration?.textModel ?? "gpt-4o-mini",
             aiModelPool: nil,
@@ -1942,20 +1936,16 @@ struct ContentView: View {
             isICloudMetadataSyncEnabled: isICloudMetadataSyncEnabled,
             aiProviders: providerBackups,
             activeAIProviderID: providerStore.activeProfileID(),
-            containsCredentials: includeCredentials
+            containsCredentials: true
         )
     }
 
-    private func exportSettingsBackup(includeCredentials: Bool, password: String? = nil) {
+    /// 导出设置备份：始终包含密钥，且必须用密码加密（不允许明文携带密钥）。
+    private func exportSettingsBackup(password: String? = nil) {
         do {
-            let backup = makeSettingsBackup(includeCredentials: includeCredentials)
-            let data: Data
-            if includeCredentials {
-                guard let password else { throw SettingsBackupCodecError.invalidPassword }
-                data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
-            } else {
-                data = try SettingsBackupCodec.encodePlain(backup)
-            }
+            let backup = makeSettingsBackup()
+            guard let password else { throw SettingsBackupCodecError.invalidPassword }
+            let data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
             showSettings = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -2016,7 +2006,12 @@ struct ContentView: View {
                 )
             }
             translationTargetLanguage = backup.translationTargetLanguage
-            translationPromptTemplate = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
+            let restoredPrompt = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
+            if !restoredPrompt.isEmpty, restoredPrompt != AITranslator.defaultTranslationStyleInstructions {
+                // 旧备份里的完整提示词与新固定 JSON 协议冲突：备份而不回填（审查 #4）
+                UserDefaults.standard.set(restoredPrompt, forKey: "translation_prompt_legacy_backup")
+            }
+            translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
             visionTranslationPromptTemplate = backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw
@@ -2040,7 +2035,7 @@ struct ContentView: View {
             switch request.purpose {
             case .export:
                 backupPasswordRequest = nil
-                exportSettingsBackup(includeCredentials: true, password: password)
+                exportSettingsBackup(password: password)
             case .restore(let data):
                 let backup = try SettingsBackupCodec.decode(data, password: password)
                 try applySettingsBackup(backup)

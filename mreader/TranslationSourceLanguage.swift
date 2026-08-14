@@ -30,6 +30,28 @@ nonisolated enum TranslationSourceLanguage: String, Codable, CaseIterable, Ident
         return Locale.Language(identifier: rawValue)
     }
 
+    /// 该语言对应的 Vision OCR 识别语言标识（用于 Apple Vision 语言校正）。
+    var recognitionLanguageIdentifiers: [String] {
+        switch self {
+        case .automatic: return ["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]
+        case .simplifiedChinese: return ["zh-Hans"]
+        case .traditionalChinese: return ["zh-Hant"]
+        case .english: return ["en-US"]
+        case .japanese: return ["ja-JP"]
+        case .korean: return ["ko-KR"]
+        case .french: return ["fr-FR"]
+        case .german: return ["de-DE"]
+        case .spanish: return ["es-ES"]
+        case .italian: return ["it-IT"]
+        case .portuguese: return ["pt-BR"]
+        case .russian: return ["ru-RU"]
+        case .thai: return ["th-TH"]
+        case .vietnamese: return ["vi-VN"]
+        case .indonesian: return ["id-ID"]
+        case .arabic: return ["ar-SA"]
+        }
+    }
+
     var localizedTitle: String {
         switch self {
         case .automatic:

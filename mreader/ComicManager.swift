@@ -1231,6 +1231,50 @@ class ComicManager {
         }
     }
 
+    /// 只读取归档页图片的尺寸，不整张解码像素（审查 #18）。
+    /// 用增量 ImageIO 边解压边尝试读宽高；ZIPFoundation 暂不支持提前中断解压，
+    /// 但一旦拿到尺寸就不再做后续工作，也无需构造完整 Data。
+    nonisolated static func imagePixelSizeForArchivePageURL(_ url: URL) -> CGSize? {
+        guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url),
+              format == .zip else {
+            return nil
+        }
+        let readSize: () throws -> CGSize? = {
+            let encoding = encodingRawValue.map { String.Encoding(rawValue: $0) }
+            let archive = try compatibleZIPArchive(url: archiveURL, pathEncoding: encoding)
+            let normalizedTarget = normalizedArchivePath(entryPath)
+            guard let entry = archive.first(where: { entry in
+                let path = encoding.map { entry.path(using: $0) } ?? entry.path
+                return normalizedArchivePath(path).caseInsensitiveCompare(normalizedTarget) == .orderedSame
+            }) else {
+                return nil
+            }
+            let source = CGImageSourceCreateIncremental(nil)
+            var accumulated = Data()
+            var result: CGSize?
+            _ = try archive.extract(entry, skipCRC32: true) { chunk in
+                guard result == nil else { return }
+                accumulated.append(chunk)
+                CGImageSourceUpdateData(source, accumulated as CFData, false)
+                if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                   let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+                   let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+                   width > 0, height > 0 {
+                    result = CGSize(width: width, height: height)
+                }
+            }
+            return result
+        }
+        do {
+            if let size = try withSelectedLibraryRoot({ _ in try readSize() }) {
+                return size
+            }
+            return try readSize()
+        } catch {
+            return nil
+        }
+    }
+
     nonisolated static func zipImportFailureReason(for url: URL) -> String {
         let isSecurityScoped = url.startAccessingSecurityScopedResource()
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }

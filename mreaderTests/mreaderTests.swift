@@ -69,16 +69,19 @@ struct mreaderTests {
     @Test func pageTranslationPromptContainsStableIDsAndExplicitTarget() throws {
         let prompt = try AIPageTranslationPromptBuilder.prompt(
             items: [
-                AIPageTranslationItem(id: "a", sourceText: "遅い", order: 0),
-                AIPageTranslationItem(id: "b", sourceText: "ごめん", order: 1)
+                AIPageTranslationItem(id: "b0", sourceText: "遅い", order: 0),
+                AIPageTranslationItem(id: "b1", sourceText: "ごめん", order: 1)
             ],
-            target: .simplifiedChinese
+            sourceLanguage: .japanese,
+            target: .simplifiedChinese,
+            styleInstructions: "保持自然口语"
         )
 
         #expect(prompt.contains("zh-Hans"))
-        #expect(prompt.contains("\"id\" : \"a\""))
-        #expect(prompt.contains("\"id\" : \"b\""))
-        #expect(prompt.contains("绝对不能合并不同 id"))
+        #expect(prompt.contains("ja"))
+        #expect(prompt.contains("\"id\" : \"b0\""))
+        #expect(prompt.contains("\"id\" : \"b1\""))
+        #expect(prompt.contains("禁止修改、合并、拆分"))
     }
 
     @Test func visionRecognitionFiltersNonContentAndFallsBackToTextGeometry() throws {

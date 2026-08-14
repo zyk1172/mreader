@@ -65,6 +65,22 @@ struct ReaderContainerView: View {
                         comic.currentPageIndex = min(comic.currentPageIndex, max(0, result.pages.count - 1))
                         onComicUpdate(comic)
                     }
+                    // 在 Reader 第一次创建前完成阅读预设检测（审查 #17）：
+                    // 长条漫画第一次出现时就已经是 continuousScroll + fitWidth + 8192，
+                    // 不会先产生一套 4096 普通阅读器。
+                    if !comic.hasInitializedReadingPreset {
+                        let preset = await InitialReadingPresetDetector.detect(
+                            comic: comic,
+                            pages: result.pages
+                        )
+                        comic.readingModeRaw = preset.readingMode.rawValue
+                        comic.pageTurnAnimationRaw = preset.pageTurnAnimation.rawValue
+                        comic.imageFitModeRaw = preset.imageFitMode.rawValue
+                        comic.isAutoOCRMagnificationEnabled = false
+                        comic.isAutoTranslationEnabled = false
+                        comic.hasInitializedReadingPreset = true
+                        onComicUpdate(comic)
+                    }
                     await prewarmInitialScrollingPage(in: result)
                     manager.applyLoadedPages(result)
                     isLoaded = true
@@ -163,8 +179,122 @@ private struct InitialReadingPreset {
     )
 }
 
+/// 阅读预设检测器：在 Reader 第一次创建之前完成“这本漫画是不是长条”的判断，
+/// 避免先按普通模式预载再切到 8192 重解码（审查 #17）。
+nonisolated private enum InitialReadingPresetDetector {
+    static func detect(comic: ComicBook, pages: [ComicPage]) async -> InitialReadingPreset {
+        if isDocument(comic, "epub") {
+            return InitialReadingPreset(
+                readingMode: .horizontalPage,
+                pageTurnAnimation: .curl,
+                imageFitMode: .fitScreen,
+                reason: "epub"
+            )
+        }
+        if isDocument(comic, "pdf") {
+            return InitialReadingPreset.longStrip
+        }
+        let sampleIndices = samplePageIndices(totalPages: pages.count)
+        guard !sampleIndices.isEmpty else { return .normalPage }
+        var ratios: [CGFloat] = []
+        for index in sampleIndices {
+            guard pages.indices.contains(index),
+                  let size = await pagePixelSize(for: pages[index].url) else { continue }
+            await MainActor.run { PageGeometryStore.shared.setSize(size, for: pages[index].url) }
+            ratios.append(size.height / max(size.width, 1))
+        }
+        guard let medianRatio = medianRatio(ratios) else { return .normalPage }
+        if medianRatio > 1.8 {
+            return InitialReadingPreset(
+                readingMode: .continuousScroll,
+                pageTurnAnimation: .none,
+                imageFitMode: .fitWidth,
+                reason: String(format: "median ratio %.3f pages %@", medianRatio, sampleIndices.map { "\($0 + 1)" }.joined(separator: ","))
+            )
+        }
+        return InitialReadingPreset(
+            readingMode: .horizontalPage,
+            pageTurnAnimation: .slide,
+            imageFitMode: .fitScreen,
+            reason: String(format: "median ratio %.3f pages %@", medianRatio, sampleIndices.map { "\($0 + 1)" }.joined(separator: ","))
+        )
+    }
+
+    private static func pagePixelSize(for url: URL) async -> CGSize? {
+        if RemotePageLoader.isRemotePageURL(url) {
+            if let request = RemotePageLoader.RemotePageRequest(url: url) {
+                let cachedURL = RemotePageLoader.pageCacheURL(
+                    sourceID: request.sourceID,
+                    bookID: request.bookID,
+                    pageIndex: request.pageIndex
+                )
+                if let data = try? Data(contentsOf: cachedURL) {
+                    return imagePixelSize(from: data)
+                }
+            }
+            guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
+            return imagePixelSize(from: data)
+        }
+        if ComicManager.isArchivePageURL(url) {
+            return await Task.detached(priority: .utility) {
+                // 轻量尺寸读取，避免为了读宽高而完整解压图片（审查 #18）
+                ComicManager.imagePixelSizeForArchivePageURL(url)
+                    ?? ComicManager.imageData(forArchivePageURL: url).flatMap { imagePixelSize(from: $0) }
+            }.value
+        }
+        return await Task.detached(priority: .utility) {
+            imagePixelSize(from: url)
+        }.value
+    }
+
+    private static func isDocument(_ comic: ComicBook, _ expectedExtension: String) -> Bool {
+        let rawValues = [comic.libraryPath, comic.chapterPath, comic.sourceURL]
+        if rawValues.contains(where: { path in
+            guard let path else { return false }
+            if let url = URL(string: path), url.scheme != nil {
+                return url.pathExtension.lowercased() == expectedExtension
+            }
+            return URL(fileURLWithPath: path).pathExtension.lowercased() == expectedExtension
+        }) {
+            return true
+        }
+        return comic.chapterTypeRaw?.lowercased() == expectedExtension
+    }
+
+    private static func samplePageIndices(totalPages: Int) -> [Int] {
+        guard totalPages > 0 else { return [] }
+        let preferred = (2..<min(totalPages, 5)).map { $0 }
+        return preferred.isEmpty ? Array(0..<totalPages) : preferred
+    }
+
+    private static func medianRatio(_ ratios: [CGFloat]) -> CGFloat? {
+        guard !ratios.isEmpty else { return nil }
+        let sortedRatios = ratios.sorted()
+        let middle = sortedRatios.count / 2
+        if sortedRatios.count.isMultiple(of: 2) {
+            return (sortedRatios[middle - 1] + sortedRatios[middle]) / 2
+        }
+        return sortedRatios[middle]
+    }
+}
+
 nonisolated private func deviceMemoryBytes() -> UInt64 {
     ProcessInfo.processInfo.physicalMemory
+}
+
+/// 页面几何缓存：图片解码/尺寸读取后登记真实宽高，供连续滚动占位使用真实比例（审查 #16）。
+@MainActor
+final class PageGeometryStore {
+    static let shared = PageGeometryStore()
+    private var sizes: [String: CGSize] = [:]
+
+    func setSize(_ size: CGSize, for url: URL) {
+        sizes[url.absoluteString] = size
+    }
+
+    func size(for url: URL) -> CGSize? {
+        sizes[url.absoluteString]
+    }
 }
 
 nonisolated private func cacheLimits() -> (memoryLimitMB: Int, preloadMB: Int) {
@@ -254,8 +384,17 @@ private final class ReaderImageCache {
         }
     }
 
+    private let resolutionTiers: [CGFloat] = [8192, 6144, 4096]
+
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
-        cache.object(forKey: cacheKey(for: url, maxPixelSize: maxPixelSize) as NSString)
+        // 高分辨率缓存可以满足低分辨率请求（审查 #19）：
+        // 已有 8192 时，4096 请求直接复用，避免重复解压。
+        for tier in resolutionTiers where tier >= maxPixelSize {
+            if let image = cache.object(forKey: cacheKey(for: url, maxPixelSize: tier) as NSString) {
+                return image
+            }
+        }
+        return nil
     }
 
     func loadImage(for url: URL, maxPixelSize: CGFloat = 4096) async -> UIImage? {
@@ -432,6 +571,10 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         remoteData = nil
     }
     await ReaderImageDecodeLimiter.shared.acquire()
+    if Task.isCancelled {
+        await ReaderImageDecodeLimiter.shared.release()
+        return nil
+    }
     let image = autoreleasepool { () -> UIImage? in
         let source: CGImageSource?
         if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
@@ -454,7 +597,18 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         }
         return UIImage(contentsOfFile: url.path)
     }
+    if Task.isCancelled {
+        await ReaderImageDecodeLimiter.shared.release()
+        return nil
+    }
     await ReaderImageDecodeLimiter.shared.release()
+    if let image {
+        let pixelSize = CGSize(
+            width: image.size.width * image.scale,
+            height: image.size.height * image.scale
+        )
+        await MainActor.run { PageGeometryStore.shared.setSize(pixelSize, for: url) }
+    }
     return image
 }
 
@@ -2298,7 +2452,7 @@ struct ContinuousScrollReader: View {
                                 targetLanguage: targetLanguage,
                                 imageFitMode: .fitWidth,
                                 visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
-                                placeholderHeight: max(viewportProxy.size.height, viewportProxy.size.width * 1.35),
+                                placeholderHeight: placeholderHeight(for: page.url, viewport: viewportProxy.size),
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
@@ -2520,6 +2674,14 @@ struct ContinuousScrollReader: View {
             lastScrollPositionNotifyDate = Date()
             onScrollPositionChange(visiblePageIndex, Double(progress), Double(pageProgress))
         }
+    }
+
+    /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
+    private func placeholderHeight(for url: URL, viewport: CGSize) -> CGFloat {
+        if let size = PageGeometryStore.shared.size(for: url), size.width > 1 {
+            return max(viewport.height, viewport.width * size.height / size.width)
+        }
+        return max(viewport.height, viewport.width * 1.35)
     }
 
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
@@ -3534,9 +3696,11 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: translationSourceLanguageRaw) { _, _ in
-            // 修改原文语言后，当前翻译与 Apple 请求一并失效并重译（审查 #4）
+            // 修改原文语言后，当前翻译与 Apple 请求一并失效并重译（审查 #4）；
+            // 同时清掉之前自动识别的 stable language，避免旧语言继续污染（审查 #9）
             textBlocks.removeAll()
             appleTranslationRequests.removeAll()
+            clearStableSourceLanguage()
             if isAutoTranslationEnabled {
                 startTranslation()
             }
@@ -4199,7 +4363,9 @@ struct LocalImageView: View {
         let bridgeGeneration = UUID()
 
         if let decision {
-            if decision.confidence >= 0.6 {
+            // 只有 automatic 的高可信检测才允许写入 stable language；
+            // 手动指定语言不污染 stable（审查 #9）
+            if comicTranslationSourceLanguage == .automatic, decision.confidence >= 0.8 {
                 persistStableSourceLanguage(decision.languageCode)
             }
             let cacheKey = AppleTranslationPageCache.key(
@@ -4254,6 +4420,11 @@ struct LocalImageView: View {
         UserDefaults.standard.set(code, forKey: "translation_stable_source_\(comicID.uuidString)")
     }
 
+    private func clearStableSourceLanguage() {
+        guard let comicID else { return }
+        UserDefaults.standard.removeObject(forKey: "translation_stable_source_\(comicID.uuidString)")
+    }
+
     /// Apple 桥接结果是否仍属于当前代际/页面/目标语言（防止旧结果写回新翻译）。
     private func isAppleBridgeCurrent(
         generation: UUID,
@@ -4290,16 +4461,18 @@ struct LocalImageView: View {
                     baseURL: activeConfiguration.baseURL,
                     model: activeConfiguration.textModel,
                     target: requestTarget,
-                    promptTemplate: translationPromptTemplate
+                    promptTemplate: translationPromptTemplate,
+                    sourceLanguage: comicTranslationSourceLanguage
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
                     guard (self.translationGeneration == generation || self.appleTranslationGeneration == generation),
                           self.url == pageURL,
                           self.targetLanguage == targetCode else { return }
-                    for id in missingIDs {
-                        guard let index = self.textBlocks.firstIndex(where: { $0.id == id }),
-                              let value = pageResult.translation(for: id.uuidString.lowercased()) else { continue }
+                    // 线上 ID 是 b0/b1/...，顺序 = missingBlocks 中的位置
+                    for (position, block) in missingBlocks.enumerated() {
+                        guard let index = self.textBlocks.firstIndex(where: { $0.id == block.id }),
+                              let value = pageResult.translation(for: "b\(position)") else { continue }
                         self.textBlocks[index].translation = value.translation
                         self.textBlocks[index].translationLines = value.translationLines
                     }
@@ -4361,14 +4534,15 @@ struct LocalImageView: View {
                     baseURL: requestBaseURL,
                     model: requestModelName,
                     target: requestTarget,
-                    promptTemplate: requestPromptTemplate
+                    promptTemplate: requestPromptTemplate,
+                    sourceLanguage: comicTranslationSourceLanguage
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
                     guard self.translationGeneration == generation, self.url == pageURL else { return }
+                    // 线上 ID 是 b0/b1/...，顺序 = blocks 中的位置
                     for index in blocks.indices {
-                        let id = blocks[index].id.uuidString.lowercased()
-                        guard let translated = pageResult.translation(for: id),
+                        guard let translated = pageResult.translation(for: "b\(index)"),
                               self.textBlocks.indices.contains(index) else {
                             continue
                         }
