@@ -31,6 +31,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     let safeAreaInset: Double
     let usesVisualOCRVerification: Bool
     let viewportAspect: CGFloat
+    let sourceLanguagePreference: TranslationSourceLanguage?
 
     var cacheKey: String {
         let sourceIdentity: String
@@ -40,13 +41,24 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
         } else {
             sourceIdentity = pageURL.absoluteString
         }
+        // 模型按角色（text/vision）进入缓存 key：纯 OCR 翻译只依赖 textModel，
+        // 开启视觉复核后依赖 text+vision，Vision 模式依赖 vision+text。
+        let modelIdentity: String
+        switch mode {
+        case .ocr:
+            modelIdentity = usesVisualOCRVerification
+                ? "text=\(configuration.textModel)|vision=\(configuration.visionModel)"
+                : "text=\(configuration.textModel)"
+        case .vision:
+            modelIdentity = "vision=\(configuration.visionModel)|text=\(configuration.textModel)"
+        }
         let rawValue = [
-            "v4",
+            "v5",
             sourceIdentity,
             mode.rawValue,
             configuration.profileID.uuidString,
             configuration.baseURL,
-            configuration.model,
+            modelIdentity,
             target.rawValue,
             isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", minimumTextHeight),
@@ -54,6 +66,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             String(format: "%.4f", safeAreaInset),
             usesVisualOCRVerification ? "visual-review" : "local-only",
             String(format: "%.3f", Double(viewportAspect)),
+            sourceLanguagePreference?.rawValue ?? "auto",
             translationPromptTemplate,
             visionPromptTemplate
         ].joined(separator: "|")
@@ -260,7 +273,8 @@ nonisolated enum AITranslationPagePipeline {
                 image: request.image,
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
-                model: request.configuration.model,
+                visionModel: request.configuration.visionModel,
+                textFallbackModel: request.configuration.textModel,
                 targetLanguage: request.target.rawValue,
                 promptTemplate: request.visionPromptTemplate,
                 isRightToLeft: request.isRightToLeft,
@@ -273,7 +287,8 @@ nonisolated enum AITranslationPagePipeline {
         let options = OCRPreprocessor.Options(
             isRightToLeft: request.isRightToLeft,
             minimumTextHeight: request.minimumTextHeight,
-            recognitionMode: request.ocrRecognitionMode
+            recognitionMode: request.ocrRecognitionMode,
+            sourceLanguagePreference: request.sourceLanguagePreference
         )
         let cacheRequest = OCRRecognitionCacheRequest(
             pageURL: request.pageURL,
@@ -292,7 +307,7 @@ nonisolated enum AITranslationPagePipeline {
                 blocks: localResult.resolvedBlocks,
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
-                model: request.configuration.model,
+                model: request.configuration.visionModel,
                 isRightToLeft: request.isRightToLeft
             )
         } else {
@@ -334,7 +349,7 @@ nonisolated enum AITranslationPagePipeline {
             blocks: requestedBlocks,
             apiKey: request.configuration.apiKey,
             baseURL: request.configuration.baseURL,
-            model: request.configuration.model,
+            model: request.configuration.textModel,
             target: request.target,
             promptTemplate: request.translationPromptTemplate
         )

@@ -1098,6 +1098,16 @@ struct ReaderView: View {
                             Text(language.localizedTitle).tag(language.rawValue)
                         }
                     }
+
+                    Picker("ocr.sourceLanguage".localized, selection: Binding(
+                        get: { comic.translationSourceLanguageRaw },
+                        set: { newValue in updateComic { $0.translationSourceLanguageRaw = newValue } }
+                    )) {
+                        ForEach(TranslationSourceLanguage.allCases) { language in
+                            Text(language.localizedTitle).tag(language.rawValue)
+                        }
+                    }
+                    .disabled(!comic.isAITranslationEnabled)
                 }
 
                 Section(header: Text("ocr.filter".localized), footer: Text("ocr.filterDescription".localized)) {
@@ -1632,7 +1642,8 @@ struct ReaderView: View {
                         ocrRecognitionMode: ocrRecognitionMode,
                         safeAreaInset: safeAreaInset,
                         usesVisualOCRVerification: usesVisualVerification,
-                        viewportAspect: 2.0
+                        viewportAspect: 2.0,
+                        sourceLanguagePreference: comic.translationSourceLanguage
                     )
                     _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
                     print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
@@ -2276,6 +2287,7 @@ struct ContinuousScrollReader: View {
                                 isAITranslationEnabled: comic.isAITranslationEnabled,
                                 isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
                                 aiTranslationModeRaw: comic.aiTranslationModeRaw,
+                                translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
                                 translateRequestID: translateRequestID,
                                 ocrMagnifyRequestID: ocrMagnifyRequestID,
                                 isOCRMagnificationVisible: isOCRMagnificationVisible && page.index == currentPageIndex,
@@ -2564,6 +2576,7 @@ struct GuidedPanelReader: View {
                         isAITranslationEnabled: comic.isAITranslationEnabled,
                         isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
                         aiTranslationModeRaw: comic.aiTranslationModeRaw,
+                        translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
                         translateRequestID: translateRequestID,
                         ocrMagnifyRequestID: ocrMagnifyRequestID,
                         isOCRMagnificationVisible: isOCRMagnificationVisible,
@@ -2848,6 +2861,7 @@ struct AnimatedPageReader: View {
             // 下一页的翻译由 Reader 层 scheduleTranslationPrefetch 统一预取。
             isAutoTranslationEnabled: index == currentPageIndex ? comic.isAutoTranslationEnabled : false,
             aiTranslationModeRaw: comic.aiTranslationModeRaw,
+            translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
             translateRequestID: translateRequestID,
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
@@ -2962,6 +2976,7 @@ struct DoublePageReader: View {
             isAITranslationEnabled: comic.isAITranslationEnabled,
             isAutoTranslationEnabled: comic.isAutoTranslationEnabled,
             aiTranslationModeRaw: comic.aiTranslationModeRaw,
+            translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
             translateRequestID: translateRequestID,
             ocrMagnifyRequestID: ocrMagnifyRequestID,
             isOCRMagnificationVisible: isOCRMagnificationVisible,
@@ -3276,6 +3291,7 @@ struct LocalImageView: View {
     let isAITranslationEnabled: Bool
     let isAutoTranslationEnabled: Bool
     let aiTranslationModeRaw: String
+    let translationSourceLanguageRaw: String
     let translateRequestID: UUID
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
@@ -3326,6 +3342,7 @@ struct LocalImageView: View {
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @State private var appleTranslationRequests: [AppleTranslationBlockRequest] = []
     @State private var appleTranslationGeneration = UUID()
+    @State private var appleSourceLanguageCode: String? = nil
     @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
@@ -3335,6 +3352,10 @@ struct LocalImageView: View {
 
     private var aiTranslationMode: AITranslationMode {
         AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
+    }
+
+    private var comicTranslationSourceLanguage: TranslationSourceLanguage {
+        TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
     private var canTranslate: Bool {
@@ -3392,22 +3413,50 @@ struct LocalImageView: View {
             }
         }
         .background {
-            if useAppleLowLatency, aiTranslationMode == .ocr, !appleTranslationRequests.isEmpty {
+            if useAppleLowLatency, aiTranslationMode == .ocr, !appleTranslationRequests.isEmpty,
+               let sourceCode = appleSourceLanguageCode {
                 let bridgeGeneration = appleTranslationGeneration
                 let bridgeTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage).rawValue
                 AppleTranslationBridge(
-                    sourceLanguage: nil,
+                    sourceLanguage: Locale.Language(identifier: sourceCode),
                     targetLanguage: Locale.Language(identifier: bridgeTarget),
                     requests: appleTranslationRequests,
-                    onResult: { results in
-                        for (id, text) in results {
-                            guard let index = self.textBlocks.firstIndex(where: { $0.id == id }) else { continue }
-                            self.textBlocks[index].translation = text
-                            self.textBlocks[index].translationLines = [text]
-                        }
+                    onResult: { id, text in
+                        guard self.isAppleBridgeCurrent(
+                            generation: bridgeGeneration,
+                            pageURL: self.url,
+                            targetLanguage: bridgeTarget
+                        ) else { return }
+                        guard let index = self.textBlocks.firstIndex(where: { $0.id == id }) else { return }
+                        self.textBlocks[index].translation = text
+                        self.textBlocks[index].translationLines = [text]
                     },
-                    onMissing: { missing in
-                        self.cloudFallbackForMissing(missing, generation: bridgeGeneration, pageURL: self.url)
+                    onFinished: { seen in
+                        guard self.isAppleBridgeCurrent(
+                            generation: bridgeGeneration,
+                            pageURL: self.url,
+                            targetLanguage: bridgeTarget
+                        ) else { return }
+                        // 把整页（含增量结果）写入 Apple 页缓存，翻回旧页不再重复翻译
+                        let cacheKey = AppleTranslationPageCache.key(
+                            pageURL: self.url,
+                            sourceLanguage: sourceCode,
+                            targetLanguage: bridgeTarget
+                        )
+                        Task {
+                            await AppleTranslationPageCache.shared.store(self.textBlocks, key: cacheKey)
+                        }
+                        let missing = self.appleTranslationRequests
+                            .filter { !seen.contains($0.id) }
+                            .map(\.id)
+                        if !missing.isEmpty {
+                            self.cloudFallbackForMissing(
+                                missing,
+                                generation: bridgeGeneration,
+                                pageURL: self.url,
+                                targetLanguage: bridgeTarget
+                            )
+                        }
                     }
                 )
                 .id(appleTranslationGeneration)
@@ -3480,6 +3529,14 @@ struct LocalImageView: View {
         }
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()
+            if isAutoTranslationEnabled {
+                startTranslation()
+            }
+        }
+        .onChange(of: translationSourceLanguageRaw) { _, _ in
+            // 修改原文语言后，当前翻译与 Apple 请求一并失效并重译（审查 #4）
+            textBlocks.removeAll()
+            appleTranslationRequests.removeAll()
             if isAutoTranslationEnabled {
                 startTranslation()
             }
@@ -4024,7 +4081,8 @@ struct LocalImageView: View {
             resolvedBlocks: filtered,
             lineBlocks: segmentation.lines,
             bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: rejected
+            rejectedBlocks: rejected,
+            detectedLanguage: result.detectedLanguage
         )
     }
 
@@ -4074,6 +4132,10 @@ struct LocalImageView: View {
         let pageURL = url
         let generation = UUID()
         translationGeneration = generation
+        // 新一轮翻译开始：让在途 Apple 桥接的旧结果失效，避免旧 generation 写回
+        appleTranslationGeneration = UUID()
+        appleTranslationRequests = []
+        appleSourceLanguageCode = nil
         translationErrorMessage = nil
         isTranslating = true
         onTranslationStateChange(true)
@@ -4118,22 +4180,99 @@ struct LocalImageView: View {
     }
 
     /// Apple 原生翻译路径：本地 OCR → 先显示未翻译气泡 → AppleTranslationBridge 批量翻译 → 云端兜底。
+    ///
+    /// 源语言不由 TranslationSession 猜测：用户手动指定优先，否则用整页文本 + OCR 线索
+    /// 由 TranslationSourceResolver 判断；仍无法判断时不创建 `source = nil` 的会话，
+    /// 直接交给云端文本模型兜底。
     private func startAppleLowLatencyTranslation(image: UIImage, pageURL: URL, generation: UUID) async throws {
         let recognizedResult = try await recognizedPipelineResult(for: image)
         try Task.checkCancellation()
         let blocks = preparedOCRResult(from: recognizedResult).bubbleBlocks
+
+        let targetCode = TranslationTargetLanguage.migrateLegacyValue(targetLanguage).rawValue
+        let decision = TranslationSourceResolver.resolve(
+            preference: comicTranslationSourceLanguage,
+            blocks: blocks,
+            previousStableLanguage: stableSourceLanguage,
+            ocrHint: recognizedResult.detectedLanguage
+        )
         let bridgeGeneration = UUID()
-        await MainActor.run {
-            guard self.translationGeneration == generation, self.url == pageURL else { return }
-            self.textBlocks = blocks
-            self.appleTranslationRequests = blocks.map { AppleTranslationBlockRequest(id: $0.id, text: $0.text) }
-            self.appleTranslationGeneration = bridgeGeneration
+
+        if let decision {
+            if decision.confidence >= 0.6 {
+                persistStableSourceLanguage(decision.languageCode)
+            }
+            let cacheKey = AppleTranslationPageCache.key(
+                pageURL: pageURL,
+                sourceLanguage: decision.languageCode,
+                targetLanguage: targetCode
+            )
+            if let cached = await AppleTranslationPageCache.shared.cachedBlocks(key: cacheKey) {
+                await MainActor.run {
+                    guard self.translationGeneration == generation, self.url == pageURL else { return }
+                    self.textBlocks = cached
+                    self.appleTranslationRequests = []
+                }
+                return
+            }
+            await MainActor.run {
+                guard self.translationGeneration == generation, self.url == pageURL else { return }
+                self.textBlocks = blocks
+                self.appleTranslationRequests = blocks.map { AppleTranslationBlockRequest(id: $0.id, text: $0.text) }
+                self.appleTranslationGeneration = bridgeGeneration
+                self.appleSourceLanguageCode = decision.languageCode
+            }
+        } else {
+            // 无法可靠判断源语言：不创建 Apple 会话（避免 source=nil 被 Apple 误判），
+            // 全部交给云端文本模型兜底。
+            await MainActor.run {
+                guard self.translationGeneration == generation, self.url == pageURL else { return }
+                self.textBlocks = blocks
+                self.appleTranslationRequests = []
+                self.appleSourceLanguageCode = nil
+            }
+            await MainActor.run {
+                self.cloudFallbackForMissing(
+                    blocks.map(\.id),
+                    generation: generation,
+                    pageURL: pageURL,
+                    targetLanguage: targetCode
+                )
+            }
         }
+    }
+
+    /// 这本漫画已稳定识别的原文语言（按 comicID 持久化到 UserDefaults）。
+    private var stableSourceLanguage: String? {
+        guard let comicID else { return nil }
+        let key = "translation_stable_source_\(comicID.uuidString)"
+        return UserDefaults.standard.string(forKey: key)
+    }
+
+    private func persistStableSourceLanguage(_ code: String) {
+        guard let comicID else { return }
+        UserDefaults.standard.set(code, forKey: "translation_stable_source_\(comicID.uuidString)")
+    }
+
+    /// Apple 桥接结果是否仍属于当前代际/页面/目标语言（防止旧结果写回新翻译）。
+    private func isAppleBridgeCurrent(
+        generation: UUID,
+        pageURL: URL,
+        targetLanguage: String
+    ) -> Bool {
+        appleTranslationGeneration == generation
+            && self.url == pageURL
+            && self.targetLanguage == targetLanguage
     }
 
     /// Apple 翻译缺失项 → 整页云端 AI 兜底（只翻译缺失的 id）。
     @MainActor
-    private func cloudFallbackForMissing(_ missingIDs: [UUID], generation: UUID, pageURL: URL) {
+    private func cloudFallbackForMissing(
+        _ missingIDs: [UUID],
+        generation: UUID,
+        pageURL: URL,
+        targetLanguage targetCode: String
+    ) {
         guard !missingIDs.isEmpty else { return }
         Task {
             let missingBlocks = textBlocks.filter {
@@ -4142,19 +4281,22 @@ struct LocalImageView: View {
             }
             guard !missingBlocks.isEmpty,
                   let activeConfiguration = AIProviderStore.shared.activeConfiguration() else { return }
-            let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+            let requestTarget = TranslationTargetLanguage.migrateLegacyValue(self.targetLanguage)
             do {
+                // 纯文本兜底：用文本模型而不是昂贵的视觉模型（审查 #14）
                 let pageResult = try await AITranslator.translatePage(
                     blocks: missingBlocks,
                     apiKey: activeConfiguration.apiKey,
                     baseURL: activeConfiguration.baseURL,
-                    model: activeConfiguration.model,
+                    model: activeConfiguration.textModel,
                     target: requestTarget,
                     promptTemplate: translationPromptTemplate
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
-                    guard self.translationGeneration == generation, self.url == pageURL else { return }
+                    guard (self.translationGeneration == generation || self.appleTranslationGeneration == generation),
+                          self.url == pageURL,
+                          self.targetLanguage == targetCode else { return }
                     for id in missingIDs {
                         guard let index = self.textBlocks.firstIndex(where: { $0.id == id }),
                               let value = pageResult.translation(for: id.uuidString.lowercased()) else { continue }
@@ -4186,7 +4328,8 @@ struct LocalImageView: View {
             safeAreaInset: ocrSafeAreaInset,
             usesVisualOCRVerification: ocrVisualVerificationEnabled,
             viewportAspect: visionViewportAspect
-                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25)
+                ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25),
+            sourceLanguagePreference: comicTranslationSourceLanguage
         )
     }
 
@@ -4205,7 +4348,7 @@ struct LocalImageView: View {
         }
         let requestAPIKey = activeConfiguration.apiKey
         let requestBaseURL = activeConfiguration.baseURL
-        let requestModelName = activeConfiguration.model
+        let requestModelName = activeConfiguration.textModel
         let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let requestPromptTemplate = translationPromptTemplate
         var translatedIndexes = Set<Int>()
@@ -4305,15 +4448,16 @@ struct LocalImageView: View {
 
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
         let activeConfiguration = AIProviderStore.shared.activeConfiguration()
-        let activeModel = activeConfiguration?.model ?? "none"
-        let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#model=\(activeModel)"
+        let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")"
+        let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
         if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
             return recognizedPipelineCache
         }
         let options = OCRPreprocessor.Options(
             isRightToLeft: isRightToLeftReading,
             minimumTextHeight: ocrMinimumTextHeight,
-            recognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive
+            recognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive,
+            sourceLanguagePreference: comicTranslationSourceLanguage
         )
         let cacheRequest = OCRRecognitionCacheRequest(
             pageURL: url,
@@ -4336,7 +4480,7 @@ struct LocalImageView: View {
                 blocks: localResult.resolvedBlocks,
                 apiKey: activeConfiguration.apiKey,
                 baseURL: activeConfiguration.baseURL,
-                model: activeConfiguration.model,
+                model: activeConfiguration.visionModel,
                 isRightToLeft: isRightToLeftReading
             )
             let segmentation = MangaTextSegmenter.segment(
@@ -4348,7 +4492,8 @@ struct LocalImageView: View {
                 resolvedBlocks: corrected,
                 lineBlocks: segmentation.lines,
                 bubbleBlocks: segmentation.bubbles,
-                rejectedBlocks: localResult.rejectedBlocks
+                rejectedBlocks: localResult.rejectedBlocks,
+                detectedLanguage: localResult.detectedLanguage
             )
         } else {
             result = localResult

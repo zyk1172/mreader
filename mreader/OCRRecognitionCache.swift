@@ -21,7 +21,8 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             options.isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", options.minimumTextHeight),
             options.recognitionMode.rawValue,
-            options.languages.joined(separator: ",")
+            options.languages.joined(separator: ","),
+            options.sourceLanguagePreference?.rawValue ?? "auto"
         ].joined(separator: "|")
         return SHA256.hash(data: Data(rawValue.utf8))
             .map { String(format: "%02x", $0) }

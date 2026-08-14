@@ -32,7 +32,7 @@ struct AIProviderSettingsView: View {
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(profile.name)
                                             .foregroundStyle(.primary)
-                                        Text(profile.selectedModel)
+                                        Text(profile.selectedTextModel)
                                             .font(.caption.monospaced())
                                             .foregroundStyle(.secondary)
                                         Text(profile.baseURL)
@@ -56,7 +56,7 @@ struct AIProviderSettingsView: View {
                                     } label: {
                                         Label(
                                             model,
-                                            systemImage: profile.selectedModel == model
+                                            systemImage: profile.selectedTextModel == model
                                                 ? "checkmark"
                                                 : "circle"
                                         )
@@ -193,11 +193,17 @@ private struct AIProviderEditorView: View {
     @State private var baseURL: String
     @State private var apiKey: String
     @State private var modelsText: String
-    @State private var selectedModel: String
-    @State private var isTesting = false
+    @State private var selectedTextModel: String
+    @State private var selectedVisionModel: String
+    @State private var testingKind: ConnectionTestKind?
     @State private var testMessage: String?
     @State private var testFailed = false
     @State private var validationMessage: String?
+
+    private enum ConnectionTestKind: String {
+        case text
+        case vision
+    }
 
     init(profile: AIProviderProfile?, onSaved: @escaping () -> Void) {
         let id = profile?.id ?? UUID()
@@ -208,12 +214,15 @@ private struct AIProviderEditorView: View {
         _baseURL = State(initialValue: profile?.baseURL ?? "https://api.openai.com/v1")
         _apiKey = State(initialValue: profile.map { AIProviderStore.shared.apiKey(for: $0.id) } ?? "")
         _modelsText = State(initialValue: profile?.models.joined(separator: "\n") ?? "gpt-4o-mini")
-        _selectedModel = State(initialValue: profile?.selectedModel ?? "gpt-4o-mini")
+        _selectedTextModel = State(initialValue: profile?.selectedTextModel ?? "gpt-4o-mini")
+        _selectedVisionModel = State(initialValue: profile?.selectedVisionModel ?? profile?.selectedTextModel ?? "gpt-4o-mini")
     }
 
     private var normalizedModels: [String] {
         AIProviderProfile.normalizedModels(from: modelsText)
     }
+
+    private var isTesting: Bool { testingKind != nil }
 
     var body: some View {
         Form {
@@ -240,7 +249,12 @@ private struct AIProviderEditorView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 } else {
-                    Picker("aiProvider.currentChildModel".localized, selection: $selectedModel) {
+                    Picker("aiProvider.textModel".localized, selection: $selectedTextModel) {
+                        ForEach(normalizedModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    Picker("aiProvider.visionModel".localized, selection: $selectedVisionModel) {
                         ForEach(normalizedModels, id: \.self) { model in
                             Text(model).tag(model)
                         }
@@ -249,20 +263,32 @@ private struct AIProviderEditorView: View {
             } header: {
                 Text("aiProvider.childModels".localized)
             } footer: {
-                Text("aiProvider.childModelsDescription".localized)
+                Text("aiProvider.textVisionFooter".localized)
             }
 
             Section {
                 Button {
-                    testConnection()
+                    testConnection(kind: .text)
                 } label: {
-                    if isTesting {
+                    if testingKind == .text {
                         ProgressView()
                     } else {
-                        Label("settings.testConnection".localized, systemImage: "antenna.radiowaves.left.and.right")
+                        Label("settings.testTextConnection".localized, systemImage: "text.bubble")
                     }
                 }
-                .disabled(isTesting || apiKey.isEmpty || normalizedModels.isEmpty)
+                .disabled(testingKind != nil || apiKey.isEmpty || normalizedModels.isEmpty)
+
+                Button {
+                    testConnection(kind: .vision)
+                } label: {
+                    if testingKind == .vision {
+                        ProgressView()
+                    } else {
+                        Label("settings.testVisionConnection".localized, systemImage: "photo")
+                    }
+                }
+                .disabled(testingKind != nil || apiKey.isEmpty || normalizedModels.isEmpty)
+
                 if let testMessage {
                     Text(testMessage)
                         .font(.footnote)
@@ -281,8 +307,11 @@ private struct AIProviderEditorView: View {
             }
         }
         .onChange(of: modelsText) { _, _ in
-            if !normalizedModels.contains(selectedModel) {
-                selectedModel = normalizedModels.first ?? ""
+            if !normalizedModels.contains(selectedTextModel) {
+                selectedTextModel = normalizedModels.first ?? ""
+            }
+            if !normalizedModels.contains(selectedVisionModel) {
+                selectedVisionModel = normalizedModels.first ?? ""
             }
         }
         .alert(
@@ -304,7 +333,8 @@ private struct AIProviderEditorView: View {
             name: name,
             baseURL: baseURL,
             modelsText: modelsText,
-            selectedModel: selectedModel,
+            selectedTextModel: selectedTextModel,
+            selectedVisionModel: selectedVisionModel,
             createdAt: createdAt,
             updatedAt: Date()
         )
@@ -316,12 +346,14 @@ private struct AIProviderEditorView: View {
             validationMessage = "aiProvider.apiKeyRequired".localized
             return
         }
-        guard !profile.selectedModel.isEmpty else {
+        guard !profile.selectedTextModel.isEmpty || !profile.selectedVisionModel.isEmpty else {
             validationMessage = "aiProvider.modelRequired".localized
             return
         }
         do {
-            try AIProviderStore.shared.save(profile: profile, apiKey: apiKey, activate: true)
+            // 编辑已有配置时保持其原来的 active 状态，不要因为编辑就自动激活（审查 #22）。
+            let wasActive = AIProviderStore.shared.activeProfileID() == profileID
+            try AIProviderStore.shared.save(profile: profile, apiKey: apiKey, activate: wasActive)
             HapticManager.shared.play(.success)
             onSaved()
             dismiss()
@@ -331,11 +363,12 @@ private struct AIProviderEditorView: View {
         }
     }
 
-    private func testConnection() {
-        let model = normalizedModels.contains(selectedModel)
-            ? selectedModel
-            : (normalizedModels.first ?? "")
-        isTesting = true
+    private func testConnection(kind: ConnectionTestKind) {
+        let model = kind == .text
+            ? (normalizedModels.contains(selectedTextModel) ? selectedTextModel : (normalizedModels.first ?? ""))
+            : (normalizedModels.contains(selectedVisionModel) ? selectedVisionModel : (normalizedModels.first ?? ""))
+        guard !model.isEmpty else { return }
+        testingKind = kind
         testMessage = nil
         Task {
             do {
@@ -348,12 +381,34 @@ private struct AIProviderEditorView: View {
                 request.httpMethod = "POST"
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.timeoutInterval = 20
-                request.httpBody = try JSONSerialization.data(withJSONObject: [
-                    "model": model,
-                    "messages": [["role": "user", "content": "Reply with OK."]],
-                    "max_tokens": 8
-                ])
+                request.timeoutInterval = 25
+                let body: [String: Any]
+                if kind == .vision {
+                    // 与 AITranslator.recognizeVisionImage 相同的内容格式：小图验证多模态输入
+                    guard let imageURL = tinyPNGDataURL() else {
+                        throw AITranslationRequestError.invalidConfiguration("settings.imageEncodingFailed".localized)
+                    }
+                    body = [
+                        "model": model,
+                        "messages": [
+                            [
+                                "role": "user",
+                                "content": [
+                                    ["type": "text", "text": "Return OK."],
+                                    ["type": "image_url", "image_url": ["url": imageURL]]
+                                ]
+                            ]
+                        ],
+                        "max_tokens": 8
+                    ]
+                } else {
+                    body = [
+                        "model": model,
+                        "messages": [["role": "user", "content": "Reply with OK."]],
+                        "max_tokens": 8
+                    ]
+                }
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let response = response as? HTTPURLResponse else {
                     throw AITranslationRequestError.invalidConfiguration("settings.invalidResponse".localized)
@@ -367,14 +422,28 @@ private struct AIProviderEditorView: View {
                     )
                 }
                 testFailed = false
-                testMessage = "settings.connectionSuccess".localizedFormat(model)
+                let kindLabel = kind == .text
+                    ? "settings.testTextConnection".localized
+                    : "settings.testVisionConnection".localized
+                testMessage = "settings.connectionSuccess".localizedFormat("\(kindLabel) · \(model)")
                 HapticManager.shared.play(.success)
             } catch {
                 testFailed = true
                 testMessage = error.localizedDescription
                 HapticManager.shared.play(.error)
             }
-            isTesting = false
+            testingKind = nil
         }
+    }
+
+    private func tinyPNGDataURL() -> String? {
+        let size = 32
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+        let image = renderer.image { context in
+            UIColor.gray.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        }
+        guard let data = image.pngData() else { return nil }
+        return "data:image/png;base64,\(data.base64EncodedString())"
     }
 }

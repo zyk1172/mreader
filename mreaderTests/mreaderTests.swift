@@ -519,18 +519,20 @@ struct mreaderTests {
         #expect(result == 7)
     }
 
-    @Test func aiProviderProfileNormalizesChildModelsAndKeepsOneSelection() {
+    @Test func aiProviderKeepsIndependentTextAndVisionModels() {
         let profile = AIProviderProfile.normalized(
             name: " 中转服务 ",
             baseURL: " https://example.com/v1/ ",
             modelsText: "gpt-4.1-mini\n qwen-vl ,gpt-4.1-mini",
-            selectedModel: "qwen-vl"
+            selectedTextModel: "gpt-4.1-mini",
+            selectedVisionModel: "qwen-vl"
         )
 
         #expect(profile.name == "中转服务")
         #expect(profile.baseURL == "https://example.com/v1")
         #expect(profile.models == ["gpt-4.1-mini", "qwen-vl"])
-        #expect(profile.selectedModel == "qwen-vl")
+        #expect(profile.selectedTextModel == "gpt-4.1-mini")
+        #expect(profile.selectedVisionModel == "qwen-vl")
     }
 
     @Test func legacyAISettingsMigrateIntoOneParentWithChildModels() {
@@ -542,7 +544,8 @@ struct mreaderTests {
         )
 
         #expect(profile.models == ["primary-model", "secondary-model"])
-        #expect(profile.selectedModel == "primary-model")
+        #expect(profile.selectedTextModel == "primary-model")
+        #expect(profile.selectedVisionModel == "primary-model")
     }
 
     @Test @MainActor func aiProviderStoreResolvesOnlySelectedParentAndChild() throws {
@@ -555,13 +558,15 @@ struct mreaderTests {
             name: "接口 A",
             baseURL: "https://a.example/v1",
             modelsText: "text-a\nvision-a",
-            selectedModel: "vision-a"
+            selectedTextModel: "text-a",
+            selectedVisionModel: "vision-a"
         )
         let second = AIProviderProfile.normalized(
             name: "接口 B",
             baseURL: "https://b.example/v1",
             modelsText: "model-b",
-            selectedModel: "model-b"
+            selectedTextModel: "model-b",
+            selectedVisionModel: "model-b"
         )
         try store.save(profile: first, apiKey: "key-a")
         try store.save(profile: second, apiKey: "key-b")
@@ -569,7 +574,8 @@ struct mreaderTests {
 
         let active = try #require(store.activeConfiguration())
         #expect(active.profileID == first.id)
-        #expect(active.model == "vision-a")
+        #expect(active.textModel == "text-a")
+        #expect(active.visionModel == "vision-a")
         #expect(active.apiKey == "key-a")
     }
 
@@ -583,13 +589,15 @@ struct mreaderTests {
             name: "接口 A",
             baseURL: "https://a.example/v1",
             modelsText: "ocr-a\nvision-a",
-            selectedModel: "ocr-a"
+            selectedTextModel: "ocr-a",
+            selectedVisionModel: "vision-a"
         )
         let second = AIProviderProfile.normalized(
             name: "接口 B",
             baseURL: "https://b.example/v1",
             modelsText: "ocr-b\nvision-b",
-            selectedModel: "ocr-b"
+            selectedTextModel: "ocr-b",
+            selectedVisionModel: "vision-b"
         )
         try store.save(profile: first, apiKey: "key-a")
         try store.save(profile: second, apiKey: "key-b")
@@ -599,7 +607,8 @@ struct mreaderTests {
 
         let active = try #require(store.activeConfiguration())
         #expect(active.profileID == second.id)
-        #expect(active.model == "vision-b")
+        #expect(active.textModel == "vision-b")
+        #expect(active.visionModel == "vision-b")
         #expect(active.apiKey == "key-b")
     }
 
@@ -608,7 +617,8 @@ struct mreaderTests {
             name: "中转接口",
             baseURL: "https://relay.example/v1",
             modelsText: "ocr-model\nvision-model\nshared-model",
-            selectedModel: "shared-model"
+            selectedTextModel: "ocr-model",
+            selectedVisionModel: "vision-model"
         )
         let backup = MReaderSettingsBackup(
             openAIAPIKey: "legacy-key",
@@ -639,14 +649,15 @@ struct mreaderTests {
         )
         let provider = try #require(decoded.aiProviders?.first)
 
-        #expect(decoded.version == 8)
+        #expect(decoded.version == 9)
         #expect(decoded.isOCRVisualVerificationEnabled == true)
         #expect(decoded.ocrLocalRecognitionMode == OCRRecognitionMode.maximumAccuracy.rawValue)
         #expect(decoded.isICloudMetadataSyncEnabled == true)
         #expect(decoded.activeAIProviderID == profile.id)
         #expect(provider.profile.id == profile.id)
         #expect(provider.profile.models == ["ocr-model", "vision-model", "shared-model"])
-        #expect(provider.profile.selectedModel == "shared-model")
+        #expect(provider.profile.selectedTextModel == "ocr-model")
+        #expect(provider.profile.selectedVisionModel == "vision-model")
         #expect(provider.apiKey == "provider-key")
     }
 
@@ -1173,12 +1184,13 @@ struct mreaderTests {
             name: "Test",
             baseURL: "https://example.com/v1",
             modelsText: "model-a",
-            selectedModel: "model-a"
+            selectedTextModel: "model-a",
+            selectedVisionModel: "model-a"
         )
         let backup = MReaderSettingsBackup(
             openAIAPIKey: secret,
             openAIBaseURL: profile.baseURL,
-            openAIModel: profile.selectedModel,
+            openAIModel: profile.selectedTextModel,
             aiModelPool: nil,
             isAIModelPoolEnabled: false,
             translationTargetLanguage: "简体中文",
@@ -1528,6 +1540,152 @@ private actor LibrarySyncProbe {
         )
         #expect((try? SettingsBackupCodec.encodePlain(plain)) != nil)
     }
+
+    // MARK: - 第二份审查报告回归测试（源语言 + 模型拆分）
+
+    @Test func legacySelectedModelMigratesToBothRoles() throws {
+        let json = """
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "name": "旧接口",
+          "baseURL": "https://example.com/v1",
+          "models": ["old-model"],
+          "selectedModel": "old-model",
+          "createdAt": 1000,
+          "updatedAt": 1000
+        }
+        """
+        let profile = try JSONDecoder().decode(
+            AIProviderProfile.self,
+            from: Data(json.utf8)
+        )
+        #expect(profile.selectedTextModel == "old-model")
+        #expect(profile.selectedVisionModel == "old-model")
+    }
+
+    @Test @MainActor func replaceProfilesWithEmptyListClearsActiveID() throws {
+        let suiteName = "ReplaceProfilesClearTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AIProviderStore(defaults: defaults, credentials: InMemoryAICredentialStore())
+        let profile = AIProviderProfile.normalized(
+            name: "接口",
+            baseURL: "https://a.example/v1",
+            modelsText: "model-a",
+            selectedTextModel: "model-a",
+            selectedVisionModel: "model-a"
+        )
+        try store.save(profile: profile, apiKey: "k")
+        store.setActiveProfile(id: profile.id)
+        #expect(store.activeProfileID() == profile.id)
+
+        try store.replaceProfiles([], activeProfileID: profile.id)
+        #expect(store.activeProfileID() == nil)
+    }
+
+    @Test func translationSourceLanguageDefaultsToAutomatic() {
+        let comic = ComicBook(title: "t", bookmarkData: Data(), totalPages: 1)
+        #expect(comic.translationSourceLanguage == .automatic)
+    }
+
+    @Test func translationSourceResolverUsesManualPreferenceFirst() {
+        let decision = TranslationSourceResolver.resolve(
+            preference: .english,
+            blocks: [TextBlock(text: "No!", boundingBox: .zero, confidence: 0.9, ocrSource: "original:en")],
+            previousStableLanguage: nil
+        )
+        #expect(decision?.languageCode == "en")
+        #expect(decision?.confidence == 1)
+    }
+
+    @Test func translationSourceResolverFallsBackToPreviousWhenUncertain() {
+        let decision = TranslationSourceResolver.resolve(
+            preference: .automatic,
+            blocks: [],
+            previousStableLanguage: "ja"
+        )
+        #expect(decision?.languageCode == "ja")
+    }
+
+    @Test func translationSourceResolverReturnsNilWhenUnknownAndNoPrevious() {
+        let decision = TranslationSourceResolver.resolve(
+            preference: .automatic,
+            blocks: [],
+            previousStableLanguage: nil
+        )
+        #expect(decision == nil)
+    }
+
+    @Test func translationOutputValidatorPageLevelRejectsDifferentLatinLanguage() {
+        // 目标英语：整页译文若是清晰的其它拉丁语言（法语），应判定不兼容
+        let french = "Bonjour, comment allez-vous aujourd'hui? Je vais tres bien, merci beaucoup."
+        #expect(
+            TranslationOutputValidator.pageIsCompatible(
+                [french],
+                target: .english
+            ) == false
+        )
+        let english = "Hello, how are you doing today? I am doing very well, thank you."
+        #expect(
+            TranslationOutputValidator.pageIsCompatible(
+                [english],
+                target: .english
+            )
+        )
+    }
+
+    @Test func translationPageCacheKeyTracksModelRoles() {
+        // 纯 OCR 翻译：只依赖 textModel；visionModel 变化不应改变缓存 key
+        let ocrA = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-a", visualVerify: false)
+        let ocrB = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-b", visualVerify: false)
+        #expect(ocrA.cacheKey == ocrB.cacheKey)
+
+        let ocrC = makeTestPageRequest(mode: .ocr, textModel: "text-b", visionModel: "vision-a", visualVerify: false)
+        #expect(ocrA.cacheKey != ocrC.cacheKey)
+
+        // 开启视觉复核：visionModel 变化必须使缓存 key 变化
+        let verifyA = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-a", visualVerify: true)
+        let verifyB = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-b", visualVerify: true)
+        #expect(verifyA.cacheKey != verifyB.cacheKey)
+
+        // Vision 模式：visionModel 与 textModel 都进入缓存 key
+        let visionA = makeTestPageRequest(mode: .vision, textModel: "text-a", visionModel: "vision-a", visualVerify: false)
+        let visionB = makeTestPageRequest(mode: .vision, textModel: "text-a", visionModel: "vision-b", visualVerify: false)
+        #expect(visionA.cacheKey != visionB.cacheKey)
+        let visionC = makeTestPageRequest(mode: .vision, textModel: "text-b", visionModel: "vision-a", visualVerify: false)
+        #expect(visionA.cacheKey != visionC.cacheKey)
+    }
+}
+
+private func makeTestPageRequest(
+    mode: AITranslationMode,
+    textModel: String,
+    visionModel: String,
+    visualVerify: Bool
+) -> AITranslationPageRequest {
+    AITranslationPageRequest(
+        pageURL: URL(fileURLWithPath: "/tmp/page.png"),
+        image: UIImage(),
+        mode: mode,
+        configuration: AIActiveConfiguration(
+            profileID: UUID(),
+            profileName: "p",
+            baseURL: "https://example.com/v1",
+            apiKey: "k",
+            textModel: textModel,
+            visionModel: visionModel
+        ),
+        target: .simplifiedChinese,
+        translationPromptTemplate: "t",
+        visionPromptTemplate: "v",
+        isRightToLeft: false,
+        minimumTextHeight: 0.002,
+        ocrRecognitionMode: .adaptive,
+        safeAreaInset: 0,
+        usesVisualOCRVerification: visualVerify,
+        viewportAspect: 1.5,
+        sourceLanguagePreference: nil
+    )
 }
 
 @MainActor

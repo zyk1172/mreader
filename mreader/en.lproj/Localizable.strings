@@ -132,7 +132,7 @@
 "aiProvider.saved" = "Saved Profiles";
 "aiProvider.empty" = "No AI API Profile";
 "aiProvider.emptyDescription" = "Add an OpenAI-compatible API and its child models.";
-"aiProvider.sharedModelDescription" = "OCR and vision translation use the same selected child model. Requests never switch models automatically.";
+"aiProvider.sharedModelDescription" = "Text translation and vision translation are configured separately; each request always uses its own role model and never switches automatically.";
 "aiProvider.add" = "Add API Profile";
 "aiProvider.makeActive" = "Set Active";
 "aiProvider.deleteTitle" = "Delete API Profile?";
@@ -140,7 +140,15 @@
 "aiProvider.connection" = "Connection";
 "aiProvider.name" = "Profile Name";
 "aiProvider.childModels" = "Child Models";
-"aiProvider.childModelsDescription" = "Enter one model name per line, then select the single model used by OCR and vision.";
+"aiProvider.childModelsDescription" = "Enter one model name per line, then choose the text and vision models separately.";
+"aiProvider.textModel" = "OCR Text Translation Model";
+"aiProvider.visionModel" = "Vision Model";
+"aiProvider.textVisionFooter" = "The OCR text model only translates recognized text and does not need image input; the vision model is used for whole-page vision translation and OCR visual review, and must support image input. They may be the same model.";
+"settings.testTextConnection" = "Test Text Model";
+"settings.testVisionConnection" = "Test Vision Model";
+"settings.imageEncodingFailed" = "Failed to encode test image";
+"ocr.sourceLanguage" = "Source Language";
+"translation.source.auto" = "Auto";
 "aiProvider.currentChildModel" = "Current Child Model";
 "aiProvider.modelRequired" = "Add and select at least one child model.";
 "aiProvider.apiKeyRequired" = "Enter an API key.";

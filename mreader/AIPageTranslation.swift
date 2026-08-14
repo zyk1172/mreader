@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import NaturalLanguage
 
 nonisolated enum AITranslationRequestPolicy {
     static let pageModelAttempts = 1
@@ -121,11 +122,13 @@ nonisolated enum AIPageTranslationPromptBuilder {
 nonisolated enum AIPageTranslationParserError: LocalizedError, Sendable {
     case invalidJSON
     case emptyResult
+    case pageLanguageMismatch
 
     var errorDescription: String? {
         switch self {
         case .invalidJSON: return "整页翻译返回格式无效"
         case .emptyResult: return "整页翻译没有返回可用文本"
+        case .pageLanguageMismatch: return "整页翻译语言与目标语言不一致"
         }
     }
 }
@@ -180,6 +183,14 @@ nonisolated enum AIPageTranslationParser {
         let orderedItems = expectedItems.compactMap { accepted[$0.id] }
         let missingIDs = expectedItems.filter { accepted[$0.id] == nil }.map(\.id)
         guard !orderedItems.isEmpty else { throw AIPageTranslationParserError.emptyResult }
+        // 拉丁语言（英/法/德/西/意/葡/越/印尼）逐气泡只校验拉丁字母，
+        // 整页再用 NLLanguageRecognizer 二次校验，避免法语/荷兰语结果被当成英语通过。
+        if !TranslationOutputValidator.pageIsCompatible(
+            orderedItems.map(\.translation),
+            target: target
+        ) {
+            throw AIPageTranslationParserError.pageLanguageMismatch
+        }
         return AIPageTranslationResult(items: orderedItems, missingIDs: missingIDs)
     }
 
@@ -263,5 +274,35 @@ nonisolated enum TranslationOutputValidator {
             }
         }
         return result
+    }
+
+    /// 对拉丁字母目标语言做整页语言二次校验：
+    /// 仅凭“是否含拉丁字母”无法区分英语/法语/德语/荷兰语，逐气泡校验可能放过错误语言。
+    /// 这里把整页译文聚合后用 NLLanguageRecognizer 判断，若确信是“另一种拉丁语言”，
+    /// 则整页不兼容（交给调用方重试/兜底）。
+    static func pageIsCompatible(
+        _ translations: [String],
+        target: TranslationTargetLanguage
+    ) -> Bool {
+        let latinTargets: Set<TranslationTargetLanguage> = [
+            .english, .french, .german, .spanish, .italian,
+            .portuguese, .vietnamese, .indonesian
+        ]
+        guard latinTargets.contains(target) else { return true }
+        let joined = translations
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 文本太短时 NL 不可靠，保持原行为
+        guard joined.unicodeScalars.count >= 12 else { return true }
+        let targetLanguage = NLLanguage(rawValue: target.rawValue)
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(joined)
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 3)
+            .sorted { $0.value > $1.value }
+        guard let first = hypotheses.first else { return true }
+        let second = hypotheses.dropFirst().first?.value ?? 0
+        // 只有高置信、明显区分时才判定不兼容，避免误伤
+        guard first.value >= 0.7, first.value - second >= 0.15 else { return true }
+        return first.key == targetLanguage
     }
 }
