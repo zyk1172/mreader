@@ -346,13 +346,23 @@ class AITranslator {
         throw AITranslationRequestError.invalidResponse(model: model)
     }
 
-    static func translateVisionPage(image: UIImage, apiKey: String, baseURL: String, model: String, targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue, promptTemplate: String = defaultVisionTranslationPromptTemplate, isRightToLeft: Bool = false, viewportAspect: CGFloat = 2.0) async throws -> [TextBlock] {
+    static func translateVisionPage(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        textFallbackModel: String,
+        targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue,
+        promptTemplate: String = defaultVisionTranslationPromptTemplate,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0
+    ) async throws -> [TextBlock] {
         let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let recognized = try await recognizeVisionPage(
             image: image,
             apiKey: apiKey,
             baseURL: baseURL,
-            model: model,
+            model: visionModel,
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             translationTarget: target,
@@ -366,11 +376,12 @@ class AITranslator {
         }
         if !missingIndexes.isEmpty {
             let missingBlocks = missingIndexes.map { translated[$0] }
+            // Vision 漏译的纯文本补译走文本模型，而不是昂贵的视觉模型（审查 #12）
             let pageResult = try await translatePage(
                 blocks: missingBlocks,
                 apiKey: apiKey,
                 baseURL: baseURL,
-                model: model,
+                model: textFallbackModel,
                 target: target,
                 promptTemplate: defaultTranslationPromptTemplate
             )

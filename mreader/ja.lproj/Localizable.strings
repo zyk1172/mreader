@@ -132,7 +132,7 @@
 "aiProvider.saved" = "保存済み設定";
 "aiProvider.empty" = "AI API 設定がありません";
 "aiProvider.emptyDescription" = "OpenAI 互換 API と子モデルを追加します。";
-"aiProvider.sharedModelDescription" = "OCR と画像翻訳は同じ選択中の子モデルを使用し、自動切替は行いません。";
+"aiProvider.sharedModelDescription" = "テキスト翻訳とビジュアル翻訳は別々に設定します。各リクエストは常にその役割のモデルを使い、自動切替は行いません。";
 "aiProvider.add" = "API 設定を追加";
 "aiProvider.makeActive" = "現在の設定にする";
 "aiProvider.deleteTitle" = "API 設定を削除しますか？";
@@ -140,7 +140,15 @@
 "aiProvider.connection" = "接続";
 "aiProvider.name" = "設定名";
 "aiProvider.childModels" = "子モデル";
-"aiProvider.childModelsDescription" = "1 行に 1 モデルを入力し、OCR と画像翻訳で共用するモデルを選択します。";
+"aiProvider.childModelsDescription" = "1 行に 1 つのモデル名を入力し、テキスト用・ビジュアル用のモデルをそれぞれ選択します。";
+"aiProvider.textModel" = "OCR テキスト翻訳モデル";
+"aiProvider.visionModel" = "ビジョンモデル";
+"aiProvider.textVisionFooter" = "OCR テキストモデルは認識済みテキストのみ翻訳し、画像入力は不要です。ビジョンモデルはページ全体のビジュアル翻訳と OCR の視覚確認に使い、画像入力に対応している必要があります。同じモデルでも構いません。";
+"settings.testTextConnection" = "テキストモデルをテスト";
+"settings.testVisionConnection" = "ビジョンモデルをテスト";
+"settings.imageEncodingFailed" = "テスト画像のエンコードに失敗";
+"ocr.sourceLanguage" = "原文言語";
+"translation.source.auto" = "自動";
 "aiProvider.currentChildModel" = "現在の子モデル";
 "aiProvider.modelRequired" = "子モデルを 1 つ以上追加して選択してください。";
 "aiProvider.apiKeyRequired" = "API Key を入力してください。";

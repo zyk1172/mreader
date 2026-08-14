@@ -22,6 +22,8 @@ struct OCRPreprocessor {
         var minimumTextHeight: Double
         var languages: [String] = ["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]
         var recognitionMode: OCRRecognitionMode = .adaptive
+        /// 用户显式指定的原文语言：CJK 无假名时优先用它来区分中/日文，而不是只靠阅读方向猜。
+        var sourceLanguagePreference: TranslationSourceLanguage? = nil
     }
 
     // CIContext 创建成本高，整个 OCR 预处理共享一个
@@ -115,7 +117,7 @@ struct OCRPreprocessor {
                     options: options,
                     passes: [plan.primary]
                 )
-                if needsEnhancedFallback(sliceBlocks), let fallback = plan.fallback {
+                if needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft), let fallback = plan.fallback {
                     sliceBlocks.append(contentsOf: await recognize(
                         original,
                         options: options,
@@ -132,7 +134,7 @@ struct OCRPreprocessor {
                 )
             }
 
-            let needsImageEnhancement = needsEnhancedFallback(sliceBlocks)
+            let needsImageEnhancement = needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft)
             if needsImageEnhancement,
                let enhancedImage = enhancedImage(slice.image, inverted: false) {
                 let enhanced = OCRImageVariant(
@@ -149,7 +151,7 @@ struct OCRPreprocessor {
             }
 
             // 暗色判断只分析低分辨率定位图，避免为了少量采样强制解码整块高清像素。
-            let shouldTryInverted = isLikelyDark(locatorImage) || needsEnhancedFallback(sliceBlocks)
+            let shouldTryInverted = isLikelyDark(locatorImage) || needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft)
             if shouldTryInverted,
                let invertedImage = enhancedImage(slice.image, inverted: true) {
                 let inverted = OCRImageVariant(
@@ -200,8 +202,11 @@ struct OCRPreprocessor {
         return blocks
     }
 
-    nonisolated private static func needsEnhancedFallback(_ candidates: [TextBlock]) -> Bool {
-        let resolved = OCRCandidateResolver.resolve(candidates, isRightToLeft: false).resolvedBlocks
+    nonisolated private static func needsEnhancedFallback(
+        _ candidates: [TextBlock],
+        isRightToLeft: Bool
+    ) -> Bool {
+        let resolved = OCRCandidateResolver.resolve(candidates, isRightToLeft: isRightToLeft).resolvedBlocks
         guard !resolved.isEmpty else { return true }
         let confidence = averageConfidence(resolved)
         let usefulCharacterCount = resolved.reduce(into: 0) { total, block in
@@ -521,9 +526,17 @@ struct OCRPreprocessor {
             return RecognitionPlan(primary: korean, fallback: japanese)
         }
         if cjkCount > 0 {
-            return options.isRightToLeft
-                ? RecognitionPlan(primary: japanese, fallback: chinese)
-                : RecognitionPlan(primary: chinese, fallback: japanese)
+            // 用户显式指定原文语言时优先遵循，替代“用阅读方向猜中/日文”的弱启发（审查 #21）
+            switch options.sourceLanguagePreference {
+            case .japanese:
+                return RecognitionPlan(primary: japanese, fallback: chinese)
+            case .simplifiedChinese, .traditionalChinese:
+                return RecognitionPlan(primary: chinese, fallback: japanese)
+            default:
+                return options.isRightToLeft
+                    ? RecognitionPlan(primary: japanese, fallback: chinese)
+                    : RecognitionPlan(primary: chinese, fallback: japanese)
+            }
         }
         if latinCount > 0 {
             return RecognitionPlan(primary: english, fallback: options.isRightToLeft ? japanese : chinese)

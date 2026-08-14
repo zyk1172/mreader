@@ -132,7 +132,7 @@
 "aiProvider.saved" = "已保存的接口";
 "aiProvider.empty" = "尚未添加 AI 接口";
 "aiProvider.emptyDescription" = "添加 OpenAI 兼容接口及其子模型。";
-"aiProvider.sharedModelDescription" = "OCR 与视觉翻译共同使用当前子模型。请求失败时不会自动切换其他模型。";
+"aiProvider.sharedModelDescription" = "文本翻译与视觉翻译分别配置；每次请求固定使用对应角色的模型，不会自动切换。";
 "aiProvider.add" = "添加接口配置";
 "aiProvider.makeActive" = "设为当前";
 "aiProvider.deleteTitle" = "删除接口配置？";
@@ -140,7 +140,15 @@
 "aiProvider.connection" = "接口连接";
 "aiProvider.name" = "接口名称";
 "aiProvider.childModels" = "子模型";
-"aiProvider.childModelsDescription" = "每行输入一个模型名称，然后选择 OCR 与视觉翻译共同使用的唯一子模型。";
+"aiProvider.childModelsDescription" = "每行输入一个模型名称，然后分别选择文本翻译模型与视觉模型。";
+"aiProvider.textModel" = "OCR 文本翻译模型";
+"aiProvider.visionModel" = "视觉模型";
+"aiProvider.textVisionFooter" = "OCR 文本模型只处理识别后的文字，无需支持图片输入；视觉模型用于整页视觉翻译和 OCR 视觉复核，必须支持图片输入。两者可以选择同一个模型。";
+"settings.testTextConnection" = "测试文本模型";
+"settings.testVisionConnection" = "测试视觉模型";
+"settings.imageEncodingFailed" = "测试图片编码失败";
+"ocr.sourceLanguage" = "原文语言";
+"translation.source.auto" = "自动";
 "aiProvider.currentChildModel" = "当前子模型";
 "aiProvider.modelRequired" = "请至少添加并选择一个子模型。";
 "aiProvider.apiKeyRequired" = "请输入 API Key。";

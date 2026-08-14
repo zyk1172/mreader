@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 import Translation
@@ -9,22 +10,71 @@ nonisolated struct AppleTranslationBlockRequest: Sendable, Identifiable, Equatab
     let text: String
 }
 
+/// Apple 本地翻译的会话内页缓存。
+///
+/// 让“翻回旧页”时能直接命中上次 Apple 翻译结果，而不必重新 OCR + 重新翻译。
+/// 按 (pageURL + 源语言 + 目标语言) 分键，只做内存缓存（会话内有效）。
+actor AppleTranslationPageCache {
+    static let shared = AppleTranslationPageCache()
+
+    private var memoryCache: [String: [TextBlock]] = [:]
+    private var memoryOrder: [String] = []
+    private let memoryPageLimit = 40
+
+    func cachedBlocks(key: String) -> [TextBlock]? {
+        if let blocks = memoryCache[key] {
+            touch(key)
+            return blocks
+        }
+        return nil
+    }
+
+    func store(_ blocks: [TextBlock], key: String) {
+        if memoryCache[key] == nil {
+            memoryOrder.append(key)
+        }
+        memoryCache[key] = blocks
+        if memoryOrder.count > memoryPageLimit {
+            let oldest = memoryOrder.removeFirst()
+            memoryCache.removeValue(forKey: oldest)
+        }
+    }
+
+    private func touch(_ key: String) {
+        if let index = memoryOrder.firstIndex(of: key) {
+            memoryOrder.remove(at: index)
+            memoryOrder.append(key)
+        }
+    }
+
+    nonisolated static func key(
+        pageURL: URL,
+        sourceLanguage: String,
+        targetLanguage: String
+    ) -> String {
+        let raw = "\(pageURL.absoluteString)#\(sourceLanguage)#\(targetLanguage)"
+        return SHA256.hash(data: Data(raw.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+
 /// 驱动 Apple `TranslationSession` 的轻量桥接视图。
 ///
-/// 它负责用 `.translationTask` 取得会话，然后以 `translate(batch:)` 一次性批量翻译
-/// 一页里的所有气泡（通过 `clientIdentifier` 把异步返回的结果映射回原文气泡），
-/// 替代“每个气泡一次云端 HTTP 请求”。翻译失败/缺失的气泡通过 `onMissing` 交回
-/// 云端 AI 兜底。
+/// 负责用 `.translationTask` 取得会话，以 `translate(batch:)` 批量翻译一页气泡，
+/// 并通过 `clientIdentifier` 把异步返回的结果映射回原文气泡：
+/// - `onResult` 在每条结果完成时立即回调（增量显示，而不是全部结束才一次性给）；
+/// - `onFinished` 在整批结束后回调（用于缓存与缺失项兜底）。
 struct AppleTranslationBridge: View {
-    let sourceLanguage: Locale.Language?
+    let sourceLanguage: Locale.Language
     let targetLanguage: Locale.Language
     let requests: [AppleTranslationBlockRequest]
-    let onResult: @MainActor ([UUID: String]) -> Void
-    let onMissing: @MainActor ([UUID]) -> Void
+    let onResult: @MainActor (UUID, String) -> Void
+    let onFinished: @MainActor (Set<UUID>) -> Void
 
     private var configuration: TranslationSession.Configuration {
         if #available(iOS 26.4, *) {
-            // 低延迟策略（传统翻译模型，速度优先）；高保真/不可用时会回退
+            // 低延迟策略（传统翻译模型，速度优先）
             return TranslationSession.Configuration(
                 source: sourceLanguage,
                 target: targetLanguage,
@@ -41,7 +91,6 @@ struct AppleTranslationBridge: View {
                 let translationRequests = requests.map {
                     TranslationSession.Request(sourceText: $0.text, clientIdentifier: $0.id.uuidString)
                 }
-                var results: [UUID: String] = [:]
                 var seen = Set<UUID>()
                 do {
                     for try await response in session.translate(batch: translationRequests) {
@@ -52,19 +101,15 @@ struct AppleTranslationBridge: View {
                         }
                         let text = response.targetText
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty {
-                            results[id] = text
-                        }
+                        guard !text.isEmpty else { continue }
+                        // 增量：这一条先完成就先显示
+                        await MainActor.run { onResult(id, text) }
                     }
                 } catch {
                     // Apple Translation 不可用（未安装语言包 / 不支持语言对 / 系统限制）：
-                    // 交给 onMissing 全部走云端兜底。
+                    // 由 onFinished 把缺失项交给云端兜底。
                 }
-                let missing = requests.filter { results[$0.id] == nil }.map(\.id)
-                await MainActor.run {
-                    onResult(results)
-                    onMissing(missing)
-                }
+                await MainActor.run { onFinished(seen) }
             }
     }
 }

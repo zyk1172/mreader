@@ -103,7 +103,7 @@ private enum DeleteRequest: Identifiable {
 }
 
 nonisolated struct MReaderSettingsBackup: Codable {
-    var version = 8
+    var version = 9
     var openAIAPIKey: String?
     var openAIBaseURL: String
     var openAIModel: String
@@ -1924,7 +1924,7 @@ struct ContentView: View {
         return MReaderSettingsBackup(
             openAIAPIKey: includeCredentials ? activeConfiguration?.apiKey : nil,
             openAIBaseURL: activeConfiguration?.baseURL ?? "https://api.openai.com/v1",
-            openAIModel: activeConfiguration?.model ?? "gpt-4o-mini",
+            openAIModel: activeConfiguration?.textModel ?? "gpt-4o-mini",
             aiModelPool: nil,
             isAIModelPoolEnabled: false,
             translationTargetLanguage: translationTargetLanguage,
