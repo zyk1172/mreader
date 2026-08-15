@@ -219,7 +219,7 @@
 "backup.title" = "Backup & Restore";
 "backup.export" = "Export Settings Backup";
 "backup.import" = "Import Settings Backup";
-"backup.description" = "Standard backups exclude API keys, passwords, and tokens. Use an encrypted credential backup when moving credentials. Comics, progress, and cache are not included.";
+"backup.description" = "Backups now include API keys and are always password-encrypted. Comic files, reading progress, and cache are not included.";
 "backup.exportEncrypted" = "Export Encrypted Credential Backup";
 "backup.exportWithCredentials" = "Export Encrypted Backup (includes API keys)";
 "backup.encryptTitle" = "Encrypt Settings Backup";
@@ -385,7 +385,8 @@
 "reader.bookmarkPage" = "Page %d";
 
 /* Settings Additional */
-"settings.translationPromptPlaceholder" = "Placeholders: {targetLanguage}, {ocrText}";
+"settings.translationStyleTitle" = "Translation Style Requirements";
+"settings.translationStyleDescription" = "This only controls translation style, terms, honorifics, and tone. Input text, target language, and the JSON output protocol are provided automatically by MReader; no placeholders are needed.";
 "settings.visionPromptPlaceholder" = "Placeholder: {targetLanguage}";
 "settings.restoreSuccess" = "Restore Successful";
 "settings.restoreSuccessMessage" = "Settings backup has been restored.";

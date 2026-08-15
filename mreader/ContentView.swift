@@ -103,14 +103,17 @@ private enum DeleteRequest: Identifiable {
 }
 
 nonisolated struct MReaderSettingsBackup: Codable {
-    var version = 9
+    var version = 10
     var openAIAPIKey: String?
     var openAIBaseURL: String
     var openAIModel: String
     var aiModelPool: String?
     var isAIModelPoolEnabled: Bool?
     var translationTargetLanguage: String
+    /// v9 及更老：旧完整 Prompt（只读，不用于新协议）。
     var translationPromptTemplate: String?
+    /// v10 起：用户可编辑的“翻译风格要求”（项4）。
+    var translationStyleInstructions: String? = nil
     var visionTranslationPromptTemplate: String?
     var isHapticFeedbackEnabled: Bool
     var mediaSources: [MediaSourceBackup]?
@@ -255,7 +258,7 @@ struct ContentView: View {
     @State private var showVisionPrompt = false
     @State private var showOCRSearch = false
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
-    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage(HapticSettings.isEnabledKey) private var isHapticFeedbackEnabled = true
     @AppStorage("translation_color_style") private var translationColorStyleRaw = "contrast"
@@ -904,22 +907,22 @@ struct ContentView: View {
             .sheet(isPresented: $showTranslationPrompt) {
                 NavigationStack {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("settings.translationPromptPlaceholder".localized)
+                        Text("settings.translationStyleDescription".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextEditor(text: $translationPromptTemplate)
+                        TextEditor(text: $translationStyleInstructions)
                             .font(.footnote.monospaced())
                             .scrollContentBackground(.hidden)
                             .background(Color.secondary.opacity(0.08))
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .padding()
-                    .navigationTitle("settings.translationPrompt".localized)
+                    .navigationTitle("settings.translationStyleTitle".localized)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("nav.cancel".localized) {
-                                translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+                                translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
                                 showTranslationPrompt = false
                             }
                         }
@@ -1362,7 +1365,7 @@ struct ContentView: View {
                 showTranslationPrompt = true
             } label: {
                 HStack {
-                    Text("settings.translationPrompt".localized)
+                    Text("settings.translationStyleTitle".localized)
                     Spacer()
                     Image(systemName: "chevron.right")
                         .foregroundStyle(.secondary)
@@ -1922,7 +1925,8 @@ struct ContentView: View {
             aiModelPool: nil,
             isAIModelPoolEnabled: false,
             translationTargetLanguage: translationTargetLanguage,
-            translationPromptTemplate: translationPromptTemplate,
+            translationPromptTemplate: nil,
+            translationStyleInstructions: translationStyleInstructions,
             visionTranslationPromptTemplate: visionTranslationPromptTemplate,
             isHapticFeedbackEnabled: isHapticFeedbackEnabled,
             mediaSources: mediaSources,
@@ -2006,12 +2010,18 @@ struct ContentView: View {
                 )
             }
             translationTargetLanguage = backup.translationTargetLanguage
-            let restoredPrompt = backup.translationPromptTemplate ?? AITranslator.defaultTranslationPromptTemplate
-            if !restoredPrompt.isEmpty, restoredPrompt != AITranslator.defaultTranslationStyleInstructions {
-                // 旧备份里的完整提示词与新固定 JSON 协议冲突：备份而不回填（审查 #4）
-                UserDefaults.standard.set(restoredPrompt, forKey: "translation_prompt_legacy_backup")
+            // 备份协议显式带版本（项4）：v10 直接恢复 translationStyleInstructions；
+            // v9 及更老把 translationPromptTemplate 视为旧完整 Prompt，备份而不回填。
+            if backup.version >= 10, let style = backup.translationStyleInstructions,
+               !style.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                translationStyleInstructions = style
+            } else if let legacy = backup.translationPromptTemplate,
+                      !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                UserDefaults.standard.set(legacy, forKey: "translation_prompt_legacy_backup")
+                translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
+            } else {
+                translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
             }
-            translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
             visionTranslationPromptTemplate = backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw

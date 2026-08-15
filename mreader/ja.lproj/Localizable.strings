@@ -219,7 +219,7 @@
 "backup.title" = "バックアップと復元";
 "backup.export" = "設定バックアップをエクスポート";
 "backup.import" = "設定バックアップをインポート";
-"backup.description" = "通常のバックアップには API Key、パスワード、Token は含まれません。認証情報を移行する場合は暗号化バックアップを使用してください。";
+"backup.description" = "バックアップには API キーが含まれ、常にパスワードで暗号化されます。漫画ファイル・読書進捗・キャッシュは含まれません。";
 "backup.exportEncrypted" = "暗号化した認証情報バックアップを出力";
 "backup.exportWithCredentials" = "暗号化バックアップを書き出し（API キーを含む）";
 "backup.encryptTitle" = "設定バックアップを暗号化";
@@ -385,7 +385,8 @@
 "reader.bookmarkPage" = "ページ %d";
 
 /* Settings Additional */
-"settings.translationPromptPlaceholder" = "プレースホルダー：{targetLanguage}、{ocrText}";
+"settings.translationStyleTitle" = "翻訳スタイルの要求";
+"settings.translationStyleDescription" = "ここでは訳文のスタイル・用語・呼称・トーンだけを指定します。入力テキスト・目標言語・JSON 出力プロトコルは MReader が自動的に提供するため、プレースホルダーは不要です。";
 "settings.visionPromptPlaceholder" = "プレースホルダー：{targetLanguage}";
 "settings.restoreSuccess" = "復元成功";
 "settings.restoreSuccessMessage" = "設定バックアップが復元されました。";

@@ -68,7 +68,9 @@ struct ReaderContainerView: View {
                     // 在 Reader 第一次创建前完成阅读预设检测（审查 #17）：
                     // 长条漫画第一次出现时就已经是 continuousScroll + fitWidth + 8192，
                     // 不会先产生一套 4096 普通阅读器。
-                    if !comic.hasInitializedReadingPreset {
+                    // 远程源（Komga/OPDS）不做阻塞式检测：无缓存时先显示当前页，
+                    // 由 ReaderView 后台检测（项13），避免首开串行下载第 3/4/5 页。
+                    if !comic.hasInitializedReadingPreset, comic.sourceType == .local {
                         let preset = await InitialReadingPresetDetector.detect(
                             comic: comic,
                             pages: result.pages
@@ -384,11 +386,10 @@ private final class ReaderImageCache {
         }
     }
 
-    private let resolutionTiers: [CGFloat] = [8192, 6144, 4096]
+    // 升序：选择“最小但 >= 请求”的缓存（项12），避免无谓持有更大 UIImage。
+    private let resolutionTiers: [CGFloat] = [4096, 6144, 8192]
 
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
-        // 高分辨率缓存可以满足低分辨率请求（审查 #19）：
-        // 已有 8192 时，4096 请求直接复用，避免重复解压。
         for tier in resolutionTiers where tier >= maxPixelSize {
             if let image = cache.object(forKey: cacheKey(for: url, maxPixelSize: tier) as NSString) {
                 return image
@@ -397,12 +398,29 @@ private final class ReaderImageCache {
         return nil
     }
 
+    /// 返回 ≥ 请求分辨率且在途的 task 对应 cacheKey（项11：让低分辨率请求 join 高分辨率在途任务）。
+    private func inFlightKeySatisfying(url: URL, maxPixelSize: CGFloat) -> String? {
+        for tier in resolutionTiers where tier >= maxPixelSize {
+            let key = cacheKey(for: url, maxPixelSize: tier)
+            if inFlightLoads[key] != nil {
+                return key
+            }
+        }
+        return nil
+    }
+
     func loadImage(for url: URL, maxPixelSize: CGFloat = 4096) async -> UIImage? {
-        let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
-        if let cached = cache.object(forKey: key as NSString) {
+        // 跨分辨率复用：已有更高分辨率缓存（如 8192）时，低分辨率请求（如 4096）直接复用（项11）
+        if let cached = cachedImage(for: url, maxPixelSize: maxPixelSize) {
             return cached
         }
+        let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
+            return await existingTask.value
+        }
+        // 加入更高分辨率的在途解码任务，避免同时双解码
+        if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
+           let existingTask = inFlightLoads[higherKey] {
             return await existingTask.value
         }
 
@@ -645,7 +663,7 @@ struct ReaderView: View {
     @Environment(\.scenePhase) private var scenePhase
     
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
-    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
@@ -1763,7 +1781,7 @@ struct ReaderView: View {
         let safeAreaInset = comic.ocrSafeAreaInset
         let usesVisualVerification = ocrVisualVerificationEnabled
         let ocrRecognitionMode = OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive
-        let translationPrompt = translationPromptTemplate
+        let translationPrompt = translationStyleInstructions
         let visionPrompt = visionTranslationPromptTemplate
 
         translationPrefetchTask = Task { @MainActor in
@@ -3505,7 +3523,7 @@ struct LocalImageView: View {
     @State private var appleTranslationRequests: [AppleTranslationBlockRequest] = []
     @State private var appleTranslationGeneration = UUID()
     @State private var appleSourceLanguageCode: String? = nil
-    @AppStorage("translation_prompt_template") private var translationPromptTemplate = AITranslator.defaultTranslationPromptTemplate
+    @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
@@ -4461,7 +4479,7 @@ struct LocalImageView: View {
                     baseURL: activeConfiguration.baseURL,
                     model: activeConfiguration.textModel,
                     target: requestTarget,
-                    promptTemplate: translationPromptTemplate,
+                    promptTemplate: translationStyleInstructions,
                     sourceLanguage: comicTranslationSourceLanguage
                 )
                 try Task.checkCancellation()
@@ -4493,7 +4511,7 @@ struct LocalImageView: View {
             mode: aiTranslationMode,
             configuration: activeConfiguration,
             target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
-            translationPromptTemplate: translationPromptTemplate,
+            translationPromptTemplate: translationStyleInstructions,
             visionPromptTemplate: visionTranslationPromptTemplate,
             isRightToLeft: isRightToLeftReading,
             minimumTextHeight: ocrMinimumTextHeight,
@@ -4523,7 +4541,7 @@ struct LocalImageView: View {
         let requestBaseURL = activeConfiguration.baseURL
         let requestModelName = activeConfiguration.textModel
         let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
-        let requestPromptTemplate = translationPromptTemplate
+        let requestPromptTemplate = translationStyleInstructions
         var translatedIndexes = Set<Int>()
 
         if AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: blocks.count) {

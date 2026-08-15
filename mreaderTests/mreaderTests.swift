@@ -9,6 +9,7 @@ import Testing
 import Foundation
 import CoreGraphics
 import UIKit
+import Vision
 import ZIPFoundation
 @testable import mreader
 
@@ -79,9 +80,21 @@ struct mreaderTests {
 
         #expect(prompt.contains("zh-Hans"))
         #expect(prompt.contains("ja"))
-        #expect(prompt.contains("\"id\" : \"b0\""))
-        #expect(prompt.contains("\"id\" : \"b1\""))
         #expect(prompt.contains("禁止修改、合并、拆分"))
+
+        // 生产 JSON 用 sortedKeys（无 pretty-printed 空格），测试不得依赖空白格式（项15）。
+        // 直接从 Prompt 中抽出输入 JSON 解析，验证 items 的 id 与顺序。
+        guard let jsonStart = prompt.range(of: "输入：\n")?.upperBound,
+              let jsonEnd = prompt.range(of: "\n\n输出格式：")?.lowerBound else {
+            Issue.record("Prompt 中找不到输入 JSON 区块")
+            return
+        }
+        let jsonText = String(prompt[jsonStart..<jsonEnd])
+        let object = try JSONSerialization.jsonObject(with: Data(jsonText.utf8)) as? [String: Any]
+        let items = object?["items"] as? [[String: Any]]
+        let ids = items?.compactMap { $0["id"] as? String }
+        #expect(ids == ["b0", "b1"])
+        #expect(items?.first?["sourceText"] as? String == "遅い")
     }
 
     @Test func visionRecognitionFiltersNonContentAndFallsBackToTextGeometry() throws {
@@ -652,7 +665,7 @@ struct mreaderTests {
         )
         let provider = try #require(decoded.aiProviders?.first)
 
-        #expect(decoded.version == 9)
+        #expect(decoded.version == 10)
         #expect(decoded.isOCRVisualVerificationEnabled == true)
         #expect(decoded.ocrLocalRecognitionMode == OCRRecognitionMode.maximumAccuracy.rawValue)
         #expect(decoded.isICloudMetadataSyncEnabled == true)
@@ -818,14 +831,16 @@ struct mreaderTests {
         let context = AITranslator.pageContextDescription(blocks: blocks, currentIndex: 1)
         #expect(context == "1. 第一句\n2. 第二句（当前要翻译的句子）")
 
-        let prompt = AITranslator.renderPromptForDiagnostics(
-            template: AITranslator.defaultTranslationPromptTemplate,
+        // 生产单气泡 fallback 使用固定协议（项1/16），上下文与原文必须进 prompt
+        let prompt = AITranslator.singleBubbleTranslationPrompt(
             text: "第二句",
-            targetLanguage: "中文",
+            target: .simplifiedChinese,
+            pageContext: context,
             ocrMetadata: "",
-            pageContext: context
+            styleInstructions: AITranslator.defaultTranslationStyleInstructions
         )
         #expect(prompt.contains("1. 第一句"))
+        #expect(prompt.contains("第二句"))
         #expect(!prompt.contains("{pageContext}"))
     }
 
@@ -1671,7 +1686,7 @@ private func makeTestPageRequest(
         image: UIImage(),
         mode: mode,
         configuration: AIActiveConfiguration(
-            profileID: UUID(),
+            profileID: UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!,
             profileName: "p",
             baseURL: "https://example.com/v1",
             apiKey: "k",
@@ -1690,6 +1705,159 @@ private func makeTestPageRequest(
         sourceLanguagePreference: nil
     )
 }
+
+    // MARK: - 第四份审查报告回归测试
+
+    @Test func chatResponseDecoderChatCompletionsString() throws {
+        let data = Data(#"{"choices":[{"message":{"content":"你好"}}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "你好")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test func chatResponseDecoderContentArray() throws {
+        let data = Data(#"{"choices":[{"message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "a\nb")
+    }
+
+    @Test func chatResponseDecoderLegacyText() throws {
+        let data = Data(#"{"choices":[{"text":"legacy"}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "legacy")
+    }
+
+    @Test func chatResponseDecoderResponsesOutputText() throws {
+        let data = Data(#"{"output_text":"top-level"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "top-level")
+    }
+
+    @Test func chatResponseDecoderResponsesNestedOutput() throws {
+        let data = Data(#"{"output":[{"content":[{"type":"output_text","text":"nested"}]}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "nested")
+    }
+
+    @Test func chatResponseDecoderReasoningOnly() throws {
+        let data = Data(#"{"choices":[{"message":{"reasoning_content":"thinking...","content":null},"finish_reason":"length"}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == nil)
+        #expect(decoded.hasReasoningOnly)
+        #expect(decoded.finishReason == "length")
+    }
+
+    @Test func chatResponseDecoderMalformed() {
+        let decoded = AIChatResponseDecoder.decode(Data("not json".utf8))
+        #expect(decoded.content == nil)
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test func singleBubblePromptAlwaysIncludesOcrTextAndTarget() {
+        let prompt = AITranslator.singleBubbleTranslationPrompt(
+            text: "こんにちは",
+            target: .simplifiedChinese,
+            pageContext: "1. 遅いね\n2. ごめん",
+            ocrMetadata: "textBox=(0.1,0.2,0.3,0.1)",
+            styleInstructions: "保持自然口语"
+        )
+        #expect(prompt.contains("こんにちは"))
+        #expect(prompt.contains("简体中文"))
+        #expect(prompt.contains("保持自然口语"))
+        #expect(prompt.contains("1. 遅いね"))
+        #expect(prompt.contains("textBox=(0.1,0.2,0.3,0.1)"))
+        // 不能出现未替换的旧占位符
+        #expect(!prompt.contains("{ocrText}"))
+        #expect(!prompt.contains("{targetLanguage}"))
+    }
+
+    @Test func settingsBackupV10RoundTripsStyleInstructions() throws {
+        let profile = AIProviderProfile.normalized(
+            name: "接口",
+            baseURL: "https://a.example/v1",
+            modelsText: "model-a",
+            selectedTextModel: "model-a",
+            selectedVisionModel: "model-a"
+        )
+        let backup = MReaderSettingsBackup(
+            openAIAPIKey: "key",
+            openAIBaseURL: "https://a.example/v1",
+            openAIModel: "model-a",
+            translationTargetLanguage: "简体中文",
+            translationStyleInstructions: "人名保留日文原名",
+            isHapticFeedbackEnabled: true,
+            aiProviders: [AIProviderBackup(profile: profile, apiKey: "key")]
+        )
+        let decoded = try JSONDecoder().decode(
+            MReaderSettingsBackup.self,
+            from: JSONEncoder().encode(backup)
+        )
+        #expect(decoded.version == 10)
+        #expect(decoded.translationStyleInstructions == "人名保留日文原名")
+    }
+
+    @Test func settingsBackupV9LegacyPromptIsSeparateField() throws {
+        let json = """
+        {
+          "version": 9,
+          "openAIBaseURL": "https://a.example/v1",
+          "openAIModel": "model-a",
+          "translationTargetLanguage": "简体中文",
+          "isHapticFeedbackEnabled": true,
+          "translationPromptTemplate": "我是漫画翻译助手……{ocrText}……"
+        }
+        """
+        let decoded = try JSONDecoder().decode(MReaderSettingsBackup.self, from: Data(json.utf8))
+        #expect(decoded.version == 9)
+        #expect(decoded.translationPromptTemplate?.contains("{ocrText}") == true)
+        #expect(decoded.translationStyleInstructions == nil)
+    }
+
+    @Test func ocrManualFrenchUsesFrenchPassFirst() {
+        let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["Bonjour, comment ça va?"],
+            sourceLanguagePreference: .french
+        )
+        #expect(passes.first?.contains("fr-FR") == true)
+    }
+
+    @Test func ocrManualRussianUsesRussianPassFirst() {
+        let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["Привет, как дела?"],
+            sourceLanguagePreference: .russian
+        )
+        #expect(passes.first?.contains("ru-RU") == true)
+    }
+
+    @Test func ocrMaximumAccuracyRespectsManualLanguage() {
+        let passes = OCRPreprocessor.maximumAccuracyPassesForDiagnostics(
+            sourceLanguagePreference: .french
+        )
+        #expect(passes.first?.contains("fr-FR") == true)
+    }
+
+    @Test func supportedRecognitionLanguagesNeverReturnsUnsupported() throws {
+        let preferred = ["ar-SA", "ru-RU", "fr-FR", "en-US"]
+        let result = OCRPreprocessor.supportedRecognitionLanguagesForDiagnostics(
+            preferredLanguages: preferred
+        )
+        let supported = (try? VNRecognizeTextRequest().supportedRecognitionLanguages()) ?? []
+        if !supported.isEmpty {
+            // 结果只能是 supported 的子集；不能把已知不支持的塞回去（项10）
+            #expect(result.allSatisfy { supported.contains($0) })
+        }
+    }
+
+    @Test func aiEndpointResolverNormalizesChatCompletionsURL() {
+        #expect(
+            AIEndpointResolver.chatCompletionsURL(from: "https://api.xxx/v1")?
+                .absoluteString == "https://api.xxx/v1/chat/completions"
+        )
+        #expect(
+            AIEndpointResolver.chatCompletionsURL(from: "https://api.xxx/v1/chat/completions")?
+                .absoluteString == "https://api.xxx/v1/chat/completions"
+        )
+    }
 
 @MainActor
 private final class InMemoryAICredentialStore: AICredentialStoring {

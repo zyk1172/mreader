@@ -33,20 +33,33 @@ struct mreaderApp: App {
         }
     }
 
-    /// V2 提示词迁移（审查 #4）：旧 `translation_prompt_template` 是“整页/逐气泡完整提示词”，
-    /// 与新固定 JSON 协议冲突。一次性备份到 `translation_prompt_legacy_backup` 并移除旧键，
-    /// 让 AppStorage 回落为默认“翻译风格要求”，不再把旧提示词注入新协议。
+    private static let translationPromptProtocolVersionKey = "translation_prompt_protocol_version"
+    private static let legacyTranslationPromptKey = "translation_prompt_template"
+    private static let styleTranslationPromptKey = "translation_style_instructions"
+
+    /// V2 提示词迁移（项3）：换用新 key `translation_style_instructions`，旧 `translation_prompt_template`
+    /// 只作为 legacy 数据读取一次，并用 `translation_prompt_protocol_version` 标记“已迁移”。
+    /// 迁移完成后绝不再碰用户在新版里设置的 custom style。
     private func migrateLegacyTranslationPromptIfNeeded() {
         let defaults = UserDefaults.standard
-        let key = "translation_prompt_template"
-        guard let legacy = defaults.string(forKey: key),
-              !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              legacy != AITranslator.defaultTranslationStyleInstructions else {
-            return
+        guard defaults.integer(forKey: Self.translationPromptProtocolVersionKey) < 2 else { return }
+
+        if let legacy = defaults.string(forKey: Self.legacyTranslationPromptKey),
+           !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // 启发式：旧完整 Prompt 含 {ocrText}/{targetLanguage}/{pageContext} 占位符；
+            // 不含占位符的值更可能是用户在上一版已填写的风格说明，直接迁移到新 key。
+            let hasLegacyPlaceholders = legacy.contains("{ocrText}")
+                || legacy.contains("{targetLanguage}")
+                || legacy.contains("{pageContext}")
+            if hasLegacyPlaceholders {
+                defaults.set(legacy, forKey: "translation_prompt_legacy_backup")
+            } else if defaults.string(forKey: Self.styleTranslationPromptKey) == nil {
+                defaults.set(legacy, forKey: Self.styleTranslationPromptKey)
+            }
         }
-        defaults.set(legacy, forKey: "translation_prompt_legacy_backup")
-        defaults.removeObject(forKey: key)
-        print("MReader migrated legacy translation prompt to translation_prompt_legacy_backup")
+        defaults.removeObject(forKey: Self.legacyTranslationPromptKey)
+        defaults.set(2, forKey: Self.translationPromptProtocolVersionKey)
+        print("MReader migrated translation prompt protocol (legacy -> style instructions)")
     }
 
     var body: some Scene {
