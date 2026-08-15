@@ -372,10 +372,11 @@ private struct AIProviderEditorView: View {
         testingKind = kind
         testMessage = nil
         Task {
+            // 无论成功/失败/提前 return，都要清理测试状态，避免 spinner 卡住（项5）
+            defer { testingKind = nil }
             do {
-                var value = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                while value.hasSuffix("/") { value.removeLast() }
-                guard let url = URL(string: value + "/chat/completions") else {
+                // 与生产共用同一个 endpoint 解析（项6），兼容 /v1 或完整 /chat/completions
+                guard let url = AIEndpointResolver.chatCompletionsURL(from: baseURL) else {
                     throw AITranslationRequestError.invalidConfiguration("settings.invalidUrl".localized)
                 }
                 var request = URLRequest(url: url)
@@ -477,7 +478,6 @@ private struct AIProviderEditorView: View {
                 testMessage = error.localizedDescription
                 HapticManager.shared.play(.error)
             }
-            testingKind = nil
         }
     }
 

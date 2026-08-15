@@ -363,7 +363,9 @@ nonisolated enum AITranslationPagePipeline {
         let maximumConcurrentRequests = min(3, indexes.count)
         let configuration = request.configuration
         let target = request.target
-        await withTaskGroup(of: (Int, String?).self) { group in
+        var successCount = 0
+        var firstError: Error?
+        await withTaskGroup(of: (Int, Result<String, Error>).self) { group in
             var nextIndex = 0
 
             func submit(_ localIndex: Int) {
@@ -385,9 +387,9 @@ nonisolated enum AITranslationPagePipeline {
                             promptTemplate: request.translationPromptTemplate,
                             requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
                         )
-                        return (index, text)
+                        return (index, .success(text))
                     } catch {
-                        return (index, nil)
+                        return (index, .failure(error))
                     }
                 }
             }
@@ -396,20 +398,32 @@ nonisolated enum AITranslationPagePipeline {
                 submit(nextIndex)
                 nextIndex += 1
             }
-            while let (index, translatedText) = await group.next() {
+            while let (index, result) = await group.next() {
                 if Task.isCancelled {
                     group.cancelAll()
                     return
                 }
-                if let translatedText, blocks.indices.contains(index) {
-                    blocks[index].translation = translatedText
-                    blocks[index].translationLines = [translatedText]
+                switch result {
+                case .success(let text):
+                    if blocks.indices.contains(index) {
+                        blocks[index].translation = text
+                        blocks[index].translationLines = [text]
+                        successCount += 1
+                    }
+                case .failure(let error):
+                    if firstError == nil { firstError = error }
                 }
                 if nextIndex < indexes.count {
                     submit(nextIndex)
                     nextIndex += 1
                 }
             }
+        }
+        // 全部失败必须向上抛错（项2），不允许“全失败却像成功一样结束”。
+        if successCount == 0, let firstError {
+            throw AITranslationRequestError.invalidConfiguration(
+                "逐气泡翻译全部失败：\(firstError.localizedDescription)"
+            )
         }
     }
 

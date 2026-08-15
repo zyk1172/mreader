@@ -165,6 +165,8 @@
 "settings.testConnection" = "Test Connection";
 "settings.connectionSuccess" = "Connected! Model %@ is available";
 "settings.translationPrompt" = "Translation Prompt Template";
+"settings.translationStyleTitle" = "Translation Style Requirements";
+"settings.translationStyleDescription" = "This only controls translation style, terms, honorifics, and tone. Input text, target language, and the JSON output protocol are provided automatically by MReader; no placeholders are needed.";
 "settings.visionPrompt" = "Vision Translation Prompt Template";
 "settings.resetDefault" = "Reset to Default";
 
@@ -203,7 +205,7 @@
 "backup.title" = "Backup & Restore";
 "backup.export" = "Export Settings Backup";
 "backup.import" = "Import Settings Backup";
-"backup.description" = "Standard backups exclude API keys, passwords, and tokens. Use an encrypted credential backup when moving credentials. Comics, progress, and cache are not included.";
+"backup.description" = "Backups now include API keys and are always password-encrypted. Comic files, reading progress, and cache are not included.";
 "backup.exportEncrypted" = "Export Encrypted Credential Backup";
 "backup.exportWithCredentials" = "Export Encrypted Backup (includes API keys)";
 "backup.encryptTitle" = "Encrypt Settings Backup";

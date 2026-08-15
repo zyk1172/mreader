@@ -94,6 +94,20 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     }
 }
 
+/// 共享的 Chat Completions endpoint 解析（项6）：生产与设置页测试共用，
+/// 兼容 `https://xxx/v1` 与已填写完整 `/chat/completions` 的 Base URL。
+nonisolated enum AIEndpointResolver {
+    static func chatCompletionsURL(from baseURL: String) -> URL? {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasSuffix("/chat/completions") {
+            return URL(string: trimmed)
+        }
+        let withoutTrailingSlash = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return URL(string: "\(withoutTrailingSlash)/chat/completions")
+    }
+}
+
 /// 统一解析 OpenAI 兼容接口的响应包，支持：
 /// - Chat Completions: choices[].message.content (String / Array)
 /// - legacy: choices[].text
@@ -418,7 +432,15 @@ class AITranslator {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw AITranslationRequestError.invalidConfiguration("接口地址无效") }
-        let prompt = renderPrompt(template: promptTemplate, text: text, targetLanguage: targetLanguage, ocrMetadata: ocrMetadata, pageContext: pageContext)
+        // 单气泡也必须使用固定协议（项1）：style 只是风格要求，
+        // 待翻译原文、目标语言、上下文与 OCR 信息始终由固定模板提供。
+        let prompt = singleBubbleTranslationPrompt(
+            text: text,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            pageContext: pageContext,
+            ocrMetadata: ocrMetadata,
+            styleInstructions: promptTemplate
+        )
         
         var request = URLRequest(url: url)
         request.timeoutInterval = requestTimeout
@@ -829,15 +851,7 @@ class AITranslator {
     }
 
     private static func chatCompletionsURL(from baseURL: String) -> URL? {
-        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if trimmed.hasSuffix("/chat/completions") {
-            return URL(string: trimmed)
-        }
-
-        let withoutTrailingSlash = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return URL(string: "\(withoutTrailingSlash)/chat/completions")
+        AIEndpointResolver.chatCompletionsURL(from: baseURL)
     }
 
     private static func apiErrorMessage(from data: Data) -> String? {
@@ -936,6 +950,39 @@ class AITranslator {
             return nil
         }
         return value
+    }
+
+    /// 单气泡翻译的固定协议（项1）：整页有固定 JSON 协议，单气泡同样必须有固定协议，
+    /// 绝不能让“翻译风格要求”单独充当完整 Prompt。
+    static func singleBubbleTranslationPrompt(
+        text: String,
+        target: TranslationTargetLanguage,
+        pageContext: String,
+        ocrMetadata: String,
+        styleInstructions: String
+    ) -> String {
+        let style = styleInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = pageContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        任务：翻译下面这一条已经完成 OCR 的漫画对白。
+
+        目标语言：\(target.modelInstruction)
+
+        待翻译原文：
+        \(text)
+
+        整页上下文（仅用于理解称呼、语气和断句，不要翻译或输出）：
+        \(context.isEmpty ? "（无）" : context)
+
+        OCR 信息：
+        \(ocrMetadata)
+
+        翻译风格要求：
+        \(style.isEmpty ? "保持漫画对白自然口语化。" : style)
+
+        要求：
+        只返回这条原文的译文，不要解释、不要复述原文、不要输出 Markdown、说明或思考过程。
+        """
     }
 
     private static func renderPrompt(template: String, text: String, targetLanguage: String, ocrMetadata: String, pageContext: String) -> String {

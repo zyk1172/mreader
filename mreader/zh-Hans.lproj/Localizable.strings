@@ -219,7 +219,7 @@
 "backup.title" = "备份与恢复";
 "backup.export" = "导出设置备份";
 "backup.import" = "导入设置备份";
-"backup.description" = "普通备份不包含 API Key、密码或 Token。需要迁移凭证时，请使用密码加密备份。漫画文件、阅读进度和缓存不包含在内。";
+"backup.description" = "备份将包含 API 密钥，并以密码加密保存。漫画文件、阅读进度和缓存不包含在内。";
 "backup.exportEncrypted" = "导出加密凭证备份";
 "backup.exportWithCredentials" = "导出含密钥的加密备份";
 "backup.encryptTitle" = "加密设置备份";
@@ -385,7 +385,8 @@
 "reader.bookmarkPage" = "第 %d 页";
 
 /* Settings Additional */
-"settings.translationPromptPlaceholder" = "可用占位符：{targetLanguage}、{ocrText}";
+"settings.translationStyleTitle" = "翻译风格要求";
+"settings.translationStyleDescription" = "这里仅控制译文风格、称呼、术语与语气。输入文本、目标语言和 JSON 输出协议由 MReader 自动提供，无需填写任何占位符。";
 "settings.visionPromptPlaceholder" = "可用占位符：{targetLanguage}";
 "settings.restoreSuccess" = "恢复成功";
 "settings.restoreSuccessMessage" = "设置备份已恢复。";

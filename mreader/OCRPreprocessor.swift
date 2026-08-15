@@ -125,7 +125,7 @@ struct OCRPreprocessor {
                     ))
                 }
             case .maximumAccuracy:
-                let passes = languagePasses()
+                let passes = maximumAccuracyPasses(for: options)
                 plan = RecognitionPlan(primary: passes[0], fallback: passes[1])
                 sliceBlocks = await recognize(
                     original,
@@ -448,9 +448,17 @@ struct OCRPreprocessor {
     }
 
     nonisolated private static func supportedRecognitionLanguages(from preferredLanguages: [String], request: VNRecognizeTextRequest) -> [String] {
-        let supported = (try? request.supportedRecognitionLanguages()) ?? preferredLanguages
+        guard let supported = try? request.supportedRecognitionLanguages() else {
+            // 查询 API 失败：才允许使用兼容 fallback（项10）
+            return preferredLanguages
+        }
         let filtered = preferredLanguages.filter { supported.contains($0) }
-        return filtered.isEmpty ? preferredLanguages : filtered
+        // 查询成功但 intersection 为空：不能再返回已知 unsupported 的 preferred；
+        // 退回到设备实际支持的语言（优先英文），保证 OCR 至少能运行。
+        if filtered.isEmpty {
+            return ["en-US"].filter { supported.contains($0) }
+        }
+        return filtered
     }
 
     nonisolated static func languagePassesForDiagnostics() -> [[String]] {
@@ -459,12 +467,58 @@ struct OCRPreprocessor {
 
     nonisolated static func preferredLanguagePassesForDiagnostics(
         detectedTexts: [String],
-        isRightToLeft: Bool = false
+        isRightToLeft: Bool = false,
+        sourceLanguagePreference: TranslationSourceLanguage? = nil
     ) -> [[String]] {
         recognitionPlan(
             detectedTexts: detectedTexts,
-            options: Options(isRightToLeft: isRightToLeft, minimumTextHeight: 0.006)
+            options: Options(
+                isRightToLeft: isRightToLeft,
+                minimumTextHeight: 0.006,
+                sourceLanguagePreference: sourceLanguagePreference
+            )
         ).orderedPasses.map(\.languages)
+    }
+
+    /// 供测试：最高精度模式的 pass（项8）。
+    nonisolated static func maximumAccuracyPassesForDiagnostics(
+        sourceLanguagePreference: TranslationSourceLanguage? = nil
+    ) -> [[String]] {
+        maximumAccuracyPasses(
+            for: Options(
+                isRightToLeft: false,
+                minimumTextHeight: 0.006,
+                sourceLanguagePreference: sourceLanguagePreference
+            )
+        ).map(\.languages)
+    }
+
+    /// 供测试：supportedRecognitionLanguages 过滤逻辑（项10）。
+    nonisolated static func supportedRecognitionLanguagesForDiagnostics(
+        preferredLanguages: [String]
+    ) -> [String] {
+        supportedRecognitionLanguages(
+            from: preferredLanguages,
+            request: VNRecognizeTextRequest()
+        )
+    }
+
+    /// #8：最高精度模式也必须尊重 sourceLanguagePreference。
+    private static func maximumAccuracyPasses(for options: Options) -> [(name: String, languages: [String])] {
+        if let source = options.sourceLanguagePreference, source != .automatic {
+            let effective = effectiveLanguages(for: options)
+            let primaryIDs = filteredLanguages(
+                source.recognitionLanguageIdentifiers,
+                allowed: effective
+            )
+            let defaultIDs = languagePasses().flatMap(\.languages)
+            let fallbackIDs = defaultIDs.filter { !primaryIDs.contains($0) }
+            return [
+                ("manual", primaryIDs),
+                ("fallback", fallbackIDs.isEmpty ? primaryIDs : fallbackIDs)
+            ]
+        }
+        return languagePasses()
     }
 
     nonisolated private static func languagePasses() -> [(name: String, languages: [String])] {
@@ -498,6 +552,9 @@ struct OCRPreprocessor {
         var hangulCount = 0
         var cjkCount = 0
         var latinCount = 0
+        var cyrillicCount = 0
+        var thaiCount = 0
+        var arabicCount = 0
 
         for scalar in scalars {
             switch scalar.value {
@@ -509,9 +566,27 @@ struct OCRPreprocessor {
                 cjkCount += 1
             case 0x0041...0x005A, 0x0061...0x007A:
                 latinCount += 1
+            case 0x0400...0x052F:
+                cyrillicCount += 1
+            case 0x0E00...0x0E7F:
+                thaiCount += 1
+            case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF:
+                arabicCount += 1
             default:
                 break
             }
+        }
+
+        // #7：用户手动指定原文语言时拥有最高优先级，不再先猜 script。
+        if let source = options.sourceLanguagePreference, source != .automatic {
+            let identifiers = filteredLanguages(
+                source.recognitionLanguageIdentifiers,
+                allowed: effectiveLanguages(for: options)
+            )
+            return RecognitionPlan(
+                primary: (source.rawValue, identifiers),
+                fallback: nil
+            )
         }
 
         let japanese = ("ja", filteredLanguages(["ja-JP", "en-US"], allowed: options.languages))
@@ -524,6 +599,19 @@ struct OCRPreprocessor {
         }
         if hangulCount > 0 {
             return RecognitionPlan(primary: korean, fallback: japanese)
+        }
+        // #9：Auto 模式补充西里尔/泰/阿拉伯文检测
+        if cyrillicCount > 0 {
+            let russian = ("ru", filteredLanguages(["ru-RU"], allowed: effectiveLanguages(for: options)))
+            return RecognitionPlan(primary: russian, fallback: nil)
+        }
+        if thaiCount > 0 {
+            let thai = ("th", filteredLanguages(["th-TH"], allowed: effectiveLanguages(for: options)))
+            return RecognitionPlan(primary: thai, fallback: nil)
+        }
+        if arabicCount > 0 {
+            let arabic = ("ar", filteredLanguages(["ar-SA"], allowed: effectiveLanguages(for: options)))
+            return RecognitionPlan(primary: arabic, fallback: nil)
         }
         if cjkCount > 0 {
             // 用户显式指定原文语言时优先遵循，替代“用阅读方向猜中/日文”的弱启发（审查 #21）
