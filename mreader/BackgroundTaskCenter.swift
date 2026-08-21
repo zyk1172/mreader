@@ -2,11 +2,23 @@ import Foundation
 import SwiftUI
 import Combine
 
+nonisolated enum BackgroundTaskDestination: Equatable, Identifiable, Sendable {
+    case offlineTranslation(comicID: UUID, jobID: UUID)
+
+    var id: String {
+        switch self {
+        case .offlineTranslation(let comicID, let jobID):
+            return "offlineTranslation:\(comicID.uuidString):\(jobID.uuidString)"
+        }
+    }
+}
+
 struct MReaderBackgroundTask: Identifiable, Equatable, Sendable {
     let id: UUID
     var title: String
     var detail: String?
     var progress: Double?
+    var destination: BackgroundTaskDestination?
     let startedAt: Date
 }
 
@@ -21,7 +33,12 @@ final class BackgroundTaskCenter: ObservableObject {
     }
 
     @discardableResult
-    func begin(title: String, detail: String? = nil, progress: Double? = nil) -> UUID {
+    func begin(
+        title: String,
+        detail: String? = nil,
+        progress: Double? = nil,
+        destination: BackgroundTaskDestination? = nil
+    ) -> UUID {
         let id = UUID()
         tasks.append(
             MReaderBackgroundTask(
@@ -29,6 +46,7 @@ final class BackgroundTaskCenter: ObservableObject {
                 title: title,
                 detail: detail,
                 progress: normalizedProgress(progress),
+                destination: destination,
                 startedAt: Date()
             )
         )
@@ -57,14 +75,28 @@ final class BackgroundTaskCenter: ObservableObject {
 
 struct BackgroundTaskIndicator: View {
     @ObservedObject var center: BackgroundTaskCenter
+    var onSelect: (BackgroundTaskDestination) -> Void = { _ in }
 
     var body: some View {
         Menu {
             ForEach(center.tasks) { task in
-                VStack(alignment: .leading) {
-                    Text(task.title)
-                    if let detail = task.detail {
-                        Text(detail)
+                if let destination = task.destination {
+                    Button {
+                        onSelect(destination)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(task.title)
+                            if let detail = task.detail {
+                                Text(detail)
+                            }
+                        }
+                    }
+                } else {
+                    VStack(alignment: .leading) {
+                        Text(task.title)
+                        if let detail = task.detail {
+                            Text(detail)
+                        }
                     }
                 }
             }

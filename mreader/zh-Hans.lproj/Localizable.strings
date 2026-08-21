@@ -492,6 +492,7 @@
 "offlineTranslation.menu" = "离线翻译";
 "offlineTranslation.overlay" = "优先显示已保存的离线译文";
 "offlineTranslation.overlayFooter" = "开启后，有效的已保存页面会跳过自动实时翻译；关闭后完全保持原有阅读器逻辑。";
+"offlineTranslation.maskOriginalText" = "绘制译文前遮盖原文";
 "offlineTranslation.storage" = "离线译文数据";
 "offlineTranslation.startTitle" = "开始离线翻译";
 "offlineTranslation.manageTitle" = "离线译文集合";
@@ -510,8 +511,15 @@
 "offlineTranslation.provider.header" = "Vision 接口";
 "offlineTranslation.provider.name" = "接口";
 "offlineTranslation.provider.model" = "Vision 模型";
+"offlineTranslation.processingMode.title" = "处理模式";
+"offlineTranslation.processingMode.ocrText" = "OCR + 文本模型（推荐）";
+"offlineTranslation.processingMode.vision" = "Vision 模型";
+"offlineTranslation.textModel" = "文本模型";
+"offlineTranslation.visionModel" = "Vision 模型";
+"offlineTranslation.ocrMode" = "OCR 识别模式";
+"offlineTranslation.visualVerification" = "使用 Vision 复核 OCR";
 "offlineTranslation.provider.missing" = "请先配置 AI 接口";
-"offlineTranslation.provider.freezeNotice" = "接口、Vision 模型、语言和提示词会冻结在任务记录中。";
+"offlineTranslation.provider.freezeNotice" = "接口、文本/Vision 模型、语言和提示词会冻结在任务记录中。";
 "offlineTranslation.currentPage" = "正在处理第 %d/%d 页";
 "offlineTranslation.coverageDetail" = "已覆盖 %d/%d 页 · 失败 %d 页";
 "offlineTranslation.partialCount" = "部分完成 %d 页";
@@ -545,7 +553,7 @@
 "offlineTranslation.taskProgress" = "本次任务：%d/%d 页";
 "offlineTranslation.provider.choose" = "选择接口";
 "offlineTranslation.provider.selected" = "当前配置";
-"offlineTranslation.policyBlocked" = "当前 Vision 模型连续拒绝这些页面，任务已暂停。";
+"offlineTranslation.policyBlocked" = "当前配置的模型连续拒绝这些页面，任务已暂停。";
 "offlineTranslation.changeModel" = "选择其他模型";
 "offlineTranslation.errorDetails" = "查看错误详情";
 "nav.close" = "关闭";

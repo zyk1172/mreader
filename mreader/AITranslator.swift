@@ -309,7 +309,7 @@ class AITranslator {
     }
 
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: String = "中文", promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
+    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
         try Task.checkCancellation()
         return try await translateTextUsingModel(
             text: text,
@@ -436,7 +436,7 @@ class AITranslator {
         }
     }
 
-    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
+    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw AITranslationRequestError.invalidConfiguration("接口地址无效") }
@@ -444,7 +444,7 @@ class AITranslator {
         // 待翻译原文、目标语言、上下文与 OCR 信息始终由固定模板提供。
         let prompt = singleBubbleTranslationPrompt(
             text: text,
-            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            target: targetLanguage,
             pageContext: pageContext,
             ocrMetadata: ocrMetadata,
             styleInstructions: promptTemplate

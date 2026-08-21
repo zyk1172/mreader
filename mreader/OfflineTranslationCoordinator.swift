@@ -30,9 +30,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
     private var task: Task<Void, Never>?
     private var stopMode: StopMode?
 
-    private enum StopMode {
+    private enum StopMode: Equatable {
         case pause
         case cancel
+        case systemInterruption
     }
 
     private init() {}
@@ -49,6 +50,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
         activateWhenComplete: Bool = true,
         providerID: UUID? = nil,
         visionModel: String? = nil,
+        processingMode: OfflineTranslationProcessingMode = .ocrText,
+        textModel: String? = nil,
+        ocrRecognitionMode: OCRRecognitionMode = .adaptive,
+        usesVisualOCRVerification: Bool = false,
         sourceSetID: UUID? = nil
     ) {
         guard task == nil else { return }
@@ -65,6 +70,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 activateWhenComplete: activateWhenComplete,
                 providerID: providerID,
                 visionModel: visionModel,
+                processingMode: processingMode,
+                textModel: textModel,
+                ocrRecognitionMode: ocrRecognitionMode,
+                usesVisualOCRVerification: usesVisualOCRVerification,
                 sourceSetID: sourceSetID
             )
         }
@@ -90,7 +99,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
         _ savedJob: OfflineTranslationJobRecord,
         comic: ComicBook,
         providerID: UUID,
-        visionModel: String
+        visionModel: String,
+        textModel: String
     ) {
         guard task == nil else { return }
         let remaining = savedJob.pageIndexes.enumerated().compactMap { offset, pageIndex in
@@ -110,6 +120,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
             activateWhenComplete: savedJob.activateWhenComplete ?? true,
             providerID: providerID,
             visionModel: visionModel,
+            processingMode: savedJob.processingMode ?? .vision,
+            textModel: textModel,
+            ocrRecognitionMode: savedJob.ocrRecognitionMode ?? .adaptive,
+            usesVisualOCRVerification: savedJob.usesVisualOCRVerification ?? false,
             sourceSetID: savedJob.setID
         )
     }
@@ -117,6 +131,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
     func pause() {
         guard task != nil else { return }
         stopMode = .pause
+        task?.cancel()
+    }
+
+    /// BGTask 到期属于系统中断：保存为 interrupted 并保留 pending 标记，供下次启动自动续传。
+    func suspendForSystemExpiration() {
+        guard task != nil else { return }
+        stopMode = .systemInterruption
         task?.cancel()
     }
 
@@ -140,12 +161,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
         activateWhenComplete: Bool,
         providerID: UUID?,
         visionModel: String?,
+        processingMode: OfflineTranslationProcessingMode,
+        textModel: String?,
+        ocrRecognitionMode: OCRRecognitionMode,
+        usesVisualOCRVerification: Bool,
         sourceSetID: UUID?
     ) async {
         do {
             let configuration = try frozenConfiguration(
                 for: providerID,
-                expectedVisionModel: visionModel
+                expectedVisionModel: visionModel,
+                expectedTextModel: textModel,
+                requiresVision: processingMode == .vision || usesVisualOCRVerification
             )
             let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
@@ -193,7 +220,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 promptSnapshot: promptSnapshot,
                 totalPages: totalPages,
                 derivedFromSetID: sourceSet?.id,
-                sourceRevision: sourceRevision
+                sourceRevision: sourceRevision,
+                processingMode: processingMode,
+                textModel: configuration.textModel,
+                ocrRecognitionMode: ocrRecognitionMode,
+                usesVisualOCRVerification: usesVisualOCRVerification
             )
             try await storage.saveManifest(manifestValue, activate: false)
             if let sourceSet,
@@ -223,7 +254,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 styleInstructions: styleInstructions,
                 activateWhenComplete: activateWhenComplete,
                 readingDirectionRaw: readingDirectionRaw,
-                totalPages: totalPages
+                totalPages: totalPages,
+                processingMode: processingMode,
+                textModel: configuration.textModel,
+                ocrRecognitionMode: ocrRecognitionMode,
+                usesVisualOCRVerification: usesVisualOCRVerification
             )
             record.state = .running
             try await jobStore.save(record)
@@ -258,7 +293,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
             let configuration = try frozenConfiguration(
                 for: savedJob.providerID,
                 expectedVisionModel: savedJob.visionModel,
-                expectedBaseURL: savedJob.baseURL
+                expectedTextModel: savedJob.textModel,
+                expectedBaseURL: savedJob.baseURL,
+                requiresVision: (savedJob.processingMode ?? .vision) == .vision
+                    || (savedJob.usesVisualOCRVerification ?? false)
             )
             let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
@@ -313,7 +351,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
         let taskID = BackgroundTaskCenter.shared.begin(
             title: "offlineTranslation.title".localized,
             detail: comic.title,
-            progress: progress
+            progress: progress,
+            destination: .offlineTranslation(comicID: comic.id, jobID: record.id)
         )
         defer {
             BackgroundTaskCenter.shared.finish(taskID)
@@ -342,7 +381,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 var pixelWidth = 0
                 var pixelHeight = 0
                 do {
-                    let page = try pageAt(pageIndex, pages: pages)
+            let page = try pageAt(pageIndex, pages: pages)
                     sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page, session: sourceSession)
                     guard let sourceData else { throw OfflineTranslationPageProviderError.pageUnavailable(pageIndex) }
                     sourceFingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData, pageURL: page.url)
@@ -379,6 +418,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         let sourcePreference = TranslationSourceLanguage(rawValue: record.resolvedSourceLanguage ?? "")
                             ?? record.sourceLanguage
                         let result = try await translatePageWithRetry(
+                            pageURL: page.url,
                             image: image,
                             configuration: configuration,
                             sourceLanguage: sourcePreference,
@@ -490,7 +530,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         if failures >= OfflineTranslationPolicyCircuit.refusalThreshold {
                             record.state = .paused
                             record.pauseReason = OfflineTranslationPauseReason.providerPolicyBlocked.rawValue
-                            record.lastError = "当前模型连续多页触发内容策略限制，任务已暂停。请更换 Vision 模型后继续。"
+                            let modelRole = record.processingMode == .ocrText ? "Text" : "Vision"
+                            record.lastError = "当前模型连续多页触发内容策略限制，任务已暂停。请更换 \(modelRole) 模型后继续。"
                             try await checkpoint(record)
                             lastError = record.lastError
                             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
@@ -518,10 +559,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
             record.currentPageIndex = nil
             record.updatedAt = Date()
             try await checkpoint(record)
-            if record.state == .completed,
+            if (record.state == .completed || record.state == .completedWithFailures),
                record.activateWhenComplete ?? true,
-               let currentIndex = await storage.index(for: record.comicID),
-               currentIndex.activeSetID != record.setID {
+               (finalManifest?.coveredPageCount ?? 0) > 0 {
                 try? await storage.setActive(comicID: record.comicID, setID: record.setID)
             }
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
@@ -537,15 +577,26 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch is CancellationError {
-            record.state = stopMode == .cancel ? .cancelled : .paused
-            record.pauseReason = stopMode == .cancel
-                ? nil
-                : OfflineTranslationPauseReason.userRequested.rawValue
-            record.lastError = stopMode == .cancel ? "用户取消了任务" : "任务已暂停，可继续处理"
+            switch stopMode {
+            case .cancel:
+                record.state = .cancelled
+                record.pauseReason = nil
+                record.lastError = "用户取消了任务"
+            case .systemInterruption:
+                record.state = .interrupted
+                record.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
+                record.lastError = "系统中断，应用下次启动后自动继续"
+            default:
+                record.state = .paused
+                record.pauseReason = OfflineTranslationPauseReason.userRequested.rawValue
+                record.lastError = "任务已暂停，可继续处理"
+            }
             record.updatedAt = Date()
             try? await jobStore.save(record)
             job = record
-            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            if stopMode != .systemInterruption {
+                OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            }
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch {
             record.state = .interrupted
@@ -561,6 +612,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
     }
 
     private func translatePageWithRetry(
+        pageURL: URL,
         image: UIImage,
         configuration: AIActiveConfiguration,
         sourceLanguage: TranslationSourceLanguage,
@@ -575,18 +627,40 @@ final class OfflineTranslationCoordinator: ObservableObject {
         var attempt = 0
         while true {
             do {
-                return try await AITranslator.recognizeOfflineVisionPage(
-                    image: image,
-                    apiKey: configuration.apiKey,
-                    baseURL: configuration.baseURL,
-                    visionModel: configuration.visionModel,
-                    sourceLanguage: sourceLanguage,
-                    targetLanguage: targetLanguage,
-                    styleInstructions: styleInstructions,
-                    previousContext: previousContext,
-                    isRightToLeft: isRightToLeft,
-                    viewportAspect: viewportAspect
-                )
+                switch record.processingMode ?? .vision {
+                case .ocrText:
+                    let request = AITranslationPageRequest(
+                        pageURL: pageURL,
+                        image: image,
+                        mode: .ocr,
+                        configuration: configuration,
+                        target: targetLanguage,
+                        translationPromptTemplate: styleInstructions,
+                        visionPromptTemplate: AITranslator.defaultVisionTranslationPromptTemplate,
+                        isRightToLeft: isRightToLeft,
+                        minimumTextHeight: 0.008,
+                        ocrRecognitionMode: record.ocrRecognitionMode ?? .adaptive,
+                        safeAreaInset: 0,
+                        usesVisualOCRVerification: record.usesVisualOCRVerification ?? false,
+                        viewportAspect: viewportAspect,
+                        sourceLanguagePreference: sourceLanguage
+                    )
+                    let blocks = try await AITranslationPagePipeline.translate(request)
+                    return blocks.isEmpty ? .noText : .translated(blocks)
+                case .vision:
+                    return try await AITranslator.recognizeOfflineVisionPage(
+                        image: image,
+                        apiKey: configuration.apiKey,
+                        baseURL: configuration.baseURL,
+                        visionModel: configuration.visionModel,
+                        sourceLanguage: sourceLanguage,
+                        targetLanguage: targetLanguage,
+                        styleInstructions: styleInstructions,
+                        previousContext: previousContext,
+                        isRightToLeft: isRightToLeft,
+                        viewportAspect: viewportAspect
+                    )
+                }
             } catch {
                 switch OfflineTranslationRetryPolicy.decision(for: error, attempt: attempt) {
                 case .needsConfiguration:
@@ -684,7 +758,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
     private func frozenConfiguration(
         for providerID: UUID? = nil,
         expectedVisionModel: String? = nil,
-        expectedBaseURL: String? = nil
+        expectedTextModel: String? = nil,
+        expectedBaseURL: String? = nil,
+        requiresVision: Bool = true
     ) throws -> AIActiveConfiguration {
         let store = AIProviderStore.shared
         let profileID = providerID ?? store.activeProfileID() ?? store.profiles().first?.id
@@ -698,13 +774,22 @@ final class OfflineTranslationCoordinator: ObservableObject {
         guard AIEndpointResolver.chatCompletionsURL(from: baseURL) != nil else {
             throw OfflineTranslationConfigurationError.invalidBaseURL
         }
-        let visionModel = (expectedVisionModel ?? profile.selectedVisionModel).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !visionModel.isEmpty else { throw OfflineTranslationConfigurationError.missingVisionModel }
-        // 恢复任务时只要求 Provider 仍存在并能从 Keychain 取到当前 Key；
-        // 文本模型不是本管线输入，视觉模型和 Base URL 使用 Job 中的冻结快照。
-        let textModel = profile.selectedTextModel.isEmpty
-            ? visionModel
-            : profile.selectedTextModel
+        let requestedTextModel = (expectedTextModel ?? profile.selectedTextModel)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedVisionModel = (expectedVisionModel ?? profile.selectedVisionModel)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let textModel: String
+        if !requestedTextModel.isEmpty {
+            textModel = requestedTextModel
+        } else if !requestedVisionModel.isEmpty {
+            textModel = requestedVisionModel
+        } else {
+            throw OfflineTranslationConfigurationError.missingTextModel
+        }
+        guard !requiresVision || !requestedVisionModel.isEmpty else {
+            throw OfflineTranslationConfigurationError.missingVisionModel
+        }
+        let visionModel = requestedVisionModel.isEmpty ? textModel : requestedVisionModel
         return AIActiveConfiguration(
             profileID: profile.id,
             profileName: profile.name,

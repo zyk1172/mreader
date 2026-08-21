@@ -4,7 +4,7 @@ import ImageIO
 import UIKit
 @preconcurrency import Vision
 
-nonisolated enum OCRRecognitionMode: String, CaseIterable, Sendable {
+nonisolated enum OCRRecognitionMode: String, Codable, CaseIterable, Sendable {
     case adaptive
     case maximumAccuracy
 

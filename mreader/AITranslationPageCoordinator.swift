@@ -53,7 +53,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             modelIdentity = "vision=\(configuration.visionModel)|text=\(configuration.textModel)"
         }
         let rawValue = [
-            "v5",
+            "v6",
             sourceIdentity,
             mode.rawValue,
             configuration.profileID.uuidString,
@@ -82,6 +82,10 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let y: Double
     let width: Double
     let height: Double
+    let bubbleX: Double?
+    let bubbleY: Double?
+    let bubbleWidth: Double?
+    let bubbleHeight: Double?
     let confidence: Double
     let ocrSource: String
     let estimatedFontScale: Double
@@ -97,6 +101,10 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
         y = block.boundingBox.minY
         width = block.boundingBox.width
         height = block.boundingBox.height
+        bubbleX = block.bubbleBox.map { Double($0.minX) }
+        bubbleY = block.bubbleBox.map { Double($0.minY) }
+        bubbleWidth = block.bubbleBox.map { Double($0.width) }
+        bubbleHeight = block.bubbleBox.map { Double($0.height) }
         confidence = block.confidence
         ocrSource = block.ocrSource
         estimatedFontScale = block.estimatedFontScale
@@ -106,7 +114,13 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     }
 
     var textBlock: TextBlock {
-        TextBlock(
+        let bubbleBox: CGRect?
+        if let bubbleX, let bubbleY, let bubbleWidth, let bubbleHeight {
+            bubbleBox = CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight)
+        } else {
+            bubbleBox = nil
+        }
+        return TextBlock(
             id: id,
             text: text,
             boundingBox: CGRect(x: x, y: y, width: width, height: height),
@@ -115,6 +129,7 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
             ocrSource: ocrSource,
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
+            bubbleBox: bubbleBox,
             polygon: polygon.map(\.point),
             translationLines: translationLines
         )
@@ -383,7 +398,7 @@ nonisolated enum AITranslationPagePipeline {
                             apiKey: configuration.apiKey,
                             baseURL: configuration.baseURL,
                             model: configuration.textModel,
-                            targetLanguage: target.modelInstruction,
+                            targetLanguage: target,
                             promptTemplate: request.translationPromptTemplate,
                             requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
                         )

@@ -225,6 +225,7 @@ actor OfflineTranslationStorageManager {
             for var job in jobs(comicID: comicID)
             where job.state == .running || job.state == .queued {
                 job.state = .interrupted
+                job.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
                 job.lastError = "应用在任务运行期间退出"
                 job.updatedAt = Date()
                 try write(job, to: jobURL(comicID: comicID, jobID: job.id))

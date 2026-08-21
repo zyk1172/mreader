@@ -13,6 +13,7 @@ final class OfflineTranslationBackgroundScheduler {
     private var didRegister = false
     private var registeredContinuedIdentifiers: Set<String> = []
     private var startupRecoveryTask: Task<Void, Never>?
+    private var resumeInFlightJobIDs: Set<UUID> = []
 
     private init() {}
 
@@ -41,6 +42,34 @@ final class OfflineTranslationBackgroundScheduler {
 
     var pendingJobID: UUID? {
         UserDefaults.standard.string(forKey: pendingJobKey).flatMap(UUID.init(uuidString:))
+    }
+
+    /// 应用冷启动后自动接管仍应继续的任务。用户主动暂停/取消、策略暂停、磁盘不足和配置错误
+    /// 都会清除 pending 标记，因此不会在这里被重新启动。
+    func resumePendingJobIfNeeded() async {
+        await startupRecoveryTask?.value
+        guard !OfflineTranslationCoordinator.shared.isRunning,
+              let jobID = pendingJobID,
+              let comicIDString = UserDefaults.standard.string(forKey: pendingComicKey),
+              let comicID = UUID(uuidString: comicIDString),
+              resumeInFlightJobIDs.insert(jobID).inserted else {
+            return
+        }
+        defer { resumeInFlightJobIDs.remove(jobID) }
+
+        let library = ComicLibraryStore()
+        var comic: ComicBook?
+        for _ in 0..<20 {
+            comic = library.comics.first(where: { $0.id == comicID })
+            if comic != nil { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard let comic,
+              let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
+              job.state == .interrupted || job.state == .queued || job.state == .running else {
+            return
+        }
+        OfflineTranslationCoordinator.shared.resume(job, comic: comic)
     }
 
     func submit(job: OfflineTranslationJobRecord, comic: ComicBook) {
@@ -97,7 +126,7 @@ final class OfflineTranslationBackgroundScheduler {
     private func handle(_ task: BGTask) async {
         task.expirationHandler = {
             Task { @MainActor in
-                OfflineTranslationCoordinator.shared.pause()
+                OfflineTranslationCoordinator.shared.suspendForSystemExpiration()
             }
         }
         await startupRecoveryTask?.value
@@ -122,6 +151,9 @@ final class OfflineTranslationBackgroundScheduler {
             let state = OfflineTranslationCoordinator.shared.job?.state
             return state == .completed || state == .completedWithFailures
         }
+
+        guard resumeInFlightJobIDs.insert(jobID).inserted else { return false }
+        defer { resumeInFlightJobIDs.remove(jobID) }
 
         let library = ComicLibraryStore()
         var comic: ComicBook?

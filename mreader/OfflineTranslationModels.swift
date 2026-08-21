@@ -73,6 +73,12 @@ nonisolated enum OfflineTranslationPauseReason: String, Codable, Sendable {
     case interrupted
 }
 
+/// 整本翻译的处理管线。旧 Job 没有该字段时由恢复逻辑兼容为 Vision。
+nonisolated enum OfflineTranslationProcessingMode: String, Codable, CaseIterable, Sendable {
+    case ocrText
+    case vision
+}
+
 nonisolated enum OfflineTranslationStartIntent: Sendable, Equatable {
     case entire
     case fromCurrent
@@ -445,6 +451,11 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
     let derivedFromSetID: UUID?
     /// 用于派生集合的廉价源版本判断；页面指纹仍由 Reader 在最终使用前兜底校验。
     var sourceRevision: String?
+    /// 新任务冻结的处理配置；旧 manifest 缺失时按旧行为回退到 Vision。
+    let processingMode: OfflineTranslationProcessingMode?
+    let textModel: String?
+    let ocrRecognitionMode: OCRRecognitionMode?
+    let usesVisualOCRVerification: Bool?
 
     init(
         id: UUID = UUID(),
@@ -460,7 +471,11 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
         totalPages: Int,
         createdAt: Date = Date(),
         derivedFromSetID: UUID? = nil,
-        sourceRevision: String? = nil
+        sourceRevision: String? = nil,
+        processingMode: OfflineTranslationProcessingMode? = nil,
+        textModel: String? = nil,
+        ocrRecognitionMode: OCRRecognitionMode? = nil,
+        usesVisualOCRVerification: Bool? = nil
     ) {
         self.schemaVersion = Self.currentSchemaVersion
         self.id = id
@@ -486,6 +501,10 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
         self.updatedAt = createdAt
         self.derivedFromSetID = derivedFromSetID
         self.sourceRevision = sourceRevision
+        self.processingMode = processingMode
+        self.textModel = textModel
+        self.ocrRecognitionMode = ocrRecognitionMode
+        self.usesVisualOCRVerification = usesVisualOCRVerification
     }
 
     var coveredPageCount: Int {
@@ -570,6 +589,11 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
     var consecutiveProviderPolicyFailures: Int?
     /// 暂停原因的稳定 raw value，避免 UI 依赖易变的错误原文。
     var pauseReason: String?
+    /// 新任务冻结的处理配置；旧 Job 缺失时恢复逻辑按旧 Vision 行为兼容。
+    let processingMode: OfflineTranslationProcessingMode?
+    let textModel: String?
+    let ocrRecognitionMode: OCRRecognitionMode?
+    let usesVisualOCRVerification: Bool?
     var lastError: String?
     let createdAt: Date
     var updatedAt: Date
@@ -593,6 +617,10 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         activateWhenComplete: Bool = true,
         readingDirectionRaw: String,
         totalPages: Int,
+        processingMode: OfflineTranslationProcessingMode? = .ocrText,
+        textModel: String? = nil,
+        ocrRecognitionMode: OCRRecognitionMode? = .adaptive,
+        usesVisualOCRVerification: Bool? = false,
         createdAt: Date = Date()
     ) {
         self.schemaVersion = Self.currentSchemaVersion
@@ -624,6 +652,10 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         self.retryCounts = [:]
         self.consecutiveProviderPolicyFailures = 0
         self.pauseReason = nil
+        self.processingMode = processingMode
+        self.textModel = textModel
+        self.ocrRecognitionMode = ocrRecognitionMode
+        self.usesVisualOCRVerification = usesVisualOCRVerification
         self.lastError = nil
         self.createdAt = createdAt
         self.updatedAt = createdAt
@@ -659,6 +691,7 @@ nonisolated enum OfflineTranslationConfigurationError: LocalizedError, Sendable 
     case missingAPIKey
     case invalidBaseURL
     case missingVisionModel
+    case missingTextModel
 
     var errorDescription: String? {
         switch self {
@@ -666,6 +699,7 @@ nonisolated enum OfflineTranslationConfigurationError: LocalizedError, Sendable 
         case .missingAPIKey: return "当前 Provider 没有 API Key"
         case .invalidBaseURL: return "当前 Provider 的 Base URL 无效"
         case .missingVisionModel: return "当前 Provider 没有配置 Vision Model"
+        case .missingTextModel: return "当前 Provider 没有配置 Text Model"
         }
     }
 }

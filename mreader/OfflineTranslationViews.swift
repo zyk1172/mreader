@@ -14,7 +14,11 @@ struct OfflineTranslationStartView: View {
     @State private var rangeStart: Int
     @State private var rangeEnd: Int
     @State private var providerID: UUID?
+    @State private var processingMode: OfflineTranslationProcessingMode
+    @State private var textModel: String
     @State private var visionModel: String
+    @State private var ocrRecognitionMode: OCRRecognitionMode
+    @State private var usesVisualOCRVerification: Bool
     @State private var availableMissingPages = 0
     @State private var availableFailedPages = 0
     @State private var activateWhenComplete = true
@@ -71,9 +75,14 @@ struct OfflineTranslationStartView: View {
             ?? AIProviderStore.shared.activeProfileID()
             ?? profiles.first?.id
         _providerID = State(initialValue: selectedID)
+        let selectedProfile = profiles.first(where: { $0.id == selectedID })
+        _processingMode = State(initialValue: .ocrText)
+        _textModel = State(initialValue: selectedProfile?.selectedTextModel ?? "")
         _visionModel = State(
-            initialValue: profiles.first(where: { $0.id == selectedID })?.selectedVisionModel ?? ""
+            initialValue: selectedProfile?.selectedVisionModel ?? ""
         )
+        _ocrRecognitionMode = State(initialValue: .adaptive)
+        _usesVisualOCRVerification = State(initialValue: false)
     }
 
     private var totalPages: Int { max(comic.totalPages, 1) }
@@ -106,6 +115,14 @@ struct OfflineTranslationStartView: View {
 
     private var providerProfile: AIProviderProfile? {
         providerProfiles.first(where: { $0.id == providerID })
+    }
+
+    private func updateSelectedProviderModels(_ id: UUID?) {
+        let selected = providerProfiles.first { profile in
+            profile.id == id
+        }
+        textModel = selected?.selectedTextModel ?? ""
+        visionModel = selected?.selectedVisionModel ?? ""
     }
 
     var body: some View {
@@ -163,18 +180,39 @@ struct OfflineTranslationStartView: View {
                                 Text(profile.name).tag(Optional(profile.id))
                             }
                         }
+                        .onChange(of: providerID) { _, newID in
+                            updateSelectedProviderModels(newID)
+                        }
+                        Picker("offlineTranslation.processingMode.title".localized, selection: $processingMode) {
+                            Text("offlineTranslation.processingMode.ocrText".localized).tag(OfflineTranslationProcessingMode.ocrText)
+                            Text("offlineTranslation.processingMode.vision".localized).tag(OfflineTranslationProcessingMode.vision)
+                        }
                         if let profile = providerProfile {
-                            Picker("offlineTranslation.provider.model".localized, selection: $visionModel) {
+                            Picker("offlineTranslation.textModel".localized, selection: $textModel) {
                                 ForEach(profile.models, id: \.self) { model in
                                     Text(model).tag(model)
                                 }
                             }
-                            .onChange(of: providerID) { _, newID in
-                                visionModel = providerProfiles.first(where: { $0.id == newID })?.selectedVisionModel ?? ""
+                            Picker("offlineTranslation.visionModel".localized, selection: $visionModel) {
+                                ForEach(profile.models, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            if processingMode == .ocrText {
+                                Picker("offlineTranslation.ocrMode".localized, selection: $ocrRecognitionMode) {
+                                    ForEach(OCRRecognitionMode.allCases, id: \.self) { mode in
+                                        Text(mode.localizationKey.localized).tag(mode)
+                                    }
+                                }
+                                Toggle(
+                                    "offlineTranslation.visualVerification".localized,
+                                    isOn: $usesVisualOCRVerification
+                                )
                             }
                         }
                         if let profile = providerProfile {
-                            LabeledContent("offlineTranslation.provider.selected".localized, value: "\(profile.name) · \(visionModel.isEmpty ? "—" : visionModel)")
+                            let selectedModels = "\(textModel.isEmpty ? "—" : textModel) / \(visionModel.isEmpty ? "—" : visionModel)"
+                            LabeledContent("offlineTranslation.provider.selected".localized, value: "\(profile.name) · \(selectedModels)")
                             Text(profile.baseURL)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -206,6 +244,10 @@ struct OfflineTranslationStartView: View {
                             activateWhenComplete: activateWhenComplete,
                             providerID: providerID,
                             visionModel: visionModel,
+                            processingMode: processingMode,
+                            textModel: textModel,
+                            ocrRecognitionMode: ocrRecognitionMode,
+                            usesVisualOCRVerification: usesVisualOCRVerification,
                             sourceSetID: intent.sourceSetID
                         )
                     } label: {
@@ -214,7 +256,10 @@ struct OfflineTranslationStartView: View {
                     .disabled(!sourceSetLoaded
                         || !coordinator.canStart
                         || providerID == nil
-                        || visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (processingMode == .ocrText
+                            && textModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        || ((processingMode == .vision || usesVisualOCRVerification)
+                            && visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         || (scope == .range && rangeStart > rangeEnd))
                 }
 
@@ -246,6 +291,13 @@ struct OfflineTranslationStartView: View {
                 }
                 sourceLanguageRaw = sourceManifest.sourceLanguage.rawValue
                 targetLanguageRaw = sourceManifest.targetLanguage.rawValue
+                processingMode = sourceManifest.processingMode ?? .vision
+                textModel = sourceManifest.textModel
+                    ?? providerProfile?.selectedTextModel
+                    ?? ""
+                visionModel = sourceManifest.visionModel
+                ocrRecognitionMode = sourceManifest.ocrRecognitionMode ?? .adaptive
+                usesVisualOCRVerification = sourceManifest.usesVisualOCRVerification ?? false
                 sourceSetLoaded = true
             }
             .task(id: targetLanguageRaw) {
@@ -410,6 +462,7 @@ private struct OfflineTranslationRebindView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
     @State private var providerID: UUID?
+    @State private var textModel: String
     @State private var visionModel: String
 
     init(comic: ComicBook, job: OfflineTranslationJobRecord) {
@@ -418,11 +471,17 @@ private struct OfflineTranslationRebindView: View {
         let profiles = AIProviderStore.shared.profiles()
         let selectedID = AIProviderStore.shared.activeProfileID() ?? profiles.first?.id
         _providerID = State(initialValue: selectedID)
-        _visionModel = State(initialValue: profiles.first(where: { $0.id == selectedID })?.selectedVisionModel ?? "")
+        let selectedProfile = profiles.first(where: { $0.id == selectedID })
+        _textModel = State(initialValue: job.textModel ?? selectedProfile?.selectedTextModel ?? "")
+        _visionModel = State(initialValue: selectedProfile?.selectedVisionModel ?? job.visionModel)
     }
 
     private var profiles: [AIProviderProfile] { AIProviderStore.shared.profiles() }
     private var profile: AIProviderProfile? { profiles.first(where: { $0.id == providerID }) }
+    private var requiresVisionModel: Bool {
+        (job.processingMode ?? .vision) == .vision
+            || (job.usesVisualOCRVerification ?? false)
+    }
 
     var body: some View {
         NavigationStack {
@@ -435,23 +494,41 @@ private struct OfflineTranslationRebindView: View {
                         }
                     }
                     if let profile {
-                        Picker("offlineTranslation.provider.model".localized, selection: $visionModel) {
+                        Picker("offlineTranslation.textModel".localized, selection: $textModel) {
+                            ForEach(profile.models, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        Picker("offlineTranslation.visionModel".localized, selection: $visionModel) {
                             ForEach(profile.models, id: \.self) { model in
                                 Text(model).tag(model)
                             }
                         }
                         .onChange(of: providerID) { _, newID in
-                            visionModel = profiles.first(where: { $0.id == newID })?.selectedVisionModel ?? ""
+                            let selected = profiles.first(where: { $0.id == newID })
+                            textModel = selected?.selectedTextModel ?? ""
+                            visionModel = selected?.selectedVisionModel ?? ""
                         }
                     }
                 }
                 Section {
                     Button("offlineTranslation.changeModel".localized) {
                         guard let providerID else { return }
-                        coordinator.rebind(job, comic: comic, providerID: providerID, visionModel: visionModel)
+                        coordinator.rebind(
+                            job,
+                            comic: comic,
+                            providerID: providerID,
+                            visionModel: visionModel,
+                            textModel: textModel
+                        )
                         dismiss()
                     }
-                    .disabled(providerID == nil || visionModel.isEmpty || !coordinator.canStart)
+                    .disabled(
+                        providerID == nil
+                            || ((job.processingMode ?? .vision) == .ocrText && textModel.isEmpty)
+                            || (requiresVisionModel && visionModel.isEmpty)
+                            || !coordinator.canStart
+                    )
                 }
             }
             .navigationTitle("offlineTranslation.changeModel".localized)

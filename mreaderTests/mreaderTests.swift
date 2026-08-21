@@ -2212,6 +2212,54 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageState.completed.needsTranslationWork)
     }
 
+    @Test func offlineTranslationFreezesOCRConfigurationAndRoundTripsIt() throws {
+        let job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-model",
+            sourceLanguage: .japanese,
+            targetLanguage: .english,
+            promptRevision: "test",
+            promptSnapshot: "snapshot",
+            styleInstructions: "natural",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2,
+            processingMode: .ocrText,
+            textModel: "text-model",
+            ocrRecognitionMode: .maximumAccuracy,
+            usesVisualOCRVerification: false
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslationJobRecord.self,
+            from: JSONEncoder().encode(job)
+        )
+        #expect(decoded.processingMode == .ocrText)
+        #expect(decoded.textModel == "text-model")
+        #expect(decoded.ocrRecognitionMode == .maximumAccuracy)
+        #expect(decoded.usesVisualOCRVerification == false)
+    }
+
+    @Test func offlineTranslationBlocksPreserveBubbleBoxThroughDTO() throws {
+        let bubbleBox = CGRect(x: 0.12, y: 0.2, width: 0.5, height: 0.24)
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.2, y: 0.28, width: 0.2, height: 0.08),
+            translation: "translated",
+            bubbleBox: bubbleBox
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        )
+        #expect(decoded.textBlock().bubbleBox == bubbleBox)
+        #expect(decoded.textBlock().boundingBox != bubbleBox)
+    }
+
     @Test func offlineTranslationIntentAndPolicyCircuitAreExplicit() {
         #expect(OfflineTranslationStartIntent.fromCurrent.sourceSetID == nil)
         let explicitIndexes = try? OfflineTranslationSelection.explicitPages([1, 3]).pageIndexes(totalPages: 4)

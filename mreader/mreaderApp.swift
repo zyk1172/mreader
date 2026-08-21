@@ -11,6 +11,9 @@ import SwiftUI
 struct mreaderApp: App {
     init() {
         OfflineTranslationBackgroundScheduler.shared.register()
+        Task { @MainActor in
+            await OfflineTranslationBackgroundScheduler.shared.resumePendingJobIfNeeded()
+        }
         RemoteImageLoader.migrateLegacyCoversIfNeeded()
         migrateLegacyTranslationPromptIfNeeded()
         let defaults = UserDefaults.standard

@@ -172,24 +172,29 @@ enum OfflineTranslationPageProvider {
     }
 }
 
+nonisolated enum OfflineTranslationOverlayResult: Sendable {
+    case displayed(blocks: [TextBlock], setID: UUID)
+    case confirmedNoText(setID: UUID)
+    case unavailable
+}
+
 /// 阅读器只在开关开启且已存在 active set 时调用此检查；因此关闭开关时完全不触碰 Translation Store。
 enum OfflineTranslationOverlayProvider {
     static func validOverlay(
         comic: ComicBook,
         page: ComicPage,
         targetLanguage: TranslationTargetLanguage,
-        sourceLanguage: TranslationSourceLanguage
-    ) async -> (blocks: [TextBlock], setID: UUID, isNoText: Bool)? {
+        sourceLanguage _: TranslationSourceLanguage
+    ) async -> OfflineTranslationOverlayResult {
         guard let active = await OfflineTranslationStorageManager.shared.activeManifest(for: comic.id, targetLanguage: targetLanguage),
               active.targetLanguage == targetLanguage,
-              active.sourceLanguage == sourceLanguage,
               let savedPage = await OfflineTranslationStorageManager.shared.page(
                 comicID: comic.id,
                 setID: active.id,
                 pageIndex: page.index
               ),
               savedPage.state.isUsableOverlay else {
-            return nil
+            return .unavailable
         }
 
         do {
@@ -202,13 +207,16 @@ enum OfflineTranslationOverlayProvider {
                     setID: active.id,
                     pageIndex: page.index
                 )
-                return nil
+                return .unavailable
             }
             let blocks = savedPage.blocks.map { $0.textBlock() }
-            return (blocks, active.id, savedPage.state == .noText)
+            if savedPage.state == .noText {
+                return .confirmedNoText(setID: active.id)
+            }
+            return .displayed(blocks: blocks, setID: active.id)
         } catch {
             // 原图暂时不可读时不污染旧译文，Reader 继续走既有实时逻辑。
-            return nil
+            return .unavailable
         }
     }
 }

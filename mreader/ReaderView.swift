@@ -3578,7 +3578,7 @@ struct LocalImageView: View {
     @State private var isRecognizingOCR = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
-    @State private var offlineTranslationTask: Task<(blocks: [TextBlock], setID: UUID, isNoText: Bool)?, Never>?
+    @State private var offlineTranslationTask: Task<OfflineTranslationOverlayResult, Never>?
     @State private var isOfflineTranslationDisplayed = false
     @State private var translationGeneration = UUID()
     @State private var ocrMagnificationTask: Task<Void, Never>?
@@ -3593,6 +3593,7 @@ struct LocalImageView: View {
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("offline_translation_overlay_enabled") private var offlineTranslationOverlayEnabled = true
+    @AppStorage("translation_mask_original_text_enabled") private var translationMaskOriginalTextEnabled = true
 
     private var aiTranslationMode: AITranslationMode {
         AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
@@ -3784,9 +3785,8 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: canTranslate) { _, newValue in
-            if !newValue {
+            if !newValue, !isOfflineTranslationDisplayed {
                 textBlocks.removeAll()
-                isOfflineTranslationDisplayed = false
             }
         }
         .onChange(of: targetLanguage) { _, _ in
@@ -3881,7 +3881,8 @@ struct LocalImageView: View {
 
     @ViewBuilder
     private func translationOverlay(in size: CGSize) -> some View {
-        if canTranslate {
+        if isOfflineTranslationDisplayed || canTranslate {
+            translationMaskOverlay(in: size)
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
                 ColorfulTranslatedText(
@@ -3898,6 +3899,20 @@ struct LocalImageView: View {
                 )
                 .frame(width: item.rect.width)
                 .position(x: item.rect.midX, y: item.rect.midY)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func translationMaskOverlay(in size: CGSize) -> some View {
+        if translationMaskOriginalTextEnabled {
+            ForEach(visibleTranslationBlocks) { block in
+                let rect = translationMaskRect(for: block, in: size)
+                RoundedRectangle(cornerRadius: min(max(rect.height * 0.18, 5), 14), style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -3984,8 +3999,20 @@ struct LocalImageView: View {
     }
 
     private func overlayRect(for block: TextBlock, in size: CGSize, scaleMultiplier: CGFloat) -> CGRect {
-        let mapped = OCRCoordinateMapper.displayRect(
+        overlayRect(
             forNormalizedPageRect: block.boundingBox,
+            in: size,
+            scaleMultiplier: scaleMultiplier
+        )
+    }
+
+    private func overlayRect(
+        forNormalizedPageRect normalizedRect: CGRect,
+        in size: CGSize,
+        scaleMultiplier: CGFloat
+    ) -> CGRect {
+        let mapped = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: normalizedRect,
             using: ocrDisplayTransform(in: size)
         )
         let width = max(mapped.width * scaleMultiplier, 44)
@@ -3996,6 +4023,16 @@ struct LocalImageView: View {
             width: width,
             height: height
         )
+    }
+
+    private func translationMaskRect(for block: TextBlock, in size: CGSize) -> CGRect {
+        let sourceRect = block.bubbleBox ?? block.boundingBox
+        let mapped = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: sourceRect,
+            using: ocrDisplayTransform(in: size)
+        )
+        let padding = max(5, min(mapped.height * 0.18, 12))
+        return mapped.insetBy(dx: -padding, dy: -padding)
     }
 
     private func ocrDisplayTransform(in size: CGSize) -> OCRDisplayTransform {
@@ -4027,7 +4064,11 @@ struct LocalImageView: View {
 
     private func translationBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
         let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
-        let original = overlayRect(for: block, in: size, scaleMultiplier: magnificationScale)
+        let original = overlayRect(
+            forNormalizedPageRect: block.bubbleBox ?? block.boundingBox,
+            in: size,
+            scaleMultiplier: magnificationScale
+        )
         let safeMargin: CGFloat = 12
         let imageBounds = ocrDisplayTransform(in: size).imageRect
         let maxWidth = max(44, min(imageBounds.width - safeMargin * 2, isOCRMagnificationVisible ? 230 : 210))
@@ -4053,7 +4094,7 @@ struct LocalImageView: View {
         let transform = ocrDisplayTransform(in: size)
         for item in initialItems {
             let original = item.rect
-            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
+            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.bubbleBox ?? $1.boundingBox) }
             let mappedSourceRect = OCRCoordinateMapper.displayRect(
                 forNormalizedPageRect: sourceRect,
                 using: transform
@@ -4230,13 +4271,20 @@ struct LocalImageView: View {
             return false
         }
         offlineTranslationTask = nil
-        guard let result else {
+        switch result {
+        case .displayed(let blocks, _):
+            textBlocks = blocks
+            isOfflineTranslationDisplayed = true
+            return true
+        case .confirmedNoText:
+            // “确认无文字”不是不可用：允许自动实时 OCR 再检查，手动强制翻译仍走原有路径。
+            textBlocks.removeAll()
+            isOfflineTranslationDisplayed = false
+            return false
+        case .unavailable:
             isOfflineTranslationDisplayed = false
             return false
         }
-        textBlocks = result.blocks
-        isOfflineTranslationDisplayed = true
-        return true
     }
 
     private var zoomGesture: some Gesture {
@@ -4738,7 +4786,7 @@ struct LocalImageView: View {
                             apiKey: requestAPIKey,
                             baseURL: requestBaseURL,
                             model: requestModelName,
-                            targetLanguage: requestTarget.modelInstruction,
+                            targetLanguage: requestTarget,
                             promptTemplate: requestPromptTemplate,
                             requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
                         )
