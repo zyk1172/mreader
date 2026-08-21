@@ -4915,6 +4915,14 @@ private struct ColorfulTranslatedText: View {
         }
             .padding(5)
             .frame(width: layoutSize.width, height: layoutSize.height)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.white.opacity(0.50))
+                    }
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.86), lineWidth: 0.75)

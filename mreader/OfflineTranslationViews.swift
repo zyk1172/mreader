@@ -411,21 +411,29 @@ struct OfflineTranslationProgressView: View {
                         }
                         .padding(.horizontal)
                     }
-                    HStack {
+                    HStack(spacing: 20) {
                         if coordinator.isRunning {
                             Button {
-                                if let onBackground {
-                                    onBackground()
-                                } else {
-                                    dismiss()
-                                }
+                                coordinator.pause()
                             } label: {
-                                Label("offlineTranslation.runInBackground".localized, systemImage: "arrow.down.to.line")
+                                progressActionLabel(
+                                    "offlineTranslation.pause".localized,
+                                    tint: .blue
+                                )
                             }
-                            Button("offlineTranslation.pause".localized) { coordinator.pause() }
-                            Button("offlineTranslation.cancel".localized, role: .destructive) {
+                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity)
+
+                            Button(role: .destructive) {
                                 showingCancelConfirmation = true
+                            } label: {
+                                progressActionLabel(
+                                    "offlineTranslation.cancel".localized,
+                                    tint: .red
+                                )
                             }
+                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity)
                         } else if job.state == .paused
                                     || job.state == .interrupted
                                     || job.state == .needsConfiguration {
@@ -444,6 +452,11 @@ struct OfflineTranslationProgressView: View {
             .navigationTitle("offlineTranslation.progressTitle".localized)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("tab.library".localized) {
+                        returnToShelf()
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("nav.close".localized) { dismiss() }
                 }
@@ -477,6 +490,27 @@ struct OfflineTranslationProgressView: View {
 
     private func title(for state: OfflineTranslationJobState) -> String {
         "offlineTranslation.state.\(state.rawValue)".localized
+    }
+
+    private func returnToShelf() {
+        if let onBackground {
+            onBackground()
+        } else {
+            dismiss()
+        }
+    }
+
+    private func progressActionLabel(_ title: String, tint: Color) -> some View {
+        Text(title)
+            .font(.headline)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(tint)
+            }
+            .clipShape(Capsule(style: .continuous))
+            .contentShape(Capsule(style: .continuous))
     }
 }
 
