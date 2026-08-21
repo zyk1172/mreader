@@ -521,9 +521,9 @@ nonisolated enum AITranslationPagePipeline {
         }
         // 全部失败必须向上抛错（项2），不允许“全失败却像成功一样结束”。
         if successCount == 0, let firstError {
-            throw AITranslationRequestError.invalidConfiguration(
-                "逐气泡翻译全部失败：\(firstError.localizedDescription)"
-            )
+            // 保留原始错误类型及其 statusCode/retryAfter，交给离线重试策略处理
+            // 429、503、鉴权失败和内容策略拒绝，而不是降级成字符串错误。
+            throw firstError
         }
     }
 

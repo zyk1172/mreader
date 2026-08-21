@@ -508,6 +508,56 @@ struct mreaderTests {
         #expect(refined[0].estimatedFontScale == 0.05)
     }
 
+    @Test func translationGeometryRefinerRejectsAdjacentRepeatedShortText() {
+        let vision = TextBlock(
+            text: "あいう",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.15),
+            translation: "你好",
+            estimatedFontScale: 0.03
+        )
+        let firstLine = TextBlock(
+            text: "あ",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let secondLine = TextBlock(
+            text: "い",
+            boundingBox: CGRect(x: 0.2, y: 0.255, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let thirdLine = TextBlock(
+            text: "う",
+            boundingBox: CGRect(x: 0.2, y: 0.31, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let adjacentBubble = TextBlock(
+            text: "あ",
+            boundingBox: CGRect(x: 0.62, y: 0.22, width: 0.08, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [firstLine, secondLine, thirdLine, adjacentBubble],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(abs(refined[0].boundingBox.minX - 0.2) < 0.0001)
+        #expect(abs(refined[0].boundingBox.minY - 0.2) < 0.0001)
+        #expect(abs(refined[0].boundingBox.width - 0.30) < 0.0001)
+        #expect(abs(refined[0].boundingBox.height - 0.15) < 0.0001)
+        #expect(refined[0].estimatedFontScale == 0.04)
+    }
+
     @Test func ocrTranslationUsesBoundedTimeoutAndFastFallbackPolicy() {
         #expect(AITranslationRequestPolicy.pageModelAttempts == 1)
         #expect(AITranslationRequestPolicy.pageRequestTimeout == 25)
@@ -2351,7 +2401,7 @@ private func makeTestPageRequest(
                 readingDirectionRaw: "leftToRight",
                 totalPages: 1
             )
-            job.state = .running
+            job.state = manifest.id == japanese.id ? .paused : .completedWithFailures
             try await storage.saveJob(job)
         }
 
@@ -2368,6 +2418,13 @@ private func makeTestPageRequest(
                 sourceLanguage: .french,
                 targetLanguage: .english
             ) == nil
+        )
+        #expect(
+            (await storage.inProgressManifest(
+                for: comicID,
+                sourceLanguage: .korean,
+                targetLanguage: .english
+            ))?.id == korean.id
         )
     }
 
@@ -2591,6 +2648,22 @@ private func makeTestPageRequest(
         )
         #expect(decoded.textBlock().bubbleBox == bubbleBox)
         #expect(decoded.textBlock().boundingBox != bubbleBox)
+    }
+
+    @Test func offlineTranslationPersistsExplicitTextOrientationThroughDTO() throws {
+        let block = TextBlock(
+            text: "多行横排对白",
+            boundingBox: CGRect(x: 0.42, y: 0.18, width: 0.08, height: 0.28),
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        )
+
+        #expect(decoded.textOrientation == .horizontal)
+        #expect(decoded.textBlock().textOrientation == .horizontal)
     }
 
     @Test func offlineTranslationIntentAndPolicyCircuitAreExplicit() {

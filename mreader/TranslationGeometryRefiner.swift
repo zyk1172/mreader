@@ -51,18 +51,19 @@ nonisolated enum TranslationGeometryRefiner {
         availableIndexes: Set<Int>
     ) -> Set<Int> {
         let expandedVision = vision.boundingBox.insetBy(
-            dx: -max(vision.boundingBox.width * 1.5, 0.04),
-            dy: -max(vision.boundingBox.height * 2.5, 0.04)
+            dx: -max(vision.boundingBox.width * 0.35, 0.025),
+            dy: -max(vision.boundingBox.height * 0.75, 0.04)
         )
-        let candidates = availableIndexes.compactMap { index -> (index: Int, score: CGFloat, text: CGFloat)? in
+        let candidates = availableIndexes.compactMap { index -> (index: Int, score: CGFloat, text: CGFloat, insideExpanded: Bool)? in
             let local = localBlocks[index]
             let text = textSimilarity(vision.text, local.text)
             let overlap = intersectionOverUnion(vision.boundingBox, local.boundingBox)
             let distance = normalizedCenterDistance(vision.boundingBox, local.boundingBox)
-            let spatial = !expandedVision.intersection(local.boundingBox).isNull || distance <= 0.30
+            let insideExpanded = !expandedVision.intersection(local.boundingBox).isNull
+            let spatial = insideExpanded || distance <= 0.30
             guard spatial, text >= 0.20 || overlap >= 0.30 else { return nil }
             let proximity = max(0, 1 - distance / 0.30)
-            return (index, text * 0.62 + overlap * 0.23 + proximity * 0.15, text)
+            return (index, text * 0.62 + overlap * 0.23 + proximity * 0.15, text, insideExpanded)
         }
 
         guard let strongest = candidates.max(by: { $0.score < $1.score }) else { return [] }
@@ -70,7 +71,7 @@ nonisolated enum TranslationGeometryRefiner {
         if strongest.text >= 0.55 || candidates.count > 1 {
             return Set(candidates.filter { candidate in
                 candidate.text >= 0.20 && (
-                    !expandedVision.intersection(localBlocks[candidate.index].boundingBox).isNull
+                    candidate.insideExpanded
                         || candidate.index == strongest.index
                 )
             }.map(\.index))

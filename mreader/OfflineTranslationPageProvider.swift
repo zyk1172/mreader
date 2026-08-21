@@ -178,7 +178,7 @@ nonisolated enum OfflineTranslationOverlayResult: Sendable {
     case unavailable
 }
 
-/// Reader 优先检查运行中 Set 的当前页，再回退到旧 active Set；关闭开关时完全不触碰 Translation Store。
+/// Reader 优先检查最新工作 Set 的当前页，再沿派生关系回退到旧 Set 和 active Set；关闭开关时完全不触碰 Translation Store。
 enum OfflineTranslationOverlayProvider {
     static func validOverlay(
         comic: ComicBook,
@@ -187,17 +187,31 @@ enum OfflineTranslationOverlayProvider {
         sourceLanguage: TranslationSourceLanguage
     ) async -> OfflineTranslationOverlayResult {
         let storage = OfflineTranslationStorageManager.shared
-        var candidateManifests: [OfflineTranslationSetManifest] = []
+        var roots: [OfflineTranslationSetManifest] = []
         if let inProgress = await storage.inProgressManifest(
             for: comic.id,
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage
         ) {
-            candidateManifests.append(inProgress)
+            roots.append(inProgress)
         }
         if let active = await storage.activeManifest(for: comic.id, targetLanguage: targetLanguage),
-           active.id != candidateManifests.first?.id {
-            candidateManifests.append(active)
+           active.id != roots.first?.id {
+            roots.append(active)
+        }
+
+        var candidateManifests: [OfflineTranslationSetManifest] = []
+        var visitedSetIDs = Set<UUID>()
+        for root in roots {
+            let chain = await manifestChain(
+                storage: storage,
+                comicID: comic.id,
+                startingFrom: root
+            )
+            for candidate in chain {
+                guard visitedSetIDs.insert(candidate.id).inserted else { continue }
+                candidateManifests.append(candidate)
+            }
         }
 
         for candidate in candidateManifests {
@@ -236,5 +250,21 @@ enum OfflineTranslationOverlayProvider {
             }
         }
         return .unavailable
+    }
+
+    private static func manifestChain(
+        storage: OfflineTranslationStorageManager,
+        comicID: UUID,
+        startingFrom manifest: OfflineTranslationSetManifest
+    ) async -> [OfflineTranslationSetManifest] {
+        var result: [OfflineTranslationSetManifest] = []
+        var visited = Set<UUID>()
+        var current: OfflineTranslationSetManifest? = manifest
+        while let candidate = current, visited.insert(candidate.id).inserted {
+            result.append(candidate)
+            guard let parentID = candidate.derivedFromSetID else { break }
+            current = await storage.manifest(comicID: comicID, setID: parentID)
+        }
+        return result
     }
 }

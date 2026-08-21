@@ -560,8 +560,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
             record.currentPageIndex = nil
             record.updatedAt = Date()
             try await checkpoint(record)
-            if (record.state == .completed || record.state == .completedWithFailures),
+            if record.state == .completed,
                record.activateWhenComplete ?? true,
+               finalManifest?.isCompleteSet == true,
                (finalManifest?.coveredPageCount ?? 0) > 0 {
                 try? await storage.setActive(comicID: record.comicID, setID: record.setID)
             }
@@ -701,7 +702,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
             var retryCount = initialRetryCount
 
             if work.processingMode == .vision {
-                let localOCR: OCRPipelineResult?
+                var localOCR: OCRPipelineResult?
+                var localOCRError: Error?
                 do {
                     localOCR = try await MangaOCRPipeline.recognize(
                         in: image,
@@ -716,7 +718,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     throw CancellationError()
                 } catch {
                     localOCR = nil
+                    localOCRError = error
                     print("MReader offline geometry refinement skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
+                }
+
+                if case .noText = translationResult, let localOCRError {
+                    // Vision 的 noText 只有在本地 OCR 成功确认无正文时才成立；验证过程失败
+                    // 必须让页面进入失败/重试路径，不能永久伪装成空页。
+                    throw localOCRError
                 }
 
                 if let localOCR {

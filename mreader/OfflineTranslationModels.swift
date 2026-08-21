@@ -398,6 +398,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         try container.encode(classification, forKey: .classification)
         try container.encode(estimatedFontScale, forKey: .estimatedFontScale)
         try container.encodeIfPresent(textColorHex, forKey: .textColorHex)
+        try container.encode(textOrientation, forKey: .textOrientation)
     }
 
     init(block: TextBlock, id: String? = nil) {
@@ -598,6 +599,15 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
 
     var coveredPageCount: Int {
         completedPageCount + noTextPageCount + partialPageCount
+    }
+
+    /// 只有所有页面都已经以 completed/noText 覆盖，才可以替换当前完整译本。
+    /// partial、failed、stale 或缺失页面都必须保留旧 Set 的回退机会。
+    var isCompleteSet: Bool {
+        coveredPageCount == totalPages
+            && partialPageCount == 0
+            && failedPageCount == 0
+            && stalePageCount == 0
     }
 }
 

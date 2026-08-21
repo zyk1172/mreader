@@ -890,23 +890,26 @@ class AITranslator {
                 let original = corrected[originalIndex]
                 let correctedText = best.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !correctedText.isEmpty else { continue }
+                let correctedBox = OCRCoordinateMapper.normalizedPageRect(
+                    forSliceRect: best.boundingBox,
+                    sourceRect: region.sourceRect
+                )
                 corrected[originalIndex] = TextBlock(
                     id: original.id,
                     text: correctedText,
-                    boundingBox: OCRCoordinateMapper.normalizedPageRect(
-                        forSliceRect: best.boundingBox,
-                        sourceRect: region.sourceRect
-                    ),
+                    boundingBox: correctedBox,
                     translation: original.translation,
                     confidence: max(original.confidence, best.confidence),
                     ocrSource: "visual-review",
                     isFiltered: original.isFiltered,
                     filterReason: original.filterReason,
-                    estimatedFontScale: original.estimatedFontScale,
+                    estimatedFontScale: best.estimatedFontScale > 0
+                        ? best.estimatedFontScale
+                        : Double(min(correctedBox.width, correctedBox.height)),
                     textColorHex: original.textColorHex,
                     polygon: original.polygon,
                     translationLines: original.translationLines,
-                    textOrientation: original.textOrientation
+                    textOrientation: best.textOrientation
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
             } catch is CancellationError {

@@ -70,7 +70,8 @@ actor OfflineTranslationStorageManager {
         return manifest(comicID: comicID, setID: activeID)
     }
 
-    /// 返回当前仍在执行的任务集合。它不改变 active 指针，只用于 Reader 按页预览新 Set。
+    /// 返回 Reader 应优先预览的最新工作集合。它不改变 active 指针；暂停、系统中断、配置等待
+    /// 和带失败页面的终止任务仍可能包含已经落盘的可用页面，不能在 Reader 中突然消失。
     func inProgressManifest(
         for comicID: UUID,
         sourceLanguage: TranslationSourceLanguage,
@@ -78,7 +79,14 @@ actor OfflineTranslationStorageManager {
     ) -> OfflineTranslationSetManifest? {
         jobs(comicID: comicID)
             .filter { job in
-                (job.state == .queued || job.state == .running)
+                let isReaderCandidate: Bool
+                switch job.state {
+                case .queued, .running, .paused, .interrupted, .needsConfiguration, .completedWithFailures:
+                    isReaderCandidate = true
+                case .completed, .cancelled:
+                    isReaderCandidate = false
+                }
+                return isReaderCandidate
                     && job.sourceLanguage == sourceLanguage
                     && job.targetLanguage == targetLanguage
             }
