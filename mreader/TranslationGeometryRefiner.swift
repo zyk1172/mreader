@@ -1,10 +1,8 @@
 import CoreGraphics
 import Foundation
 
-/// 视觉模型负责识别/翻译，本地 OCR 只校准文字几何。
-///
-/// 保留模型给出的译文、气泡范围与阅读顺序；当同一文字能和本地 OCR 匹配时，
-/// 用本地的 textBox、字号尺度及可用颜色替换模型几何，避免模型坐标漂移影响排版。
+/// Vision 可能把同一气泡的多行文字合并成一个 item，而 Apple OCR 会返回多条 line。
+/// 这里按“一个 Vision block 对应一组 local line block”匹配并合并几何。
 nonisolated enum TranslationGeometryRefiner {
     static func refine(
         visionBlocks: [TextBlock],
@@ -17,55 +15,88 @@ nonisolated enum TranslationGeometryRefiner {
         let orderedVision = AITranslator.sortedTextBlocks(visionBlocks, isRightToLeft: isRightToLeft)
 
         return orderedVision.map { vision in
-            guard let matchIndex = bestMatch(
+            let matches = matchingIndexes(
                 for: vision,
                 among: localOCRBlocks,
                 availableIndexes: availableLocalIndexes
-            ) else {
-                return vision
-            }
-            availableLocalIndexes.remove(matchIndex)
-            let local = localOCRBlocks[matchIndex]
+            )
+            guard !matches.isEmpty else { return vision }
+            availableLocalIndexes.subtract(matches)
+
+            let locals = matches.map { localOCRBlocks[$0] }
+            let localBounds = locals.dropFirst().reduce(locals[0].boundingBox) { $0.union($1.boundingBox) }
             return TextBlock(
                 id: vision.id,
                 text: vision.text,
-                boundingBox: local.boundingBox,
+                boundingBox: localBounds,
                 translation: vision.translation,
-                confidence: max(vision.confidence, local.confidence),
+                confidence: max(vision.confidence, locals.map(\.confidence).max() ?? 0),
                 ocrSource: "\(vision.ocrSource)+local-geometry",
                 isFiltered: vision.isFiltered,
                 filterReason: vision.filterReason,
-                estimatedFontScale: local.estimatedFontScale,
-                textColorHex: local.textColorHex ?? vision.textColorHex,
+                estimatedFontScale: weightedMedianFontScale(locals),
+                textColorHex: locals.compactMap(\.textColorHex).first ?? vision.textColorHex,
                 bubbleBox: vision.bubbleBox,
-                polygon: local.polygon.isEmpty ? vision.polygon : local.polygon,
+                polygon: locals.flatMap(\.polygon).isEmpty ? vision.polygon : locals.flatMap(\.polygon),
                 bubblePolygon: vision.bubblePolygon,
-                translationLines: vision.translationLines
+                translationLines: vision.translationLines,
+                textOrientation: majorityOrientation(locals)
             )
         }
     }
 
-    private static func bestMatch(
+    private static func matchingIndexes(
         for vision: TextBlock,
         among localBlocks: [TextBlock],
         availableIndexes: Set<Int>
-    ) -> Int? {
-        let candidates = availableIndexes.compactMap { index -> (Int, CGFloat)? in
+    ) -> Set<Int> {
+        let expandedVision = vision.boundingBox.insetBy(
+            dx: -max(vision.boundingBox.width * 1.5, 0.04),
+            dy: -max(vision.boundingBox.height * 2.5, 0.04)
+        )
+        let candidates = availableIndexes.compactMap { index -> (index: Int, score: CGFloat, text: CGFloat)? in
             let local = localBlocks[index]
             let text = textSimilarity(vision.text, local.text)
             let overlap = intersectionOverUnion(vision.boundingBox, local.boundingBox)
             let distance = normalizedCenterDistance(vision.boundingBox, local.boundingBox)
-            let proximity = max(0, 1 - distance / 0.28)
-            let score = text * 0.58 + overlap * 0.30 + proximity * 0.12
-
-            // OCR 文本完全不同且空间上也没有证据时，不把错误几何套到译文上。
-            guard score >= 0.46,
-                  text >= 0.38 || (overlap >= 0.52 && distance <= 0.10) else {
-                return nil
-            }
-            return (index, score)
+            let spatial = !expandedVision.intersection(local.boundingBox).isNull || distance <= 0.30
+            guard spatial, text >= 0.20 || overlap >= 0.30 else { return nil }
+            let proximity = max(0, 1 - distance / 0.30)
+            return (index, text * 0.62 + overlap * 0.23 + proximity * 0.15, text)
         }
-        return candidates.max { lhs, rhs in lhs.1 < rhs.1 }?.0
+
+        guard let strongest = candidates.max(by: { $0.score < $1.score }) else { return [] }
+        // 强匹配或多个短 line 同时命中时，允许把同一 Vision 框内的 line 一并纳入。
+        if strongest.text >= 0.55 || candidates.count > 1 {
+            return Set(candidates.filter { candidate in
+                candidate.text >= 0.20 && (
+                    !expandedVision.intersection(localBlocks[candidate.index].boundingBox).isNull
+                        || candidate.index == strongest.index
+                )
+            }.map(\.index))
+        }
+        return [strongest.index]
+    }
+
+    private static func majorityOrientation(_ blocks: [TextBlock]) -> TextOrientation {
+        let horizontalWeight = blocks.filter { $0.textOrientation == .horizontal }
+            .reduce(0.0) { $0 + max(Double($1.boundingBox.width * $1.boundingBox.height), 0.000_1) }
+        let verticalWeight = blocks.filter { $0.textOrientation == .vertical }
+            .reduce(0.0) { $0 + max(Double($1.boundingBox.width * $1.boundingBox.height), 0.000_1) }
+        return horizontalWeight >= verticalWeight ? .horizontal : .vertical
+    }
+
+    private static func weightedMedianFontScale(_ blocks: [TextBlock]) -> Double {
+        let values = blocks.map { block in
+            (value: block.estimatedFontScale, weight: max(Double(block.boundingBox.width * block.boundingBox.height), 0.000_1))
+        }.sorted { $0.value < $1.value }
+        let target = values.reduce(0) { $0 + $1.weight } / 2
+        var cumulative = 0.0
+        for value in values {
+            cumulative += value.weight
+            if cumulative >= target { return value.value }
+        }
+        return values.last?.value ?? 0
     }
 
     private static func normalizedCenterDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
@@ -87,20 +118,19 @@ nonisolated enum TranslationGeometryRefiner {
         if left.contains(right) || right.contains(left) {
             return CGFloat(min(left.count, right.count)) / CGFloat(max(left.count, right.count))
         }
-
         let leftScalars = Array(left.unicodeScalars)
         let rightScalars = Array(right.unicodeScalars)
-        let common = longestCommonSubsequenceLength(leftScalars, rightScalars)
-        return CGFloat(common) / CGFloat(max(leftScalars.count, rightScalars.count))
+        return CGFloat(longestCommonSubsequenceLength(leftScalars, rightScalars))
+            / CGFloat(max(leftScalars.count, rightScalars.count))
     }
 
     private static func normalizedText(_ text: String) -> String {
-        text
-            .lowercased()
-            .unicodeScalars
-            .filter { CharacterSet.alphanumerics.contains($0) || (0x3400...0x9FFF).contains($0.value) || (0x3040...0x30FF).contains($0.value) || (0xAC00...0xD7AF).contains($0.value) }
-            .map(String.init)
-            .joined()
+        text.lowercased().unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+                || (0x3400...0x9FFF).contains($0.value)
+                || (0x3040...0x30FF).contains($0.value)
+                || (0xAC00...0xD7AF).contains($0.value)
+        }.map(String.init).joined()
     }
 
     private static func longestCommonSubsequenceLength(
@@ -111,11 +141,9 @@ nonisolated enum TranslationGeometryRefiner {
         for left in lhs {
             var current = Array(repeating: 0, count: rhs.count + 1)
             for (index, right) in rhs.enumerated() {
-                if left == right {
-                    current[index + 1] = previous[index] + 1
-                } else {
-                    current[index + 1] = max(previous[index + 1], current[index])
-                }
+                current[index + 1] = left == right
+                    ? previous[index] + 1
+                    : max(previous[index + 1], current[index])
             }
             previous = current
         }

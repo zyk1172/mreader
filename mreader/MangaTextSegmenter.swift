@@ -117,7 +117,8 @@ nonisolated enum MangaTextSegmenter {
             ocrSource: sources,
             estimatedFontScale: scale,
             textColorHex: ordered.compactMap(\.textColorHex).first,
-            polygon: ordered.flatMap(\.polygon)
+            polygon: ordered.flatMap(\.polygon),
+            textOrientation: ordered[0].textOrientation
         )
     }
 
@@ -143,7 +144,7 @@ nonisolated enum MangaTextSegmenter {
     }
 
     private static func isVertical(_ block: TextBlock) -> Bool {
-        block.boundingBox.height > block.boundingBox.width * 1.35
+        block.textOrientation == .vertical
     }
 
     private static func fontScale(_ block: TextBlock) -> CGFloat {

@@ -411,12 +411,14 @@ struct mreaderTests {
         let horizontal = TextBlock(
             text: "横排对白",
             boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.32, height: 0.04),
-            estimatedFontScale: 0.04
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
         )
         let vertical = TextBlock(
             text: "竖排",
             boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.04, height: 0.32),
-            estimatedFontScale: 0.04
+            estimatedFontScale: 0.04,
+            textOrientation: .vertical
         )
 
         #expect(abs(horizontal.sourceFontSize(in: displayedPage) - 31.2) < 0.001)
@@ -470,6 +472,40 @@ struct mreaderTests {
         #expect(refined[0].estimatedFontScale == local.estimatedFontScale)
         #expect(refined[0].bubbleBox == modelBubble)
         #expect(refined[0].translation == "你好")
+    }
+
+    @Test func translationGeometryRefinerUnionsMultipleLocalLinesAndKeepsOrientation() {
+        let vision = TextBlock(
+            text: "あいうえ",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.18),
+            translation: "你好",
+            estimatedFontScale: 0.03
+        )
+        let firstLine = TextBlock(
+            text: "あい",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.05),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.05,
+            textOrientation: .horizontal
+        )
+        let secondLine = TextBlock(
+            text: "うえ",
+            boundingBox: CGRect(x: 0.2, y: 0.27, width: 0.30, height: 0.05),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.05,
+            textOrientation: .horizontal
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [firstLine, secondLine],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(refined[0].boundingBox == CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.12))
+        #expect(refined[0].textOrientation == .horizontal)
+        #expect(refined[0].estimatedFontScale == 0.05)
     }
 
     @Test func ocrTranslationUsesBoundedTimeoutAndFastFallbackPolicy() {
@@ -1768,7 +1804,8 @@ private func makeTestPageRequest(
         safeAreaInset: 0,
         usesVisualOCRVerification: visualVerify,
         viewportAspect: 1.5,
-        sourceLanguagePreference: nil
+        sourceLanguagePreference: nil,
+        previousContext: ""
     )
 }
 
@@ -2023,7 +2060,8 @@ private func makeTestPageRequest(
           "id":"a","sourceText":"こんにちは","translation":"你好","translationLines":["你好"],
           "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
           "bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},
-          "textPolygon":[],"bubblePolygon":[],"confidence":0.9,"classification":"dialogue"
+          "textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],
+          "bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"
         }]}
         """
         let blocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -2034,7 +2072,7 @@ private func makeTestPageRequest(
         #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
 
         let missingTextBox = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3}}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -2062,7 +2100,7 @@ private func makeTestPageRequest(
         }
 
         let invalidCoordinates = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08}}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(

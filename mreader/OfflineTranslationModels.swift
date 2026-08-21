@@ -325,10 +325,11 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
     let classification: String
     let estimatedFontScale: Double
     let textColorHex: String?
+    let textOrientation: TextOrientation
 
     private enum CodingKeys: String, CodingKey {
         case id, sourceText, translation, translationLines, lines, textBox, bubbleBox
-        case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex
+        case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex, textOrientation
     }
 
     init(
@@ -343,7 +344,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         confidence: Double,
         classification: String,
         estimatedFontScale: Double,
-        textColorHex: String? = nil
+        textColorHex: String? = nil,
+        textOrientation: TextOrientation? = nil
     ) {
         self.id = id
         self.sourceText = sourceText
@@ -357,6 +359,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         self.classification = classification
         self.estimatedFontScale = estimatedFontScale
         self.textColorHex = textColorHex
+        self.textOrientation = textOrientation ?? .inferred(from: textBox.cgRect)
     }
 
     init(from decoder: Decoder) throws {
@@ -377,6 +380,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         classification = try container.decode(String.self, forKey: .classification)
         estimatedFontScale = try container.decode(Double.self, forKey: .estimatedFontScale)
         textColorHex = try container.decodeIfPresent(String.self, forKey: .textColorHex)
+        textOrientation = try container.decodeIfPresent(TextOrientation.self, forKey: .textOrientation)
+            ?? .inferred(from: textBox.cgRect)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -421,7 +426,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             confidence: block.confidence,
             classification: classification,
             estimatedFontScale: block.estimatedFontScale,
-            textColorHex: block.textColorHex
+            textColorHex: block.textColorHex,
+            textOrientation: block.textOrientation
         )
     }
 
@@ -438,7 +444,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             bubbleBox: bubbleBox?.cgRect,
             polygon: textPolygon.map(\.cgPoint),
             bubblePolygon: bubblePolygon.map(\.cgPoint),
-            translationLines: translationLines
+            translationLines: translationLines,
+            textOrientation: textOrientation
         )
     }
 

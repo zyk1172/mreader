@@ -41,6 +41,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
     let source: String
     let estimatedFontScale: Double
     let textColorHex: String?
+    let textOrientation: TextOrientation?
 
     init(_ block: TextBlock) {
         id = block.id
@@ -53,6 +54,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
         source = block.ocrSource
         estimatedFontScale = block.estimatedFontScale
         textColorHex = block.textColorHex
+        textOrientation = block.textOrientation
     }
 
     var textBlock: TextBlock {
@@ -63,7 +65,8 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
             confidence: confidence,
             ocrSource: source,
             estimatedFontScale: estimatedFontScale,
-            textColorHex: textColorHex
+            textColorHex: textColorHex,
+            textOrientation: textOrientation
         )
     }
 }

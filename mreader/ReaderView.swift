@@ -1888,7 +1888,8 @@ struct ReaderView: View {
                         safeAreaInset: safeAreaInset,
                         usesVisualOCRVerification: usesVisualVerification,
                         viewportAspect: 2.0,
-                        sourceLanguagePreference: comic.translationSourceLanguage
+                        sourceLanguagePreference: comic.translationSourceLanguage,
+                        previousContext: ""
                     )
                     _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
                     print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
@@ -4688,7 +4689,8 @@ struct LocalImageView: View {
             usesVisualOCRVerification: ocrVisualVerificationEnabled,
             viewportAspect: visionViewportAspect
                 ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25),
-            sourceLanguagePreference: comicTranslationSourceLanguage
+            sourceLanguagePreference: comicTranslationSourceLanguage,
+            previousContext: ""
         )
     }
 
@@ -4835,7 +4837,7 @@ struct LocalImageView: View {
         let result: OCRPipelineResult
         if ocrVisualVerificationEnabled, let activeConfiguration {
             let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
-            let corrected = await AITranslator.visualVerifyOCRRegions(
+            let corrected = try await AITranslator.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: localResult.resolvedBlocks,
                 apiKey: activeConfiguration.apiKey,

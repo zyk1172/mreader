@@ -92,7 +92,8 @@ nonisolated enum AIPageTranslationPromptBuilder {
         items: [AIPageTranslationItem],
         sourceLanguage: TranslationSourceLanguage?,
         target: TranslationTargetLanguage,
-        styleInstructions: String
+        styleInstructions: String,
+        previousContext: String = ""
     ) throws -> String {
         let wireItems = items.map { item -> [String: Any] in
             ["id": item.id, "sourceText": item.sourceText]
@@ -107,6 +108,8 @@ nonisolated enum AIPageTranslationPromptBuilder {
         }
         let source = sourceLanguage?.rawValue ?? "auto"
         let style = styleInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = previousContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        let contextSection = context.isEmpty ? "（无）" : context
         return """
         任务：翻译已经完成 OCR 的漫画文字。
 
@@ -126,6 +129,9 @@ nonisolated enum AIPageTranslationPromptBuilder {
 
         翻译风格要求：
         \(style)
+
+        上一页上下文（仅用于保持人名、称呼、语气和术语一致，不要翻译或复述这段上下文）：
+        \(contextSection)
 
         输入：
         \(json)

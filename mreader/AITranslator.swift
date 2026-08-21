@@ -43,6 +43,15 @@ private final class VisionResponseFormatCache: @unchecked Sendable {
     }
 }
 
+nonisolated enum TextOrientation: String, Codable, Sendable {
+    case horizontal
+    case vertical
+
+    static func inferred(from rect: CGRect) -> Self {
+        rect.width >= rect.height ? .horizontal : .vertical
+    }
+}
+
 // 定义识别出的文本块模型
 struct TextBlock: Identifiable, Sendable {
     let id: UUID
@@ -60,8 +69,10 @@ struct TextBlock: Identifiable, Sendable {
     var polygon: [CGPoint]
     var bubblePolygon: [CGPoint]
     var translationLines: [String]
+    /// 在最初 OCR observation 阶段确定的文字方向；合并成 line/bubble 后必须继承。
+    var textOrientation: TextOrientation
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = []) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -77,14 +88,13 @@ struct TextBlock: Identifiable, Sendable {
         self.polygon = polygon
         self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
+        self.textOrientation = textOrientation ?? .inferred(from: boundingBox)
     }
 
     /// OCR 字号尺度始终取原文短边：横排文字对应 textBox 高度，竖排文字对应宽度。
     /// 显示时必须用同一坐标轴的页面尺寸还原，不能统一乘图片短边。
     nonisolated func sourceFontSize(in imageRect: CGRect) -> CGFloat {
-        let reference = boundingBox.width >= boundingBox.height
-            ? imageRect.height
-            : imageRect.width
+        let reference = textOrientation == .horizontal ? imageRect.height : imageRect.width
         return CGFloat(estimatedFontScale) * max(reference, 1)
     }
 }
@@ -376,7 +386,8 @@ class AITranslator {
         model: String,
         target: TranslationTargetLanguage,
         promptTemplate: String = defaultTranslationPromptTemplate,
-        sourceLanguage: TranslationSourceLanguage? = nil
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = ""
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -391,6 +402,7 @@ class AITranslator {
             target: target,
             promptTemplate: promptTemplate,
             sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
             requestTimeout: AITranslationRequestPolicy.pageRequestTimeout
         )
     }
@@ -403,6 +415,7 @@ class AITranslator {
         target: TranslationTargetLanguage,
         promptTemplate: String,
         sourceLanguage: TranslationSourceLanguage?,
+        previousContext: String,
         requestTimeout: TimeInterval
     ) async throws -> AIPageTranslationResult {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
@@ -419,7 +432,8 @@ class AITranslator {
             items: items,
             sourceLanguage: sourceLanguage,
             target: target,
-            styleInstructions: promptTemplate
+            styleInstructions: promptTemplate,
+            previousContext: previousContext
         )
 
         var request = URLRequest(url: url)
@@ -755,7 +769,7 @@ class AITranslator {
         var lastError: Error?
         var successfulSlices = 0
         var failedSlices = 0
-        await withTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
+        try await withThrowingTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
             var nextIndex = 0
 
             func submit(_ index: Int) {
@@ -775,6 +789,8 @@ class AITranslator {
                             strictTranslationGeometry: strictTranslationGeometry
                         )
                         return (index, .success(blocks))
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         return (index, .failure(error))
                     }
@@ -786,10 +802,10 @@ class AITranslator {
                 nextIndex += 1
             }
 
-            while let (index, result) = await group.next() {
+            while let (index, result) = try await group.next() {
                 if Task.isCancelled {
                     group.cancelAll()
-                    break
+                    throw CancellationError()
                 }
                 switch result {
                 case .success(let blocks):
@@ -831,7 +847,7 @@ class AITranslator {
         baseURL: String,
         model: String,
         isRightToLeft: Bool
-    ) async -> [TextBlock] {
+    ) async throws -> [TextBlock] {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let cgImage = image.cgImage else {
             return blocks
@@ -842,8 +858,8 @@ class AITranslator {
         var corrected = blocks
         let pagePixelBounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
         for region in regions {
-            guard !Task.isCancelled,
-                  let originalIndex = corrected.firstIndex(where: { $0.id == region.blockID }) else {
+            try Task.checkCancellation()
+            guard let originalIndex = corrected.firstIndex(where: { $0.id == region.blockID }) else {
                 continue
             }
             let pixelRect = CGRect(
@@ -889,9 +905,12 @@ class AITranslator {
                     estimatedFontScale: original.estimatedFontScale,
                     textColorHex: original.textColorHex,
                     polygon: original.polygon,
-                    translationLines: original.translationLines
+                    translationLines: original.translationLines,
+                    textOrientation: original.textOrientation
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 print("MReader OCR visual review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
             }
@@ -1579,6 +1598,22 @@ class AITranslator {
                 guard rectValue(from: item["textBox"]) != nil else {
                     throw VisionTranslationError.missingTextBox
                 }
+                guard rectValue(from: item["bubbleBox"]) != nil else {
+                    throw VisionTranslationError.protocolViolation("缺少必需 bubbleBox")
+                }
+                guard let textPolygon = pointsValue(from: item["textPolygon"]), textPolygon.count >= 4,
+                      let bubblePolygon = pointsValue(from: item["bubblePolygon"]), bubblePolygon.count >= 4 else {
+                    throw VisionTranslationError.protocolViolation("缺少必需四点 polygon")
+                }
+                guard let confidence = doubleValue(from: item["confidence"]), confidence.isFinite,
+                      (0...1).contains(confidence) else {
+                    throw VisionTranslationError.protocolViolation("confidence 必须为 0 到 1 之间的数字")
+                }
+                let classification = item["classification"] as? String
+                guard let classification,
+                      ["dialogue", "narration", "soundEffect"].contains(classification) else {
+                    throw VisionTranslationError.protocolViolation("classification 不符合协议")
+                }
             }
         }
 
@@ -2027,6 +2062,7 @@ class AITranslator {
     private static func doubleValue(from value: Any?) -> Double? {
         if let double = value as? Double { return double }
         if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return nil
     }
