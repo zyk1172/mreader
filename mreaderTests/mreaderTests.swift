@@ -406,6 +406,23 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 5.88) < 0.01)
     }
 
+    @Test func sourceFontSizeUsesTheMatchingDisplayAxisForTextDirection() {
+        let displayedPage = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let horizontal = TextBlock(
+            text: "横排对白",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.32, height: 0.04),
+            estimatedFontScale: 0.04
+        )
+        let vertical = TextBlock(
+            text: "竖排",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.04, height: 0.32),
+            estimatedFontScale: 0.04
+        )
+
+        #expect(abs(horizontal.sourceFontSize(in: displayedPage) - 31.2) < 0.001)
+        #expect(abs(vertical.sourceFontSize(in: displayedPage) - 15.6) < 0.001)
+    }
+
     @Test @MainActor func anchoredTranslationLayoutKeepsSourceCenterAndExpandsBeforeShrinking() {
         let source = CGRect(x: 130, y: 210, width: 80, height: 34)
         let allowed = CGRect(x: 70, y: 145, width: 210, height: 170)
@@ -2017,7 +2034,7 @@ private func makeTestPageRequest(
         #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
 
         let missingTextBox = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3}}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3}}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -2041,11 +2058,11 @@ private func makeTestPageRequest(
             )
             Issue.record("离线视觉协议不应接受带空译文的 item")
         } catch {
-            #expect(error.localizedDescription.contains("可用文本"))
+            #expect(error.localizedDescription.contains("缺少必需译文"))
         }
 
         let invalidCoordinates = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08}}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08}}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -2056,6 +2073,28 @@ private func makeTestPageRequest(
             Issue.record("无效坐标不应被改写为有效结果")
         } catch {
             #expect(error.localizedDescription.contains("坐标"))
+        }
+
+        let emptyPage = """
+        {"coordinateSpace":"normalized","items":[]}
+        """
+        #expect(try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: emptyPage,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        ).isEmpty)
+
+        for malformed in ["{}", "{\"coordinateSpace\":\"normalized\"}", "{\"coordinateSpace\":\"pixels\",\"items\":[]}"] {
+            do {
+                _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                    from: malformed,
+                    inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                    requiresTextBox: true
+                )
+                Issue.record("strict 离线视觉协议不应接受缺失或错误的顶层字段")
+            } catch {
+                #expect(error.localizedDescription.contains("协议错误"))
+            }
         }
     }
 

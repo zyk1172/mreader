@@ -299,6 +299,39 @@ nonisolated enum AITranslationPagePipeline {
         }
     }
 
+    /// Vision 明确返回空页但本地 OCR 已经识别到正文时，复用该 OCR 结果走 Text Model。
+    /// 这避免将有文字的页静默写成 noText，也避免为了补译再跑一次 OCR。
+    static func translateExistingOCRBubbles(
+        _ bubbles: [TextBlock],
+        request: AITranslationPageRequest
+    ) async throws -> [TextBlock] {
+        var translated = bubbles
+        guard !translated.isEmpty else { return [] }
+
+        try await applyBatchTranslationSafely(
+            to: &translated,
+            indexes: Array(translated.indices),
+            request: request
+        )
+        let missing = translated.indices.filter {
+            (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !missing.isEmpty {
+            try await applyBatchTranslationSafely(
+                to: &translated,
+                indexes: missing,
+                request: request
+            )
+        }
+        let completed = translated.filter {
+            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !completed.isEmpty else {
+            throw AITranslationRequestError.invalidResponse(model: request.configuration.textModel)
+        }
+        return completed
+    }
+
     private static func translateOCR(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
         let options = OCRPreprocessor.Options(
             isRightToLeft: request.isRightToLeft,

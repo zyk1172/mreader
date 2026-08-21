@@ -683,7 +683,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             )
             try await storage.savePageAndUpdateManifest(processingPage)
 
-            let (initialTranslationResult, retryCount) = try await translatePageWithRetry(
+            let (initialTranslationResult, initialRetryCount) = try await translatePageWithRetry(
                 pageURL: work.page.url,
                 image: image,
                 configuration: work.configuration,
@@ -698,10 +698,12 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 usesVisualOCRVerification: work.usesVisualOCRVerification
             )
             var translationResult = initialTranslationResult
+            var retryCount = initialRetryCount
 
             if work.processingMode == .vision {
+                let localOCR: OCRPipelineResult?
                 do {
-                    let localOCR = try await MangaOCRPipeline.recognize(
+                    localOCR = try await MangaOCRPipeline.recognize(
                         in: image,
                         options: OCRPreprocessor.Options(
                             isRightToLeft: work.isRightToLeft,
@@ -710,6 +712,12 @@ final class OfflineTranslationCoordinator: ObservableObject {
                             sourceLanguagePreference: work.sourceLanguage
                         )
                     )
+                } catch {
+                    localOCR = nil
+                    print("MReader offline geometry refinement skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
+                }
+
+                if let localOCR {
                     switch translationResult {
                     case .translated(let blocks):
                         translationResult = .translated(
@@ -729,11 +737,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
                             failedSlices: failedSlices
                         )
                     case .noText:
-                        break
+                        // 合法 Vision 空页只有在本地 OCR 也没有正文时才可保存为 noText。
+                        // 本地已识别到文字则改走 Text Model，失败会按页重试/失败处理。
+                        guard !localOCR.bubbleBlocks.isEmpty else { break }
+                        let fallback = try await translateLocalOCRFallbackWithRetry(
+                            localOCR.bubbleBlocks,
+                            work: work,
+                            image: image
+                        )
+                        translationResult = .translated(fallback.blocks)
+                        retryCount += fallback.retryCount
                     }
-                } catch {
-                    // 本地 OCR 是视觉结果的几何校准层；设备端识别失败时保留已获得的译文。
-                    print("MReader offline geometry refinement skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
                 }
             }
 
@@ -912,6 +926,55 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     )
                 }
                 return (result, retryCount: attempt)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                switch OfflineTranslationRetryPolicy.decision(for: error, attempt: attempt) {
+                case .needsConfiguration:
+                    throw OfflineTranslationRunError.needsConfiguration(error.localizedDescription)
+                case .retry(let delay):
+                    attempt += 1
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                case .fail:
+                    throw OfflineTranslationRetryFailure(
+                        message: error.localizedDescription,
+                        retryCount: attempt,
+                        isPolicyRefusal: OfflineTranslationPolicyCircuit.isProviderRefusal(error)
+                    )
+                }
+            }
+        }
+    }
+
+    nonisolated private static func translateLocalOCRFallbackWithRetry(
+        _ bubbles: [TextBlock],
+        work: OfflineTranslationPageWork,
+        image: UIImage
+    ) async throws -> (blocks: [TextBlock], retryCount: Int) {
+        var attempt = 0
+        let request = AITranslationPageRequest(
+            pageURL: work.page.url,
+            image: image,
+            mode: .ocr,
+            configuration: work.configuration,
+            target: work.targetLanguage,
+            translationPromptTemplate: work.styleInstructions,
+            visionPromptTemplate: AITranslator.defaultVisionTranslationPromptTemplate,
+            isRightToLeft: work.isRightToLeft,
+            minimumTextHeight: 0.002,
+            ocrRecognitionMode: work.ocrRecognitionMode,
+            safeAreaInset: 0,
+            usesVisualOCRVerification: false,
+            viewportAspect: max(image.size.height / max(image.size.width, 1), 1.25),
+            sourceLanguagePreference: work.sourceLanguage
+        )
+        while true {
+            do {
+                let blocks = try await AITranslationPagePipeline.translateExistingOCRBubbles(
+                    bubbles,
+                    request: request
+                )
+                return (blocks, attempt)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

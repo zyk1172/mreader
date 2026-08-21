@@ -331,6 +331,7 @@
 "offlineTranslation.manageTitle" = "Offline Translation Sets";
 "offlineTranslation.progressTitle" = "Offline Translation Progress";
 "offlineTranslation.runInBackground" = "Translate in background and return to shelf";
+"offlineTranslation.background" = "Background";
 "offlineTranslation.scope.header" = "Pages";
 "offlineTranslation.scope.title" = "Range";
 "offlineTranslation.scope.footer" = "Page numbers shown here start at 1; stored indexes start at 0.";

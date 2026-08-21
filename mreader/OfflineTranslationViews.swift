@@ -453,7 +453,7 @@ struct OfflineTranslationProgressView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("tab.library".localized) {
+                    Button("offlineTranslation.background".localized) {
                         returnToShelf()
                     }
                 }

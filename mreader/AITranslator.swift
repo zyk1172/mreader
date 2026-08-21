@@ -78,6 +78,15 @@ struct TextBlock: Identifiable, Sendable {
         self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
     }
+
+    /// OCR 字号尺度始终取原文短边：横排文字对应 textBox 高度，竖排文字对应宽度。
+    /// 显示时必须用同一坐标轴的页面尺寸还原，不能统一乘图片短边。
+    nonisolated func sourceFontSize(in imageRect: CGRect) -> CGFloat {
+        let reference = boundingBox.width >= boundingBox.height
+            ? imageRect.height
+            : imageRect.width
+        return CGFloat(estimatedFontScale) * max(reference, 1)
+    }
 }
 
 nonisolated struct OCRVerificationRegion: Sendable {
@@ -636,26 +645,22 @@ class AITranslator {
             styleInstructions: styleInstructions,
             previousContext: previousContext
         )
-        do {
-            let result = try await recognizeVisionPageUsingModelWithStats(
-                image: image,
-                apiKey: apiKey,
-                baseURL: baseURL,
-                model: visionModel,
-                isRightToLeft: isRightToLeft,
-                viewportAspect: viewportAspect,
-                additionalInstructions: "",
-                translationTarget: targetLanguage,
-                translationPromptTemplate: prompt,
-                strictTranslationGeometry: true
-            )
-            guard !result.blocks.isEmpty else { return .noText }
-            return result.failedSlices > 0
-                ? .partial(result.blocks, failedSlices: result.failedSlices)
-                : .translated(result.blocks)
-        } catch VisionTranslationError.emptyResult {
-            return .noText
-        }
+        let result = try await recognizeVisionPageUsingModelWithStats(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: visionModel,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: "",
+            translationTarget: targetLanguage,
+            translationPromptTemplate: prompt,
+            strictTranslationGeometry: true
+        )
+        guard !result.blocks.isEmpty else { return .noText }
+        return result.failedSlices > 0
+            ? .partial(result.blocks, failedSlices: result.failedSlices)
+            : .translated(result.blocks)
     }
 
     private struct VisionPageRecognitionResult {
@@ -707,6 +712,10 @@ class AITranslator {
                 translationPromptTemplate: translationPromptTemplate,
                 strictTranslationGeometry: strictTranslationGeometry
             )
+            if blocks.isEmpty, strictTranslationGeometry {
+                // strict parser 已确认顶层为合法的 { coordinateSpace: normalized, items: [] }。
+                return VisionPageRecognitionResult(blocks: [], successfulSlices: 1, failedSlices: 0)
+            }
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
             return VisionPageRecognitionResult(
                 blocks: sortedTextBlocks(blocks, isRightToLeft: isRightToLeft),
@@ -798,6 +807,13 @@ class AITranslator {
             }
         }
         let deduped = deduplicatedMangaTextBlocks(fallbackBlocks, isRightToLeft: isRightToLeft)
+        if deduped.isEmpty,
+           strictTranslationGeometry,
+           failedSlices == 0,
+           successfulSlices == slices.count {
+            // 所有分片都明确返回合法空 items，才可判定整页无文字。
+            return VisionPageRecognitionResult(blocks: [], successfulSlices: successfulSlices, failedSlices: 0)
+        }
         guard !deduped.isEmpty else {
             throw lastError ?? VisionTranslationError.emptyResult
         }
@@ -950,6 +966,10 @@ class AITranslator {
                 .prefix(500)
             print("MReader vision recognition invalid JSON excerpt=\(excerpt)")
             throw VisionTranslationError.invalidJSON
+        }
+        if blocks.isEmpty, strictTranslationGeometry {
+            // strict parser 只会为合法的 { coordinateSpace: normalized, items: [] } 返回空数组。
+            return []
         }
         guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
         return blocks
@@ -1373,6 +1393,8 @@ class AITranslator {
         case invalidJSON
         case invalidCoordinates
         case missingTextBox
+        case missingTranslation
+        case protocolViolation(String)
         case emptyResult
 
         var errorDescription: String? {
@@ -1387,6 +1409,10 @@ class AITranslator {
                 return "视觉坐标未按归一化协议返回"
             case .missingTextBox:
                 return "视觉翻译格式不完整：缺少必需 textBox"
+            case .missingTranslation:
+                return "视觉翻译格式不完整：缺少必需译文"
+            case .protocolViolation(let message):
+                return "视觉翻译协议错误：\(message)"
             case .emptyResult:
                 return "视觉翻译没有返回可用文本"
             }
@@ -1396,7 +1422,7 @@ class AITranslator {
     private static func shouldFallbackToVisionSlices(after error: Error) -> Bool {
         guard let visionError = error as? VisionTranslationError else { return false }
         switch visionError {
-        case .invalidJSON, .invalidCoordinates, .missingTextBox, .emptyResult:
+        case .invalidJSON, .invalidCoordinates, .missingTextBox, .missingTranslation, .protocolViolation, .emptyResult:
             return true
         case .api(let message):
             let lowercased = message.lowercased()
@@ -1505,7 +1531,23 @@ class AITranslator {
         let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
 
         let rawItems: [[String: Any]]
-        if let array = json as? [[String: Any]] {
+        if requiresTextBox {
+            guard let object = json as? [String: Any] else {
+                throw VisionTranslationError.protocolViolation("顶层必须是对象")
+            }
+            guard (object["coordinateSpace"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() == "normalized" else {
+                throw VisionTranslationError.protocolViolation("coordinateSpace 必须为 normalized")
+            }
+            guard let itemValues = object["items"] as? [Any] else {
+                throw VisionTranslationError.protocolViolation("缺少 items 数组")
+            }
+            guard itemValues.allSatisfy({ $0 is [String: Any] }) else {
+                throw VisionTranslationError.protocolViolation("items 必须只包含对象")
+            }
+            rawItems = itemValues.compactMap { $0 as? [String: Any] }
+        } else if let array = json as? [[String: Any]] {
             rawItems = array
         } else if let dictionary = json as? [String: Any] {
             rawItems = (dictionary["items"] as? [[String: Any]])
@@ -1520,19 +1562,21 @@ class AITranslator {
 
         if requiresTextBox {
             for item in rawItems {
-                let rawLines = ((item["translationLines"] ?? item["translation_lines"] ?? item["lines"]) as? [String])?
+                guard let sourceText = item["sourceText"] as? String,
+                      !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw VisionTranslationError.protocolViolation("缺少必需 sourceText")
+                }
+                let rawLines = (item["translationLines"] as? [String])?
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty } ?? []
-                let translation = rawLines.isEmpty
-                    ? firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"])
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    : rawLines.joined(separator: "\n")
+                let translation = (item["translation"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 // 离线协议要求模型直接省略 URL/水印等非内容项；保留了 item 却返回空译文
                 // 说明协议被破坏，不能把整页误记为“没有文字”。空 items 仍是合法的 noText 结果。
-                guard !translation.isEmpty else {
-                    throw VisionTranslationError.emptyResult
+                guard !translation.isEmpty, !rawLines.isEmpty else {
+                    throw VisionTranslationError.missingTranslation
                 }
-                guard rectValue(from: item["textBox"] ?? item["text_box"]) != nil else {
+                guard rectValue(from: item["textBox"]) != nil else {
                     throw VisionTranslationError.missingTextBox
                 }
             }
@@ -1603,7 +1647,7 @@ class AITranslator {
 
         // 坐标协议：只接受“显式 normalized 0...1”的响应。不再按数值大小猜测像素/百分比/0~1000 基准，
         // 避免小像素坐标（如 2048 图上的 x=20,y=25,width=40,height=30）被误判成百分比放大几十倍。
-        if !parsedItems.isEmpty {
+        if requiresTextBox || !parsedItems.isEmpty {
             guard visionCoordinateSpaceIsNormalized(
                 json,
                 rects: parsedItems.flatMap { [$0.textRect, $0.bubbleRect, $0.rect].compactMap { $0 } },
@@ -1647,6 +1691,9 @@ class AITranslator {
                 bubblePolygon: mappedBubblePolygon,
                 translationLines: item.rawLines
             )
+        }
+        if requiresTextBox, blocks.count != rawItems.count {
+            throw VisionTranslationError.protocolViolation("items 包含无效 textBox")
         }
         return blocks
     }

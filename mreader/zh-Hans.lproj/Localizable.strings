@@ -496,6 +496,7 @@
 "offlineTranslation.manageTitle" = "离线译文集合";
 "offlineTranslation.progressTitle" = "离线翻译进度";
 "offlineTranslation.runInBackground" = "后台翻译并返回书架";
+"offlineTranslation.background" = "后台翻译";
 "offlineTranslation.scope.header" = "页面范围";
 "offlineTranslation.scope.title" = "范围";
 "offlineTranslation.scope.footer" = "界面页码从 1 开始，内部保存索引从 0 开始。";

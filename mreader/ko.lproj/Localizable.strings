@@ -496,6 +496,7 @@
 "offlineTranslation.manageTitle" = "오프라인 번역 세트";
 "offlineTranslation.progressTitle" = "오프라인 번역 진행률";
 "offlineTranslation.runInBackground" = "백그라운드에서 번역하고 서재로 돌아가기";
+"offlineTranslation.background" = "백그라운드";
 "offlineTranslation.scope.header" = "페이지";
 "offlineTranslation.scope.title" = "범위";
 "offlineTranslation.scope.footer" = "표시는 1부터, 저장 인덱스는 0부터 시작합니다.";

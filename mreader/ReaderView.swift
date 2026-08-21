@@ -4066,25 +4066,29 @@ struct LocalImageView: View {
     }
 
     private func translationLayoutItem(for block: TextBlock, in size: CGSize) -> TranslationLayoutItem {
-        let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
-        let textRect = overlayRect(
+        let transform = ocrDisplayTransform(in: size)
+        // 离线译文以 OCR textBox 的真实显示矩形为锚点；不能复用带最小点击尺寸的 overlayRect。
+        let textRect = OCRCoordinateMapper.displayRect(
             forNormalizedPageRect: block.boundingBox,
-            in: size,
-            scaleMultiplier: magnificationScale
+            using: transform
         )
-        let imageBounds = ocrDisplayTransform(in: size).imageRect
-        let fallbackBounds = imageBounds.insetBy(dx: 5, dy: 5)
+        let imageBounds = transform.imageRect
+        let fallbackBounds = limitedTranslationFallbackBounds(
+            around: textRect,
+            within: imageBounds
+        )
         let allowedBounds: CGRect
         if let bubbleBox = block.bubbleBox {
             let mappedBubble = OCRCoordinateMapper.displayRect(
                 forNormalizedPageRect: bubbleBox,
-                using: ocrDisplayTransform(in: size)
+                using: transform
             ).intersection(imageBounds)
-            // bubbleBox 只作为“可扩展到哪里”的上限；模型框明显不含原文时不让它影响文字锚点。
+            // bubbleBox 只有完整包住本地 OCR textBox 时才可信；否则使用有限扩张范围，
+            // 避免长译文借由一个错误的模型框铺满整张页面。
             allowedBounds = !mappedBubble.isNull
                 && mappedBubble.width > 0
                 && mappedBubble.height > 0
-                && mappedBubble.contains(CGPoint(x: textRect.midX, y: textRect.midY))
+                && mappedBubble.contains(textRect)
                 ? mappedBubble
                 : fallbackBounds
         } else {
@@ -4099,6 +4103,21 @@ struct LocalImageView: View {
             lineSpacing: 2
         )
         return TranslationLayoutItem(blocks: [block], rect: layout.rect, fontSize: layout.fontSize)
+    }
+
+    private func limitedTranslationFallbackBounds(around textRect: CGRect, within imageBounds: CGRect) -> CGRect {
+        guard !imageBounds.isNull, imageBounds.width > 0, imageBounds.height > 0 else {
+            return textRect
+        }
+        let maximumWidth = min(textRect.width * 2.5, imageBounds.width * 0.55)
+        let maximumHeight = min(textRect.height * 3.5, imageBounds.height * 0.45)
+        let bounds = CGRect(
+            x: textRect.midX - maximumWidth / 2,
+            y: textRect.midY - maximumHeight / 2,
+            width: maximumWidth,
+            height: maximumHeight
+        ).intersection(imageBounds)
+        return bounds.isNull || bounds.width <= 0 || bounds.height <= 0 ? textRect : bounds
     }
 
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
@@ -4362,10 +4381,8 @@ struct LocalImageView: View {
 
     private func preferredTranslationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
-        let displayedReference = max(min(imageRect.width, imageRect.height), 1)
-        let sourceFontSize = CGFloat(block.estimatedFontScale) * displayedReference
         return OCRBubbleLayoutEngine.preferredTranslationFontSize(
-            sourceFontSize: sourceFontSize
+            sourceFontSize: block.sourceFontSize(in: imageRect)
         )
     }
 

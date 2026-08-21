@@ -496,6 +496,7 @@
 "offlineTranslation.manageTitle" = "オフライン翻訳セット";
 "offlineTranslation.progressTitle" = "オフライン翻訳の進行状況";
 "offlineTranslation.runInBackground" = "バックグラウンドで翻訳して本棚に戻る";
+"offlineTranslation.background" = "バックグラウンド";
 "offlineTranslation.scope.header" = "ページ";
 "offlineTranslation.scope.title" = "範囲";
 "offlineTranslation.scope.footer" = "表示は1始まり、保存時のインデックスは0始まりです。";
