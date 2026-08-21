@@ -50,8 +50,19 @@ actor OfflineTranslationStorageManager {
         let indexValue = index(for: comicID)
         let activeID: UUID?
         if let targetLanguage {
-            activeID = indexValue?.activeSetIDsByTargetLanguage[targetLanguage.rawValue]
-                ?? (indexValue?.activeSetIDsByTargetLanguage.isEmpty == true ? indexValue?.activeSetID : nil)
+            if let mappedID = indexValue?.activeSetIDsByTargetLanguage[targetLanguage.rawValue] {
+                return manifest(comicID: comicID, setID: mappedID)
+            }
+            // 旧版本只有一个 activeSetID。按目标语言验证后再懒迁移，避免把中文集合误当成英文集合。
+            guard let legacyID = indexValue?.activeSetID,
+                  let legacyManifest = manifest(comicID: comicID, setID: legacyID),
+                  legacyManifest.targetLanguage == targetLanguage else {
+                return nil
+            }
+            var migratedIndex = indexValue ?? OfflineTranslationIndex(comicID: comicID)
+            migratedIndex.activeSetIDsByTargetLanguage[targetLanguage.rawValue] = legacyID
+            try? write(migratedIndex, to: indexURL(for: comicID))
+            return legacyManifest
         } else {
             activeID = indexValue?.activeSetID
         }
@@ -125,6 +136,45 @@ actor OfflineTranslationStorageManager {
         try write(manifest, to: manifestURL(comicID: page.comicID, setID: page.setID))
     }
 
+    /// 低频修复路径：页面文件是事实来源，修正可能因进程终止而落后的计数和失败信息。
+    @discardableResult
+    func reconcileManifest(comicID: UUID, setID: UUID) throws -> OfflineTranslationSetManifest? {
+        guard let existing = manifest(comicID: comicID, setID: setID) else { return nil }
+        let recalculated = recalculatedManifest(existing)
+        guard recalculated.completedPageCount != existing.completedPageCount
+                || recalculated.noTextPageCount != existing.noTextPageCount
+                || recalculated.partialPageCount != existing.partialPageCount
+                || recalculated.failedPageCount != existing.failedPageCount
+                || recalculated.stalePageCount != existing.stalePageCount
+                || recalculated.coverage != existing.coverage
+                || recalculated.failureMessages != existing.failureMessages else {
+            return existing
+        }
+        try write(recalculated, to: manifestURL(comicID: comicID, setID: setID))
+        return recalculated
+    }
+
+    /// 启动恢复时一次性扫描所有集合；正常逐页 checkpoint 不调用该方法。
+    func reconcileAllManifests() throws -> Int {
+        guard let comicDirectories = try? fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var count = 0
+        for comicDirectory in comicDirectories {
+            guard let comicID = UUID(uuidString: comicDirectory.lastPathComponent),
+                  let indexValue = index(for: comicID) else { continue }
+            for setID in indexValue.setIDs {
+                guard let before = manifest(comicID: comicID, setID: setID),
+                      let after = try reconcileManifest(comicID: comicID, setID: setID),
+                      before != after else { continue }
+                count += 1
+            }
+        }
+        return count
+    }
+
     func markPageStale(comicID: UUID, setID: UUID, pageIndex: Int) {
         guard var page = page(comicID: comicID, setID: setID, pageIndex: pageIndex) else { return }
         page.state = .stale
@@ -141,6 +191,17 @@ actor OfflineTranslationStorageManager {
         return try? decoder.decode(OfflineTranslationJobRecord.self, from: data)
     }
 
+    /// 后台 handler 的单写者 claim：避免冷启动恢复与其它恢复路径同时接管同一个 Job。
+    func claimJobForBackgroundExecution(comicID: UUID, jobID: UUID) throws -> OfflineTranslationJobRecord? {
+        guard var job = job(comicID: comicID, jobID: jobID), !job.state.isTerminal else { return nil }
+        job.state = .running
+        job.lastError = nil
+        job.pauseReason = nil
+        job.updatedAt = Date()
+        try saveJob(job)
+        return job
+    }
+
     func jobs(comicID: UUID) -> [OfflineTranslationJobRecord] {
         let directory = comicDirectory(comicID: comicID).appendingPathComponent("jobs", isDirectory: true)
         guard let urls = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
@@ -153,10 +214,6 @@ actor OfflineTranslationStorageManager {
     }
 
     func markRunningJobsInterrupted() throws -> Int {
-        try markRunningJobsInterrupted(excludingJobID: nil)
-    }
-
-    func markRunningJobsInterrupted(excludingJobID: UUID?) throws -> Int {
         var count = 0
         guard let comicDirectories = try? fileManager.contentsOfDirectory(
             at: rootURL,
@@ -166,7 +223,7 @@ actor OfflineTranslationStorageManager {
         for comicDirectory in comicDirectories {
             guard let comicID = UUID(uuidString: comicDirectory.lastPathComponent) else { continue }
             for var job in jobs(comicID: comicID)
-            where job.id != excludingJobID && (job.state == .running || job.state == .queued) {
+            where job.state == .running || job.state == .queued {
                 job.state = .interrupted
                 job.lastError = "应用在任务运行期间退出"
                 job.updatedAt = Date()
@@ -205,9 +262,9 @@ actor OfflineTranslationStorageManager {
                 blocks: page.blocks,
                 state: page.state,
                 savedAt: Date(),
-                providerID: targetManifest.providerID,
-                visionModel: targetManifest.visionModel,
-                resolvedSourceLanguage: targetManifest.resolvedSourceLanguage ?? page.resolvedSourceLanguage,
+                providerID: page.providerID,
+                visionModel: page.visionModel,
+                resolvedSourceLanguage: page.resolvedSourceLanguage,
                 errorMessage: page.errorMessage
             )
             try savePageAndUpdateManifest(copiedPage)
@@ -222,8 +279,7 @@ actor OfflineTranslationStorageManager {
             guard let manifestValue = manifest(comicID: comicID, setID: setID) else { return nil }
             return OfflineTranslationSetSummary(
                 manifest: manifestValue,
-                isActive: indexValue.activeSetIDsByTargetLanguage[manifestValue.targetLanguage.rawValue] == setID
-                    || (indexValue.activeSetIDsByTargetLanguage.isEmpty && indexValue.activeSetID == setID),
+                isActive: activeManifest(for: comicID, targetLanguage: manifestValue.targetLanguage)?.id == setID,
                 jobs: jobs(comicID: comicID).filter { $0.setID == setID }
             )
         }.sorted { $0.manifest.updatedAt > $1.manifest.updatedAt }
@@ -421,11 +477,15 @@ actor OfflineTranslationJobStore {
         await storage.job(comicID: comicID, jobID: jobID)
     }
 
+    func claimJobForBackgroundExecution(comicID: UUID, jobID: UUID) async throws -> OfflineTranslationJobRecord? {
+        try await storage.claimJobForBackgroundExecution(comicID: comicID, jobID: jobID)
+    }
+
     func list(comicID: UUID) async -> [OfflineTranslationJobRecord] {
         await storage.jobs(comicID: comicID)
     }
 
-    func markRunningJobsInterrupted(excludingJobID: UUID? = nil) async throws -> Int {
-        try await storage.markRunningJobsInterrupted(excludingJobID: excludingJobID)
+    func markRunningJobsInterrupted() async throws -> Int {
+        try await storage.markRunningJobsInterrupted()
     }
 }

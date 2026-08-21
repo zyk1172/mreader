@@ -32,12 +32,6 @@ struct mreaderApp: App {
         } catch {
             print("MReader AI legacy configuration migration failed: \(error.localizedDescription)")
         }
-        Task {
-            let pendingJobID = OfflineTranslationBackgroundScheduler.shared.pendingJobID
-            if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(excludingJobID: pendingJobID), count > 0 {
-                print("MReader marked \(count) offline translation jobs interrupted after relaunch")
-            }
-        }
     }
 
     private static let translationPromptProtocolVersionKey = "translation_prompt_protocol_version"

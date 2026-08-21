@@ -514,6 +514,8 @@
 "offlineTranslation.provider.freezeNotice" = "接口、Vision 模型、语言和提示词会冻结在任务记录中。";
 "offlineTranslation.currentPage" = "正在处理第 %d/%d 页";
 "offlineTranslation.coverageDetail" = "已覆盖 %d/%d 页 · 失败 %d 页";
+"offlineTranslation.partialCount" = "部分完成 %d 页";
+"offlineTranslation.setUnavailable" = "所选翻译集合已不存在。";
 "offlineTranslation.active" = "当前使用";
 "offlineTranslation.setActive" = "使用此集合";
 "offlineTranslation.deleteSet" = "删除集合";

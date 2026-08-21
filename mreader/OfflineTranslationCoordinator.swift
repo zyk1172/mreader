@@ -95,6 +95,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
         guard task == nil else { return }
         let remaining = savedJob.pageIndexes.enumerated().compactMap { offset, pageIndex in
             offset >= savedJob.nextPageOffset || savedJob.failedPageIndexes.contains(pageIndex)
+                || (savedJob.partialPageIndexes ?? []).contains(pageIndex)
                 ? pageIndex
                 : nil
         }
@@ -149,6 +150,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
             let totalPages = pages.count
+            let sourceRevision = OfflineTranslationPageProvider.sourceRevision(for: comic, session: sourceSession)
             let promptSnapshot = OfflineTranslationPromptBuilder.make(
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
@@ -190,24 +192,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 promptRevision: OfflineTranslationPromptBuilder.revision,
                 promptSnapshot: promptSnapshot,
                 totalPages: totalPages,
-                derivedFromSetID: sourceSet?.id
+                derivedFromSetID: sourceSet?.id,
+                sourceRevision: sourceRevision
             )
-            let shouldActivateImmediately = sourceSet == nil
-            try await storage.saveManifest(manifestValue, activate: shouldActivateImmediately)
+            try await storage.saveManifest(manifestValue, activate: false)
             if let sourceSet,
                sourceSet.targetLanguage == targetLanguage,
-               sourceSet.sourceLanguage == sourceLanguage {
-                var sourceFingerprints: [Int: String] = [:]
-                let excluded = Set(pageIndexes)
-                for index in 0..<min(sourceSet.totalPages, pages.count) where !excluded.contains(index) {
-                    guard let data = try? await OfflineTranslationPageProvider.data(for: comic, page: pages[index], session: sourceSession) else { continue }
-                    sourceFingerprints[index] = OfflineTranslationPageProvider.fingerprint(for: data, pageURL: pages[index].url)
-                }
+               sourceSet.sourceLanguage == sourceLanguage,
+               sourceSet.sourceRevision == sourceRevision {
                 _ = try await storage.copyValidPages(
                     from: sourceSet.id,
                     to: manifestValue,
-                    excludingPageIndexes: excluded,
-                    sourceFingerprints: sourceFingerprints
+                    excludingPageIndexes: Set(pageIndexes)
                 )
             }
 
@@ -276,7 +272,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             try await jobStore.save(record)
             OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             job = record
-            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+            manifest = try? await storage.reconcileManifest(comicID: record.comicID, setID: record.setID)
             progress = record.pageIndexes.isEmpty
                 ? 1
                 : Double(min(record.nextPageOffset, record.pageIndexes.count)) / Double(record.pageIndexes.count)
@@ -481,6 +477,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     if !record.failedPageIndexes.contains(pageIndex) {
                         record.failedPageIndexes.append(pageIndex)
                     }
+                    record.completedPageIndexes.removeAll { $0 == pageIndex }
+                    record.noTextPageIndexes.removeAll { $0 == pageIndex }
+                    record.partialPageIndexes?.removeAll { $0 == pageIndex }
                     record.lastError = message
                     record.nextPageOffset += 1
                     record.currentPageIndex = nil
@@ -508,7 +507,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     : Double(record.nextPageOffset) / Double(record.pageIndexes.count)
             }
 
-            record.state = record.failedPageIndexes.isEmpty ? .completed : .completedWithFailures
+            let finalManifest = try? await storage.reconcileManifest(
+                comicID: record.comicID,
+                setID: record.setID
+            )
+            record.state = OfflineTranslationJobState.completionState(
+                failedPageCount: record.failedPageIndexes.count,
+                partialPageCount: finalManifest?.partialPageCount ?? 0
+            )
             record.currentPageIndex = nil
             record.updatedAt = Date()
             try await checkpoint(record)
@@ -519,7 +525,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 try? await storage.setActive(comicID: record.comicID, setID: record.setID)
             }
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
-            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+            manifest = finalManifest
         } catch OfflineTranslationStorageError.lowDiskSpace {
             record.state = .paused
             record.pauseReason = OfflineTranslationPauseReason.lowDiskSpace.rawValue
@@ -643,8 +649,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
         switch state {
         case .noText:
             if !record.noTextPageIndexes.contains(pageIndex) { record.noTextPageIndexes.append(pageIndex) }
-        case .completed, .partial:
+            record.completedPageIndexes.removeAll { $0 == pageIndex }
+            record.partialPageIndexes?.removeAll { $0 == pageIndex }
+        case .completed:
             if !record.completedPageIndexes.contains(pageIndex) { record.completedPageIndexes.append(pageIndex) }
+            record.noTextPageIndexes.removeAll { $0 == pageIndex }
+            record.partialPageIndexes?.removeAll { $0 == pageIndex }
+        case .partial:
+            if !(record.partialPageIndexes ?? []).contains(pageIndex) {
+                record.partialPageIndexes = (record.partialPageIndexes ?? []) + [pageIndex]
+            }
+            record.completedPageIndexes.removeAll { $0 == pageIndex }
+            record.noTextPageIndexes.removeAll { $0 == pageIndex }
         case .pending, .processing, .failed, .stale:
             break
         }

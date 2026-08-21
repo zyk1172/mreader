@@ -514,6 +514,8 @@
 "offlineTranslation.provider.freezeNotice" = "プロバイダ、モデル、言語、プロンプトはタスクに固定保存されます。";
 "offlineTranslation.currentPage" = "%d/%dページを処理中";
 "offlineTranslation.coverageDetail" = "%d/%dページ完了 · 失敗%d";
+"offlineTranslation.partialCount" = "部分完了 %dページ";
+"offlineTranslation.setUnavailable" = "選択した翻訳セットは存在しません。";
 "offlineTranslation.active" = "使用中";
 "offlineTranslation.setActive" = "このセットを使用";
 "offlineTranslation.deleteSet" = "セットを削除";

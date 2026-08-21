@@ -2047,6 +2047,85 @@ private func makeTestPageRequest(
         #expect(first.count == 64)
     }
 
+    @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: target,
+                providerID: UUID(),
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let chinese = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        try await storage.saveManifest(chinese, activate: true)
+        try await storage.saveManifest(english, activate: true)
+        let legacyIndex = OfflineTranslationIndex(
+            comicID: comicID,
+            activeSetID: chinese.id,
+            activeSetIDsByTargetLanguage: [TranslationTargetLanguage.english.rawValue: english.id],
+            setIDs: [chinese.id, english.id]
+        )
+        try JSONEncoder().encode(legacyIndex).write(
+            to: root.appendingPathComponent(comicID.uuidString).appendingPathComponent("index.json"),
+            options: .atomic
+        )
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
+        #expect((await storage.index(for: comicID))?.activeSetIDsByTargetLanguage[TranslationTargetLanguage.simplifiedChinese.rawValue] == chinese.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
+    @Test func offlineTranslationReconcilesManifestFromPageFiles() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-reconcile-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 1
+        )
+        try await storage.saveManifest(set)
+        try await storage.savePageAndUpdateManifest(
+            OfflineTranslatedPage(
+                comicID: comicID,
+                setID: set.id,
+                pageIndex: 0,
+                sourceFingerprint: "stable",
+                pixelWidth: 100,
+                pixelHeight: 100,
+                blocks: [],
+                state: .partial,
+                providerID: set.providerID,
+                visionModel: set.visionModel
+            )
+        )
+        try await storage.saveManifest(set)
+        let repaired = try await storage.reconcileManifest(comicID: comicID, setID: set.id)
+        #expect(repaired?.partialPageCount == 1)
+        #expect(repaired?.coveredPageCount == 1)
+    }
+
     @Test func offlineTranslationDerivedSetCopiesOnlyOutsideSelectedPagesAndSwitchesAfterCompletion() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-derived-\(UUID().uuidString)", isDirectory: true)
@@ -2054,6 +2133,7 @@ private func makeTestPageRequest(
         let storage = OfflineTranslationStorageManager(rootURL: root)
         let comicID = UUID()
         let providerID = UUID()
+        let sourcePageProviderID = UUID()
         func makeManifest(id: UUID, derivedFromSetID: UUID? = nil) -> OfflineTranslationSetManifest {
             OfflineTranslationSetManifest(
                 id: id,
@@ -2067,7 +2147,8 @@ private func makeTestPageRequest(
                 promptRevision: OfflineTranslationPromptBuilder.revision,
                 promptSnapshot: "fixed",
                 totalPages: 2,
-                derivedFromSetID: derivedFromSetID
+                derivedFromSetID: derivedFromSetID,
+                sourceRevision: "revision-1"
             )
         }
         let source = makeManifest(id: UUID())
@@ -2084,8 +2165,8 @@ private func makeTestPageRequest(
                     pixelHeight: 100,
                     blocks: [],
                     state: .noText,
-                    providerID: providerID,
-                    visionModel: "vision-test"
+                    providerID: sourcePageProviderID,
+                    visionModel: "source-vision"
                 )
             )
         }
@@ -2096,7 +2177,8 @@ private func makeTestPageRequest(
             excludingPageIndexes: [1]
         )
         #expect((await storage.activeManifest(for: comicID))?.id == source.id)
-        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0) != nil)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0)?.providerID == sourcePageProviderID)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0)?.visionModel == "source-vision")
         #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 1) == nil)
 
         try await storage.savePageAndUpdateManifest(
@@ -2124,6 +2206,8 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageState.stale.isUsableOverlay)
         #expect(OfflineTranslationJobState.interrupted.isTerminal == false)
         #expect(OfflineTranslationJobState.completedWithFailures.isTerminal)
+        #expect(OfflineTranslationJobState.completionState(failedPageCount: 0, partialPageCount: 0) == .completed)
+        #expect(OfflineTranslationJobState.completionState(failedPageCount: 0, partialPageCount: 1) == .completedWithFailures)
         #expect(OfflineTranslationPageState.partial.needsTranslationWork)
         #expect(!OfflineTranslationPageState.completed.needsTranslationWork)
     }
@@ -2169,6 +2253,19 @@ private func makeTestPageRequest(
                 attempt: 0
             ) == .retry(afterSeconds: 2)
         )
+        let moderation = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 403,
+            message: "content policy refusal"
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: moderation, attempt: 0) == .fail)
+        #expect(OfflineTranslationPolicyCircuit.isProviderRefusal(moderation))
+        let forbidden = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 403,
+            message: "invalid API key"
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: forbidden, attempt: 0) == .needsConfiguration)
     }
 
     @Test func offlineTranslationJobJSONNeverContainsAPIKey() throws {

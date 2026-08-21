@@ -58,6 +58,12 @@ nonisolated enum OfflineTranslationJobState: String, Codable, CaseIterable, Send
             return false
         }
     }
+
+    static func completionState(failedPageCount: Int, partialPageCount: Int) -> Self {
+        failedPageCount > 0 || partialPageCount > 0
+            ? .completedWithFailures
+            : .completed
+    }
 }
 
 nonisolated enum OfflineTranslationPauseReason: String, Codable, Sendable {
@@ -437,6 +443,8 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
     let createdAt: Date
     var updatedAt: Date
     let derivedFromSetID: UUID?
+    /// 用于派生集合的廉价源版本判断；页面指纹仍由 Reader 在最终使用前兜底校验。
+    var sourceRevision: String?
 
     init(
         id: UUID = UUID(),
@@ -451,7 +459,8 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
         promptSnapshot: String,
         totalPages: Int,
         createdAt: Date = Date(),
-        derivedFromSetID: UUID? = nil
+        derivedFromSetID: UUID? = nil,
+        sourceRevision: String? = nil
     ) {
         self.schemaVersion = Self.currentSchemaVersion
         self.id = id
@@ -476,6 +485,7 @@ nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, 
         self.createdAt = createdAt
         self.updatedAt = createdAt
         self.derivedFromSetID = derivedFromSetID
+        self.sourceRevision = sourceRevision
     }
 
     var coveredPageCount: Int {
@@ -552,6 +562,8 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
     let totalPages: Int
     var completedPageIndexes: [Int]
     var noTextPageIndexes: [Int]
+    /// 旧任务缺失该字段时按空数组兼容；partial 页面仍需后续重翻。
+    var partialPageIndexes: [Int]?
     var failedPageIndexes: [Int]
     var retryCounts: [String: Int]
     /// 连续触发 Provider 内容策略拒绝的次数；旧 job 缺失时按 0 处理。
@@ -607,6 +619,7 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         self.totalPages = totalPages
         self.completedPageIndexes = []
         self.noTextPageIndexes = []
+        self.partialPageIndexes = []
         self.failedPageIndexes = []
         self.retryCounts = [:]
         self.consecutiveProviderPolicyFailures = 0
@@ -677,11 +690,29 @@ nonisolated enum OfflineTranslationRetryPolicy {
             || lowercased.contains("network")
     }
 
+    private static func isPolicyMessage(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        return lowercased.contains("1301")
+            || lowercased.contains("policy")
+            || lowercased.contains("unsafe")
+            || lowercased.contains("safety")
+            || lowercased.contains("moderation")
+            || lowercased.contains("内容策略")
+            || lowercased.contains("敏感")
+    }
+
+    private static func requiresConfiguration(statusCode: Int?, message: String) -> Bool {
+        guard let statusCode else { return false }
+        if statusCode == 401 { return true }
+        // 403 既可能是鉴权失败，也可能是 Provider 的内容审查；先看消息再决定。
+        return statusCode == 403 && !isPolicyMessage(message)
+    }
+
     static func decision(for error: Error, attempt: Int) -> OfflineTranslationRetryDecision {
         var retryAfterSeconds: UInt64?
         if let requestError = error as? AITranslationRequestError,
-           case .server(_, let statusCode, _) = requestError {
-            if statusCode == 401 || statusCode == 403 {
+           case .server(_, let statusCode, let message) = requestError {
+            if requiresConfiguration(statusCode: statusCode, message: message) {
                 return .needsConfiguration
             }
             let retryableStatus = statusCode == 408
@@ -690,8 +721,8 @@ nonisolated enum OfflineTranslationRetryPolicy {
                 || (statusCode ?? 0) >= 500
             guard retryableStatus else { return .fail }
         } else if let requestError = error as? AITranslationRequestError,
-                  case .serverWithRetryAfter(_, let statusCode, _, let retryAfter) = requestError {
-            if statusCode == 401 || statusCode == 403 {
+                  case .serverWithRetryAfter(_, let statusCode, let message, let retryAfter) = requestError {
+            if requiresConfiguration(statusCode: statusCode, message: message) {
                 return .needsConfiguration
             }
             let retryableStatus = statusCode == 408
@@ -725,7 +756,7 @@ nonisolated enum OfflineTranslationPolicyCircuit {
         } else {
             statusCode = nil
         }
-        guard statusCode == 400 else { return false }
+        guard statusCode == 400 || statusCode == 403 else { return false }
         return message.contains("1301")
             || message.contains("policy")
             || message.contains("unsafe")

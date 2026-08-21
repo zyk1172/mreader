@@ -19,6 +19,8 @@ struct OfflineTranslationStartView: View {
     @State private var availableFailedPages = 0
     @State private var activateWhenComplete = true
     @State private var showingProgress = false
+    @State private var sourceSetLoaded: Bool
+    @State private var sourceSetLoadFailed = false
 
     private enum Scope: String, CaseIterable, Identifiable {
         case entire
@@ -47,6 +49,7 @@ struct OfflineTranslationStartView: View {
         self.comic = comic
         self.currentPageIndex = currentPageIndex
         self.intent = intent
+        _sourceSetLoaded = State(initialValue: intent.sourceSetID == nil)
         _sourceLanguageRaw = State(initialValue: comic.translationSourceLanguageRaw)
         _targetLanguageRaw = State(
             initialValue: UserDefaults.standard.string(forKey: "translation_target_language")
@@ -136,10 +139,19 @@ struct OfflineTranslationStartView: View {
                             Text(language.localizedTitle).tag(language.rawValue)
                         }
                     }
+                    .disabled(intent.sourceSetID != nil)
                     Picker("ocr.targetLanguage".localized, selection: $targetLanguageRaw) {
                         ForEach(TranslationTargetLanguage.allCases) { language in
                             Text(language.localizedTitle).tag(language.rawValue)
                         }
+                    }
+                    .disabled(intent.sourceSetID != nil)
+                }
+
+                if sourceSetLoadFailed {
+                    Section {
+                        Label("offlineTranslation.setUnavailable".localized, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
                     }
                 }
 
@@ -199,7 +211,8 @@ struct OfflineTranslationStartView: View {
                     } label: {
                         Label("offlineTranslation.start".localized, systemImage: "play.circle.fill")
                     }
-                    .disabled(!coordinator.canStart
+                    .disabled(!sourceSetLoaded
+                        || !coordinator.canStart
                         || providerID == nil
                         || visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || (scope == .range && rangeStart > rangeEnd))
@@ -218,6 +231,22 @@ struct OfflineTranslationStartView: View {
                 if coordinator.job?.comicID == comic.id {
                     showingProgress = true
                 }
+            }
+            .task {
+                guard let setID = intent.sourceSetID else {
+                    sourceSetLoaded = true
+                    return
+                }
+                guard let sourceManifest = await OfflineTranslationStorageManager.shared.manifest(
+                    comicID: comic.id,
+                    setID: setID
+                ) else {
+                    sourceSetLoadFailed = true
+                    return
+                }
+                sourceLanguageRaw = sourceManifest.sourceLanguage.rawValue
+                targetLanguageRaw = sourceManifest.targetLanguage.rawValue
+                sourceSetLoaded = true
             }
             .task(id: targetLanguageRaw) {
                 let targetLanguage = TranslationTargetLanguage.migrateLegacyValue(targetLanguageRaw)
@@ -282,6 +311,7 @@ struct OfflineTranslationProgressView: View {
                         VStack(spacing: 6) {
                             Text("offlineTranslation.completedCount".localizedFormat(manifest.completedPageCount))
                             Text("offlineTranslation.noTextCount".localizedFormat(manifest.noTextPageCount))
+                            Text("offlineTranslation.partialCount".localizedFormat(manifest.partialPageCount))
                             Text("offlineTranslation.coverageDetail".localizedFormat(
                                 manifest.coveredPageCount,
                                 manifest.totalPages,
@@ -291,12 +321,15 @@ struct OfflineTranslationProgressView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     }
-                    if job.pauseReason == OfflineTranslationPauseReason.providerPolicyBlocked.rawValue {
-                        Text("offlineTranslation.policyBlocked".localized)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
+                    if job.pauseReason == OfflineTranslationPauseReason.providerPolicyBlocked.rawValue
+                        || job.state == .needsConfiguration {
+                        if job.pauseReason == OfflineTranslationPauseReason.providerPolicyBlocked.rawValue {
+                            Text("offlineTranslation.policyBlocked".localized)
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                        }
                         Button("offlineTranslation.changeModel".localized) {
                             showingRebind = true
                         }
@@ -467,6 +500,7 @@ struct OfflineTranslationManagerView: View {
                                     summary.manifest.totalPages,
                                     summary.manifest.failedPageCount
                                 ))
+                                Text("offlineTranslation.partialCount".localizedFormat(summary.manifest.partialPageCount))
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 Text("\(summary.manifest.providerName) · \(summary.manifest.visionModel)")

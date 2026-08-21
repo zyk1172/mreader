@@ -62,10 +62,32 @@ enum OfflineTranslationPageProvider {
         deinit {
             if didStart { scopedURL?.stopAccessingSecurityScopedResource() }
         }
+
+        nonisolated var hasActiveSecurityScope: Bool { didStart }
+        nonisolated var resolvedURL: URL? { scopedURL }
     }
 
     static func sourceSession(for comic: ComicBook) -> SourceSession {
         SourceSession(comic: comic)
+    }
+
+    static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) -> String {
+        switch comic.sourceType {
+        case .local:
+            let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
+                ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
+            let values = resolvedURL.flatMap {
+                try? $0.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            }
+            let path = resolvedURL?.standardizedFileURL.path ?? comic.libraryPath ?? ""
+            let size = values?.fileSize ?? Int(comic.fileSize)
+            let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+            return "local:\(path)#\(size)#\(modified)#pages=\(comic.totalPages)"
+        case .komga:
+            return "komga:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.komgaBookID ?? "")#\(comic.remotePageCount ?? comic.totalPages)#\(comic.sourceURL ?? "")"
+        case .opds:
+            return "opds:\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
+        }
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {
         switch comic.sourceType {
@@ -140,7 +162,10 @@ enum OfflineTranslationPageProvider {
                 if fallbackStarted { fallbackURL?.stopAccessingSecurityScopedResource() }
             }
             if ComicManager.isArchivePageURL(pageURL) {
-                return ComicManager.imageData(forArchivePageURL: pageURL)
+                return ComicManager.imageData(
+                    forArchivePageURL: pageURL,
+                    securityScopedAccessHeld: session?.hasActiveSecurityScope == true
+                )
             }
             return try? Data(contentsOf: pageURL)
         }.value

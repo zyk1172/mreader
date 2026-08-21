@@ -514,6 +514,8 @@
 "offlineTranslation.provider.freezeNotice" = "제공자, 모델, 언어와 프롬프트는 작업에 고정 저장됩니다.";
 "offlineTranslation.currentPage" = "%d/%d 페이지 처리 중";
 "offlineTranslation.coverageDetail" = "%d/%d 페이지 완료 · 실패 %d";
+"offlineTranslation.partialCount" = "부분 완료 %d페이지";
+"offlineTranslation.setUnavailable" = "선택한 번역 세트가 더 이상 존재하지 않습니다.";
 "offlineTranslation.active" = "활성";
 "offlineTranslation.setActive" = "이 세트 사용";
 "offlineTranslation.deleteSet" = "세트 삭제";

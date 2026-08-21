@@ -349,6 +349,8 @@
 "offlineTranslation.provider.freezeNotice" = "The provider, Vision model, source/target language and prompt are frozen in the task record.";
 "offlineTranslation.currentPage" = "Processing page %d of %d";
 "offlineTranslation.coverageDetail" = "%d/%d pages covered · %d failed";
+"offlineTranslation.partialCount" = "Partial %d";
+"offlineTranslation.setUnavailable" = "The selected translation set is no longer available.";
 "offlineTranslation.active" = "Active";
 "offlineTranslation.setActive" = "Use this set";
 "offlineTranslation.deleteSet" = "Delete set";

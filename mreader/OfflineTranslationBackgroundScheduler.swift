@@ -11,6 +11,8 @@ final class OfflineTranslationBackgroundScheduler {
     private let pendingJobKey = "offline_translation_pending_background_job"
     private let pendingComicKey = "offline_translation_pending_background_comic"
     private var didRegister = false
+    private var registeredContinuedIdentifiers: Set<String> = []
+    private var startupRecoveryTask: Task<Void, Never>?
 
     private init() {}
 
@@ -18,15 +20,21 @@ final class OfflineTranslationBackgroundScheduler {
         guard !didRegister else { return }
         didRegister = true
         if #available(iOS 26.0, *) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: continuedIdentifier, using: nil) { [weak self] task in
-                Task { @MainActor [weak self] in
-                    await self?.handle(task)
-                }
+            if let pendingJobID {
+                registerContinuedTask(identifier: continuedTaskIdentifier(for: pendingJobID))
             }
         }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: processingIdentifier, using: nil) { [weak self] task in
             Task { @MainActor [weak self] in
                 await self?.handle(task)
+            }
+        }
+        startupRecoveryTask = Task { @MainActor in
+            if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(), count > 0 {
+                print("MReader marked \(count) offline translation jobs interrupted after relaunch")
+            }
+            if let reconciled = try? await OfflineTranslationStorageManager.shared.reconcileAllManifests(), reconciled > 0 {
+                print("MReader reconciled \(reconciled) offline translation manifests after relaunch")
             }
         }
     }
@@ -40,8 +48,10 @@ final class OfflineTranslationBackgroundScheduler {
         UserDefaults.standard.set(comic.id.uuidString, forKey: pendingComicKey)
 
         if #available(iOS 26.0, *) {
+            let identifier = continuedTaskIdentifier(for: job.id)
+            registerContinuedTask(identifier: identifier)
             let request = BGContinuedProcessingTaskRequest(
-                identifier: "\(continuedIdentifier).\(job.id.uuidString)",
+                identifier: identifier,
                 title: "offlineTranslation.title".localized,
                 subtitle: comic.title
             )
@@ -64,6 +74,20 @@ final class OfflineTranslationBackgroundScheduler {
         }
     }
 
+    @available(iOS 26.0, *)
+    private func registerContinuedTask(identifier: String) {
+        guard registeredContinuedIdentifiers.insert(identifier).inserted else { return }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { [weak self] task in
+            Task { @MainActor [weak self] in
+                await self?.handle(task)
+            }
+        }
+    }
+
+    private func continuedTaskIdentifier(for jobID: UUID) -> String {
+        "\(continuedIdentifier).\(jobID.uuidString)"
+    }
+
     func clearPending(jobID: UUID) {
         guard UserDefaults.standard.string(forKey: pendingJobKey) == jobID.uuidString else { return }
         UserDefaults.standard.removeObject(forKey: pendingJobKey)
@@ -76,6 +100,7 @@ final class OfflineTranslationBackgroundScheduler {
                 OfflineTranslationCoordinator.shared.pause()
             }
         }
+        await startupRecoveryTask?.value
         let success = await resumePendingTask(task: task)
         task.setTaskCompleted(success: success)
     }
@@ -105,10 +130,13 @@ final class OfflineTranslationBackgroundScheduler {
             if comic != nil { break }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        guard let comic,
-              let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID) else {
+        guard let comic else {
             return false
         }
+        guard let job = try? await OfflineTranslationJobStore.shared.claimJobForBackgroundExecution(
+            comicID: comicID,
+            jobID: jobID
+        ) else { return false }
 
         if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
             OfflineTranslationCoordinator.shared.resume(job, comic: comic)

@@ -1208,7 +1208,10 @@ class ComicManager {
         return "\(archiveURL.path)#\(size)#\(modification)#\(entryPath)"
     }
 
-    nonisolated static func imageData(forArchivePageURL url: URL) -> Data? {
+    nonisolated static func imageData(
+        forArchivePageURL url: URL,
+        securityScopedAccessHeld: Bool = false
+    ) -> Data? {
         guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url) else {
             logger.error("archive-page-url-invalid url=\(url.absoluteString, privacy: .public)")
             return nil
@@ -1223,7 +1226,9 @@ class ComicManager {
         }
         do {
             let data: Data
-            if let scopedData = try withSelectedLibraryRoot({ _ in try readData() }) {
+            if securityScopedAccessHeld {
+                data = try readData()
+            } else if let scopedData = try withSelectedLibraryRoot({ _ in try readData() }) {
                 data = scopedData
             } else {
                 data = try readData()

@@ -572,12 +572,15 @@ private final class ReaderImageCache {
     }
 
     private func estimatedDecodedCost(for url: URL, maxPixelSize: CGFloat) -> Int {
-        if ComicManager.isArchivePageURL(url),
-           let pixelSize = ComicManager.imagePixelSizeForArchivePageURL(url),
-           pixelSize.width > 0,
-           pixelSize.height > 0 {
-            let scale = min(1, maxPixelSize / max(pixelSize.width, pixelSize.height))
-            return max(1, Int(pixelSize.width * scale * pixelSize.height * scale * 4))
+        if ComicManager.isArchivePageURL(url) {
+            // 估算阶段不能再次解压 CBZ；优先使用已经登记的几何信息，未知时采用保守预算。
+            if let pixelSize = PageGeometryStore.shared.size(for: url),
+               pixelSize.width > 0,
+               pixelSize.height > 0 {
+                let scale = min(1, maxPixelSize / max(pixelSize.width, pixelSize.height))
+                return max(1, Int(pixelSize.width * scale * pixelSize.height * scale * 4))
+            }
+            return max(12 * 1024 * 1024, Int(maxPixelSize * maxPixelSize * 0.55))
         }
         if RemotePageLoader.isRemotePageURL(url) {
             return Int(maxPixelSize * maxPixelSize * 0.55)
