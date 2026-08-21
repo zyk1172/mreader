@@ -3780,13 +3780,15 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: isAutoTranslationEnabled) { _, newValue in
-            guard newValue, shouldDisplayOfflineTranslation else { return }
+            guard newValue else { return }
             startTranslation()
         }
         .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
             offlineTranslationTask?.cancel()
-            isOfflineTranslationDisplayed = false
-            textBlocks.removeAll()
+            if isOfflineTranslationDisplayed {
+                isOfflineTranslationDisplayed = false
+                textBlocks.removeAll()
+            }
             guard newValue else {
                 return
             }
@@ -3810,7 +3812,7 @@ struct LocalImageView: View {
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()
             isOfflineTranslationDisplayed = false
-            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
+            if isAutoTranslationEnabled {
                 Task {
                     let loaded = await loadOfflineTranslationIfAvailable()
                     if !loaded { startTranslation() }
@@ -3824,7 +3826,7 @@ struct LocalImageView: View {
             isOfflineTranslationDisplayed = false
             appleTranslationRequests.removeAll()
             clearStableSourceLanguage()
-            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
+            if isAutoTranslationEnabled {
                 Task {
                     let loaded = await loadOfflineTranslationIfAvailable()
                     if !loaded { startTranslation() }
@@ -3833,7 +3835,7 @@ struct LocalImageView: View {
         }
         .onChange(of: aiTranslationModeRaw) { _, _ in
             textBlocks.removeAll()
-            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
+            if isAutoTranslationEnabled {
                 startTranslation()
             }
         }
@@ -3911,7 +3913,7 @@ struct LocalImageView: View {
 
     @ViewBuilder
     private func translationOverlay(in size: CGSize) -> some View {
-        if shouldDisplayOfflineTranslation && (isOfflineTranslationDisplayed || canTranslate) {
+        if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
                 ColorfulTranslatedText(
@@ -3919,14 +3921,10 @@ struct LocalImageView: View {
                         let value = displayTranslation(for: $0)
                         return value.isEmpty ? nil : value
                     },
-                    fontSize: translationFontSize(
-                        for: item.blocks,
-                        in: item.rect,
-                        containerSize: size
-                    ),
+                    fontSize: item.fontSize,
+                    layoutSize: item.rect.size,
                     style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast
                 )
-                .frame(width: item.rect.width)
                 .position(x: item.rect.midX, y: item.rect.midY)
             }
         }
@@ -4067,32 +4065,47 @@ struct LocalImageView: View {
         )
     }
 
-    private func translationBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
+    private func translationLayoutItem(for block: TextBlock, in size: CGSize) -> TranslationLayoutItem {
         let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
-        let original = overlayRect(
+        let textRect = overlayRect(
             forNormalizedPageRect: block.boundingBox,
             in: size,
             scaleMultiplier: magnificationScale
         )
-        let safeMargin: CGFloat = 12
         let imageBounds = ocrDisplayTransform(in: size).imageRect
-        let maxWidth = max(44, min(imageBounds.width - safeMargin * 2, isOCRMagnificationVisible ? 230 : 210))
+        let fallbackBounds = imageBounds.insetBy(dx: 5, dy: 5)
+        let allowedBounds: CGRect
+        if let bubbleBox = block.bubbleBox {
+            let mappedBubble = OCRCoordinateMapper.displayRect(
+                forNormalizedPageRect: bubbleBox,
+                using: ocrDisplayTransform(in: size)
+            ).intersection(imageBounds)
+            // bubbleBox 只作为“可扩展到哪里”的上限；模型框明显不含原文时不让它影响文字锚点。
+            allowedBounds = !mappedBubble.isNull
+                && mappedBubble.width > 0
+                && mappedBubble.height > 0
+                && mappedBubble.contains(CGPoint(x: textRect.midX, y: textRect.midY))
+                ? mappedBubble
+                : fallbackBounds
+        } else {
+            allowedBounds = fallbackBounds
+        }
         let translatedText = displayTranslation(for: block)
-        return OCRBubbleLayoutEngine.measuredBubbleRect(
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: translatedText.isEmpty ? block.text : translatedText,
-            fontSize: preferredTranslationFontSize(for: block, in: size),
-            sourceRect: original,
-            bounds: imageBounds,
-            maximumWidth: maxWidth,
-            lineSpacing: 2,
-            margin: safeMargin
+            sourceFontSize: preferredTranslationFontSize(for: block, in: size),
+            sourceRect: textRect,
+            allowedBounds: allowedBounds,
+            lineSpacing: 2
         )
+        return TranslationLayoutItem(blocks: [block], rect: layout.rect, fontSize: layout.fontSize)
     }
 
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
-        let initialItems = visibleTranslationBlocks.map { block in
-            TranslationLayoutItem(blocks: [block], rect: translationBubbleRect(for: block, in: size))
-        }
+        let initialItems = visibleTranslationBlocks.map { translationLayoutItem(for: $0, in: size) }
+
+        // 离线翻译优先替换原文字位置：允许重叠也不把对白移动到别处。
+        guard !isOfflineTranslationDisplayed else { return initialItems }
 
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
@@ -4111,7 +4124,7 @@ struct LocalImageView: View {
                 bounds: transform.imageRect
             )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
-            items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect))
+            items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect, fontSize: item.fontSize))
         }
         return items
     }
@@ -4159,7 +4172,7 @@ struct LocalImageView: View {
                 bounds: transform.imageRect
             )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
-            items.append(TranslationLayoutItem(blocks: [block], rect: rect))
+            items.append(TranslationLayoutItem(blocks: [block], rect: rect, fontSize: uniformOCRFontSize))
         }
         return items
     }
@@ -4202,7 +4215,7 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem = nil
             }
             let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
-            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled, !hasOfflineTranslation {
+            if isAutoTranslationEnabled, !hasOfflineTranslation {
                 await MainActor.run { startTranslation() }
             }
             if isOCRMagnificationVisible {
@@ -4239,7 +4252,7 @@ struct LocalImageView: View {
             self.isLoadingImage = false
         }
         let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
-        if shouldDisplayOfflineTranslation, isAutoTranslationEnabled, !hasOfflineTranslation {
+        if isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
         if isOCRMagnificationVisible {
@@ -4354,61 +4367,6 @@ struct LocalImageView: View {
         return OCRBubbleLayoutEngine.preferredTranslationFontSize(
             sourceFontSize: sourceFontSize
         )
-    }
-
-    private func translationFontSize(
-        for blocks: [TextBlock],
-        in bubbleRect: CGRect,
-        containerSize: CGSize
-    ) -> CGFloat {
-        let segments = blocks.compactMap { block -> String? in
-            let text = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
-        }
-        guard !segments.isEmpty else { return 10 }
-        let availableWidth = max(bubbleRect.width - 14, 24)
-        let availableHeight = max(bubbleRect.height - 10, 20)
-        let requestedMaximum = blocks
-            .map { preferredTranslationFontSize(for: $0, in: containerSize) }
-            .max() ?? 10
-        var lower = max(min(requestedMaximum * 0.72, requestedMaximum), 8)
-        var upper = requestedMaximum
-        for _ in 0..<8 {
-            let candidate = (lower + upper) / 2
-            if translationTextFits(
-                segments,
-                fontSize: candidate,
-                width: availableWidth,
-                height: availableHeight
-            ) {
-                lower = candidate
-            } else {
-                upper = candidate
-            }
-        }
-        return min(max(lower, 8), requestedMaximum)
-    }
-
-    private func translationTextFits(_ segments: [String], fontSize: CGFloat, width: CGFloat, height: CGFloat) -> Bool {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineBreakMode = .byWordWrapping
-        paragraphStyle.alignment = .center
-        paragraphStyle.lineSpacing = 2
-        let requiredTextHeight = segments.reduce(CGFloat.zero) { partial, segment in
-            let measured = (segment as NSString).boundingRect(
-                with: CGSize(width: width, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
-                    .paragraphStyle: paragraphStyle
-                ],
-                context: nil
-            )
-            return partial + ceil(measured.height)
-        }
-        let segmentSpacing = CGFloat(max(segments.count - 1, 0)) * 7
-        let requiredHeight = requiredTextHeight + segmentSpacing
-        return requiredHeight <= height
     }
 
     private var ocrTextSizeFactor: CGFloat {
@@ -4894,6 +4852,7 @@ struct LocalImageView: View {
 private struct TranslationLayoutItem: Identifiable {
     let blocks: [TextBlock]
     let rect: CGRect
+    let fontSize: CGFloat
 
     var id: UUID { blocks.first?.id ?? UUID() }
 }
@@ -4938,6 +4897,7 @@ private enum TranslationColorStyle: String, CaseIterable {
 private struct ColorfulTranslatedText: View {
     let segments: [String]
     let fontSize: CGFloat
+    let layoutSize: CGSize
     let style: TranslationColorStyle
 
     var body: some View {
@@ -4953,25 +4913,12 @@ private struct ColorfulTranslatedText: View {
                     .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
             }
         }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background {
+            .padding(5)
+            .frame(width: layoutSize.width, height: layoutSize.height)
+            .overlay {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.98),
-                                Color(red: 0.92, green: 0.96, blue: 1.0).opacity(0.97),
-                                Color(red: 1.0, green: 0.93, blue: 0.97).opacity(0.97)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(colorGradient(index: 0).opacity(0.9), lineWidth: 1)
-                    }
+                    .strokeBorder(Color.white.opacity(0.86), lineWidth: 0.75)
+                    .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
             }
     }
 

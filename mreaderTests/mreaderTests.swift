@@ -400,10 +400,59 @@ struct mreaderTests {
         #expect(rect.width <= 220)
     }
 
-    @Test func translatedFontIsOnlySlightlyLargerThanSourceFont() {
-        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 17.6) < 0.01)
-        #expect(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) == 22)
-        #expect(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) == 9)
+    @Test func translatedFontStartsAtSourceScaleWithoutGlobalClamp() {
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 15.68) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) - 29.4) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 5.88) < 0.01)
+    }
+
+    @Test @MainActor func anchoredTranslationLayoutKeepsSourceCenterAndExpandsBeforeShrinking() {
+        let source = CGRect(x: 130, y: 210, width: 80, height: 34)
+        let allowed = CGRect(x: 70, y: 145, width: 210, height: 170)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "这是一段需要比原始文字区域更宽才能自然排下的中文译文。",
+            sourceFontSize: 16,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(abs(layout.rect.midX - source.midX) < 0.01)
+        #expect(abs(layout.rect.midY - source.midY) < 0.01)
+        #expect(layout.rect.width >= source.width)
+        #expect(layout.fontSize <= 15.68)
+        #expect(layout.fontSize >= 9.6)
+        #expect(allowed.contains(layout.rect))
+    }
+
+    @Test func translationGeometryRefinerUsesLocalOCRTextBoxButRetainsModelBubbleBox() {
+        let modelBubble = CGRect(x: 0.08, y: 0.10, width: 0.55, height: 0.24)
+        let vision = TextBlock(
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.36, y: 0.44, width: 0.18, height: 0.06),
+            translation: "你好",
+            estimatedFontScale: 0.02,
+            bubbleBox: modelBubble
+        )
+        let local = TextBlock(
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.15, y: 0.22, width: 0.30, height: 0.08),
+            confidence: 0.94,
+            ocrSource: "local",
+            estimatedFontScale: 0.052
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [local],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(refined[0].boundingBox == local.boundingBox)
+        #expect(refined[0].estimatedFontScale == local.estimatedFontScale)
+        #expect(refined[0].bubbleBox == modelBubble)
+        #expect(refined[0].translation == "你好")
     }
 
     @Test func ocrTranslationUsesBoundedTimeoutAndFastFallbackPolicy() {
@@ -1944,7 +1993,70 @@ private func makeTestPageRequest(
         #expect(prompt.contains("coordinateSpace=\"normalized\""))
         #expect(prompt.contains("前页：先走吧"))
         #expect(prompt.contains("右到左"))
+        #expect(prompt.contains("sourceText"))
+        #expect(prompt.contains("translationLines"))
+        #expect(prompt.contains("textBox"))
+        #expect(prompt.contains("bubblePolygon"))
         #expect(!prompt.contains("{targetLanguage}"))
+    }
+
+    @Test func offlineVisionTranslationRequiresTextBoxAndPreservesCoordinateDiagnostics() throws {
+        let valid = """
+        {"coordinateSpace":"normalized","items":[{
+          "id":"a","sourceText":"こんにちは","translation":"你好","translationLines":["你好"],
+          "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
+          "bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},
+          "textPolygon":[],"bubblePolygon":[],"confidence":0.9,"classification":"dialogue"
+        }]}
+        """
+        let blocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: valid,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        )
+        #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
+
+        let missingTextBox = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3}}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: missingTextBox,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("离线视觉翻译不应以 bubbleBox 代替必需 textBox")
+        } catch {
+            #expect(error.localizedDescription.contains("textBox"))
+        }
+
+        let emptyTranslation = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"https://example.com","translation":"","textBox":{"x":0.1,"y":0.2,"width":0.3,"height":0.05}}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: emptyTranslation,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("离线视觉协议不应接受带空译文的 item")
+        } catch {
+            #expect(error.localizedDescription.contains("可用文本"))
+        }
+
+        let invalidCoordinates = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08}}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: invalidCoordinates,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("无效坐标不应被改写为有效结果")
+        } catch {
+            #expect(error.localizedDescription.contains("坐标"))
+        }
     }
 
     @Test func offlineTranslationPageDTOConvertsWithoutTextBlockJSON() throws {
@@ -1970,6 +2082,34 @@ private func makeTestPageRequest(
         #expect(roundTrip.translation == "你好")
         #expect(abs(roundTrip.boundingBox.minX - 0.1) < 0.0001)
         #expect(abs((roundTrip.bubbleBox?.minX ?? 0) - 0.05) < 0.0001)
+    }
+
+    @Test func offlineTranslationDTOWritesCanonicalGeometryKeysAndReadsLegacyKeys() throws {
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08),
+            translation: "译文",
+            bubbleBox: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.3),
+            polygon: [CGPoint(x: 0.2, y: 0.3)],
+            bubblePolygon: [CGPoint(x: 0.1, y: 0.2)],
+            translationLines: ["译文"]
+        )
+        let encoded = try JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        #expect(object?["translationLines"] != nil)
+        #expect(object?["textPolygon"] != nil)
+        #expect(object?["bubblePolygon"] != nil)
+        #expect(object?["lines"] == nil)
+        #expect(object?["polygon"] == nil)
+
+        let legacy = """
+        {"id":"legacy","sourceText":"原文","translation":"译文","lines":["译文"],
+        "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"polygon":[{"x":0.2,"y":0.3}],
+        "confidence":0.9,"classification":"dialogue","estimatedFontScale":0.04}
+        """
+        let decoded = try JSONDecoder().decode(OfflineTranslatedBlock.self, from: Data(legacy.utf8))
+        #expect(decoded.translationLines == ["译文"])
+        #expect(decoded.textPolygon.count == 1)
     }
 
     @Test func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {

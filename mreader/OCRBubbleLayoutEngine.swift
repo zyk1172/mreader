@@ -2,25 +2,45 @@ import CoreGraphics
 import UIKit
 
 nonisolated enum OCRBubbleLayoutEngine {
+    struct TranslationLayout: Sendable {
+        let rect: CGRect
+        let fontSize: CGFloat
+    }
+
     static func preferredTranslationFontSize(sourceFontSize: CGFloat) -> CGFloat {
-        min(max(sourceFontSize * 1.10, 9), 22)
+        // 译文默认应接近原文字号；只在内容装不下时由 anchoredTranslationLayout 缩小。
+        max(sourceFontSize * 0.98, 1)
     }
 
     @MainActor
-    static func measuredBubbleRect(
+    static func anchoredTranslationLayout(
         text: String,
-        fontSize: CGFloat,
+        sourceFontSize: CGFloat,
         sourceRect: CGRect,
-        bounds: CGRect,
-        maximumWidth: CGFloat,
+        allowedBounds: CGRect,
         lineSpacing: CGFloat,
-        margin: CGFloat = 12
-    ) -> CGRect {
-        let availableWidth = max(bounds.width - margin * 2, 44)
-        let availableHeight = max(bounds.height - margin * 2, 34)
-        let maximumBubbleWidth = min(max(maximumWidth, 44), availableWidth)
-        let minimumBubbleWidth = min(max(sourceRect.width, 72), maximumBubbleWidth)
-        let preferredWidth = min(max(sourceRect.width * 1.15, minimumBubbleWidth), maximumBubbleWidth)
+        padding: CGFloat = 5
+    ) -> TranslationLayout {
+        let safeBounds = allowedBounds.standardized
+        guard safeBounds.width > 0, safeBounds.height > 0 else {
+            return TranslationLayout(rect: sourceRect, fontSize: max(sourceFontSize, 1))
+        }
+
+        let anchor = CGPoint(
+            x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
+            y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
+        )
+        // 保持原文中心不变时能扩展到的最大范围；只有图片边缘无法容纳时才由 clamped 做最小位移。
+        let maximumWidth = max(1, min(
+            safeBounds.width,
+            2 * min(anchor.x - safeBounds.minX, safeBounds.maxX - anchor.x)
+        ))
+        let maximumHeight = max(1, min(
+            safeBounds.height,
+            2 * min(anchor.y - safeBounds.minY, safeBounds.maxY - anchor.y)
+        ))
+        let targetFontSize = preferredTranslationFontSize(sourceFontSize: sourceFontSize)
+        let initialWidth = min(max(sourceRect.width + padding * 2, 1), maximumWidth)
 
         func measuredSize(contentWidth: CGFloat) -> CGSize {
             let paragraphStyle = NSMutableParagraphStyle()
@@ -31,32 +51,99 @@ nonisolated enum OCRBubbleLayoutEngine {
                 with: CGSize(width: max(contentWidth, 24), height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [
+                    .font: UIFont.systemFont(ofSize: targetFontSize, weight: .bold),
+                    .paragraphStyle: paragraphStyle
+                ],
+                context: nil
+            ).integral.size
+            return CGSize(width: measured.width + padding * 2, height: measured.height + padding * 2)
+        }
+
+        func rect(width: CGFloat, height: CGFloat) -> CGRect {
+            CGRect(
+                x: anchor.x - width / 2,
+                y: anchor.y - height / 2,
+                width: width,
+                height: height
+            )
+        }
+
+        // 先保持字号，以原 textBox 为起点逐步扩展到 bubbleBox（或图片）允许的范围。
+        let expansionSteps = 8
+        for step in 0...expansionSteps {
+            let progress = CGFloat(step) / CGFloat(expansionSteps)
+            let width = initialWidth + (maximumWidth - initialWidth) * progress
+            let measured = measuredSize(contentWidth: max(width - padding * 2, 1))
+            let height = max(sourceRect.height + padding * 2, measured.height)
+            guard height <= maximumHeight else { continue }
+            return TranslationLayout(
+                rect: clamped(rect(width: width, height: height), to: safeBounds, margin: 0),
+                fontSize: targetFontSize
+            )
+        }
+
+        // 可用区域已经扩到上限后才缩字号；最低约为原字号 60%，不再使用固定 pt 下限。
+        let width = maximumWidth
+        var lower = max(sourceFontSize * 0.60, 1)
+        var upper = targetFontSize
+        func fittingHeight(fontSize: CGFloat) -> CGFloat {
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineBreakMode = .byWordWrapping
+            paragraphStyle.alignment = .center
+            paragraphStyle.lineSpacing = lineSpacing
+            let measured = (text as NSString).boundingRect(
+                with: CGSize(width: max(width - padding * 2, 1), height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [
                     .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
                     .paragraphStyle: paragraphStyle
                 ],
                 context: nil
             ).integral.size
-            return CGSize(width: measured.width + 14, height: measured.height + 10)
+            return max(sourceRect.height + padding * 2, measured.height + padding * 2)
         }
-
-        var measured = measuredSize(contentWidth: preferredWidth - 14)
-        if measured.height > min(max(sourceRect.height * 2.8, 112), availableHeight * 0.42),
-           preferredWidth < maximumBubbleWidth {
-            measured = measuredSize(contentWidth: maximumBubbleWidth - 14)
+        for _ in 0..<10 {
+            let candidate = (lower + upper) / 2
+            if fittingHeight(fontSize: candidate) <= maximumHeight {
+                lower = candidate
+            } else {
+                upper = candidate
+            }
         }
-        let width = min(max(measured.width, minimumBubbleWidth), maximumBubbleWidth)
-        let finalMeasured = measuredSize(contentWidth: width - 14)
-        let height = min(max(finalMeasured.height, sourceRect.height, 34), availableHeight)
-        return clamped(
-            CGRect(
-                x: sourceRect.midX - width / 2,
-                y: sourceRect.midY - height / 2,
-                width: width,
-                height: height
-            ),
-            to: bounds,
-            margin: margin
+        let finalHeight = min(fittingHeight(fontSize: lower), maximumHeight)
+        return TranslationLayout(
+            rect: clamped(rect(width: width, height: finalHeight), to: safeBounds, margin: 0),
+            fontSize: lower
         )
+    }
+
+    /// 兼容旧调用；离线翻译改用 anchoredTranslationLayout，以 textBox 为锚点。
+    @MainActor
+    static func measuredBubbleRect(
+        text: String,
+        fontSize: CGFloat,
+        sourceRect: CGRect,
+        bounds: CGRect,
+        maximumWidth: CGFloat,
+        lineSpacing: CGFloat,
+        margin: CGFloat = 12
+    ) -> CGRect {
+        let insetBounds = bounds.insetBy(dx: margin, dy: margin)
+        let allowed = insetBounds.intersection(
+            CGRect(
+                x: sourceRect.midX - maximumWidth / 2,
+                y: insetBounds.minY,
+                width: maximumWidth,
+                height: insetBounds.height
+            )
+        )
+        return anchoredTranslationLayout(
+            text: text,
+            sourceFontSize: fontSize,
+            sourceRect: sourceRect,
+            allowedBounds: allowed.isNull ? insetBounds : allowed,
+            lineSpacing: lineSpacing
+        ).rect
     }
 
     static func clamped(

@@ -316,23 +316,30 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
     let id: String
     let sourceText: String
     let translation: String?
-    let lines: [String]
+    let translationLines: [String]
     let textBox: OfflineTranslationRect
     let bubbleBox: OfflineTranslationRect?
-    let polygon: [OfflineTranslationPoint]
+    let textPolygon: [OfflineTranslationPoint]
+    let bubblePolygon: [OfflineTranslationPoint]
     let confidence: Double
     let classification: String
     let estimatedFontScale: Double
     let textColorHex: String?
 
+    private enum CodingKeys: String, CodingKey {
+        case id, sourceText, translation, translationLines, lines, textBox, bubbleBox
+        case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex
+    }
+
     init(
         id: String,
         sourceText: String,
         translation: String?,
-        lines: [String],
+        translationLines: [String],
         textBox: OfflineTranslationRect,
         bubbleBox: OfflineTranslationRect? = nil,
-        polygon: [OfflineTranslationPoint] = [],
+        textPolygon: [OfflineTranslationPoint] = [],
+        bubblePolygon: [OfflineTranslationPoint] = [],
         confidence: Double,
         classification: String,
         estimatedFontScale: Double,
@@ -341,14 +348,51 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         self.id = id
         self.sourceText = sourceText
         self.translation = translation
-        self.lines = lines
+        self.translationLines = translationLines
         self.textBox = textBox
         self.bubbleBox = bubbleBox
-        self.polygon = polygon
+        self.textPolygon = textPolygon
+        self.bubblePolygon = bubblePolygon
         self.confidence = confidence
         self.classification = classification
         self.estimatedFontScale = estimatedFontScale
         self.textColorHex = textColorHex
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        sourceText = try container.decode(String.self, forKey: .sourceText)
+        translation = try container.decodeIfPresent(String.self, forKey: .translation)
+        translationLines = try container.decodeIfPresent([String].self, forKey: .translationLines)
+            ?? (try container.decodeIfPresent([String].self, forKey: .lines))
+            ?? []
+        textBox = try container.decode(OfflineTranslationRect.self, forKey: .textBox)
+        bubbleBox = try container.decodeIfPresent(OfflineTranslationRect.self, forKey: .bubbleBox)
+        textPolygon = try container.decodeIfPresent([OfflineTranslationPoint].self, forKey: .textPolygon)
+            ?? (try container.decodeIfPresent([OfflineTranslationPoint].self, forKey: .polygon))
+            ?? []
+        bubblePolygon = try container.decodeIfPresent([OfflineTranslationPoint].self, forKey: .bubblePolygon) ?? []
+        confidence = try container.decode(Double.self, forKey: .confidence)
+        classification = try container.decode(String.self, forKey: .classification)
+        estimatedFontScale = try container.decode(Double.self, forKey: .estimatedFontScale)
+        textColorHex = try container.decodeIfPresent(String.self, forKey: .textColorHex)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sourceText, forKey: .sourceText)
+        try container.encodeIfPresent(translation, forKey: .translation)
+        try container.encode(translationLines, forKey: .translationLines)
+        try container.encode(textBox, forKey: .textBox)
+        try container.encodeIfPresent(bubbleBox, forKey: .bubbleBox)
+        try container.encode(textPolygon, forKey: .textPolygon)
+        try container.encode(bubblePolygon, forKey: .bubblePolygon)
+        try container.encode(confidence, forKey: .confidence)
+        try container.encode(classification, forKey: .classification)
+        try container.encode(estimatedFontScale, forKey: .estimatedFontScale)
+        try container.encodeIfPresent(textColorHex, forKey: .textColorHex)
     }
 
     init(block: TextBlock, id: String? = nil) {
@@ -369,10 +413,11 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             id: id ?? block.id.uuidString,
             sourceText: block.text,
             translation: block.translation,
-            lines: block.translationLines,
+            translationLines: block.translationLines,
             textBox: OfflineTranslationRect(block.boundingBox),
             bubbleBox: block.bubbleBox.map(OfflineTranslationRect.init),
-            polygon: block.polygon.map(OfflineTranslationPoint.init),
+            textPolygon: block.polygon.map(OfflineTranslationPoint.init),
+            bubblePolygon: block.bubblePolygon.map(OfflineTranslationPoint.init),
             confidence: block.confidence,
             classification: classification,
             estimatedFontScale: block.estimatedFontScale,
@@ -391,8 +436,9 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
             bubbleBox: bubbleBox?.cgRect,
-            polygon: polygon.map(\.cgPoint),
-            translationLines: lines
+            polygon: textPolygon.map(\.cgPoint),
+            bubblePolygon: bubblePolygon.map(\.cgPoint),
+            translationLines: translationLines
         )
     }
 

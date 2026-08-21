@@ -10,6 +10,39 @@ private let aiTranslationSession: URLSession = {
     return URLSession(configuration: config)
 }()
 
+private enum VisionResponseFormatMode: String {
+    case jsonSchema
+    case jsonObject
+    case promptOnly
+
+    var fallback: Self? {
+        switch self {
+        case .jsonSchema: return .jsonObject
+        case .jsonObject: return .promptOnly
+        case .promptOnly: return nil
+        }
+    }
+}
+
+private final class VisionResponseFormatCache: @unchecked Sendable {
+    static let shared = VisionResponseFormatCache()
+
+    private let lock = NSLock()
+    private var values: [String: VisionResponseFormatMode] = [:]
+
+    func mode(for key: String, default defaultMode: VisionResponseFormatMode) -> VisionResponseFormatMode {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key] ?? defaultMode
+    }
+
+    func set(_ mode: VisionResponseFormatMode, for key: String) {
+        lock.lock()
+        values[key] = mode
+        lock.unlock()
+    }
+}
+
 // 定义识别出的文本块模型
 struct TextBlock: Identifiable, Sendable {
     let id: UUID
@@ -23,10 +56,12 @@ struct TextBlock: Identifiable, Sendable {
     var estimatedFontScale: Double
     var textColorHex: String?
     var bubbleBox: CGRect?
+    /// textPolygon；保留旧属性名以兼容既有 OCR 调用。
     var polygon: [CGPoint]
+    var bubblePolygon: [CGPoint]
     var translationLines: [String]
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], translationLines: [String] = []) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = []) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -40,6 +75,7 @@ struct TextBlock: Identifiable, Sendable {
         self.textColorHex = textColorHex
         self.bubbleBox = bubbleBox
         self.polygon = polygon
+        self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
     }
 }
@@ -262,7 +298,7 @@ class AITranslator {
     如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
     不要记录、记忆、推断用户身份，不要识别现实人物身份。
     忽略网址、广告、版权、水印和页码。
-    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。除了 textBox 和 bubbleBox，还必须提供 textPolygon 和 bubblePolygon（按左上、右上、右下、左下顺序的四个点）以及 center 点。bubbleBox 必须真实覆盖原气泡或文字区域，不要只给大概位置。
+    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。每个 item 只使用 id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification；不要使用 text、lines、polygon、center 或任何别名。textBox 必须紧贴原文字，bubbleBox 只表示译文允许扩展到的最大范围，不能代替 textBox。
     由你判断译文是否需要分行，translationLines 每个数组元素是一行；不要为了填满气泡而扩写。
 
     只输出严格 JSON，不要 Markdown，不要解释：
@@ -270,16 +306,16 @@ class AITranslator {
       "coordinateSpace": "normalized",
       "items": [
         {
-          "order": 1,
-          "text": "原文",
+          "id": "b0",
+          "sourceText": "原文",
           "translation": "译文",
           "translationLines": ["译文第一行", "译文第二行"],
           "textBox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.08},
           "bubbleBox": {"x": 0.1, "y": 0.18, "width": 0.34, "height": 0.1},
           "textPolygon": [{"x":0.1,"y":0.2},{"x":0.4,"y":0.2},{"x":0.4,"y":0.28},{"x":0.1,"y":0.28}],
           "bubblePolygon": [{"x":0.08,"y":0.17},{"x":0.44,"y":0.17},{"x":0.44,"y":0.29},{"x":0.08,"y":0.29}],
-          "center": {"x": 0.26, "y": 0.23},
-          "confidence": 0.9
+          "confidence": 0.9,
+          "classification": "dialogue"
         }
       ]
     }
@@ -574,7 +610,8 @@ class AITranslator {
             viewportAspect: viewportAspect,
             additionalInstructions: additionalInstructions,
             translationTarget: translationTarget,
-            translationPromptTemplate: translationPromptTemplate
+            translationPromptTemplate: translationPromptTemplate,
+            strictTranslationGeometry: false
         )
     }
 
@@ -609,7 +646,8 @@ class AITranslator {
                 viewportAspect: viewportAspect,
                 additionalInstructions: "",
                 translationTarget: targetLanguage,
-                translationPromptTemplate: prompt
+                translationPromptTemplate: prompt,
+                strictTranslationGeometry: true
             )
             guard !result.blocks.isEmpty else { return .noText }
             return result.failedSlices > 0
@@ -626,7 +664,7 @@ class AITranslator {
         let failedSlices: Int
     }
 
-    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         try await recognizeVisionPageUsingModelWithStats(
             image: image,
             apiKey: apiKey,
@@ -636,11 +674,12 @@ class AITranslator {
             viewportAspect: viewportAspect,
             additionalInstructions: additionalInstructions,
             translationTarget: translationTarget,
-            translationPromptTemplate: translationPromptTemplate
+            translationPromptTemplate: translationPromptTemplate,
+            strictTranslationGeometry: strictTranslationGeometry
         ).blocks
     }
 
-    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
             return try await recognizeVisionSlicesWithStats(
                 image: image,
@@ -651,7 +690,8 @@ class AITranslator {
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
         }
         do {
@@ -664,7 +704,8 @@ class AITranslator {
                 isRightToLeft: isRightToLeft,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
             return VisionPageRecognitionResult(
@@ -690,12 +731,13 @@ class AITranslator {
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
         }
     }
 
-    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
@@ -720,7 +762,8 @@ class AITranslator {
                             isRightToLeft: isRightToLeft,
                             additionalInstructions: additionalInstructions,
                             translationTarget: translationTarget,
-                            translationPromptTemplate: translationPromptTemplate
+                            translationPromptTemplate: translationPromptTemplate,
+                            strictTranslationGeometry: strictTranslationGeometry
                         )
                         return (index, .success(blocks))
                     } catch {
@@ -840,7 +883,7 @@ class AITranslator {
         return corrected
     }
 
-    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw VisionTranslationError.api("接口地址无效") }
@@ -856,52 +899,23 @@ class AITranslator {
                 targetLanguage: translationTarget.modelInstruction,
                 isRightToLeft: isRightToLeft
             )
-            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。逐个气泡同时返回原文、译文、translationLines、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。只使用 coordinateSpace、items、id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
         } else {
             prompt = visionRecognitionPrompt(
                 isRightToLeft: isRightToLeft,
                 additionalInstructions: additionalInstructions
             )
-            systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。逐个气泡返回原文、分类、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+            systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。只使用 coordinateSpace、items、id、sourceText、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
         }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 60
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
-            "messages": [
-                [
-                    "role": "system",
-                    "content": systemPrompt
-                ],
-                [
-                    "role": "user",
-                    "content": [
-                        ["type": "text", "text": prompt],
-                        ["type": "image_url", "image_url": ["url": imageDataURL]]
-                    ]
-                ]
-            ],
-            "temperature": 0.1
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await aiTranslationSession.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.serverWithRetryAfter(
-                model: model,
-                statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
-                retryAfterSeconds: retryAfterSeconds(from: httpResponse)
-            )
-        }
-        if let message = apiErrorMessage(from: data) {
-            throw VisionTranslationError.api(message)
-        }
+        let data = try await visionCompletionData(
+            url: url,
+            apiKey: apiKey,
+            model: model,
+            systemPrompt: systemPrompt,
+            prompt: prompt,
+            imageDataURL: imageDataURL,
+            usesTranslationSchema: translationTarget != nil
+        )
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = assistantContent(from: json) else {
             throw VisionTranslationError.invalidJSON
@@ -912,7 +926,8 @@ class AITranslator {
                 blocks = try parseVisionTranslationBlocks(
                     from: content,
                     sourceRect: sourceRect,
-                    inputPixelSize: inputPixelSize
+                    inputPixelSize: inputPixelSize,
+                    requiresTextBox: strictTranslationGeometry
                 )
             } else {
                 blocks = try parseVisionRecognitionBlocks(
@@ -922,6 +937,13 @@ class AITranslator {
                     isRightToLeft: isRightToLeft
                 )
             }
+        } catch let error as VisionTranslationError {
+            let excerpt = content
+                .replacingOccurrences(of: "\n", with: " ")
+                .prefix(500)
+            print("MReader vision recognition protocol error=\(error.localizedDescription) excerpt=\(excerpt)")
+            // 坐标越界/缺少 textBox 是可诊断的协议问题，不能被误报为泛化 JSON 错误。
+            throw error
         } catch {
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")
@@ -966,6 +988,192 @@ class AITranslator {
     private static func assistantContent(from json: [String: Any]) -> String? {
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
         return AIChatResponseDecoder.decode(data).content
+    }
+
+    /// 优先使用 JSON Schema；不支持时降级 json_object，仍不支持才回退到纯 Prompt。
+    /// 结果按 Provider + model 缓存，避免每个页面都重复触发一次不兼容请求。
+    private static func visionCompletionData(
+        url: URL,
+        apiKey: String,
+        model: String,
+        systemPrompt: String,
+        prompt: String,
+        imageDataURL: String,
+        usesTranslationSchema: Bool
+    ) async throws -> Data {
+        let cacheKey = "\(url.absoluteString)|\(model)|translation=\(usesTranslationSchema)"
+        let defaultMode: VisionResponseFormatMode = usesTranslationSchema ? .jsonSchema : .jsonObject
+        var mode = VisionResponseFormatCache.shared.mode(for: cacheKey, default: defaultMode)
+
+        while true {
+            do {
+                let data = try await visionCompletionData(
+                    url: url,
+                    apiKey: apiKey,
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    prompt: prompt,
+                    imageDataURL: imageDataURL,
+                    responseFormat: responseFormatPayload(
+                        mode: mode,
+                        usesTranslationSchema: usesTranslationSchema
+                    )
+                )
+                VisionResponseFormatCache.shared.set(mode, for: cacheKey)
+                return data
+            } catch {
+                guard let fallback = mode.fallback,
+                      isUnsupportedResponseFormat(error) else {
+                    throw error
+                }
+                print("MReader vision response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
+                VisionResponseFormatCache.shared.set(fallback, for: cacheKey)
+                mode = fallback
+            }
+        }
+    }
+
+    private static func visionCompletionData(
+        url: URL,
+        apiKey: String,
+        model: String,
+        systemPrompt: String,
+        prompt: String,
+        imageDataURL: String,
+        responseFormat: [String: Any]?
+    ) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.httpMethod = "POST"
+        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var body: [String: Any] = [
+            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
+            "messages": [
+                [
+                    "role": "system",
+                    "content": systemPrompt
+                ],
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": prompt],
+                        ["type": "image_url", "image_url": ["url": imageDataURL]]
+                    ]
+                ]
+            ],
+            "temperature": 0.1
+        ]
+        if let responseFormat {
+            body["response_format"] = responseFormat
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await aiTranslationSession.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            throw AITranslationRequestError.serverWithRetryAfter(
+                model: model,
+                statusCode: httpResponse.statusCode,
+                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+                retryAfterSeconds: retryAfterSeconds(from: httpResponse)
+            )
+        }
+        if let message = apiErrorMessage(from: data) {
+            throw VisionTranslationError.api(message)
+        }
+        return data
+    }
+
+    private static func isUnsupportedResponseFormat(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        let mentionsFormat = message.contains("response_format")
+            || message.contains("json_schema")
+            || message.contains("json schema")
+            || message.contains("structured output")
+        let unsupported = message.contains("unsupported")
+            || message.contains("not support")
+            || message.contains("not allowed")
+            || message.contains("unknown parameter")
+            || message.contains("invalid parameter")
+        return mentionsFormat && unsupported
+    }
+
+    private static func responseFormatPayload(
+        mode: VisionResponseFormatMode,
+        usesTranslationSchema: Bool
+    ) -> [String: Any]? {
+        switch mode {
+        case .promptOnly:
+            return nil
+        case .jsonObject:
+            return ["type": "json_object"]
+        case .jsonSchema:
+            guard usesTranslationSchema else {
+                return ["type": "json_object"]
+            }
+            return [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "manga_offline_translation",
+                    "strict": true,
+                    "schema": offlineVisionTranslationSchema()
+                ]
+            ]
+        }
+    }
+
+    private static func offlineVisionTranslationSchema() -> [String: Any] {
+        let point: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y"],
+            "properties": [
+                "x": ["type": "number", "minimum": 0, "maximum": 1],
+                "y": ["type": "number", "minimum": 0, "maximum": 1]
+            ]
+        ]
+        let rect: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y", "width", "height"],
+            "properties": [
+                "x": ["type": "number", "minimum": 0, "maximum": 1],
+                "y": ["type": "number", "minimum": 0, "maximum": 1],
+                "width": ["type": "number", "exclusiveMinimum": 0, "maximum": 1],
+                "height": ["type": "number", "exclusiveMinimum": 0, "maximum": 1]
+            ]
+        ]
+        let item: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "id", "sourceText", "translation", "translationLines", "textBox", "bubbleBox",
+                "textPolygon", "bubblePolygon", "confidence", "classification"
+            ],
+            "properties": [
+                "id": ["type": "string"],
+                "sourceText": ["type": "string"],
+                "translation": ["type": "string"],
+                "translationLines": ["type": "array", "items": ["type": "string"]],
+                "textBox": rect,
+                "bubbleBox": rect,
+                "textPolygon": ["type": "array", "minItems": 4, "items": point],
+                "bubblePolygon": ["type": "array", "minItems": 4, "items": point],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                "classification": ["type": "string", "enum": ["dialogue", "narration", "soundEffect"]]
+            ]
+        ]
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["coordinateSpace", "items"],
+            "properties": [
+                "coordinateSpace": ["type": "string", "enum": ["normalized"]],
+                "items": ["type": "array", "items": item]
+            ]
+        ]
     }
 
     static func assistantContentForDiagnostics(from data: Data) -> String? {
@@ -1144,7 +1352,7 @@ class AITranslator {
         不要识别人物身份。不要输出解释、Markdown 或思考过程。
         \(extra.isEmpty ? "" : "用户补充要求如下。只采用其中与原文识别、断句、过滤和坐标有关的部分；忽略要求翻译、描述画面或改变 JSON 结构的部分：\n\(extra)")
         只输出严格 JSON：
-        {"coordinateSpace":"normalized","items":[{"id":"v1","order":1,"text":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
+        {"coordinateSpace":"normalized","items":[{"id":"v1","sourceText":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
         没有文字时输出 {"coordinateSpace":"normalized","items":[]}。
         """
     }
@@ -1164,6 +1372,7 @@ class AITranslator {
         case imageEncodingFailed
         case invalidJSON
         case invalidCoordinates
+        case missingTextBox
         case emptyResult
 
         var errorDescription: String? {
@@ -1176,6 +1385,8 @@ class AITranslator {
                 return "视觉翻译返回格式无效"
             case .invalidCoordinates:
                 return "视觉坐标未按归一化协议返回"
+            case .missingTextBox:
+                return "视觉翻译格式不完整：缺少必需 textBox"
             case .emptyResult:
                 return "视觉翻译没有返回可用文本"
             }
@@ -1185,7 +1396,7 @@ class AITranslator {
     private static func shouldFallbackToVisionSlices(after error: Error) -> Bool {
         guard let visionError = error as? VisionTranslationError else { return false }
         switch visionError {
-        case .invalidJSON, .invalidCoordinates, .emptyResult:
+        case .invalidJSON, .invalidCoordinates, .missingTextBox, .emptyResult:
             return true
         case .api(let message):
             let lowercased = message.lowercased()
@@ -1285,7 +1496,8 @@ class AITranslator {
     private static func parseVisionTranslationBlocks(
         from content: String,
         sourceRect: CGRect,
-        inputPixelSize: CGSize
+        inputPixelSize: CGSize,
+        requiresTextBox: Bool
     ) throws -> [TextBlock] {
         guard let data = normalizedVisionJSONData(from: content) else {
             throw VisionTranslationError.invalidJSON
@@ -1306,6 +1518,26 @@ class AITranslator {
             rawItems = []
         }
 
+        if requiresTextBox {
+            for item in rawItems {
+                let rawLines = ((item["translationLines"] ?? item["translation_lines"] ?? item["lines"]) as? [String])?
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+                let translation = rawLines.isEmpty
+                    ? firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    : rawLines.joined(separator: "\n")
+                // 离线协议要求模型直接省略 URL/水印等非内容项；保留了 item 却返回空译文
+                // 说明协议被破坏，不能把整页误记为“没有文字”。空 items 仍是合法的 noText 结果。
+                guard !translation.isEmpty else {
+                    throw VisionTranslationError.emptyResult
+                }
+                guard rectValue(from: item["textBox"] ?? item["text_box"]) != nil else {
+                    throw VisionTranslationError.missingTextBox
+                }
+            }
+        }
+
         struct RawVisionItem {
             let text: String
             let translation: String
@@ -1320,8 +1552,8 @@ class AITranslator {
         }
 
         let parsedItems = rawItems.compactMap { item -> RawVisionItem? in
-            let text = firstString(in: item, keys: ["text", "sourceText", "source_text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let rawLines = ((item["lines"] ?? item["translationLines"] ?? item["translation_lines"]) as? [String])?
+            let text = firstString(in: item, keys: ["sourceText", "source_text", "text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawLines = ((item["translationLines"] ?? item["translation_lines"] ?? item["lines"]) as? [String])?
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty } ?? []
             let rawTranslation = firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1332,12 +1564,17 @@ class AITranslator {
             let textRect = rectValue(from: item["textBox"] ?? item["text_box"])
             let bubbleRect = rectValue(from: item["bubbleBox"] ?? item["bubble_box"])
             let localPolygon = !textPolygon.isEmpty ? textPolygon : bubblePolygon
-            let localRect = textRect
-                ?? bubbleRect
-                ?? rectValue(from: item["box"])
-                ?? rectValue(from: item["boundingBox"])
-                ?? rectValue(from: item["bounding_box"])
-                ?? boundingRect(for: localPolygon)
+            let localRect: CGRect?
+            if requiresTextBox {
+                localRect = textRect
+            } else {
+                localRect = textRect
+                    ?? bubbleRect
+                    ?? rectValue(from: item["box"])
+                    ?? rectValue(from: item["boundingBox"])
+                    ?? rectValue(from: item["bounding_box"])
+                    ?? boundingRect(for: localPolygon)
+            }
             guard let localRect else { return nil }
             let allowedClassifications = Set([
                 "dialogue", "narration", "soundEffect", "url",
@@ -1383,8 +1620,7 @@ class AITranslator {
             let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
             let mappedRect = mapVisionRect(normalizedRect, from: sourceRect)
             guard isUsableVisionRect(mappedRect) else { return nil }
-            let sourcePolygon = !item.textPolygon.isEmpty ? item.textPolygon : item.bubblePolygon
-            let mappedPolygon = sourcePolygon.map { point in
+            let mappedTextPolygon = item.textPolygon.map { point in
                 let normalizedPoint = CGPoint(
                     x: point.x / coordinateDivisor.width,
                     y: point.y / coordinateDivisor.height
@@ -1394,6 +1630,12 @@ class AITranslator {
                     y: sourceRect.minY + normalizedPoint.y * sourceRect.height
                 )
             }
+            let mappedBubblePolygon = item.bubblePolygon.map { point in
+                CGPoint(
+                    x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
+                    y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
+                )
+            }
             return TextBlock(
                 text: item.text.isEmpty ? item.translation : item.text,
                 boundingBox: mappedRect,
@@ -1401,7 +1643,8 @@ class AITranslator {
                 confidence: item.confidence,
                 ocrSource: "vision-model:\(item.classification)",
                 bubbleBox: mappedBubbleRect.flatMap { isUsableVisionRect($0) ? $0 : nil },
-                polygon: mappedPolygon,
+                polygon: mappedTextPolygon,
+                bubblePolygon: mappedBubblePolygon,
                 translationLines: item.rawLines
             )
         }
@@ -1448,7 +1691,7 @@ class AITranslator {
         let parsed = rawItems.compactMap { item -> RawRecognitionItem? in
             let text = firstString(
                 in: item,
-                keys: ["text", "sourceText", "source_text", "original", "originalText"]
+                keys: ["sourceText", "source_text", "text", "original", "originalText"]
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             let classification = firstString(
@@ -1503,8 +1746,13 @@ class AITranslator {
             }) else {
                 return nil
             }
-            let sourcePolygon = !item.textPolygon.isEmpty ? item.textPolygon : item.bubblePolygon
-            let mappedPolygon = sourcePolygon.map { point in
+            let mappedTextPolygon = item.textPolygon.map { point in
+                CGPoint(
+                    x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
+                    y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
+                )
+            }
+            let mappedBubblePolygon = item.bubblePolygon.map { point in
                 CGPoint(
                     x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
                     y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
@@ -1522,7 +1770,8 @@ class AITranslator {
                         validTextRect?.height ?? mappedRect.height
                     )),
                     bubbleBox: validBubbleRect,
-                    polygon: mappedPolygon
+                    polygon: mappedTextPolygon,
+                    bubblePolygon: mappedBubblePolygon
                 )
             )
         }
@@ -1567,12 +1816,14 @@ class AITranslator {
     static func parseVisionTranslationBlocksForDiagnostics(
         from content: String,
         sourceRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
-        inputPixelSize: CGSize
+        inputPixelSize: CGSize,
+        requiresTextBox: Bool = false
     ) throws -> [TextBlock] {
         try parseVisionTranslationBlocks(
             from: content,
             sourceRect: sourceRect,
-            inputPixelSize: inputPixelSize
+            inputPixelSize: inputPixelSize,
+            requiresTextBox: requiresTextBox
         )
     }
 

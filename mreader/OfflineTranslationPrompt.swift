@@ -7,7 +7,7 @@ nonisolated enum OfflineVisionPageResult: Sendable {
 }
 
 nonisolated enum OfflineTranslationPromptBuilder {
-    static let revision = "offline-vision-v2"
+    static let revision = "offline-vision-v3"
 
     static func make(
         sourceLanguage: TranslationSourceLanguage,
@@ -37,13 +37,14 @@ nonisolated enum OfflineTranslationPromptBuilder {
 
         固定输出协议：只输出一个严格 JSON 对象，不要 Markdown、代码围栏、注释或思考过程。
         顶层必须包含 coordinateSpace="normalized" 和 items 数组。坐标以输入图片左上角为原点，所有 x/y/width/height 与 polygon 点都必须是 0 到 1 的归一化值。
-        每个 item 必须包含 id、sourceText、translation、lines、textBox、bubbleBox、polygon、confidence、classification。
-        classification 只能是 dialogue、narration、soundEffect、url、advertisement、watermark、copyright、pageNumber 之一；网址、页码、水印等保留在结果中但 translation 可以为空。
-        textBox 紧贴文字，bubbleBox 覆盖完整气泡；同一气泡内的碎片应合并，不同气泡不能合并。
+        每个 item 必须包含 id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification。不要使用 text、lines、polygon 或任何别名。
+        classification 只能是 dialogue、narration、soundEffect 之一。不要返回网址、广告、版权、水印或页码等非翻译文字。
+        textBox 是紧贴原文字的必填字段，用于原文字号与位置；bubbleBox 只表示译文可扩展到的最大范围，不能代替 textBox。textPolygon 与 bubblePolygon 分别对应两个框。
+        同一气泡内的碎片应合并，不同气泡不能合并；translation 与 translationLines 不能为空。
         没有可翻译文字时返回 {"coordinateSpace":"normalized","items":[]}，这是成功结果，不要编造文字。
 
         JSON 示例形状（不要输出示例内容）：
-        {"coordinateSpace":"normalized","items":[{"id":"b0","sourceText":"原文","translation":"译文","lines":["译文"],"textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"polygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"id":"b0","sourceText":"原文","translation":"译文","translationLines":["译文"],"textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9,"classification":"dialogue"}]}
         """
     }
 }
