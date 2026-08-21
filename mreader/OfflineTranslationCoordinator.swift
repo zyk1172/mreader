@@ -1,0 +1,608 @@
+import Foundation
+import UIKit
+import Combine
+
+nonisolated private enum OfflineTranslationRunError: LocalizedError {
+    case needsConfiguration(String)
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .needsConfiguration(let message), .failed(let message):
+            return message
+        }
+    }
+}
+
+/// 整本任务的唯一执行协调器：全局单任务、单页串行，checkpoint 顺序为 page -> manifest -> job。
+@MainActor
+final class OfflineTranslationCoordinator: ObservableObject {
+    static let shared = OfflineTranslationCoordinator()
+
+    @Published private(set) var job: OfflineTranslationJobRecord?
+    @Published private(set) var manifest: OfflineTranslationSetManifest?
+    @Published private(set) var progress: Double = 0
+    @Published private(set) var isRunning = false
+    @Published private(set) var lastError: String?
+
+    private let storage = OfflineTranslationStorageManager.shared
+    private let jobStore = OfflineTranslationJobStore.shared
+    private var task: Task<Void, Never>?
+    private var stopMode: StopMode?
+
+    private enum StopMode {
+        case pause
+        case cancel
+    }
+
+    private init() {}
+
+    var canStart: Bool { task == nil }
+
+    func start(
+        comic: ComicBook,
+        selection: OfflineTranslationSelection,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage,
+        styleInstructions: String,
+        readingDirectionRaw: String,
+        activateWhenComplete: Bool = true
+    ) {
+        guard task == nil else { return }
+        lastError = nil
+        task = Task { [weak self] in
+            guard let self else { return }
+            await self.startNewJob(
+                comic: comic,
+                selection: selection,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                styleInstructions: styleInstructions,
+                readingDirectionRaw: readingDirectionRaw,
+                activateWhenComplete: activateWhenComplete
+            )
+        }
+    }
+
+    func resume(_ savedJob: OfflineTranslationJobRecord, comic: ComicBook) {
+        guard task == nil else { return }
+        lastError = nil
+        task = Task { [weak self] in
+            guard let self else { return }
+            await self.resumeJob(
+                savedJob,
+                comic: comic,
+                styleInstructions: savedJob.styleInstructions
+                    ?? AITranslator.defaultTranslationStyleInstructions
+            )
+        }
+    }
+
+    func pause() {
+        guard task != nil else { return }
+        stopMode = .pause
+        task?.cancel()
+    }
+
+    func cancel() {
+        guard task != nil else { return }
+        stopMode = .cancel
+        task?.cancel()
+    }
+
+    func clearError() {
+        lastError = nil
+    }
+
+    private func startNewJob(
+        comic: ComicBook,
+        selection: OfflineTranslationSelection,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage,
+        styleInstructions: String,
+        readingDirectionRaw: String,
+        activateWhenComplete: Bool
+    ) async {
+        do {
+            let configuration = try frozenConfiguration()
+            let pages = try await loadPages(for: comic)
+            let totalPages = pages.count
+            let promptSnapshot = OfflineTranslationPromptBuilder.make(
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                isRightToLeft: readingDirectionRaw == "rightToLeft",
+                styleInstructions: styleInstructions,
+                previousContext: ""
+            )
+            let active = await storage.activeManifest(for: comic.id)
+            let activeIsCompatible = active.map {
+                $0.sourceLanguage == sourceLanguage
+                    && $0.targetLanguage == targetLanguage
+                    && $0.providerID == configuration.profileID
+                    && $0.baseURL == configuration.baseURL
+                    && $0.visionModel == configuration.visionModel
+                    && $0.promptRevision == OfflineTranslationPromptBuilder.revision
+                    && $0.promptSnapshot == promptSnapshot
+            } ?? false
+            let existingStates: [Int: OfflineTranslationPageState]
+            if let active, activeIsCompatible {
+                existingStates = await storage.pageStates(comicID: comic.id, setID: active.id)
+            } else {
+                existingStates = [:]
+            }
+            let pageIndexes = try selection.pageIndexes(
+                totalPages: totalPages,
+                currentPageIndex: min(max(comic.currentPageIndex, 0), max(totalPages - 1, 0)),
+                existingStates: existingStates
+            )
+
+            let manifestValue = OfflineTranslationSetManifest(
+                comicID: comic.id,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                providerID: configuration.profileID,
+                providerName: configuration.profileName,
+                baseURL: configuration.baseURL,
+                visionModel: configuration.visionModel,
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: promptSnapshot,
+                totalPages: totalPages,
+                derivedFromSetID: active?.id
+            )
+            let shouldActivateImmediately = active == nil
+            try await storage.saveManifest(manifestValue, activate: shouldActivateImmediately)
+            if let active, activeIsCompatible {
+                _ = try await storage.copyValidPages(
+                    from: active.id,
+                    to: manifestValue,
+                    excludingPageIndexes: Set(pageIndexes)
+                )
+            }
+
+            var record = OfflineTranslationJobRecord(
+                comicID: comic.id,
+                setID: manifestValue.id,
+                selection: selection,
+                pageIndexes: pageIndexes,
+                providerID: configuration.profileID,
+                providerName: configuration.profileName,
+                baseURL: configuration.baseURL,
+                visionModel: configuration.visionModel,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: promptSnapshot,
+                styleInstructions: styleInstructions,
+                activateWhenComplete: activateWhenComplete,
+                readingDirectionRaw: readingDirectionRaw,
+                totalPages: totalPages
+            )
+            record.state = .running
+            try await jobStore.save(record)
+            OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
+            job = record
+            manifest = await storage.manifest(comicID: comic.id, setID: manifestValue.id)
+            progress = 0
+            isRunning = true
+            await execute(
+                record,
+                comic: comic,
+                pages: pages,
+                configuration: configuration,
+                styleInstructions: styleInstructions
+            )
+        } catch {
+            isRunning = false
+            lastError = error.localizedDescription
+            task = nil
+        }
+    }
+
+    private func resumeJob(
+        _ savedJob: OfflineTranslationJobRecord,
+        comic: ComicBook,
+        styleInstructions: String
+    ) async {
+        do {
+            let configuration = try frozenConfiguration(
+                for: savedJob.providerID,
+                expectedVisionModel: savedJob.visionModel,
+                expectedBaseURL: savedJob.baseURL
+            )
+            let pages = try await loadPages(for: comic)
+            guard pages.count == savedJob.totalPages else {
+                throw OfflineTranslationRunError.failed("漫画页数已变化，无法安全续传")
+            }
+            var record = savedJob
+            record.state = .running
+            record.lastError = nil
+            record.updatedAt = Date()
+            try await jobStore.save(record)
+            OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
+            job = record
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+            isRunning = true
+            await execute(
+                record,
+                comic: comic,
+                pages: pages,
+                configuration: configuration,
+                styleInstructions: styleInstructions
+            )
+        } catch {
+            isRunning = false
+            lastError = error.localizedDescription
+            var recoveryJob = savedJob
+            recoveryJob.state = error is OfflineTranslationConfigurationError
+                ? .needsConfiguration
+                : .interrupted
+            recoveryJob.lastError = error.localizedDescription
+            recoveryJob.updatedAt = Date()
+            try? await jobStore.save(recoveryJob)
+            job = recoveryJob
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: savedJob.id)
+            task = nil
+        }
+    }
+
+    private func execute(
+        _ initialJob: OfflineTranslationJobRecord,
+        comic: ComicBook,
+        pages: [ComicPage],
+        configuration: AIActiveConfiguration,
+        styleInstructions: String
+    ) async {
+        var record = initialJob
+        let taskID = BackgroundTaskCenter.shared.begin(
+            title: "offlineTranslation.title".localized,
+            detail: comic.title,
+            progress: progress
+        )
+        defer {
+            BackgroundTaskCenter.shared.finish(taskID)
+            isRunning = false
+            task = nil
+            stopMode = nil
+        }
+
+        do {
+            while record.nextPageOffset < record.pageIndexes.count {
+                try Task.checkCancellation()
+                try await storage.ensureSufficientDiskSpace()
+                let pageIndex = record.pageIndexes[record.nextPageOffset]
+                record.currentPageIndex = pageIndex
+                record.state = .running
+                record.updatedAt = Date()
+                try await checkpoint(record)
+                BackgroundTaskCenter.shared.update(
+                    taskID,
+                    detail: "\(comic.title) · \(pageIndex + 1)/\(record.totalPages)",
+                    progress: progress
+                )
+
+                do {
+                    let page = try pageAt(pageIndex, pages: pages)
+                    let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page)
+                    let sourceFingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData)
+                    let image = try OfflineTranslationPageProvider.image(for: sourceData, pageIndex: pageIndex)
+                    let pixelWidth = image.cgImage?.width ?? Int(image.size.width * image.scale)
+                    let pixelHeight = image.cgImage?.height ?? Int(image.size.height * image.scale)
+
+                    if let existing = await storage.page(comicID: record.comicID, setID: record.setID, pageIndex: pageIndex),
+                       existing.state.isUsableOverlay,
+                       existing.sourceFingerprint == sourceFingerprint {
+                        registerSuccess(existing.state, pageIndex: pageIndex, in: &record)
+                    } else {
+                        var processingPage = OfflineTranslatedPage(
+                            comicID: record.comicID,
+                            setID: record.setID,
+                            pageIndex: pageIndex,
+                            sourceFingerprint: sourceFingerprint,
+                            pixelWidth: pixelWidth,
+                            pixelHeight: pixelHeight,
+                            blocks: [],
+                            state: .processing,
+                            providerID: configuration.profileID,
+                            visionModel: configuration.visionModel,
+                            resolvedSourceLanguage: record.resolvedSourceLanguage
+                        )
+                        try await storage.savePageAndUpdateManifest(processingPage)
+
+                        let previousContext = await previousPageContext(
+                            comicID: record.comicID,
+                            setID: record.setID,
+                            pageIndex: pageIndex,
+                            minimumPageIndex: record.pageIndexes.min() ?? 0
+                        )
+                        let sourcePreference = TranslationSourceLanguage(rawValue: record.resolvedSourceLanguage ?? "")
+                            ?? record.sourceLanguage
+                        let result = try await translatePageWithRetry(
+                            image: image,
+                            configuration: configuration,
+                            sourceLanguage: sourcePreference,
+                            targetLanguage: record.targetLanguage,
+                            styleInstructions: styleInstructions,
+                            previousContext: previousContext,
+                            isRightToLeft: record.readingDirectionRaw == "rightToLeft",
+                            viewportAspect: max(image.size.height / max(image.size.width, 1), 1.25),
+                            pageIndex: pageIndex,
+                            record: &record
+                        )
+
+                        let pageState: OfflineTranslationPageState
+                        let blocks: [OfflineTranslatedBlock]
+                        switch result {
+                        case .noText:
+                            pageState = .noText
+                            blocks = []
+                        case .translated(let translatedBlocks):
+                            pageState = translatedBlocks.isEmpty ? .noText : .completed
+                            blocks = translatedBlocks.enumerated().map { index, block in
+                                block.offlineTranslatedBlock(id: "b\(index)")
+                            }
+                            if record.sourceLanguage == .automatic,
+                               record.resolvedSourceLanguage == nil,
+                               let decision = TranslationSourceResolver.resolve(
+                                preference: .automatic,
+                                blocks: translatedBlocks,
+                                previousStableLanguage: nil
+                               ) {
+                                record.resolvedSourceLanguage = decision.languageCode
+                            }
+                        }
+                        processingPage.state = pageState
+                        processingPage.resolvedSourceLanguage = record.resolvedSourceLanguage
+                        processingPage = OfflineTranslatedPage(
+                            comicID: processingPage.comicID,
+                            setID: processingPage.setID,
+                            pageIndex: processingPage.pageIndex,
+                            sourceFingerprint: processingPage.sourceFingerprint,
+                            pixelWidth: processingPage.pixelWidth,
+                            pixelHeight: processingPage.pixelHeight,
+                            blocks: blocks,
+                            state: pageState,
+                            providerID: processingPage.providerID,
+                            visionModel: processingPage.visionModel,
+                            resolvedSourceLanguage: record.resolvedSourceLanguage
+                        )
+                        try await storage.savePageAndUpdateManifest(processingPage)
+                        registerSuccess(pageState, pageIndex: pageIndex, in: &record)
+                    }
+                    record.nextPageOffset += 1
+                    record.currentPageIndex = nil
+                    record.lastError = nil
+                    record.updatedAt = Date()
+                    try await checkpoint(record)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch OfflineTranslationRunError.needsConfiguration(let message) {
+                    record.state = .needsConfiguration
+                    record.lastError = message
+                    record.updatedAt = Date()
+                    try? await jobStore.save(record)
+                    job = record
+                    lastError = message
+                    OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+                    return
+                } catch {
+                    let message = error.localizedDescription
+                    let page = pages.indices.contains(pageIndex) ? pages[pageIndex] : nil
+                    if let page,
+                       let sourceData = try? await OfflineTranslationPageProvider.data(for: comic, page: page) {
+                        let failedPage = OfflineTranslatedPage(
+                            comicID: record.comicID,
+                            setID: record.setID,
+                            pageIndex: pageIndex,
+                            sourceFingerprint: OfflineTranslationPageProvider.fingerprint(for: sourceData),
+                            pixelWidth: 0,
+                            pixelHeight: 0,
+                            blocks: [],
+                            state: .failed,
+                            providerID: configuration.profileID,
+                            visionModel: configuration.visionModel,
+                            resolvedSourceLanguage: record.resolvedSourceLanguage,
+                            errorMessage: message
+                        )
+                        try? await storage.savePageAndUpdateManifest(failedPage)
+                    }
+                    if !record.failedPageIndexes.contains(pageIndex) {
+                        record.failedPageIndexes.append(pageIndex)
+                    }
+                    record.lastError = message
+                    record.nextPageOffset += 1
+                    record.currentPageIndex = nil
+                    record.updatedAt = Date()
+                    try await checkpoint(record)
+                }
+                progress = record.pageIndexes.isEmpty
+                    ? 1
+                    : Double(record.nextPageOffset) / Double(record.pageIndexes.count)
+            }
+
+            record.state = record.failedPageIndexes.isEmpty ? .completed : .completedWithFailures
+            record.currentPageIndex = nil
+            record.updatedAt = Date()
+            try await checkpoint(record)
+            if record.state == .completed,
+               record.activateWhenComplete ?? true,
+               let currentIndex = await storage.index(for: record.comicID),
+               currentIndex.activeSetID != record.setID {
+                try? await storage.setActive(comicID: record.comicID, setID: record.setID)
+            }
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+        } catch OfflineTranslationStorageError.lowDiskSpace {
+            record.state = .paused
+            record.lastError = OfflineTranslationStorageError.lowDiskSpace.localizedDescription
+            record.updatedAt = Date()
+            try? await jobStore.save(record)
+            job = record
+            lastError = record.lastError
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+        } catch is CancellationError {
+            record.state = stopMode == .cancel ? .cancelled : .paused
+            record.lastError = stopMode == .cancel ? "用户取消了任务" : "任务已暂停，可继续处理"
+            record.updatedAt = Date()
+            try? await jobStore.save(record)
+            job = record
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+        } catch {
+            record.state = .completedWithFailures
+            record.lastError = error.localizedDescription
+            record.updatedAt = Date()
+            try? await jobStore.save(record)
+            job = record
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            lastError = error.localizedDescription
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+        }
+    }
+
+    private func translatePageWithRetry(
+        image: UIImage,
+        configuration: AIActiveConfiguration,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage,
+        styleInstructions: String,
+        previousContext: String,
+        isRightToLeft: Bool,
+        viewportAspect: CGFloat,
+        pageIndex: Int,
+        record: inout OfflineTranslationJobRecord
+    ) async throws -> OfflineVisionPageResult {
+        var attempt = 0
+        while true {
+            do {
+                return try await AITranslator.recognizeOfflineVisionPage(
+                    image: image,
+                    apiKey: configuration.apiKey,
+                    baseURL: configuration.baseURL,
+                    visionModel: configuration.visionModel,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage,
+                    styleInstructions: styleInstructions,
+                    previousContext: previousContext,
+                    isRightToLeft: isRightToLeft,
+                    viewportAspect: viewportAspect
+                )
+            } catch {
+                switch OfflineTranslationRetryPolicy.decision(for: error, attempt: attempt) {
+                case .needsConfiguration:
+                    throw OfflineTranslationRunError.needsConfiguration(error.localizedDescription)
+                case .retry(let delay):
+                    attempt += 1
+                    record.retryCounts[String(pageIndex), default: 0] += 1
+                    record.updatedAt = Date()
+                    try await jobStore.save(record)
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                case .fail:
+                    throw error
+                }
+            }
+        }
+    }
+
+    private func previousPageContext(
+        comicID: UUID,
+        setID: UUID,
+        pageIndex: Int,
+        minimumPageIndex: Int
+    ) async -> String {
+        guard pageIndex > minimumPageIndex else { return "" }
+        let start = max(minimumPageIndex, pageIndex - 2)
+        var lines: [String] = []
+        for index in start..<pageIndex {
+            guard let page = await storage.page(comicID: comicID, setID: setID, pageIndex: index),
+                  page.state.isUsableOverlay else { continue }
+            for block in page.blocks {
+                let translation = block.translation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !translation.isEmpty else { continue }
+                lines.append("第\(index + 1)页：\(translation)")
+            }
+        }
+        var context = lines.joined(separator: "\n")
+        if context.count > 2200 {
+            context = String(context.suffix(2200))
+        }
+        return context
+    }
+
+    private func checkpoint(_ record: OfflineTranslationJobRecord) async throws {
+        if var currentManifest = await storage.manifest(comicID: record.comicID, setID: record.setID) {
+            currentManifest.resolvedSourceLanguage = record.resolvedSourceLanguage
+            try await storage.saveManifest(currentManifest)
+            manifest = currentManifest
+        } else {
+            manifest = nil
+        }
+        try await jobStore.save(record)
+        job = record
+    }
+
+    private func registerSuccess(
+        _ state: OfflineTranslationPageState,
+        pageIndex: Int,
+        in record: inout OfflineTranslationJobRecord
+    ) {
+        switch state {
+        case .noText:
+            if !record.noTextPageIndexes.contains(pageIndex) { record.noTextPageIndexes.append(pageIndex) }
+        case .completed, .partial:
+            if !record.completedPageIndexes.contains(pageIndex) { record.completedPageIndexes.append(pageIndex) }
+        case .pending, .processing, .failed, .stale:
+            break
+        }
+        record.failedPageIndexes.removeAll { $0 == pageIndex }
+    }
+
+    private func pageAt(_ index: Int, pages: [ComicPage]) throws -> ComicPage {
+        guard pages.indices.contains(index) else {
+            throw OfflineTranslationPageProviderError.pageUnavailable(index)
+        }
+        return pages[index]
+    }
+
+    private func loadPages(for comic: ComicBook) async throws -> [ComicPage] {
+        guard let pages = await OfflineTranslationPageProvider.loadPages(for: comic), !pages.isEmpty else {
+            throw OfflineTranslationPageProviderError.sourceUnavailable
+        }
+        return pages
+    }
+
+    private func frozenConfiguration(
+        for providerID: UUID? = nil,
+        expectedVisionModel: String? = nil,
+        expectedBaseURL: String? = nil
+    ) throws -> AIActiveConfiguration {
+        let store = AIProviderStore.shared
+        let profileID = providerID ?? store.activeProfileID() ?? store.profiles().first?.id
+        guard let profileID,
+              let profile = store.profiles().first(where: { $0.id == profileID }) else {
+            throw OfflineTranslationConfigurationError.missingProvider
+        }
+        let apiKey = store.apiKey(for: profileID).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { throw OfflineTranslationConfigurationError.missingAPIKey }
+        let baseURL = expectedBaseURL ?? profile.baseURL
+        guard AIEndpointResolver.chatCompletionsURL(from: baseURL) != nil else {
+            throw OfflineTranslationConfigurationError.invalidBaseURL
+        }
+        let visionModel = (expectedVisionModel ?? profile.selectedVisionModel).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !visionModel.isEmpty else { throw OfflineTranslationConfigurationError.missingVisionModel }
+        // 恢复任务时只要求 Provider 仍存在并能从 Keychain 取到当前 Key；
+        // 文本模型不是本管线输入，视觉模型和 Base URL 使用 Job 中的冻结快照。
+        let textModel = profile.selectedTextModel.isEmpty
+            ? visionModel
+            : profile.selectedTextModel
+        return AIActiveConfiguration(
+            profileID: profile.id,
+            profileName: profile.name,
+            baseURL: baseURL,
+            apiKey: apiKey,
+            textModel: textModel,
+            visionModel: visionModel
+        )
+    }
+
+}

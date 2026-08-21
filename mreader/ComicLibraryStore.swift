@@ -287,6 +287,12 @@ final class ComicLibraryStore: ObservableObject {
 
     func delete(id: UUID) {
         if let comic = comics.first(where: { $0.id == id }) {
+            if OfflineTranslationCoordinator.shared.job?.comicID == comic.id {
+                OfflineTranslationCoordinator.shared.cancel()
+            }
+            Task {
+                try? await OfflineTranslationStorageManager.shared.deleteComicTranslations(comicID: comic.id)
+            }
             OfflineDownloadManager.shared.remove(comic)
             Task { await OCRSearchIndex.shared.remove(comicID: comic.id) }
             if comic.sourceType == .local {
@@ -828,6 +834,8 @@ final class ComicLibraryStore: ObservableObject {
     func runStartupMaintenance() {
         Task {
             await syncAllLibrariesAsync()
+            let validComicIDs = Set(comics.map(\.id))
+            _ = try? await OfflineTranslationStorageManager.shared.maintenance(validComicIDs: validComicIDs)
         }
     }
 

@@ -1859,8 +1859,390 @@ private func makeTestPageRequest(
         )
     }
 
-@MainActor
-private final class InMemoryAICredentialStore: AICredentialStoring {
+    // MARK: - 整本离线翻译回归测试
+
+    @Test func offlineTranslationSelectionUsesZeroBasedIndexesAndValidatesRanges() throws {
+        #expect(try OfflineTranslationSelection.entireComic.pageIndexes(totalPages: 4) == [0, 1, 2, 3])
+        #expect(try OfflineTranslationSelection.fromPage(2).pageIndexes(totalPages: 4) == [2, 3])
+        #expect(try OfflineTranslationSelection.range(start: 1, end: 2).pageIndexes(totalPages: 4) == [1, 2])
+        #expect(
+            try OfflineTranslationSelection.missingPages.pageIndexes(
+                totalPages: 4,
+                existingStates: [0: .completed, 1: .failed, 2: .noText]
+            ) == [1, 3]
+        )
+        #expect(try OfflineTranslationSelection.failedPages.pageIndexes(totalPages: 4, existingStates: [1: .failed]) == [1])
+        #expect(throws: OfflineTranslationSelectionError.self) {
+            try OfflineTranslationSelection.range(start: 3, end: 1).pageIndexes(totalPages: 4)
+        }
+        #expect(throws: OfflineTranslationSelectionError.self) {
+            try OfflineTranslationSelection.fromPage(4).pageIndexes(totalPages: 4)
+        }
+    }
+
+    @Test func offlineTranslationPromptKeepsProtocolSeparateFromStyle() {
+        let prompt = OfflineTranslationPromptBuilder.make(
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            isRightToLeft: true,
+            styleInstructions: "保持自然口语",
+            previousContext: "前页：先走吧"
+        )
+        #expect(prompt.contains("保持自然口语"))
+        #expect(prompt.contains("coordinateSpace=\"normalized\""))
+        #expect(prompt.contains("前页：先走吧"))
+        #expect(prompt.contains("右到左"))
+        #expect(!prompt.contains("{targetLanguage}"))
+    }
+
+    @Test func offlineTranslationPageDTOConvertsWithoutTextBlockJSON() throws {
+        let block = TextBlock(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.1),
+            translation: "你好",
+            confidence: 0.91,
+            ocrSource: "vision",
+            estimatedFontScale: 0.04,
+            polygon: [CGPoint(x: 0.1, y: 0.2), CGPoint(x: 0.4, y: 0.2)]
+        )
+        let dto = OfflineTranslatedBlock(block: block, id: "b0")
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(dto)
+        )
+        let roundTrip = decoded.textBlock()
+        #expect(decoded.id == "b0")
+        #expect(roundTrip.text == "こんにちは")
+        #expect(roundTrip.translation == "你好")
+        #expect(abs(roundTrip.boundingBox.minX - 0.1) < 0.0001)
+    }
+
+    @Test func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 2
+        )
+        try await storage.saveManifest(set, activate: true)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: set.id,
+            pageIndex: 0,
+            sourceFingerprint: "fingerprint-a",
+            pixelWidth: 1200,
+            pixelHeight: 1800,
+            blocks: [],
+            state: .noText,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        let reloaded = await storage.page(comicID: comicID, setID: set.id, pageIndex: 0)
+        let manifest = await storage.manifest(comicID: comicID, setID: set.id)
+        #expect(reloaded?.sourceFingerprint == "fingerprint-a")
+        #expect(reloaded?.state == .noText)
+        #expect(manifest?.noTextPageCount == 1)
+        #expect(manifest?.coverage == 0.5)
+        #expect((await storage.activeManifest(for: comicID))?.id == set.id)
+    }
+
+    @Test func offlineTranslationStorageMarksFingerprintMismatchStaleAndSwitchesSets() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-switch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        func makeSet() -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: .english,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision-test",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let setA = makeSet()
+        let setB = makeSet()
+        try await storage.saveManifest(setA, activate: true)
+        try await storage.saveManifest(setB)
+        try await storage.setActive(comicID: comicID, setID: setB.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == setB.id)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: setB.id,
+            pageIndex: 0,
+            sourceFingerprint: "before",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [],
+            state: .completed,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        await storage.markPageStale(comicID: comicID, setID: setB.id, pageIndex: 0)
+        #expect((await storage.page(comicID: comicID, setID: setB.id, pageIndex: 0))?.state == .stale)
+        try await storage.deleteSet(comicID: comicID, setID: setA.id)
+        #expect((await storage.summaries(for: comicID)).count == 1)
+        try await storage.deleteComicTranslations(comicID: comicID)
+        #expect(await storage.index(for: comicID) == nil)
+    }
+
+    @Test func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {
+        let first = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
+        let same = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
+        let changed = OfflineTranslationFingerprint.sha256(for: Data("page-b".utf8))
+        #expect(first == same)
+        #expect(first != changed)
+        #expect(first.count == 64)
+    }
+
+    @Test func offlineTranslationDerivedSetCopiesOnlyOutsideSelectedPagesAndSwitchesAfterCompletion() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-derived-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        func makeManifest(id: UUID, derivedFromSetID: UUID? = nil) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                id: id,
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision-test",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 2,
+                derivedFromSetID: derivedFromSetID
+            )
+        }
+        let source = makeManifest(id: UUID())
+        let derived = makeManifest(id: UUID(), derivedFromSetID: source.id)
+        try await storage.saveManifest(source, activate: true)
+        for pageIndex in 0..<2 {
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: source.id,
+                    pageIndex: pageIndex,
+                    sourceFingerprint: "source-\(pageIndex)",
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [],
+                    state: .noText,
+                    providerID: providerID,
+                    visionModel: "vision-test"
+                )
+            )
+        }
+        try await storage.saveManifest(derived)
+        _ = try await storage.copyValidPages(
+            from: source.id,
+            to: derived,
+            excludingPageIndexes: [1]
+        )
+        #expect((await storage.activeManifest(for: comicID))?.id == source.id)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0) != nil)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 1) == nil)
+
+        try await storage.savePageAndUpdateManifest(
+            OfflineTranslatedPage(
+                comicID: comicID,
+                setID: derived.id,
+                pageIndex: 1,
+                sourceFingerprint: "new-1",
+                pixelWidth: 100,
+                pixelHeight: 100,
+                blocks: [],
+                state: .noText,
+                providerID: providerID,
+                visionModel: "vision-test"
+            )
+        )
+        try await storage.setActive(comicID: comicID, setID: derived.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == derived.id)
+    }
+
+    @Test func offlineTranslationStatesTreatNoTextAsSuccessfulCoverage() {
+        #expect(OfflineTranslationPageState.noText.countsAsCoverage)
+        #expect(OfflineTranslationPageState.noText.isUsableOverlay)
+        #expect(!OfflineTranslationPageState.failed.countsAsCoverage)
+        #expect(!OfflineTranslationPageState.stale.isUsableOverlay)
+        #expect(OfflineTranslationJobState.interrupted.isTerminal == false)
+        #expect(OfflineTranslationJobState.completedWithFailures.isTerminal)
+    }
+
+    @Test func offlineTranslationRetryPolicyStopsAtFiniteBackoffAndPausesForAuth() {
+        let unauthorized = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 401,
+            message: "unauthorized"
+        )
+        let rateLimited = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 429,
+            message: "too many requests"
+        )
+        let serverRetryAfter = AITranslationRequestError.serverWithRetryAfter(
+            model: "vision",
+            statusCode: 503,
+            message: "temporarily unavailable",
+            retryAfterSeconds: 8
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: unauthorized, attempt: 0) == .needsConfiguration)
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 0) == .retry(afterSeconds: 2))
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 2) == .retry(afterSeconds: 15))
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 3) == .fail)
+        #expect(OfflineTranslationRetryPolicy.decision(for: serverRetryAfter, attempt: 0) == .retry(afterSeconds: 8))
+        #expect(
+            OfflineTranslationRetryPolicy.decision(
+                for: AITranslationRequestError.invalidTranslationJSON(model: "vision", excerpt: "{}"),
+                attempt: 0
+            ) == .retry(afterSeconds: 2)
+        )
+    }
+
+    @Test func offlineTranslationJobJSONNeverContainsAPIKey() throws {
+        let job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .fromPage(2),
+            pageIndexes: [2, 3],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            sourceLanguage: .automatic,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            styleInstructions: "保持自然",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 4
+        )
+        let data = try JSONEncoder().encode(job)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("apiKey"))
+        #expect(json.contains("styleInstructions"))
+    }
+
+    @Test func offlineTranslationRestartMarksRunningJobsInterruptedWithoutDeletingPages() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-interruption-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 2
+        )
+        try await storage.saveManifest(set, activate: true)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: set.id,
+            pageIndex: 0,
+            sourceFingerprint: "stable",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [],
+            state: .noText,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        var job = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: set.id,
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2
+        )
+        job.state = .running
+        try await storage.saveJob(job)
+        #expect(try await storage.markRunningJobsInterrupted() == 1)
+        #expect((await storage.job(comicID: comicID, jobID: job.id))?.state == .interrupted)
+        #expect((await storage.page(comicID: comicID, setID: set.id, pageIndex: 0))?.state == .noText)
+    }
+
+    @Test func offlineTranslationCorruptPageJSONIsIgnoredForRegeneration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-corrupt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let setID = UUID()
+        let manifest = OfflineTranslationSetManifest(
+            id: setID,
+            comicID: comicID,
+            sourceLanguage: .automatic,
+            targetLanguage: .english,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 1
+        )
+        try await storage.saveManifest(manifest, activate: true)
+        let pagesURL = root
+            .appendingPathComponent(comicID.uuidString)
+            .appendingPathComponent("sets")
+            .appendingPathComponent(setID.uuidString)
+            .appendingPathComponent("pages")
+        try FileManager.default.createDirectory(at: pagesURL, withIntermediateDirectories: true)
+        try Data("{not-json".utf8).write(
+            to: pagesURL.appendingPathComponent("000000.json"),
+            options: .atomic
+        )
+        #expect(await storage.page(comicID: comicID, setID: setID, pageIndex: 0) == nil)
+        #expect(await storage.pageStates(comicID: comicID, setID: setID).isEmpty)
+    }
+
+    @MainActor
+    private final class InMemoryAICredentialStore: AICredentialStoring {
     private var values: [UUID: String] = [:]
 
     func apiKey(for profileID: UUID) -> String? {

@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated enum TranslationTargetLanguage: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum TranslationTargetLanguage: String, Codable, CaseIterable, Identifiable, Sendable {
     case simplifiedChinese = "zh-Hans"
     case traditionalChinese = "zh-Hant"
     case english = "en"

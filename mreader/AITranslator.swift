@@ -50,6 +50,7 @@ nonisolated struct OCRVerificationRegion: Sendable {
 nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     case invalidConfiguration(String)
     case server(model: String, statusCode: Int?, message: String)
+    case serverWithRetryAfter(model: String, statusCode: Int?, message: String, retryAfterSeconds: UInt64?)
     case invalidResponse(model: String)
     case invalidResponseEnvelope(model: String, contentType: String?, excerpt: String)
     case missingAssistantContent(model: String, finishReason: String?)
@@ -61,6 +62,11 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
         case .invalidConfiguration(let message):
             return message
         case .server(let model, let statusCode, let message):
+            if let statusCode {
+                return "模型 \(model) 请求失败：HTTP \(statusCode)，\(message)"
+            }
+            return "模型 \(model) 请求失败：\(message)"
+        case .serverWithRetryAfter(let model, let statusCode, let message, _):
             if let statusCode {
                 return "模型 \(model) 请求失败：HTTP \(statusCode)，\(message)"
             }
@@ -456,7 +462,7 @@ class AITranslator {
             ],
             "temperature": 0.3
         ]
-        
+
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await aiTranslationSession.data(for: request)
@@ -568,6 +574,44 @@ class AITranslator {
             translationTarget: translationTarget,
             translationPromptTemplate: translationPromptTemplate
         )
+    }
+
+    /// 整本离线翻译专用入口：只调用 Vision 识别/翻译，不进入 `translatePage` 文本模型兜底。
+    /// 固定协议由 OfflineTranslationPromptBuilder 生成，用户自定义内容只作为风格说明。
+    static func recognizeOfflineVisionPage(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage,
+        styleInstructions: String,
+        previousContext: String,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0
+    ) async throws -> OfflineVisionPageResult {
+        let prompt = OfflineTranslationPromptBuilder.make(
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            isRightToLeft: isRightToLeft,
+            styleInstructions: styleInstructions,
+            previousContext: previousContext
+        )
+        do {
+            let blocks = try await recognizeVisionPage(
+                image: image,
+                apiKey: apiKey,
+                baseURL: baseURL,
+                model: visionModel,
+                isRightToLeft: isRightToLeft,
+                viewportAspect: viewportAspect,
+                translationTarget: targetLanguage,
+                translationPromptTemplate: prompt
+            )
+            return blocks.isEmpty ? .noText : .translated(blocks)
+        } catch VisionTranslationError.emptyResult {
+            return .noText
+        }
     }
 
     private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
@@ -810,10 +854,11 @@ class AITranslator {
         let (data, response) = try await aiTranslationSession.data(for: request)
         if let httpResponse = response as? HTTPURLResponse,
            !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.server(
+            throw AITranslationRequestError.serverWithRetryAfter(
                 model: model,
                 statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+                retryAfterSeconds: retryAfterSeconds(from: httpResponse)
             )
         }
         if let message = apiErrorMessage(from: data) {
@@ -852,6 +897,15 @@ class AITranslator {
 
     private static func chatCompletionsURL(from baseURL: String) -> URL? {
         AIEndpointResolver.chatCompletionsURL(from: baseURL)
+    }
+
+    private static func retryAfterSeconds(from response: HTTPURLResponse) -> UInt64? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              seconds >= 0 else {
+            return nil
+        }
+        return UInt64(ceil(seconds))
     }
 
     private static func apiErrorMessage(from data: Data) -> String? {
@@ -1221,6 +1275,7 @@ class AITranslator {
             let polygon: [CGPoint]
             let rect: CGRect
             let confidence: Double
+            let classification: String
         }
 
         let parsedItems = rawItems.compactMap { item -> RawVisionItem? in
@@ -1241,13 +1296,25 @@ class AITranslator {
                 ?? rectValue(from: item["bounding_box"])
                 ?? boundingRect(for: localPolygon)
             guard let localRect else { return nil }
+            let allowedClassifications = Set([
+                "dialogue", "narration", "soundEffect", "url",
+                "advertisement", "watermark", "copyright", "pageNumber"
+            ])
+            let rawClassification = firstString(
+                in: item,
+                keys: ["classification", "type", "category"]
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let classification = allowedClassifications.contains(rawClassification)
+                ? rawClassification
+                : "dialogue"
             return RawVisionItem(
                 text: text,
                 translation: translation,
                 rawLines: rawLines,
                 polygon: localPolygon,
                 rect: localRect,
-                confidence: doubleValue(from: item["confidence"]) ?? 0.75
+                confidence: doubleValue(from: item["confidence"]) ?? 0.75,
+                classification: classification
             )
         }
 
@@ -1283,7 +1350,7 @@ class AITranslator {
                 boundingBox: mappedRect,
                 translation: item.translation,
                 confidence: item.confidence,
-                ocrSource: "vision-model",
+                ocrSource: "vision-model:\(item.classification)",
                 polygon: mappedPolygon,
                 translationLines: item.rawLines
             )

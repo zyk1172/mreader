@@ -10,6 +10,7 @@ import SwiftUI
 @main
 struct mreaderApp: App {
     init() {
+        OfflineTranslationBackgroundScheduler.shared.register()
         RemoteImageLoader.migrateLegacyCoversIfNeeded()
         migrateLegacyTranslationPromptIfNeeded()
         let defaults = UserDefaults.standard
@@ -30,6 +31,11 @@ struct mreaderApp: App {
             }
         } catch {
             print("MReader AI legacy configuration migration failed: \(error.localizedDescription)")
+        }
+        Task {
+            if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(), count > 0 {
+                print("MReader marked \(count) offline translation jobs interrupted after relaunch")
+            }
         }
     }
 

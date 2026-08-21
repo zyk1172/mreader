@@ -4,9 +4,10 @@ nonisolated struct CacheStorageSnapshot: Sendable {
     var remotePages: Int64
     var generatedAssets: Int64
     var offlineComics: Int64
+    var offlineTranslations: Int64
     var temporaryFiles: Int64
 
-    static let zero = CacheStorageSnapshot(remotePages: 0, generatedAssets: 0, offlineComics: 0, temporaryFiles: 0)
+    static let zero = CacheStorageSnapshot(remotePages: 0, generatedAssets: 0, offlineComics: 0, offlineTranslations: 0, temporaryFiles: 0)
 
     var readerCacheTotal: Int64 {
         remotePages + generatedAssets + temporaryFiles
@@ -21,6 +22,7 @@ nonisolated enum CacheStorageManager {
             remotePages: size(of: cacheURL("MReaderRemotePageCache")),
             generatedAssets: generatedCacheURLs.reduce(0) { $0 + size(of: $1) },
             offlineComics: size(of: cacheURL("MReaderOfflineComics")),
+            offlineTranslations: size(of: translationStoreURL),
             temporaryFiles: ComicManager.temporaryImportCacheSize()
         )
     }
@@ -49,6 +51,11 @@ nonisolated enum CacheStorageManager {
     private static func cacheURL(_ component: String) -> URL {
         fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(component, isDirectory: true)
+    }
+
+    private static var translationStoreURL: URL {
+        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MReaderTranslations", isDirectory: true)
     }
 
     private static func size(of url: URL) -> Int64 {

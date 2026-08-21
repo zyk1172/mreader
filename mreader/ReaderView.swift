@@ -674,6 +674,8 @@ struct ReaderView: View {
     @State private var currentPageIndex: Int
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
+    @State private var showOfflineTranslationStart = false
+    @State private var showOfflineTranslationManager = false
     @State private var translateRequestID = UUID()
     @State private var ocrMagnifyRequestID = UUID()
     @State private var isOCRMagnificationVisible = false
@@ -1021,6 +1023,12 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
+        .sheet(isPresented: $showOfflineTranslationStart) {
+            OfflineTranslationStartView(comic: comic, currentPageIndex: currentPageIndex)
+        }
+        .sheet(isPresented: $showOfflineTranslationManager) {
+            OfflineTranslationManagerView(comic: comic)
+        }
         .alert("reader.bookmarkEditNote".localized, isPresented: $showBookmarkNoteAlert) {
             TextField("reader.bookmarkNotePlaceholder".localized, text: $bookmarkNoteText)
             Button("nav.cancel".localized, role: .cancel) {
@@ -1166,6 +1174,25 @@ struct ReaderView: View {
                 .frame(minWidth: 76, minHeight: 40)
 
             Spacer(minLength: 4)
+
+            Menu {
+                Button {
+                    showOfflineTranslationStart = true
+                } label: {
+                    Label("offlineTranslation.startFromReader".localized, systemImage: "text.bubble.fill")
+                }
+                Button {
+                    showOfflineTranslationManager = true
+                } label: {
+                    Label("offlineTranslation.manage".localized, systemImage: "list.bullet.rectangle")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 40)
+            }
+            .accessibilityLabel("offlineTranslation.menu".localized)
 
             Button {
                 HapticManager.shared.play(.light)
@@ -2453,6 +2480,7 @@ struct ContinuousScrollReader: View {
                         ForEach(pages) { page in
                             LocalImageView(
                                 url: page.url,
+                                comic: comic,
                                 comicID: comic.id,
                                 pageIndex: page.index,
                                 isOCREnabled: comic.isOCREnabled,
@@ -2750,6 +2778,7 @@ struct GuidedPanelReader: View {
                 if let page = currentPage {
                     LocalImageView(
                         url: page.url,
+                        comic: comic,
                         comicID: comic.id,
                         pageIndex: page.index,
                         isOCREnabled: comic.isOCREnabled,
@@ -3033,6 +3062,7 @@ struct AnimatedPageReader: View {
     private func pageView(index: Int) -> some View {
         LocalImageView(
             url: pages[index].url,
+            comic: comic,
             comicID: comic.id,
             pageIndex: index,
             isOCREnabled: comic.isOCREnabled,
@@ -3150,6 +3180,7 @@ struct DoublePageReader: View {
     private func pageView(index: Int) -> some View {
         LocalImageView(
             url: pages[index].url,
+            comic: comic,
             comicID: comic.id,
             pageIndex: index,
             isOCREnabled: comic.isOCREnabled,
@@ -3465,6 +3496,7 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
 
 struct LocalImageView: View {
     let url: URL
+    var comic: ComicBook? = nil
     var comicID: UUID? = nil
     var pageIndex: Int? = nil
     let isOCREnabled: Bool
@@ -3517,6 +3549,8 @@ struct LocalImageView: View {
     @State private var isRecognizingOCR = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
+    @State private var offlineTranslationTask: Task<(blocks: [TextBlock], setID: UUID, isNoText: Bool)?, Never>?
+    @State private var isOfflineTranslationDisplayed = false
     @State private var translationGeneration = UUID()
     @State private var ocrMagnificationTask: Task<Void, Never>?
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
@@ -3529,6 +3563,7 @@ struct LocalImageView: View {
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
+    @AppStorage("offline_translation_overlay_enabled") private var offlineTranslationOverlayEnabled = true
 
     private var aiTranslationMode: AITranslationMode {
         AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
@@ -3672,6 +3707,8 @@ struct LocalImageView: View {
         .onDisappear {
             translationTask?.cancel()
             translationTask = nil
+            offlineTranslationTask?.cancel()
+            offlineTranslationTask = nil
             translationGeneration = UUID()
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
@@ -3681,7 +3718,7 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: translateRequestID) { _, _ in
-            startTranslation()
+            startTranslation(force: true)
         }
         .onChange(of: ocrMagnifyRequestID) { _, _ in
             startOCRMagnification()
@@ -3697,6 +3734,21 @@ struct LocalImageView: View {
             guard newValue else { return }
             startTranslation()
         }
+        .onChange(of: offlineTranslationOverlayEnabled) { _, newValue in
+            offlineTranslationTask?.cancel()
+            isOfflineTranslationDisplayed = false
+            textBlocks.removeAll()
+            guard newValue else {
+                if isAutoTranslationEnabled { startTranslation() }
+                return
+            }
+            Task {
+                let loaded = await loadOfflineTranslationIfAvailable()
+                if !loaded, isAutoTranslationEnabled {
+                    startTranslation()
+                }
+            }
+        }
         .onChange(of: isOCREnabled) { _, newValue in
             if !newValue {
                 ocrTextBlocks.removeAll()
@@ -3705,22 +3757,31 @@ struct LocalImageView: View {
         .onChange(of: canTranslate) { _, newValue in
             if !newValue {
                 textBlocks.removeAll()
+                isOfflineTranslationDisplayed = false
             }
         }
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()
+            isOfflineTranslationDisplayed = false
             if isAutoTranslationEnabled {
-                startTranslation()
+                Task {
+                    let loaded = await loadOfflineTranslationIfAvailable()
+                    if !loaded { startTranslation() }
+                }
             }
         }
         .onChange(of: translationSourceLanguageRaw) { _, _ in
             // 修改原文语言后，当前翻译与 Apple 请求一并失效并重译（审查 #4）；
             // 同时清掉之前自动识别的 stable language，避免旧语言继续污染（审查 #9）
             textBlocks.removeAll()
+            isOfflineTranslationDisplayed = false
             appleTranslationRequests.removeAll()
             clearStableSourceLanguage()
             if isAutoTranslationEnabled {
-                startTranslation()
+                Task {
+                    let loaded = await loadOfflineTranslationIfAvailable()
+                    if !loaded { startTranslation() }
+                }
             }
         }
         .onChange(of: aiTranslationModeRaw) { _, _ in
@@ -4032,6 +4093,9 @@ struct LocalImageView: View {
         await MainActor.run {
             translationTask?.cancel()
             translationTask = nil
+            offlineTranslationTask?.cancel()
+            offlineTranslationTask = nil
+            isOfflineTranslationDisplayed = false
             translationGeneration = UUID()
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
@@ -4046,6 +4110,7 @@ struct LocalImageView: View {
                 isLoadingImage = false
                 loadFailed = false
                 uiImage = cachedImage
+                isOfflineTranslationDisplayed = false
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
                 debugRawBlocks.removeAll()
@@ -4061,7 +4126,8 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
             }
-            if isAutoTranslationEnabled {
+            let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+            if isAutoTranslationEnabled, !hasOfflineTranslation {
                 await MainActor.run { startTranslation() }
             }
             if isOCRMagnificationVisible {
@@ -4074,6 +4140,7 @@ struct LocalImageView: View {
             isLoadingImage = true
             loadFailed = false
             uiImage = nil
+            isOfflineTranslationDisplayed = false
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
             debugRawBlocks.removeAll()
@@ -4096,12 +4163,51 @@ struct LocalImageView: View {
             self.loadFailed = loadedImage == nil
             self.isLoadingImage = false
         }
-        if isAutoTranslationEnabled {
+        let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+        if isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
         if isOCRMagnificationVisible {
             await MainActor.run { startOCRMagnification() }
         }
+    }
+
+    /// 只验证 active set 当前页的原图指纹；开关关闭或没有漫画上下文时不读取离线仓库。
+    private func loadOfflineTranslationIfAvailable() async -> Bool {
+        guard offlineTranslationOverlayEnabled,
+              let comic,
+              let pageIndex,
+              uiImage != nil else {
+            return false
+        }
+        offlineTranslationTask?.cancel()
+        let page = ComicPage(index: pageIndex, url: url)
+        let pageURL = url
+        let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        let source = comicTranslationSourceLanguage
+        let task = Task {
+            await OfflineTranslationOverlayProvider.validOverlay(
+                comic: comic,
+                page: page,
+                targetLanguage: target,
+                sourceLanguage: source
+            )
+        }
+        offlineTranslationTask = task
+        let result = await task.value
+        guard !Task.isCancelled,
+              self.url == pageURL,
+              self.comic?.id == comic.id else {
+            return false
+        }
+        offlineTranslationTask = nil
+        guard let result else {
+            isOfflineTranslationDisplayed = false
+            return false
+        }
+        textBlocks = result.blocks
+        isOfflineTranslationDisplayed = true
+        return true
     }
 
     private var zoomGesture: some Gesture {
@@ -4151,7 +4257,7 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
                 HapticManager.shared.play(.medium)
-                startTranslation()
+                startTranslation(force: true)
             }
     }
 
@@ -4308,9 +4414,14 @@ struct LocalImageView: View {
     }
     
     // 触发 AI 流程
-    private func startTranslation() {
+    private func startTranslation(force: Bool = false) {
         translationTask?.cancel()
         guard canTranslate, let image = uiImage else { return }
+        guard force || !isOfflineTranslationDisplayed else { return }
+        if force {
+            isOfflineTranslationDisplayed = false
+            textBlocks.removeAll()
+        }
         let pageURL = url
         let generation = UUID()
         translationGeneration = generation

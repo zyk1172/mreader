@@ -254,6 +254,8 @@ struct ContentView: View {
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
+    @State private var offlineTranslationStartComic: ComicBook?
+    @State private var offlineTranslationManagerComic: ComicBook?
     @State private var showTranslationPrompt = false
     @State private var showVisionPrompt = false
     @State private var showOCRSearch = false
@@ -266,6 +268,7 @@ struct ContentView: View {
     @AppStorage("ocr_show_debug_boxes") private var isOCRDebugBoxesEnabled = false
     @AppStorage("ocr_visual_verification_enabled") private var isOCRVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrLocalRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
+    @AppStorage("offline_translation_overlay_enabled") private var offlineTranslationOverlayEnabled = true
     @AppStorage("reading_daily_page_goal") private var readingDailyPageGoal = 40.0
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
     @AppStorage(ICloudMetadataSyncService.enabledKey) private var isICloudMetadataSyncEnabled = false
@@ -355,6 +358,12 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showStorageManager) {
                 StorageManagerView(library: library)
+            }
+            .sheet(item: $offlineTranslationStartComic) { comic in
+                OfflineTranslationStartView(comic: comic, currentPageIndex: comic.currentPageIndex)
+            }
+            .sheet(item: $offlineTranslationManagerComic) { comic in
+                OfflineTranslationManagerView(comic: comic)
             }
             .sheet(isPresented: $showActivity) {
                 ShelfActivityView(comics: library.comics)
@@ -1388,6 +1397,10 @@ struct ContentView: View {
             }
             Toggle("ocr.visualVerification".localized, isOn: $isOCRVisualVerificationEnabled)
             Toggle("ocr.showDebugBoxes".localized, isOn: $isOCRDebugBoxesEnabled)
+            Toggle("offlineTranslation.overlay".localized, isOn: $offlineTranslationOverlayEnabled)
+            Text("offlineTranslation.overlayFooter".localized)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -1706,6 +1719,20 @@ struct ContentView: View {
             } else {
                 Label("ocr.index.build".localized, systemImage: "text.magnifyingglass")
             }
+        }
+
+        Button {
+            HapticManager.shared.play(.light)
+            offlineTranslationStartComic = comic
+        } label: {
+            Label("offlineTranslation.start".localized, systemImage: "text.bubble.fill")
+        }
+
+        Button {
+            HapticManager.shared.play(.light)
+            offlineTranslationManagerComic = comic
+        } label: {
+            Label("offlineTranslation.manage".localized, systemImage: "list.bullet.rectangle")
         }
 
         if comic.sourceType == .komga || comic.sourceType == .opds {
@@ -3486,6 +3513,7 @@ struct StorageManagerView: View {
                     LabeledContent("storage.pageCache".localized, value: formattedFileSize(cacheSnapshot.remotePages))
                     LabeledContent("storage.generatedCache".localized, value: formattedFileSize(cacheSnapshot.generatedAssets))
                     LabeledContent("storage.tempExtractCache".localized, value: formattedFileSize(cacheSnapshot.temporaryFiles))
+                    LabeledContent("offlineTranslation.storage".localized, value: formattedFileSize(cacheSnapshot.offlineTranslations))
                     LabeledContent("storage.totalCache".localized, value: formattedFileSize(cacheSnapshot.readerCacheTotal))
                     Button(role: .destructive) {
                         clearReaderCaches()
