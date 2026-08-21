@@ -376,3 +376,9 @@
 "offlineTranslation.deleteMessage" = "This cannot be undone. The original comic will not be deleted.";
 "offlineTranslation.activateWhenComplete" = "Use this translation set when the selected task completes";
 "offlineTranslation.taskProgress" = "Selected task: %d/%d pages";
+"offlineTranslation.provider.choose" = "Choose provider";
+"offlineTranslation.provider.selected" = "Selected configuration";
+"offlineTranslation.policyBlocked" = "The current vision model repeatedly refused these pages. The task is paused.";
+"offlineTranslation.changeModel" = "Choose another model";
+"offlineTranslation.errorDetails" = "View error details";
+"nav.close" = "Close";

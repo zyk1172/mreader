@@ -21,6 +21,15 @@ nonisolated enum OfflineTranslationPageState: String, Codable, CaseIterable, Sen
         }
     }
 
+    var needsTranslationWork: Bool {
+        switch self {
+        case .completed, .noText:
+            return false
+        case .pending, .processing, .partial, .failed, .stale:
+            return true
+        }
+    }
+
     var isUsableOverlay: Bool {
         switch self {
         case .completed, .noText, .partial:
@@ -51,18 +60,41 @@ nonisolated enum OfflineTranslationJobState: String, Codable, CaseIterable, Send
     }
 }
 
+nonisolated enum OfflineTranslationPauseReason: String, Codable, Sendable {
+    case providerPolicyBlocked
+    case lowDiskSpace
+    case userRequested
+    case interrupted
+}
+
+nonisolated enum OfflineTranslationStartIntent: Sendable, Equatable {
+    case entire
+    case fromCurrent
+    case retryFailed(setID: UUID)
+    case missing(setID: UUID)
+
+    var sourceSetID: UUID? {
+        switch self {
+        case .entire, .fromCurrent: return nil
+        case .retryFailed(let setID), .missing(let setID): return setID
+        }
+    }
+}
+
 nonisolated enum OfflineTranslationSelection: Codable, Equatable, Sendable {
     case entireComic
     case fromPage(Int)
     case range(start: Int, end: Int)
     case missingPages
     case failedPages
+    case explicitPages([Int])
 
     private enum CodingKeys: String, CodingKey {
         case kind
         case page
         case start
         case end
+        case pageIndexes
     }
 
     private enum Kind: String, Codable {
@@ -71,6 +103,7 @@ nonisolated enum OfflineTranslationSelection: Codable, Equatable, Sendable {
         case range
         case missingPages
         case failedPages
+        case explicitPages
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +123,8 @@ nonisolated enum OfflineTranslationSelection: Codable, Equatable, Sendable {
             self = .missingPages
         case .failedPages:
             self = .failedPages
+        case .explicitPages:
+            self = .explicitPages(try container.decode([Int].self, forKey: .pageIndexes))
         }
     }
 
@@ -109,6 +144,9 @@ nonisolated enum OfflineTranslationSelection: Codable, Equatable, Sendable {
             try container.encode(Kind.missingPages, forKey: .kind)
         case .failedPages:
             try container.encode(Kind.failedPages, forKey: .kind)
+        case .explicitPages(let pageIndexes):
+            try container.encode(Kind.explicitPages, forKey: .kind)
+            try container.encode(pageIndexes, forKey: .pageIndexes)
         }
     }
 
@@ -141,10 +179,15 @@ nonisolated enum OfflineTranslationSelection: Codable, Equatable, Sendable {
         case .missingPages:
             pageIndexes = (0..<totalPages).filter { index in
                 guard let state = existingStates[index] else { return true }
-                return !state.countsAsCoverage
+                return state.needsTranslationWork
             }
         case .failedPages:
             pageIndexes = (0..<totalPages).filter { existingStates[$0] == .failed }
+        case .explicitPages(let indexes):
+            guard indexes.allSatisfy({ (0..<totalPages).contains($0) }) else {
+                throw OfflineTranslationSelectionError.rangeOutOfBounds(start: indexes.min() ?? 0, end: indexes.max() ?? 0)
+            }
+            pageIndexes = indexes
         }
         guard !pageIndexes.isEmpty else {
             throw OfflineTranslationSelectionError.noMatchingPages
@@ -280,6 +323,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             translation: block.translation,
             lines: block.translationLines,
             textBox: OfflineTranslationRect(block.boundingBox),
+            bubbleBox: block.bubbleBox.map(OfflineTranslationRect.init),
             polygon: block.polygon.map(OfflineTranslationPoint.init),
             confidence: block.confidence,
             classification: classification,
@@ -298,6 +342,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             ocrSource: "offline:\(classification)",
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
+            bubbleBox: bubbleBox?.cgRect,
             polygon: polygon.map(\.cgPoint),
             translationLines: lines
         )
@@ -444,13 +489,37 @@ nonisolated struct OfflineTranslationIndex: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let comicID: UUID
     var activeSetID: UUID?
+    var activeSetIDsByTargetLanguage: [String: UUID]
     var setIDs: [UUID]
 
-    init(comicID: UUID, activeSetID: UUID? = nil, setIDs: [UUID] = []) {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, comicID, activeSetID, activeSetIDsByTargetLanguage, setIDs
+    }
+
+    init(comicID: UUID, activeSetID: UUID? = nil, activeSetIDsByTargetLanguage: [String: UUID] = [:], setIDs: [UUID] = []) {
         self.schemaVersion = Self.currentSchemaVersion
         self.comicID = comicID
         self.activeSetID = activeSetID
+        self.activeSetIDsByTargetLanguage = activeSetIDsByTargetLanguage
         self.setIDs = setIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? Self.currentSchemaVersion
+        comicID = try container.decode(UUID.self, forKey: .comicID)
+        activeSetID = try container.decodeIfPresent(UUID.self, forKey: .activeSetID)
+        activeSetIDsByTargetLanguage = try container.decodeIfPresent([String: UUID].self, forKey: .activeSetIDsByTargetLanguage) ?? [:]
+        setIDs = try container.decodeIfPresent([UUID].self, forKey: .setIDs) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(comicID, forKey: .comicID)
+        try container.encodeIfPresent(activeSetID, forKey: .activeSetID)
+        try container.encode(activeSetIDsByTargetLanguage, forKey: .activeSetIDsByTargetLanguage)
+        try container.encode(setIDs, forKey: .setIDs)
     }
 }
 
@@ -485,6 +554,10 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
     var noTextPageIndexes: [Int]
     var failedPageIndexes: [Int]
     var retryCounts: [String: Int]
+    /// 连续触发 Provider 内容策略拒绝的次数；旧 job 缺失时按 0 处理。
+    var consecutiveProviderPolicyFailures: Int?
+    /// 暂停原因的稳定 raw value，避免 UI 依赖易变的错误原文。
+    var pauseReason: String?
     var lastError: String?
     let createdAt: Date
     var updatedAt: Date
@@ -536,6 +609,8 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         self.noTextPageIndexes = []
         self.failedPageIndexes = []
         self.retryCounts = [:]
+        self.consecutiveProviderPolicyFailures = 0
+        self.pauseReason = nil
         self.lastError = nil
         self.createdAt = createdAt
         self.updatedAt = createdAt
@@ -631,6 +706,32 @@ nonisolated enum OfflineTranslationRetryPolicy {
 
         guard backoffSeconds.indices.contains(max(attempt, 0)) else { return .fail }
         return .retry(afterSeconds: retryAfterSeconds ?? backoffSeconds[max(attempt, 0)])
+    }
+}
+
+nonisolated enum OfflineTranslationPolicyCircuit {
+    static let refusalThreshold = 3
+
+    static func isProviderRefusal(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        let statusCode: Int?
+        if let requestError = error as? AITranslationRequestError {
+            switch requestError {
+            case .server(_, let status, _), .serverWithRetryAfter(_, let status, _, _):
+                statusCode = status
+            default:
+                statusCode = nil
+            }
+        } else {
+            statusCode = nil
+        }
+        guard statusCode == 400 else { return false }
+        return message.contains("1301")
+            || message.contains("policy")
+            || message.contains("unsafe")
+            || message.contains("safety")
+            || message.contains("内容策略")
+            || message.contains("敏感")
     }
 }
 

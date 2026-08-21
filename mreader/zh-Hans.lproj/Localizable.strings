@@ -541,3 +541,9 @@
 "offlineTranslation.deleteMessage" = "删除后无法恢复。漫画原文件不会被删除。";
 "offlineTranslation.activateWhenComplete" = "所选任务完成后使用此译文版本";
 "offlineTranslation.taskProgress" = "本次任务：%d/%d 页";
+"offlineTranslation.provider.choose" = "选择接口";
+"offlineTranslation.provider.selected" = "当前配置";
+"offlineTranslation.policyBlocked" = "当前 Vision 模型连续拒绝这些页面，任务已暂停。";
+"offlineTranslation.changeModel" = "选择其他模型";
+"offlineTranslation.errorDetails" = "查看错误详情";
+"nav.close" = "关闭";

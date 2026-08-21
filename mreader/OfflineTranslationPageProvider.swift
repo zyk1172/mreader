@@ -1,6 +1,30 @@
 import Foundation
 import UIKit
 
+private final class OfflineTranslationFingerprintCache: @unchecked Sendable {
+    static let shared = OfflineTranslationFingerprintCache()
+
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func value(for key: String, data: Data) -> String {
+        lock.lock()
+        if let cached = values[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let fingerprint = OfflineTranslationFingerprint.sha256(for: data)
+        lock.lock()
+        values[key] = fingerprint
+        if values.count > 512 {
+            values.removeValue(forKey: values.keys.first!)
+        }
+        lock.unlock()
+        return fingerprint
+    }
+}
+
 nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
     case sourceUnavailable
     case pageUnavailable(Int)
@@ -20,6 +44,29 @@ nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
 
 /// 统一处理本地文件、归档、Komga 和 OPDS 页面。它只读取原始页数据，不写入 ReaderImageCache。
 enum OfflineTranslationPageProvider {
+    final class SourceSession: @unchecked Sendable {
+        private let scopedURL: URL?
+        private let didStart: Bool
+
+        init(comic: ComicBook) {
+            guard comic.sourceType == .local,
+                  let resolvedURL = try? ComicManager.resolveBookmark(comic.bookmarkData) else {
+                scopedURL = nil
+                didStart = false
+                return
+            }
+            scopedURL = resolvedURL
+            didStart = resolvedURL.startAccessingSecurityScopedResource()
+        }
+
+        deinit {
+            if didStart { scopedURL?.stopAccessingSecurityScopedResource() }
+        }
+    }
+
+    static func sourceSession(for comic: ComicBook) -> SourceSession {
+        SourceSession(comic: comic)
+    }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {
         switch comic.sourceType {
         case .local:
@@ -33,18 +80,20 @@ enum OfflineTranslationPageProvider {
         }
     }
 
-    static func data(for comic: ComicBook, page: ComicPage) async throws -> Data {
+    static func data(for comic: ComicBook, page: ComicPage, session: SourceSession? = nil) async throws -> Data {
         try Task.checkCancellation()
         let data: Data?
         switch comic.sourceType {
         case .local:
-            data = await localData(for: comic, pageURL: page.url)
+            data = await localData(for: comic, pageURL: page.url, session: session)
         case .komga:
             data = RemotePageLoader.isRemotePageURL(page.url)
                 ? await RemotePageLoader.imageData(forRemotePageURL: page.url)
                 : try? Data(contentsOf: page.url)
         case .opds:
-            data = try? Data(contentsOf: page.url)
+            data = ComicManager.isArchivePageURL(page.url)
+                ? ComicManager.imageData(forArchivePageURL: page.url)
+                : try? Data(contentsOf: page.url)
         }
         guard let data, !data.isEmpty else {
             throw OfflineTranslationPageProviderError.pageUnavailable(page.index)
@@ -59,21 +108,36 @@ enum OfflineTranslationPageProvider {
         return image
     }
 
-    static func fingerprint(for data: Data) -> String {
-        OfflineTranslationFingerprint.sha256(for: data)
+    static func fingerprint(for data: Data, pageURL: URL? = nil) -> String {
+        if let pageURL,
+           let key = cacheKey(for: pageURL) {
+            return OfflineTranslationFingerprintCache.shared.value(for: key, data: data)
+        }
+        return OfflineTranslationFingerprint.sha256(for: data)
     }
 
-    private static func localData(for comic: ComicBook, pageURL: URL) async -> Data? {
+    private static func cacheKey(for pageURL: URL) -> String? {
+        if ComicManager.isArchivePageURL(pageURL) {
+            return ComicManager.archivePageCacheKey(for: pageURL)
+        }
+        guard !RemotePageLoader.isRemotePageURL(pageURL),
+              let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
+            return nil
+        }
+        return "\(pageURL.path)#\(values.fileSize ?? 0)#\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+    }
+
+    private static func localData(for comic: ComicBook, pageURL: URL, session: SourceSession?) async -> Data? {
         await Task.detached(priority: .userInitiated) {
-            let scopedURL: URL?
-            if let resolvedURL = try? ComicManager.resolveBookmark(comic.bookmarkData) {
-                scopedURL = resolvedURL
+            let fallbackURL: URL?
+            if session == nil, let resolvedURL = try? ComicManager.resolveBookmark(comic.bookmarkData) {
+                fallbackURL = resolvedURL
             } else {
-                scopedURL = nil
+                fallbackURL = nil
             }
-            let started = scopedURL?.startAccessingSecurityScopedResource() ?? false
+            let fallbackStarted = fallbackURL?.startAccessingSecurityScopedResource() ?? false
             defer {
-                if started { scopedURL?.stopAccessingSecurityScopedResource() }
+                if fallbackStarted { fallbackURL?.stopAccessingSecurityScopedResource() }
             }
             if ComicManager.isArchivePageURL(pageURL) {
                 return ComicManager.imageData(forArchivePageURL: pageURL)
@@ -91,7 +155,7 @@ enum OfflineTranslationOverlayProvider {
         targetLanguage: TranslationTargetLanguage,
         sourceLanguage: TranslationSourceLanguage
     ) async -> (blocks: [TextBlock], setID: UUID, isNoText: Bool)? {
-        guard let active = await OfflineTranslationStorageManager.shared.activeManifest(for: comic.id),
+        guard let active = await OfflineTranslationStorageManager.shared.activeManifest(for: comic.id, targetLanguage: targetLanguage),
               active.targetLanguage == targetLanguage,
               active.sourceLanguage == sourceLanguage,
               let savedPage = await OfflineTranslationStorageManager.shared.page(
@@ -104,8 +168,9 @@ enum OfflineTranslationOverlayProvider {
         }
 
         do {
-            let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page)
-            let fingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData)
+            let session = OfflineTranslationPageProvider.sourceSession(for: comic)
+            let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page, session: session)
+            let fingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData, pageURL: page.url)
             guard fingerprint == savedPage.sourceFingerprint else {
                 await OfflineTranslationStorageManager.shared.markPageStale(
                     comicID: comic.id,

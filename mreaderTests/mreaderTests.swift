@@ -1904,6 +1904,7 @@ private func makeTestPageRequest(
             confidence: 0.91,
             ocrSource: "vision",
             estimatedFontScale: 0.04,
+            bubbleBox: CGRect(x: 0.05, y: 0.15, width: 0.4, height: 0.2),
             polygon: [CGPoint(x: 0.1, y: 0.2), CGPoint(x: 0.4, y: 0.2)]
         )
         let dto = OfflineTranslatedBlock(block: block, id: "b0")
@@ -1916,6 +1917,7 @@ private func makeTestPageRequest(
         #expect(roundTrip.text == "こんにちは")
         #expect(roundTrip.translation == "你好")
         #expect(abs(roundTrip.boundingBox.minX - 0.1) < 0.0001)
+        #expect(abs((roundTrip.bubbleBox?.minX ?? 0) - 0.05) < 0.0001)
     }
 
     @Test func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {
@@ -2008,6 +2010,34 @@ private func makeTestPageRequest(
         #expect(await storage.index(for: comicID) == nil)
     }
 
+    @Test func offlineTranslationKeepsAnActiveSetPerTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-active-target-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: target,
+                providerID: UUID(),
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let chinese = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        try await storage.saveManifest(chinese, activate: true)
+        try await storage.saveManifest(english, activate: true)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
     @Test func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {
         let first = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
         let same = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
@@ -2094,6 +2124,21 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageState.stale.isUsableOverlay)
         #expect(OfflineTranslationJobState.interrupted.isTerminal == false)
         #expect(OfflineTranslationJobState.completedWithFailures.isTerminal)
+        #expect(OfflineTranslationPageState.partial.needsTranslationWork)
+        #expect(!OfflineTranslationPageState.completed.needsTranslationWork)
+    }
+
+    @Test func offlineTranslationIntentAndPolicyCircuitAreExplicit() {
+        #expect(OfflineTranslationStartIntent.fromCurrent.sourceSetID == nil)
+        let explicitIndexes = try? OfflineTranslationSelection.explicitPages([1, 3]).pageIndexes(totalPages: 4)
+        #expect(explicitIndexes == [1, 3])
+        let refusal = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 400,
+            message: "[1301] content policy refusal"
+        )
+        #expect(OfflineTranslationPolicyCircuit.isProviderRefusal(refusal))
+        #expect(OfflineTranslationPolicyCircuit.refusalThreshold == 3)
     }
 
     @Test func offlineTranslationRetryPolicyStopsAtFiniteBackoffAndPausesForAuth() {

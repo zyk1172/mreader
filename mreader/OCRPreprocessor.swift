@@ -504,7 +504,7 @@ struct OCRPreprocessor {
     }
 
     /// #8：最高精度模式也必须尊重 sourceLanguagePreference。
-    private static func maximumAccuracyPasses(for options: Options) -> [(name: String, languages: [String])] {
+    nonisolated private static func maximumAccuracyPasses(for options: Options) -> [(name: String, languages: [String])] {
         if let source = options.sourceLanguagePreference, source != .automatic {
             let effective = effectiveLanguages(for: options)
             let primaryIDs = filteredLanguages(

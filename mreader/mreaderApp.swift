@@ -33,7 +33,8 @@ struct mreaderApp: App {
             print("MReader AI legacy configuration migration failed: \(error.localizedDescription)")
         }
         Task {
-            if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(), count > 0 {
+            let pendingJobID = OfflineTranslationBackgroundScheduler.shared.pendingJobID
+            if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(excludingJobID: pendingJobID), count > 0 {
                 print("MReader marked \(count) offline translation jobs interrupted after relaunch")
             }
         }

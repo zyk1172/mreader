@@ -46,7 +46,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
         targetLanguage: TranslationTargetLanguage,
         styleInstructions: String,
         readingDirectionRaw: String,
-        activateWhenComplete: Bool = true
+        activateWhenComplete: Bool = true,
+        providerID: UUID? = nil,
+        visionModel: String? = nil,
+        sourceSetID: UUID? = nil
     ) {
         guard task == nil else { return }
         lastError = nil
@@ -59,7 +62,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 targetLanguage: targetLanguage,
                 styleInstructions: styleInstructions,
                 readingDirectionRaw: readingDirectionRaw,
-                activateWhenComplete: activateWhenComplete
+                activateWhenComplete: activateWhenComplete,
+                providerID: providerID,
+                visionModel: visionModel,
+                sourceSetID: sourceSetID
             )
         }
     }
@@ -76,6 +82,35 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     ?? AITranslator.defaultTranslationStyleInstructions
             )
         }
+    }
+
+    /// 重新绑定已暂停任务的 Provider/Vision 模型。旧任务保留为历史记录，
+    /// 新任务从旧 Set 继承仍有效页面，并只处理失败页和未处理页。
+    func rebind(
+        _ savedJob: OfflineTranslationJobRecord,
+        comic: ComicBook,
+        providerID: UUID,
+        visionModel: String
+    ) {
+        guard task == nil else { return }
+        let remaining = savedJob.pageIndexes.enumerated().compactMap { offset, pageIndex in
+            offset >= savedJob.nextPageOffset || savedJob.failedPageIndexes.contains(pageIndex)
+                ? pageIndex
+                : nil
+        }
+        guard !remaining.isEmpty else { return }
+        start(
+            comic: comic,
+            selection: .explicitPages(remaining),
+            sourceLanguage: savedJob.sourceLanguage,
+            targetLanguage: savedJob.targetLanguage,
+            styleInstructions: savedJob.styleInstructions ?? AITranslator.defaultTranslationStyleInstructions,
+            readingDirectionRaw: savedJob.readingDirectionRaw,
+            activateWhenComplete: savedJob.activateWhenComplete ?? true,
+            providerID: providerID,
+            visionModel: visionModel,
+            sourceSetID: savedJob.setID
+        )
     }
 
     func pause() {
@@ -101,10 +136,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
         targetLanguage: TranslationTargetLanguage,
         styleInstructions: String,
         readingDirectionRaw: String,
-        activateWhenComplete: Bool
+        activateWhenComplete: Bool,
+        providerID: UUID?,
+        visionModel: String?,
+        sourceSetID: UUID?
     ) async {
         do {
-            let configuration = try frozenConfiguration()
+            let configuration = try frozenConfiguration(
+                for: providerID,
+                expectedVisionModel: visionModel
+            )
+            let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
             let totalPages = pages.count
             let promptSnapshot = OfflineTranslationPromptBuilder.make(
@@ -114,19 +156,20 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 styleInstructions: styleInstructions,
                 previousContext: ""
             )
-            let active = await storage.activeManifest(for: comic.id)
-            let activeIsCompatible = active.map {
-                $0.sourceLanguage == sourceLanguage
-                    && $0.targetLanguage == targetLanguage
-                    && $0.providerID == configuration.profileID
-                    && $0.baseURL == configuration.baseURL
-                    && $0.visionModel == configuration.visionModel
-                    && $0.promptRevision == OfflineTranslationPromptBuilder.revision
-                    && $0.promptSnapshot == promptSnapshot
-            } ?? false
+            let active = await storage.activeManifest(for: comic.id, targetLanguage: targetLanguage)
+            let sourceSet: OfflineTranslationSetManifest?
+            if let sourceSetID {
+                // A retry/missing-pages request must inherit from the explicitly selected set,
+                // even when that set is not currently active.
+                sourceSet = await storage.manifest(comicID: comic.id, setID: sourceSetID)
+            } else {
+                sourceSet = active
+            }
             let existingStates: [Int: OfflineTranslationPageState]
-            if let active, activeIsCompatible {
-                existingStates = await storage.pageStates(comicID: comic.id, setID: active.id)
+            if let sourceSet,
+               sourceSet.targetLanguage == targetLanguage,
+               sourceSet.sourceLanguage == sourceLanguage {
+                existingStates = await storage.pageStates(comicID: comic.id, setID: sourceSet.id)
             } else {
                 existingStates = [:]
             }
@@ -147,15 +190,24 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 promptRevision: OfflineTranslationPromptBuilder.revision,
                 promptSnapshot: promptSnapshot,
                 totalPages: totalPages,
-                derivedFromSetID: active?.id
+                derivedFromSetID: sourceSet?.id
             )
-            let shouldActivateImmediately = active == nil
+            let shouldActivateImmediately = sourceSet == nil
             try await storage.saveManifest(manifestValue, activate: shouldActivateImmediately)
-            if let active, activeIsCompatible {
+            if let sourceSet,
+               sourceSet.targetLanguage == targetLanguage,
+               sourceSet.sourceLanguage == sourceLanguage {
+                var sourceFingerprints: [Int: String] = [:]
+                let excluded = Set(pageIndexes)
+                for index in 0..<min(sourceSet.totalPages, pages.count) where !excluded.contains(index) {
+                    guard let data = try? await OfflineTranslationPageProvider.data(for: comic, page: pages[index], session: sourceSession) else { continue }
+                    sourceFingerprints[index] = OfflineTranslationPageProvider.fingerprint(for: data, pageURL: pages[index].url)
+                }
                 _ = try await storage.copyValidPages(
-                    from: active.id,
+                    from: sourceSet.id,
                     to: manifestValue,
-                    excludingPageIndexes: Set(pageIndexes)
+                    excludingPageIndexes: excluded,
+                    sourceFingerprints: sourceFingerprints
                 )
             }
 
@@ -182,14 +234,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             job = record
             manifest = await storage.manifest(comicID: comic.id, setID: manifestValue.id)
-            progress = 0
+            progress = record.pageIndexes.isEmpty
+                ? 1
+                : Double(record.nextPageOffset) / Double(record.pageIndexes.count)
             isRunning = true
             await execute(
                 record,
                 comic: comic,
                 pages: pages,
                 configuration: configuration,
-                styleInstructions: styleInstructions
+                styleInstructions: styleInstructions,
+                sourceSession: sourceSession
             )
         } catch {
             isRunning = false
@@ -209,6 +264,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 expectedVisionModel: savedJob.visionModel,
                 expectedBaseURL: savedJob.baseURL
             )
+            let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
             guard pages.count == savedJob.totalPages else {
                 throw OfflineTranslationRunError.failed("漫画页数已变化，无法安全续传")
@@ -221,13 +277,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             job = record
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+            progress = record.pageIndexes.isEmpty
+                ? 1
+                : Double(min(record.nextPageOffset, record.pageIndexes.count)) / Double(record.pageIndexes.count)
             isRunning = true
             await execute(
                 record,
                 comic: comic,
                 pages: pages,
                 configuration: configuration,
-                styleInstructions: styleInstructions
+                styleInstructions: styleInstructions,
+                sourceSession: sourceSession
             )
         } catch {
             isRunning = false
@@ -250,7 +310,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
         comic: ComicBook,
         pages: [ComicPage],
         configuration: AIActiveConfiguration,
-        styleInstructions: String
+        styleInstructions: String,
+        sourceSession: OfflineTranslationPageProvider.SourceSession
     ) async {
         var record = initialJob
         let taskID = BackgroundTaskCenter.shared.begin(
@@ -280,13 +341,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     progress: progress
                 )
 
+                var sourceData: Data?
+                var sourceFingerprint = ""
+                var pixelWidth = 0
+                var pixelHeight = 0
                 do {
                     let page = try pageAt(pageIndex, pages: pages)
-                    let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page)
-                    let sourceFingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData)
+                    sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page, session: sourceSession)
+                    guard let sourceData else { throw OfflineTranslationPageProviderError.pageUnavailable(pageIndex) }
+                    sourceFingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData, pageURL: page.url)
                     let image = try OfflineTranslationPageProvider.image(for: sourceData, pageIndex: pageIndex)
-                    let pixelWidth = image.cgImage?.width ?? Int(image.size.width * image.scale)
-                    let pixelHeight = image.cgImage?.height ?? Int(image.size.height * image.scale)
+                    pixelWidth = image.cgImage?.width ?? Int(image.size.width * image.scale)
+                    pixelHeight = image.cgImage?.height ?? Int(image.size.height * image.scale)
 
                     if let existing = await storage.page(comicID: record.comicID, setID: record.setID, pageIndex: pageIndex),
                        existing.state.isUsableOverlay,
@@ -349,6 +415,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
                                ) {
                                 record.resolvedSourceLanguage = decision.languageCode
                             }
+                        case .partial(let translatedBlocks, _):
+                            pageState = translatedBlocks.isEmpty ? .noText : .partial
+                            blocks = translatedBlocks.enumerated().map { index, block in
+                                block.offlineTranslatedBlock(id: "b\(index)")
+                            }
                         }
                         processingPage.state = pageState
                         processingPage.resolvedSourceLanguage = record.resolvedSourceLanguage
@@ -367,6 +438,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         )
                         try await storage.savePageAndUpdateManifest(processingPage)
                         registerSuccess(pageState, pageIndex: pageIndex, in: &record)
+                        record.consecutiveProviderPolicyFailures = 0
                     }
                     record.nextPageOffset += 1
                     record.currentPageIndex = nil
@@ -386,16 +458,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     return
                 } catch {
                     let message = error.localizedDescription
-                    let page = pages.indices.contains(pageIndex) ? pages[pageIndex] : nil
-                    if let page,
-                       let sourceData = try? await OfflineTranslationPageProvider.data(for: comic, page: page) {
+                    let loadedSourceData = sourceData
+                    if let loadedSourceData {
                         let failedPage = OfflineTranslatedPage(
                             comicID: record.comicID,
                             setID: record.setID,
                             pageIndex: pageIndex,
-                            sourceFingerprint: OfflineTranslationPageProvider.fingerprint(for: sourceData),
-                            pixelWidth: 0,
-                            pixelHeight: 0,
+                            sourceFingerprint: sourceFingerprint.isEmpty
+                                ? OfflineTranslationFingerprint.sha256(for: loadedSourceData)
+                                : sourceFingerprint,
+                            pixelWidth: pixelWidth,
+                            pixelHeight: pixelHeight,
                             blocks: [],
                             state: .failed,
                             providerID: configuration.profileID,
@@ -412,6 +485,22 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     record.nextPageOffset += 1
                     record.currentPageIndex = nil
                     record.updatedAt = Date()
+                    if OfflineTranslationPolicyCircuit.isProviderRefusal(error) {
+                        let failures = (record.consecutiveProviderPolicyFailures ?? 0) + 1
+                        record.consecutiveProviderPolicyFailures = failures
+                        if failures >= OfflineTranslationPolicyCircuit.refusalThreshold {
+                            record.state = .paused
+                            record.pauseReason = OfflineTranslationPauseReason.providerPolicyBlocked.rawValue
+                            record.lastError = "当前模型连续多页触发内容策略限制，任务已暂停。请更换 Vision 模型后继续。"
+                            try await checkpoint(record)
+                            lastError = record.lastError
+                            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+                            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
+                            return
+                        }
+                    } else {
+                        record.consecutiveProviderPolicyFailures = 0
+                    }
                     try await checkpoint(record)
                 }
                 progress = record.pageIndexes.isEmpty
@@ -433,6 +522,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch OfflineTranslationStorageError.lowDiskSpace {
             record.state = .paused
+            record.pauseReason = OfflineTranslationPauseReason.lowDiskSpace.rawValue
             record.lastError = OfflineTranslationStorageError.lowDiskSpace.localizedDescription
             record.updatedAt = Date()
             try? await jobStore.save(record)
@@ -442,6 +532,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch is CancellationError {
             record.state = stopMode == .cancel ? .cancelled : .paused
+            record.pauseReason = stopMode == .cancel
+                ? nil
+                : OfflineTranslationPauseReason.userRequested.rawValue
             record.lastError = stopMode == .cancel ? "用户取消了任务" : "任务已暂停，可继续处理"
             record.updatedAt = Date()
             try? await jobStore.save(record)
@@ -449,7 +542,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch {
-            record.state = .completedWithFailures
+            record.state = .interrupted
+            record.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
             record.lastError = error.localizedDescription
             record.updatedAt = Date()
             try? await jobStore.save(record)

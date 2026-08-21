@@ -223,7 +223,6 @@ final class ComicLibraryStore: ObservableObject {
         Task {
             await load()
             purgeNetworkLibraryState()
-            runStartupMaintenance()
         }
     }
 
@@ -834,8 +833,6 @@ final class ComicLibraryStore: ObservableObject {
     func runStartupMaintenance() {
         Task {
             await syncAllLibrariesAsync()
-            let validComicIDs = Set(comics.map(\.id))
-            _ = try? await OfflineTranslationStorageManager.shared.maintenance(validComicIDs: validComicIDs)
         }
     }
 

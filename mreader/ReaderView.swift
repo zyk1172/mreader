@@ -115,7 +115,7 @@ struct ReaderContainerView: View {
     }
 }
 
-enum ReadingMode: String, CaseIterable {
+nonisolated enum ReadingMode: String, CaseIterable {
     case horizontalPage
     case verticalPage
     case continuousScroll
@@ -124,26 +124,26 @@ enum ReadingMode: String, CaseIterable {
     case guidedPanel
 }
 
-enum ReadingDirection: String, CaseIterable {
+nonisolated enum ReadingDirection: String, CaseIterable {
     case leftToRight
     case rightToLeft
 }
 
-enum PageTurnAnimation: String, CaseIterable {
+nonisolated enum PageTurnAnimation: String, CaseIterable {
     case none
     case slide
     case fade
     case curl
 }
 
-enum ImageFitMode: String, CaseIterable {
+nonisolated enum ImageFitMode: String, CaseIterable {
     case fitScreen
     case fitWidth
     case fitHeight
     case original
 }
 
-enum ScrollSpeed: String, CaseIterable {
+nonisolated enum ScrollSpeed: String, CaseIterable {
     case slow
     case standard
     case fast
@@ -160,7 +160,7 @@ enum ScrollSpeed: String, CaseIterable {
     }
 }
 
-private struct InitialReadingPreset {
+nonisolated private struct InitialReadingPreset {
     let readingMode: ReadingMode
     let pageTurnAnimation: PageTurnAnimation
     let imageFitMode: ImageFitMode
@@ -359,6 +359,9 @@ private final class ReaderImageCache {
     private var activePreloadCount = 0
     private var maximumConcurrentPreloads = 2
     private var preloadKeys: Set<String> = []
+    /// Foreground readers that joined a preload task protect that task from a
+    /// subsequent preload-window refresh cancelling the shared decode.
+    private var foregroundLoadKeys: Set<String> = []
     private let preloadBudgetBytes: Int
 
     private init() {
@@ -416,11 +419,15 @@ private final class ReaderImageCache {
         }
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
+            foregroundLoadKeys.insert(key)
+            defer { foregroundLoadKeys.remove(key) }
             return await existingTask.value
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
+            foregroundLoadKeys.insert(higherKey)
+            defer { foregroundLoadKeys.remove(higherKey) }
             return await existingTask.value
         }
 
@@ -430,7 +437,9 @@ private final class ReaderImageCache {
         }
         inFlightLoads[key] = task
         loadingCosts[key] = estimatedCost
+        foregroundLoadKeys.insert(key)
         let image = await task.value
+        foregroundLoadKeys.remove(key)
         inFlightLoads[key] = nil
         loadingCosts[key] = nil
         if let image {
@@ -465,6 +474,7 @@ private final class ReaderImageCache {
     private func startPreloading(_ urls: [URL], maxPixelSize: CGFloat, maximumConcurrent: Int) {
         let desiredKeys = Set(urls.map { cacheKey(for: $0, maxPixelSize: maxPixelSize) })
         for staleKey in preloadKeys.subtracting(desiredKeys) {
+            guard !foregroundLoadKeys.contains(staleKey) else { continue }
             inFlightLoads[staleKey]?.cancel()
         }
 
@@ -477,7 +487,10 @@ private final class ReaderImageCache {
                     maxPixelSize: maxPixelSize
                 )
             }
-            .filter { cachedImage(for: $0.url, maxPixelSize: maxPixelSize) == nil && inFlightLoads[$0.key] == nil }
+            .filter {
+                cachedImage(for: $0.url, maxPixelSize: maxPixelSize) == nil
+                    && inFlightKeySatisfying(url: $0.url, maxPixelSize: maxPixelSize) == nil
+            }
 
         preloadQueue = candidates
         maximumConcurrentPreloads = max(1, maximumConcurrent)
@@ -534,6 +547,7 @@ private final class ReaderImageCache {
             loadingCosts[key] = nil
         }
         preloadKeys.removeAll()
+        foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
         print("MReader decoded image cache memory cleared")
@@ -545,7 +559,8 @@ private final class ReaderImageCache {
 
     private func cacheKey(for url: URL, maxPixelSize: CGFloat) -> String {
         if ComicManager.isArchivePageURL(url) {
-            return "\(url.absoluteString)#px=\(Int(maxPixelSize))"
+            let sourceKey = ComicManager.archivePageCacheKey(for: url) ?? url.absoluteString
+            return "\(sourceKey)#px=\(Int(maxPixelSize))"
         }
         if RemotePageLoader.isRemotePageURL(url) {
             return "\(url.absoluteString)#px=\(Int(maxPixelSize))"
@@ -557,6 +572,13 @@ private final class ReaderImageCache {
     }
 
     private func estimatedDecodedCost(for url: URL, maxPixelSize: CGFloat) -> Int {
+        if ComicManager.isArchivePageURL(url),
+           let pixelSize = ComicManager.imagePixelSizeForArchivePageURL(url),
+           pixelSize.width > 0,
+           pixelSize.height > 0 {
+            let scale = min(1, maxPixelSize / max(pixelSize.width, pixelSize.height))
+            return max(1, Int(pixelSize.width * scale * pixelSize.height * scale * 4))
+        }
         if RemotePageLoader.isRemotePageURL(url) {
             return Int(maxPixelSize * maxPixelSize * 0.55)
         }
@@ -1024,7 +1046,11 @@ struct ReaderView: View {
             comicSettingsSheet
         }
         .sheet(isPresented: $showOfflineTranslationStart) {
-            OfflineTranslationStartView(comic: comic, currentPageIndex: currentPageIndex)
+            OfflineTranslationStartView(
+                comic: comic,
+                currentPageIndex: currentPageIndex,
+                intent: .fromCurrent
+            )
         }
         .sheet(isPresented: $showOfflineTranslationManager) {
             OfflineTranslationManagerView(comic: comic)

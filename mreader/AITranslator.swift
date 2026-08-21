@@ -22,10 +22,11 @@ struct TextBlock: Identifiable, Sendable {
     var filterReason: String?
     var estimatedFontScale: Double
     var textColorHex: String?
+    var bubbleBox: CGRect?
     var polygon: [CGPoint]
     var translationLines: [String]
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, polygon: [CGPoint] = [], translationLines: [String] = []) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], translationLines: [String] = []) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -37,6 +38,7 @@ struct TextBlock: Identifiable, Sendable {
         // 横排行的字号≈行高，竖排列的字号≈列宽；取较小边比恒取高度更接近真实字号
         self.estimatedFontScale = estimatedFontScale ?? Double(min(boundingBox.width, boundingBox.height))
         self.textColorHex = textColorHex
+        self.bubbleBox = bubbleBox
         self.polygon = polygon
         self.translationLines = translationLines
     }
@@ -598,25 +600,49 @@ class AITranslator {
             previousContext: previousContext
         )
         do {
-            let blocks = try await recognizeVisionPage(
+            let result = try await recognizeVisionPageUsingModelWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: visionModel,
                 isRightToLeft: isRightToLeft,
                 viewportAspect: viewportAspect,
+                additionalInstructions: "",
                 translationTarget: targetLanguage,
                 translationPromptTemplate: prompt
             )
-            return blocks.isEmpty ? .noText : .translated(blocks)
+            guard !result.blocks.isEmpty else { return .noText }
+            return result.failedSlices > 0
+                ? .partial(result.blocks, failedSlices: result.failedSlices)
+                : .translated(result.blocks)
         } catch VisionTranslationError.emptyResult {
             return .noText
         }
     }
 
+    private struct VisionPageRecognitionResult {
+        let blocks: [TextBlock]
+        let successfulSlices: Int
+        let failedSlices: Int
+    }
+
     private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+        try await recognizeVisionPageUsingModelWithStats(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: additionalInstructions,
+            translationTarget: translationTarget,
+            translationPromptTemplate: translationPromptTemplate
+        ).blocks
+    }
+
+    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> VisionPageRecognitionResult {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
-            return try await recognizeVisionSlices(
+            return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
@@ -641,7 +667,11 @@ class AITranslator {
                 translationPromptTemplate: translationPromptTemplate
             )
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
-            return sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
+            return VisionPageRecognitionResult(
+                blocks: sortedTextBlocks(blocks, isRightToLeft: isRightToLeft),
+                successfulSlices: 1,
+                failedSlices: 0
+            )
         } catch {
             guard shouldFallbackToVisionSlices(after: error) else {
                 throw error
@@ -651,7 +681,7 @@ class AITranslator {
                 throw error
             }
             print("MReader vision full-page recognition fallback: \(error.localizedDescription)")
-            return try await recognizeVisionSlices(
+            return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
@@ -665,13 +695,15 @@ class AITranslator {
         }
     }
 
-    private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
         let maximumConcurrentSlices = 2
         var fallbackBlocks: [TextBlock] = []
         var lastError: Error?
+        var successfulSlices = 0
+        var failedSlices = 0
         await withTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
             var nextIndex = 0
 
@@ -710,8 +742,10 @@ class AITranslator {
                 switch result {
                 case .success(let blocks):
                     fallbackBlocks.append(contentsOf: blocks)
+                    successfulSlices += 1
                 case .failure(let error):
                     lastError = error
+                    failedSlices += 1
                     print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
                 }
                 if nextIndex < slices.count {
@@ -724,7 +758,11 @@ class AITranslator {
         guard !deduped.isEmpty else {
             throw lastError ?? VisionTranslationError.emptyResult
         }
-        return sortedTextBlocks(deduped, isRightToLeft: isRightToLeft)
+        return VisionPageRecognitionResult(
+            blocks: sortedTextBlocks(deduped, isRightToLeft: isRightToLeft),
+            successfulSlices: successfulSlices,
+            failedSlices: failedSlices
+        )
     }
 
     static func visualVerifyOCRRegions(
@@ -1272,7 +1310,10 @@ class AITranslator {
             let text: String
             let translation: String
             let rawLines: [String]
-            let polygon: [CGPoint]
+            let textPolygon: [CGPoint]
+            let bubblePolygon: [CGPoint]
+            let textRect: CGRect?
+            let bubbleRect: CGRect?
             let rect: CGRect
             let confidence: Double
             let classification: String
@@ -1280,17 +1321,19 @@ class AITranslator {
 
         let parsedItems = rawItems.compactMap { item -> RawVisionItem? in
             let text = firstString(in: item, keys: ["text", "sourceText", "source_text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let rawLines = ((item["translationLines"] ?? item["translation_lines"]) as? [String])?
+            let rawLines = ((item["lines"] ?? item["translationLines"] ?? item["translation_lines"]) as? [String])?
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty } ?? []
             let rawTranslation = firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let translation = rawLines.isEmpty ? rawTranslation : rawLines.joined(separator: "\n")
             guard !translation.isEmpty else { return nil }
-            let localPolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"])
-                ?? pointsValue(from: item["textPolygon"] ?? item["text_polygon"])
-                ?? []
-            let localRect = rectValue(from: item["bubbleBox"] ?? item["bubble_box"])
-                ?? rectValue(from: item["textBox"] ?? item["text_box"])
+            let textPolygon = pointsValue(from: item["textPolygon"] ?? item["text_polygon"]) ?? []
+            let bubblePolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"]) ?? []
+            let textRect = rectValue(from: item["textBox"] ?? item["text_box"])
+            let bubbleRect = rectValue(from: item["bubbleBox"] ?? item["bubble_box"])
+            let localPolygon = !textPolygon.isEmpty ? textPolygon : bubblePolygon
+            let localRect = textRect
+                ?? bubbleRect
                 ?? rectValue(from: item["box"])
                 ?? rectValue(from: item["boundingBox"])
                 ?? rectValue(from: item["bounding_box"])
@@ -1311,7 +1354,10 @@ class AITranslator {
                 text: text,
                 translation: translation,
                 rawLines: rawLines,
-                polygon: localPolygon,
+                textPolygon: textPolygon,
+                bubblePolygon: bubblePolygon,
+                textRect: textRect,
+                bubbleRect: bubbleRect,
                 rect: localRect,
                 confidence: doubleValue(from: item["confidence"]) ?? 0.75,
                 classification: classification
@@ -1323,8 +1369,8 @@ class AITranslator {
         if !parsedItems.isEmpty {
             guard visionCoordinateSpaceIsNormalized(
                 json,
-                rects: parsedItems.map(\.rect),
-                polygons: parsedItems.map(\.polygon)
+                rects: parsedItems.flatMap { [$0.textRect, $0.bubbleRect, $0.rect].compactMap { $0 } },
+                polygons: parsedItems.flatMap { [$0.textPolygon, $0.bubblePolygon] }
             ) else {
                 throw VisionTranslationError.invalidCoordinates
             }
@@ -1332,10 +1378,13 @@ class AITranslator {
         let coordinateDivisor = CGSize(width: 1, height: 1)
 
         let blocks = parsedItems.compactMap { item -> TextBlock? in
+            let normalizedBubbleRect = item.bubbleRect.map { normalizeVisionRect($0, divisor: coordinateDivisor) }
+            let mappedBubbleRect = normalizedBubbleRect.map { mapVisionRect($0, from: sourceRect) }
             let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
             let mappedRect = mapVisionRect(normalizedRect, from: sourceRect)
             guard isUsableVisionRect(mappedRect) else { return nil }
-            let mappedPolygon = item.polygon.map { point in
+            let sourcePolygon = !item.textPolygon.isEmpty ? item.textPolygon : item.bubblePolygon
+            let mappedPolygon = sourcePolygon.map { point in
                 let normalizedPoint = CGPoint(
                     x: point.x / coordinateDivisor.width,
                     y: point.y / coordinateDivisor.height
@@ -1351,6 +1400,7 @@ class AITranslator {
                 translation: item.translation,
                 confidence: item.confidence,
                 ocrSource: "vision-model:\(item.classification)",
+                bubbleBox: mappedBubbleRect.flatMap { isUsableVisionRect($0) ? $0 : nil },
                 polygon: mappedPolygon,
                 translationLines: item.rawLines
             )
@@ -1448,12 +1498,12 @@ class AITranslator {
                 let mapped = mapVisionRect(rect, from: sourceRect)
                 return isUsableVisionRect(mapped) ? mapped : nil
             }
-            guard let mappedRect = validBubbleRect ?? validTextRect.map({
+            guard let mappedRect = validTextRect ?? validBubbleRect.map({
                 expandedVisionTextRect($0, within: sourceRect)
             }) else {
                 return nil
             }
-            let sourcePolygon = validBubbleRect == nil ? item.textPolygon : item.bubblePolygon
+            let sourcePolygon = !item.textPolygon.isEmpty ? item.textPolygon : item.bubblePolygon
             let mappedPolygon = sourcePolygon.map { point in
                 CGPoint(
                     x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
@@ -1471,6 +1521,7 @@ class AITranslator {
                         validTextRect?.width ?? mappedRect.width,
                         validTextRect?.height ?? mappedRect.height
                     )),
+                    bubbleBox: validBubbleRect,
                     polygon: mappedPolygon
                 )
             )

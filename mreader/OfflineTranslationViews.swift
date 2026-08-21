@@ -4,14 +4,19 @@ import SwiftUI
 struct OfflineTranslationStartView: View {
     let comic: ComicBook
     let currentPageIndex: Int
+    let intent: OfflineTranslationStartIntent
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
-    @AppStorage("translation_target_language") private var targetLanguageRaw = TranslationTargetLanguage.simplifiedChinese.rawValue
     @AppStorage("translation_style_instructions") private var styleInstructions = AITranslator.defaultTranslationStyleInstructions
     @State private var scope: Scope = .entire
+    @State private var targetLanguageRaw: String
     @State private var sourceLanguageRaw: String
     @State private var rangeStart: Int
     @State private var rangeEnd: Int
+    @State private var providerID: UUID?
+    @State private var visionModel: String
+    @State private var availableMissingPages = 0
+    @State private var availableFailedPages = 0
     @State private var activateWhenComplete = true
     @State private var showingProgress = false
 
@@ -34,17 +39,48 @@ struct OfflineTranslationStartView: View {
         }
     }
 
-    init(comic: ComicBook, currentPageIndex: Int, initialScopeRaw: String? = nil) {
+    init(
+        comic: ComicBook,
+        currentPageIndex: Int,
+        intent: OfflineTranslationStartIntent = .entire
+    ) {
         self.comic = comic
         self.currentPageIndex = currentPageIndex
+        self.intent = intent
         _sourceLanguageRaw = State(initialValue: comic.translationSourceLanguageRaw)
-        _scope = State(initialValue: Scope(rawValue: initialScopeRaw ?? "") ?? .entire)
+        _targetLanguageRaw = State(
+            initialValue: UserDefaults.standard.string(forKey: "translation_target_language")
+                ?? TranslationTargetLanguage.simplifiedChinese.rawValue
+        )
+        let initialScope: Scope
+        switch intent {
+        case .entire: initialScope = .entire
+        case .fromCurrent: initialScope = .fromCurrent
+        case .retryFailed: initialScope = .failed
+        case .missing: initialScope = .missing
+        }
+        _scope = State(initialValue: initialScope)
         let last = max(comic.totalPages, 1)
         _rangeStart = State(initialValue: min(max(currentPageIndex + 1, 1), last))
         _rangeEnd = State(initialValue: last)
+        let profiles = AIProviderStore.shared.profiles()
+        let selectedID = intent.sourceSetID.flatMap { _ in nil }
+            ?? AIProviderStore.shared.activeProfileID()
+            ?? profiles.first?.id
+        _providerID = State(initialValue: selectedID)
+        _visionModel = State(
+            initialValue: profiles.first(where: { $0.id == selectedID })?.selectedVisionModel ?? ""
+        )
     }
 
     private var totalPages: Int { max(comic.totalPages, 1) }
+
+    private var visibleScopes: [Scope] {
+        var values: [Scope] = [.entire, .fromCurrent, .range]
+        if availableMissingPages > 0 { values.append(.missing) }
+        if availableFailedPages > 0 { values.append(.failed) }
+        return values
+    }
 
     private var selection: OfflineTranslationSelection {
         switch scope {
@@ -61,10 +97,12 @@ struct OfflineTranslationStartView: View {
         }
     }
 
+    private var providerProfiles: [AIProviderProfile] {
+        AIProviderStore.shared.profiles()
+    }
+
     private var providerProfile: AIProviderProfile? {
-        let store = AIProviderStore.shared
-        let id = store.activeProfileID() ?? store.profiles().first?.id
-        return id.flatMap { profileID in store.profiles().first(where: { $0.id == profileID }) }
+        providerProfiles.first(where: { $0.id == providerID })
     }
 
     var body: some View {
@@ -72,7 +110,7 @@ struct OfflineTranslationStartView: View {
             Form {
                 Section {
                     Picker("offlineTranslation.scope.title".localized, selection: $scope) {
-                        ForEach(Scope.allCases) { value in
+                        ForEach(visibleScopes) { value in
                             Text(value.titleKey.localized).tag(value)
                         }
                     }
@@ -106,16 +144,30 @@ struct OfflineTranslationStartView: View {
                 }
 
                 Section("offlineTranslation.provider.header".localized) {
-                    if let profile = providerProfile {
-                        LabeledContent("offlineTranslation.provider.name".localized, value: profile.name)
-                        LabeledContent(
-                            "offlineTranslation.provider.model".localized,
-                            value: profile.selectedVisionModel.isEmpty ? "—" : profile.selectedVisionModel
-                        )
-                        Text(profile.baseURL)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                    if !providerProfiles.isEmpty {
+                        Picker("offlineTranslation.provider.name".localized, selection: $providerID) {
+                            Text("offlineTranslation.provider.choose".localized).tag(UUID?.none)
+                            ForEach(providerProfiles) { profile in
+                                Text(profile.name).tag(Optional(profile.id))
+                            }
+                        }
+                        if let profile = providerProfile {
+                            Picker("offlineTranslation.provider.model".localized, selection: $visionModel) {
+                                ForEach(profile.models, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            .onChange(of: providerID) { _, newID in
+                                visionModel = providerProfiles.first(where: { $0.id == newID })?.selectedVisionModel ?? ""
+                            }
+                        }
+                        if let profile = providerProfile {
+                            LabeledContent("offlineTranslation.provider.selected".localized, value: "\(profile.name) · \(visionModel.isEmpty ? "—" : visionModel)")
+                            Text(profile.baseURL)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
                     } else {
                         Label("offlineTranslation.provider.missing".localized, systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
@@ -139,12 +191,18 @@ struct OfflineTranslationStartView: View {
                             targetLanguage: TranslationTargetLanguage.migrateLegacyValue(targetLanguageRaw),
                             styleInstructions: styleInstructions,
                             readingDirectionRaw: comic.readingDirectionRaw,
-                            activateWhenComplete: activateWhenComplete
+                            activateWhenComplete: activateWhenComplete,
+                            providerID: providerID,
+                            visionModel: visionModel,
+                            sourceSetID: intent.sourceSetID
                         )
                     } label: {
                         Label("offlineTranslation.start".localized, systemImage: "play.circle.fill")
                     }
-                    .disabled(!coordinator.canStart || (scope == .range && rangeStart > rangeEnd))
+                    .disabled(!coordinator.canStart
+                        || providerID == nil
+                        || visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (scope == .range && rangeStart > rangeEnd))
                 }
 
                 if let error = coordinator.lastError {
@@ -160,6 +218,24 @@ struct OfflineTranslationStartView: View {
                 if coordinator.job?.comicID == comic.id {
                     showingProgress = true
                 }
+            }
+            .task(id: targetLanguageRaw) {
+                let targetLanguage = TranslationTargetLanguage.migrateLegacyValue(targetLanguageRaw)
+                let sourceManifest: OfflineTranslationSetManifest?
+                if let setID = intent.sourceSetID {
+                    sourceManifest = await OfflineTranslationStorageManager.shared.manifest(comicID: comic.id, setID: setID)
+                } else {
+                    sourceManifest = await OfflineTranslationStorageManager.shared.activeManifest(
+                        for: comic.id,
+                        targetLanguage: targetLanguage
+                    )
+                }
+                guard let sourceManifest else {
+                    return
+                }
+                let states = await OfflineTranslationStorageManager.shared.pageStates(comicID: comic.id, setID: sourceManifest.id)
+                availableMissingPages = (0..<sourceManifest.totalPages).filter { states[$0]?.needsTranslationWork ?? true }.count
+                availableFailedPages = states.values.filter { $0 == .failed }.count
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -178,6 +254,7 @@ struct OfflineTranslationProgressView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
     @State private var showingCancelConfirmation = false
+    @State private var showingRebind = false
 
     var body: some View {
         NavigationStack {
@@ -205,7 +282,6 @@ struct OfflineTranslationProgressView: View {
                         VStack(spacing: 6) {
                             Text("offlineTranslation.completedCount".localizedFormat(manifest.completedPageCount))
                             Text("offlineTranslation.noTextCount".localizedFormat(manifest.noTextPageCount))
-                            Text("offlineTranslation.failedCount".localizedFormat(manifest.failedPageCount))
                             Text("offlineTranslation.coverageDetail".localizedFormat(
                                 manifest.coveredPageCount,
                                 manifest.totalPages,
@@ -215,12 +291,25 @@ struct OfflineTranslationProgressView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     }
-                    if let error = job.lastError, !error.isEmpty {
-                        Text(error)
+                    if job.pauseReason == OfflineTranslationPauseReason.providerPolicyBlocked.rawValue {
+                        Text("offlineTranslation.policyBlocked".localized)
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.orange)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
+                        Button("offlineTranslation.changeModel".localized) {
+                            showingRebind = true
+                        }
+                        .buttonStyle(.bordered)
+                    } else if let error = job.lastError, !error.isEmpty {
+                        DisclosureGroup("offlineTranslation.errorDetails".localized) {
+                            Text(error)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal)
                     }
                     HStack {
                         if coordinator.isRunning {
@@ -230,7 +319,6 @@ struct OfflineTranslationProgressView: View {
                             }
                         } else if job.state == .paused
                                     || job.state == .interrupted
-                                    || job.state == .cancelled
                                     || job.state == .needsConfiguration {
                             Button("offlineTranslation.resume".localized) {
                                 coordinator.resume(job, comic: comic)
@@ -248,7 +336,12 @@ struct OfflineTranslationProgressView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("nav.done".localized) { dismiss() }
+                    Button("nav.close".localized) { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showingRebind) {
+                if let job = coordinator.job, job.comicID == comic.id {
+                    OfflineTranslationRebindView(comic: comic, job: job)
                 }
             }
             .alert("offlineTranslation.stopTitle".localized, isPresented: $showingCancelConfirmation) {
@@ -278,6 +371,66 @@ struct OfflineTranslationProgressView: View {
     }
 }
 
+private struct OfflineTranslationRebindView: View {
+    let comic: ComicBook
+    let job: OfflineTranslationJobRecord
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
+    @State private var providerID: UUID?
+    @State private var visionModel: String
+
+    init(comic: ComicBook, job: OfflineTranslationJobRecord) {
+        self.comic = comic
+        self.job = job
+        let profiles = AIProviderStore.shared.profiles()
+        let selectedID = AIProviderStore.shared.activeProfileID() ?? profiles.first?.id
+        _providerID = State(initialValue: selectedID)
+        _visionModel = State(initialValue: profiles.first(where: { $0.id == selectedID })?.selectedVisionModel ?? "")
+    }
+
+    private var profiles: [AIProviderProfile] { AIProviderStore.shared.profiles() }
+    private var profile: AIProviderProfile? { profiles.first(where: { $0.id == providerID }) }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("offlineTranslation.provider.header".localized) {
+                    Picker("offlineTranslation.provider.name".localized, selection: $providerID) {
+                        Text("offlineTranslation.provider.choose".localized).tag(UUID?.none)
+                        ForEach(profiles) { profile in
+                            Text(profile.name).tag(Optional(profile.id))
+                        }
+                    }
+                    if let profile {
+                        Picker("offlineTranslation.provider.model".localized, selection: $visionModel) {
+                            ForEach(profile.models, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        .onChange(of: providerID) { _, newID in
+                            visionModel = profiles.first(where: { $0.id == newID })?.selectedVisionModel ?? ""
+                        }
+                    }
+                }
+                Section {
+                    Button("offlineTranslation.changeModel".localized) {
+                        guard let providerID else { return }
+                        coordinator.rebind(job, comic: comic, providerID: providerID, visionModel: visionModel)
+                        dismiss()
+                    }
+                    .disabled(providerID == nil || visionModel.isEmpty || !coordinator.canStart)
+                }
+            }
+            .navigationTitle("offlineTranslation.changeModel".localized)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("nav.cancel".localized) { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 struct OfflineTranslationManagerView: View {
     let comic: ComicBook
     @Environment(\.dismiss) private var dismiss
@@ -285,7 +438,7 @@ struct OfflineTranslationManagerView: View {
     @State private var summaries: [OfflineTranslationSetSummary] = []
     @State private var showingStart = false
     @State private var showingProgress = false
-    @State private var startScopeRaw: String?
+    @State private var startIntent: OfflineTranslationStartIntent = .entire
     @State private var setToDelete: OfflineTranslationSetSummary?
 
     var body: some View {
@@ -342,7 +495,7 @@ struct OfflineTranslationManagerView: View {
                                     }
                                     if summary.manifest.failedPageCount > 0 {
                                         Button("offlineTranslation.retryFailed".localized) {
-                                            startScopeRaw = "failed"
+                                            startIntent = .retryFailed(setID: summary.manifest.id)
                                             showingStart = true
                                         }
                                     }
@@ -367,7 +520,7 @@ struct OfflineTranslationManagerView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        startScopeRaw = nil
+                        startIntent = .entire
                         showingStart = true
                     } label: {
                         Image(systemName: "plus")
@@ -380,7 +533,7 @@ struct OfflineTranslationManagerView: View {
                 OfflineTranslationStartView(
                     comic: comic,
                     currentPageIndex: comic.currentPageIndex,
-                    initialScopeRaw: startScopeRaw
+                    intent: startIntent
                 )
             }
             .sheet(isPresented: $showingProgress) {

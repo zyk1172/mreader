@@ -541,3 +541,9 @@
 "offlineTranslation.deleteMessage" = "되돌릴 수 없습니다. 원본 만화는 삭제되지 않습니다.";
 "offlineTranslation.activateWhenComplete" = "선택한 작업이 완료되면 이 번역 세트를 사용";
 "offlineTranslation.taskProgress" = "선택한 작업: %d/%d페이지";
+"offlineTranslation.provider.choose" = "제공자 선택";
+"offlineTranslation.provider.selected" = "선택한 구성";
+"offlineTranslation.policyBlocked" = "현재 비전 모델이 페이지를 반복적으로 거부하여 작업을 일시 중지했습니다.";
+"offlineTranslation.changeModel" = "다른 모델 선택";
+"offlineTranslation.errorDetails" = "오류 세부 정보 보기";
+"nav.close" = "닫기";

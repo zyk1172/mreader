@@ -1198,6 +1198,16 @@ class ComicManager {
         url.scheme == archivePageScheme
     }
 
+    nonisolated static func archivePageCacheKey(for url: URL) -> String? {
+        guard let (archiveURL, entryPath, _, _) = archivePageComponents(from: url),
+              let values = try? archiveURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
+            return nil
+        }
+        let modification = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values.fileSize ?? 0
+        return "\(archiveURL.path)#\(size)#\(modification)#\(entryPath)"
+    }
+
     nonisolated static func imageData(forArchivePageURL url: URL) -> Data? {
         guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url) else {
             logger.error("archive-page-url-invalid url=\(url.absoluteString, privacy: .public)")

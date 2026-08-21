@@ -2,11 +2,12 @@ import Foundation
 
 nonisolated enum OfflineVisionPageResult: Sendable {
     case translated([TextBlock])
+    case partial([TextBlock], failedSlices: Int)
     case noText
 }
 
 nonisolated enum OfflineTranslationPromptBuilder {
-    static let revision = "offline-vision-v1"
+    static let revision = "offline-vision-v2"
 
     static func make(
         sourceLanguage: TranslationSourceLanguage,

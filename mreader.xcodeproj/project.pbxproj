@@ -416,7 +416,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = mreader-offline-translation-Info.plist;
 				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
-					"zhengyk.mreader.offline-translation.continued",
+					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued",
+					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.*",
 					"zhengyk.mreader.offline-translation.processing",
 				);
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;
@@ -461,7 +462,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = mreader-offline-translation-Info.plist;
 				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
-					"zhengyk.mreader.offline-translation.continued",
+					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued",
+					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.*",
 					"zhengyk.mreader.offline-translation.processing",
 				);
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;

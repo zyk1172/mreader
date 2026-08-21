@@ -541,3 +541,9 @@
 "offlineTranslation.deleteMessage" = "元に戻せません。原作漫画は削除されません。";
 "offlineTranslation.activateWhenComplete" = "選択したタスクの完了後にこの翻訳セットを使用";
 "offlineTranslation.taskProgress" = "選択タスク：%d/%dページ";
+"offlineTranslation.provider.choose" = "プロバイダを選択";
+"offlineTranslation.provider.selected" = "選択中の設定";
+"offlineTranslation.policyBlocked" = "現在のビジョンモデルがページを繰り返し拒否したため、タスクを一時停止しました。";
+"offlineTranslation.changeModel" = "別のモデルを選択";
+"offlineTranslation.errorDetails" = "エラーの詳細を表示";
+"nav.close" = "閉じる";

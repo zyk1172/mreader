@@ -43,8 +43,19 @@ actor OfflineTranslationStorageManager {
         return try? decoder.decode(OfflineTranslationSetManifest.self, from: data)
     }
 
-    func activeManifest(for comicID: UUID) -> OfflineTranslationSetManifest? {
-        guard let activeID = index(for: comicID)?.activeSetID else { return nil }
+    func activeManifest(
+        for comicID: UUID,
+        targetLanguage: TranslationTargetLanguage? = nil
+    ) -> OfflineTranslationSetManifest? {
+        let indexValue = index(for: comicID)
+        let activeID: UUID?
+        if let targetLanguage {
+            activeID = indexValue?.activeSetIDsByTargetLanguage[targetLanguage.rawValue]
+                ?? (indexValue?.activeSetIDsByTargetLanguage.isEmpty == true ? indexValue?.activeSetID : nil)
+        } else {
+            activeID = indexValue?.activeSetID
+        }
+        guard let activeID else { return nil }
         return manifest(comicID: comicID, setID: activeID)
     }
 
@@ -55,7 +66,10 @@ actor OfflineTranslationStorageManager {
         if !indexValue.setIDs.contains(manifest.id) {
             indexValue.setIDs.append(manifest.id)
         }
-        if activate { indexValue.activeSetID = manifest.id }
+        if activate {
+            indexValue.activeSetID = manifest.id
+            indexValue.activeSetIDsByTargetLanguage[manifest.targetLanguage.rawValue] = manifest.id
+        }
         try write(indexValue, to: indexURL(for: manifest.comicID))
     }
 
@@ -66,6 +80,9 @@ actor OfflineTranslationStorageManager {
         var indexValue = index(for: comicID) ?? OfflineTranslationIndex(comicID: comicID)
         guard indexValue.setIDs.contains(setID) else { throw OfflineTranslationStorageError.invalidSet }
         indexValue.activeSetID = setID
+        if let selectedManifest = manifest(comicID: comicID, setID: setID) {
+            indexValue.activeSetIDsByTargetLanguage[selectedManifest.targetLanguage.rawValue] = setID
+        }
         try write(indexValue, to: indexURL(for: comicID))
     }
 
@@ -95,8 +112,16 @@ actor OfflineTranslationStorageManager {
               page.pageIndex < manifest.totalPages else {
             throw OfflineTranslationStorageError.invalidSet
         }
+        let previousPage = self.page(comicID: page.comicID, setID: page.setID, pageIndex: page.pageIndex)
         try write(page, to: pageURL(comicID: page.comicID, setID: page.setID, pageIndex: page.pageIndex))
-        manifest = recalculatedManifest(manifest)
+        manifest = updateManifest(
+            manifest,
+            pageIndex: page.pageIndex,
+            oldState: previousPage?.state,
+            oldErrorMessage: previousPage?.errorMessage,
+            newState: page.state,
+            newErrorMessage: page.errorMessage
+        )
         try write(manifest, to: manifestURL(comicID: page.comicID, setID: page.setID))
     }
 
@@ -128,6 +153,10 @@ actor OfflineTranslationStorageManager {
     }
 
     func markRunningJobsInterrupted() throws -> Int {
+        try markRunningJobsInterrupted(excludingJobID: nil)
+    }
+
+    func markRunningJobsInterrupted(excludingJobID: UUID?) throws -> Int {
         var count = 0
         guard let comicDirectories = try? fileManager.contentsOfDirectory(
             at: rootURL,
@@ -136,7 +165,8 @@ actor OfflineTranslationStorageManager {
         ) else { return 0 }
         for comicDirectory in comicDirectories {
             guard let comicID = UUID(uuidString: comicDirectory.lastPathComponent) else { continue }
-            for var job in jobs(comicID: comicID) where job.state == .running || job.state == .queued {
+            for var job in jobs(comicID: comicID)
+            where job.id != excludingJobID && (job.state == .running || job.state == .queued) {
                 job.state = .interrupted
                 job.lastError = "应用在任务运行期间退出"
                 job.updatedAt = Date()
@@ -154,7 +184,8 @@ actor OfflineTranslationStorageManager {
     func copyValidPages(
         from sourceSetID: UUID,
         to targetManifest: OfflineTranslationSetManifest,
-        excludingPageIndexes: Set<Int> = []
+        excludingPageIndexes: Set<Int> = [],
+        sourceFingerprints: [Int: String]? = nil
     ) throws -> Int {
         guard let sourceManifest = manifest(comicID: targetManifest.comicID, setID: sourceSetID) else { return 0 }
         try saveManifest(targetManifest)
@@ -162,7 +193,8 @@ actor OfflineTranslationStorageManager {
         for pageIndex in 0..<min(sourceManifest.totalPages, targetManifest.totalPages) {
             guard !excludingPageIndexes.contains(pageIndex) else { continue }
             guard let page = page(comicID: targetManifest.comicID, setID: sourceSetID, pageIndex: pageIndex),
-                  page.state.isUsableOverlay else { continue }
+                  page.state.isUsableOverlay,
+                  sourceFingerprints == nil || sourceFingerprints?[pageIndex] == page.sourceFingerprint else { continue }
             let copiedPage = OfflineTranslatedPage(
                 comicID: page.comicID,
                 setID: targetManifest.id,
@@ -190,7 +222,8 @@ actor OfflineTranslationStorageManager {
             guard let manifestValue = manifest(comicID: comicID, setID: setID) else { return nil }
             return OfflineTranslationSetSummary(
                 manifest: manifestValue,
-                isActive: indexValue.activeSetID == setID,
+                isActive: indexValue.activeSetIDsByTargetLanguage[manifestValue.targetLanguage.rawValue] == setID
+                    || (indexValue.activeSetIDsByTargetLanguage.isEmpty && indexValue.activeSetID == setID),
                 jobs: jobs(comicID: comicID).filter { $0.setID == setID }
             )
         }.sorted { $0.manifest.updatedAt > $1.manifest.updatedAt }
@@ -203,6 +236,7 @@ actor OfflineTranslationStorageManager {
             try? fileManager.removeItem(at: jobURL(comicID: comicID, jobID: job.id))
         }
         indexValue.setIDs.removeAll { $0 == setID }
+        indexValue.activeSetIDsByTargetLanguage = indexValue.activeSetIDsByTargetLanguage.filter { $0.value != setID }
         if indexValue.activeSetID == setID {
             indexValue.activeSetID = indexValue.setIDs.last
         }
@@ -270,6 +304,50 @@ actor OfflineTranslationStorageManager {
         updated.failureMessages = failures
         updated.updatedAt = Date()
         return updated
+    }
+
+    private func updateManifest(
+        _ manifest: OfflineTranslationSetManifest,
+        pageIndex: Int,
+        oldState: OfflineTranslationPageState?,
+        oldErrorMessage: String?,
+        newState: OfflineTranslationPageState,
+        newErrorMessage: String?
+    ) -> OfflineTranslationSetManifest {
+        var updated = manifest
+        if let oldState {
+            applyCountDelta(to: &updated, state: oldState, delta: -1)
+        }
+        applyCountDelta(to: &updated, state: newState, delta: 1)
+
+        let key = String(pageIndex)
+        if let newErrorMessage, !newErrorMessage.isEmpty {
+            updated.failureMessages[key] = newErrorMessage
+        } else if newState != .failed && newState != .stale {
+            updated.failureMessages[key] = nil
+        } else if let oldErrorMessage, !oldErrorMessage.isEmpty {
+            updated.failureMessages[key] = oldErrorMessage
+        }
+        updated.coverage = updated.totalPages == 0
+            ? 0
+            : Double(updated.coveredPageCount) / Double(updated.totalPages)
+        updated.updatedAt = Date()
+        return updated
+    }
+
+    private func applyCountDelta(
+        to manifest: inout OfflineTranslationSetManifest,
+        state: OfflineTranslationPageState,
+        delta: Int
+    ) {
+        switch state {
+        case .completed: manifest.completedPageCount = max(0, manifest.completedPageCount + delta)
+        case .noText: manifest.noTextPageCount = max(0, manifest.noTextPageCount + delta)
+        case .partial: manifest.partialPageCount = max(0, manifest.partialPageCount + delta)
+        case .failed: manifest.failedPageCount = max(0, manifest.failedPageCount + delta)
+        case .stale: manifest.stalePageCount = max(0, manifest.stalePageCount + delta)
+        case .pending, .processing: break
+        }
     }
 
     private func write<T: Encodable>(_ value: T, to url: URL) throws {
@@ -347,7 +425,7 @@ actor OfflineTranslationJobStore {
         await storage.jobs(comicID: comicID)
     }
 
-    func markRunningJobsInterrupted() async throws -> Int {
-        try await storage.markRunningJobsInterrupted()
+    func markRunningJobsInterrupted(excludingJobID: UUID? = nil) async throws -> Int {
+        try await storage.markRunningJobsInterrupted(excludingJobID: excludingJobID)
     }
 }

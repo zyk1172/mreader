@@ -6,7 +6,7 @@ import Foundation
 final class OfflineTranslationBackgroundScheduler {
     static let shared = OfflineTranslationBackgroundScheduler()
 
-    private let continuedIdentifier = "zhengyk.mreader.offline-translation.continued"
+    private let continuedIdentifier = "\(Bundle.main.bundleIdentifier ?? "zhengyk.mreader").offline-translation.continued"
     private let processingIdentifier = "zhengyk.mreader.offline-translation.processing"
     private let pendingJobKey = "offline_translation_pending_background_job"
     private let pendingComicKey = "offline_translation_pending_background_comic"
@@ -31,23 +31,36 @@ final class OfflineTranslationBackgroundScheduler {
         }
     }
 
+    var pendingJobID: UUID? {
+        UserDefaults.standard.string(forKey: pendingJobKey).flatMap(UUID.init(uuidString:))
+    }
+
     func submit(job: OfflineTranslationJobRecord, comic: ComicBook) {
         UserDefaults.standard.set(job.id.uuidString, forKey: pendingJobKey)
         UserDefaults.standard.set(comic.id.uuidString, forKey: pendingComicKey)
 
         if #available(iOS 26.0, *) {
             let request = BGContinuedProcessingTaskRequest(
-                identifier: continuedIdentifier,
+                identifier: "\(continuedIdentifier).\(job.id.uuidString)",
                 title: "offlineTranslation.title".localized,
                 subtitle: comic.title
             )
             request.strategy = .queue
-            try? BGTaskScheduler.shared.submit(request)
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                // 前台执行仍会继续；记录失败便于定位系统未接受后台续行的原因。
+                print("MReader failed to submit continued offline translation job \(job.id): \(error.localizedDescription)")
+            }
         } else {
             let request = BGProcessingTaskRequest(identifier: processingIdentifier)
             request.requiresNetworkConnectivity = true
             request.earliestBeginDate = Date(timeIntervalSinceNow: 30)
-            try? BGTaskScheduler.shared.submit(request)
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                print("MReader failed to submit processing offline translation job \(job.id): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -75,7 +88,14 @@ final class OfflineTranslationBackgroundScheduler {
             return false
         }
         if OfflineTranslationCoordinator.shared.isRunning {
-            return true
+            guard OfflineTranslationCoordinator.shared.job?.id == jobID else { return false }
+            if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+                await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
+            } else {
+                await waitForCoordinator(jobID: jobID)
+            }
+            let state = OfflineTranslationCoordinator.shared.job?.state
+            return state == .completed || state == .completedWithFailures
         }
 
         let library = ComicLibraryStore()
