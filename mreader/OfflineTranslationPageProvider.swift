@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-private final class OfflineTranslationFingerprintCache: @unchecked Sendable {
+nonisolated private final class OfflineTranslationFingerprintCache: @unchecked Sendable {
     static let shared = OfflineTranslationFingerprintCache()
 
     private let lock = NSLock()
@@ -43,7 +43,7 @@ nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
 }
 
 /// 统一处理本地文件、归档、Komga 和 OPDS 页面。它只读取原始页数据，不写入 ReaderImageCache。
-enum OfflineTranslationPageProvider {
+nonisolated enum OfflineTranslationPageProvider {
     final class SourceSession: @unchecked Sendable {
         private let scopedURL: URL?
         private let didStart: Bool
@@ -178,45 +178,63 @@ nonisolated enum OfflineTranslationOverlayResult: Sendable {
     case unavailable
 }
 
-/// 阅读器只在开关开启且已存在 active set 时调用此检查；因此关闭开关时完全不触碰 Translation Store。
+/// Reader 优先检查运行中 Set 的当前页，再回退到旧 active Set；关闭开关时完全不触碰 Translation Store。
 enum OfflineTranslationOverlayProvider {
     static func validOverlay(
         comic: ComicBook,
         page: ComicPage,
         targetLanguage: TranslationTargetLanguage,
-        sourceLanguage _: TranslationSourceLanguage
+        sourceLanguage: TranslationSourceLanguage
     ) async -> OfflineTranslationOverlayResult {
-        guard let active = await OfflineTranslationStorageManager.shared.activeManifest(for: comic.id, targetLanguage: targetLanguage),
-              active.targetLanguage == targetLanguage,
-              let savedPage = await OfflineTranslationStorageManager.shared.page(
-                comicID: comic.id,
-                setID: active.id,
-                pageIndex: page.index
-              ),
-              savedPage.state.isUsableOverlay else {
-            return .unavailable
+        let storage = OfflineTranslationStorageManager.shared
+        var candidateManifests: [OfflineTranslationSetManifest] = []
+        if let inProgress = await storage.inProgressManifest(
+            for: comic.id,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage
+        ) {
+            candidateManifests.append(inProgress)
+        }
+        if let active = await storage.activeManifest(for: comic.id, targetLanguage: targetLanguage),
+           active.id != candidateManifests.first?.id {
+            candidateManifests.append(active)
         }
 
-        do {
-            let session = OfflineTranslationPageProvider.sourceSession(for: comic)
-            let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page, session: session)
-            let fingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData, pageURL: page.url)
-            guard fingerprint == savedPage.sourceFingerprint else {
-                await OfflineTranslationStorageManager.shared.markPageStale(
+        for candidate in candidateManifests {
+            guard candidate.sourceLanguage == sourceLanguage,
+                  candidate.targetLanguage == targetLanguage,
+                  let savedPage = await storage.page(
                     comicID: comic.id,
-                    setID: active.id,
+                    setID: candidate.id,
                     pageIndex: page.index
-                )
-                return .unavailable
+                  ),
+                  savedPage.state.isUsableOverlay else {
+                // 运行中 Set 当前页还未落盘时，继续尝试旧 active Set。
+                continue
             }
-            let blocks = savedPage.blocks.map { $0.textBlock() }
-            if savedPage.state == .noText {
-                return .confirmedNoText(setID: active.id)
+
+            do {
+                let session = OfflineTranslationPageProvider.sourceSession(for: comic)
+                let sourceData = try await OfflineTranslationPageProvider.data(for: comic, page: page, session: session)
+                let fingerprint = OfflineTranslationPageProvider.fingerprint(for: sourceData, pageURL: page.url)
+                guard fingerprint == savedPage.sourceFingerprint else {
+                    await storage.markPageStale(
+                        comicID: comic.id,
+                        setID: candidate.id,
+                        pageIndex: page.index
+                    )
+                    continue
+                }
+                let blocks = savedPage.blocks.map { $0.textBlock() }
+                if savedPage.state == .noText {
+                    return .confirmedNoText(setID: candidate.id)
+                }
+                return .displayed(blocks: blocks, setID: candidate.id)
+            } catch {
+                // 原图暂时不可读时不污染旧译文，继续尝试回退 Set。
+                continue
             }
-            return .displayed(blocks: blocks, setID: active.id)
-        } catch {
-            // 原图暂时不可读时不污染旧译文，Reader 继续走既有实时逻辑。
-            return .unavailable
         }
+        return .unavailable
     }
 }

@@ -246,6 +246,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isOfflineTranslationOverlayEnabled = existing.isOfflineTranslationOverlayEnabled
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
@@ -995,6 +996,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isOfflineTranslationOverlayEnabled = existing.isOfflineTranslationOverlayEnabled
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset

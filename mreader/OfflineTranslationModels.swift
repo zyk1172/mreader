@@ -40,6 +40,32 @@ nonisolated enum OfflineTranslationPageState: String, Codable, CaseIterable, Sen
     }
 }
 
+/// 用页文件状态计算断点续传集合；任务记录中的 offset/数组只是兼容展示字段。
+nonisolated enum OfflineTranslationPageFacts {
+    static func remainingPageIndexes(
+        plannedPageIndexes: [Int],
+        states: [Int: OfflineTranslationPageState],
+        excluding: Set<Int> = []
+    ) -> [Int] {
+        plannedPageIndexes.filter { pageIndex in
+            !excluding.contains(pageIndex)
+                && (states[pageIndex]?.needsTranslationWork ?? true)
+        }
+    }
+
+    static func processedPageCount(
+        plannedPageIndexes: [Int],
+        states: [Int: OfflineTranslationPageState]
+    ) -> Int {
+        plannedPageIndexes.reduce(into: 0) { count, pageIndex in
+            guard let state = states[pageIndex] else { return }
+            if state == .completed || state == .noText || state == .partial || state == .failed {
+                count += 1
+            }
+        }
+    }
+}
+
 nonisolated enum OfflineTranslationJobState: String, Codable, CaseIterable, Sendable {
     case queued
     case running
@@ -77,6 +103,16 @@ nonisolated enum OfflineTranslationPauseReason: String, Codable, Sendable {
 nonisolated enum OfflineTranslationProcessingMode: String, Codable, CaseIterable, Sendable {
     case ocrText
     case vision
+}
+
+enum OfflineTranslationNotificationKey {
+    static let comicID = "comicID"
+    static let setID = "setID"
+    static let pageIndex = "pageIndex"
+}
+
+extension Notification.Name {
+    static let offlineTranslationPageDidUpdate = Notification.Name("MReader.offlineTranslationPageDidUpdate")
 }
 
 nonisolated enum OfflineTranslationStartIntent: Sendable, Equatable {
@@ -564,6 +600,8 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
     let pageIndexes: [Int]
     var nextPageOffset: Int
     var currentPageIndex: Int?
+    /// 当前批次正在执行的页面。它只用于恢复和进度展示，页面文件状态才是事实来源。
+    var activePageIndexes: [Int]?
     let providerID: UUID
     let providerName: String
     let baseURL: String
@@ -632,6 +670,7 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         self.pageIndexes = pageIndexes
         self.nextPageOffset = 0
         self.currentPageIndex = nil
+        self.activePageIndexes = []
         self.providerID = providerID
         self.providerName = providerName
         self.baseURL = baseURL

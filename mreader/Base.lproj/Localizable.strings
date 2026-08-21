@@ -325,13 +325,12 @@
 "offlineTranslation.startFromReader" = "Offline Translate from Here";
 "offlineTranslation.manage" = "Manage Offline Translations";
 "offlineTranslation.menu" = "Offline Translation";
-"offlineTranslation.overlay" = "Prefer saved offline translations";
-"offlineTranslation.overlayFooter" = "When enabled, a valid saved page skips automatic realtime translation. Turning it off keeps the old reader path unchanged.";
-"offlineTranslation.maskOriginalText" = "Cover original text before drawing translation";
+"offlineTranslation.showLocal" = "Show local translations";
 "offlineTranslation.storage" = "Offline translation data";
 "offlineTranslation.startTitle" = "Start Offline Translation";
 "offlineTranslation.manageTitle" = "Offline Translation Sets";
 "offlineTranslation.progressTitle" = "Offline Translation Progress";
+"offlineTranslation.runInBackground" = "Translate in background and return to shelf";
 "offlineTranslation.scope.header" = "Pages";
 "offlineTranslation.scope.title" = "Range";
 "offlineTranslation.scope.footer" = "Page numbers shown here start at 1; stored indexes start at 0.";

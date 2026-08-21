@@ -490,12 +490,12 @@
 "offlineTranslation.startFromReader" = "현재 페이지부터 오프라인 번역";
 "offlineTranslation.manage" = "오프라인 번역 관리";
 "offlineTranslation.menu" = "오프라인 번역";
-"offlineTranslation.overlay" = "저장된 오프라인 번역 우선";
-"offlineTranslation.overlayFooter" = "유효한 저장 페이지에서는 자동 실시간 번역을 건너뜁니다. 끄면 기존 리더 동작을 사용합니다.";
+"offlineTranslation.showLocal" = "로컬 번역 표시";
 "offlineTranslation.storage" = "오프라인 번역 데이터";
 "offlineTranslation.startTitle" = "오프라인 번역 시작";
 "offlineTranslation.manageTitle" = "오프라인 번역 세트";
 "offlineTranslation.progressTitle" = "오프라인 번역 진행률";
+"offlineTranslation.runInBackground" = "백그라운드에서 번역하고 서재로 돌아가기";
 "offlineTranslation.scope.header" = "페이지";
 "offlineTranslation.scope.title" = "범위";
 "offlineTranslation.scope.footer" = "표시는 1부터, 저장 인덱스는 0부터 시작합니다.";

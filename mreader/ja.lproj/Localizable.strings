@@ -490,12 +490,12 @@
 "offlineTranslation.startFromReader" = "ここからオフライン翻訳";
 "offlineTranslation.manage" = "オフライン訳を管理";
 "offlineTranslation.menu" = "オフライン翻訳";
-"offlineTranslation.overlay" = "保存済みオフライン訳を優先";
-"offlineTranslation.overlayFooter" = "有効な保存済みページでは自動リアルタイム翻訳を省略します。オフにすると従来の動作になります。";
+"offlineTranslation.showLocal" = "ローカル翻訳を表示";
 "offlineTranslation.storage" = "オフライン翻訳データ";
 "offlineTranslation.startTitle" = "オフライン翻訳を開始";
 "offlineTranslation.manageTitle" = "オフライン翻訳セット";
 "offlineTranslation.progressTitle" = "オフライン翻訳の進行状況";
+"offlineTranslation.runInBackground" = "バックグラウンドで翻訳して本棚に戻る";
 "offlineTranslation.scope.header" = "ページ";
 "offlineTranslation.scope.title" = "範囲";
 "offlineTranslation.scope.footer" = "表示は1始まり、保存時のインデックスは0始まりです。";

@@ -70,6 +70,23 @@ actor OfflineTranslationStorageManager {
         return manifest(comicID: comicID, setID: activeID)
     }
 
+    /// 返回当前仍在执行的任务集合。它不改变 active 指针，只用于 Reader 按页预览新 Set。
+    func inProgressManifest(
+        for comicID: UUID,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage
+    ) -> OfflineTranslationSetManifest? {
+        jobs(comicID: comicID)
+            .filter { job in
+                (job.state == .queued || job.state == .running)
+                    && job.sourceLanguage == sourceLanguage
+                    && job.targetLanguage == targetLanguage
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .compactMap { manifest(comicID: comicID, setID: $0.setID) }
+            .first
+    }
+
     func saveManifest(_ manifest: OfflineTranslationSetManifest, activate: Bool = false) throws {
         guard manifest.totalPages >= 0 else { throw OfflineTranslationStorageError.invalidSet }
         try write(manifest, to: manifestURL(comicID: manifest.comicID, setID: manifest.id))

@@ -490,13 +490,12 @@
 "offlineTranslation.startFromReader" = "从当前页开始离线翻译";
 "offlineTranslation.manage" = "管理离线译文";
 "offlineTranslation.menu" = "离线翻译";
-"offlineTranslation.overlay" = "优先显示已保存的离线译文";
-"offlineTranslation.overlayFooter" = "开启后，有效的已保存页面会跳过自动实时翻译；关闭后完全保持原有阅读器逻辑。";
-"offlineTranslation.maskOriginalText" = "绘制译文前遮盖原文";
+"offlineTranslation.showLocal" = "显示本地翻译";
 "offlineTranslation.storage" = "离线译文数据";
 "offlineTranslation.startTitle" = "开始离线翻译";
 "offlineTranslation.manageTitle" = "离线译文集合";
 "offlineTranslation.progressTitle" = "离线翻译进度";
+"offlineTranslation.runInBackground" = "后台翻译并返回书架";
 "offlineTranslation.scope.header" = "页面范围";
 "offlineTranslation.scope.title" = "范围";
 "offlineTranslation.scope.footer" = "界面页码从 1 开始，内部保存索引从 0 开始。";

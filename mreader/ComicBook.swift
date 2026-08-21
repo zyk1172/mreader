@@ -61,6 +61,8 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var isOCREnabled: Bool
     var isAITranslationEnabled: Bool
     var isAutoTranslationEnabled: Bool
+    /// 是否在当前漫画阅读页显示已经落盘的本地译文；只控制显示，不删除离线数据。
+    var isOfflineTranslationOverlayEnabled: Bool
     var isAutoOCRMagnificationEnabled: Bool
     var ocrTextScale: Double
     var ocrSafeAreaInset: Double
@@ -87,7 +89,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
-    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -118,6 +120,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.isOCREnabled = isOCREnabled
         self.isAITranslationEnabled = isAITranslationEnabled
         self.isAutoTranslationEnabled = isAutoTranslationEnabled
+        self.isOfflineTranslationOverlayEnabled = isOfflineTranslationOverlayEnabled
         self.isAutoOCRMagnificationEnabled = isAutoOCRMagnificationEnabled
         self.ocrTextScale = ocrTextScale
         self.ocrSafeAreaInset = ocrSafeAreaInset
@@ -165,6 +168,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         isOCREnabled = try container.decodeIfPresent(Bool.self, forKey: .isOCREnabled) ?? true
         isAITranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAITranslationEnabled) ?? true
         isAutoTranslationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoTranslationEnabled) ?? false
+        isOfflineTranslationOverlayEnabled = try container.decodeIfPresent(Bool.self, forKey: .isOfflineTranslationOverlayEnabled) ?? true
         isAutoOCRMagnificationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoOCRMagnificationEnabled) ?? false
         ocrTextScale = try container.decodeIfPresent(Double.self, forKey: .ocrTextScale) ?? 0.55
         ocrSafeAreaInset = try container.decodeIfPresent(Double.self, forKey: .ocrSafeAreaInset) ?? 0

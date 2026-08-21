@@ -1880,6 +1880,58 @@ private func makeTestPageRequest(
         }
     }
 
+    @Test func offlineTranslationPageFactsRetryPartialAndFailedPagesFromDiskState() {
+        let planned = [0, 1, 2, 3]
+        let states: [Int: OfflineTranslationPageState] = [
+            0: .completed,
+            1: .noText,
+            2: .partial,
+            3: .failed
+        ]
+        #expect(
+            OfflineTranslationPageFacts.remainingPageIndexes(
+                plannedPageIndexes: planned,
+                states: states
+            ) == [2, 3]
+        )
+        #expect(
+            OfflineTranslationPageFacts.remainingPageIndexes(
+                plannedPageIndexes: planned,
+                states: states,
+                excluding: [2]
+            ) == [3]
+        )
+        #expect(
+            OfflineTranslationPageFacts.processedPageCount(
+                plannedPageIndexes: planned,
+                states: states
+            ) == 4
+        )
+    }
+
+    @Test @MainActor func offlineTranslationDisplayPreferenceIsPerComicAndLegacyDefaultsToEnabled() throws {
+        let comic = ComicBook(title: "test", bookmarkData: Data(), totalPages: 1)
+        #expect(comic.isOfflineTranslationOverlayEnabled)
+
+        var hidden = comic
+        hidden.isOfflineTranslationOverlayEnabled = false
+        let decoded = try JSONDecoder().decode(
+            ComicBook.self,
+            from: JSONEncoder().encode(hidden)
+        )
+        #expect(!decoded.isOfflineTranslationOverlayEnabled)
+
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(comic)) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "isOfflineTranslationOverlayEnabled")
+        let legacy = try JSONDecoder().decode(
+            ComicBook.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        #expect(legacy.isOfflineTranslationOverlayEnabled)
+    }
+
     @Test func offlineTranslationPromptKeepsProtocolSeparateFromStyle() {
         let prompt = OfflineTranslationPromptBuilder.make(
             sourceLanguage: .japanese,
@@ -2036,6 +2088,70 @@ private func makeTestPageRequest(
         try await storage.saveManifest(english, activate: true)
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
+    @Test func offlineTranslationRunningSetLookupRequiresSourceAndTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-running-language-(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+
+        func makeManifest(source: TranslationSourceLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: source,
+                targetLanguage: .english,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+
+        let japanese = makeManifest(source: .japanese)
+        let korean = makeManifest(source: .korean)
+        try await storage.saveManifest(japanese)
+        try await storage.saveManifest(korean)
+        for manifest in [japanese, korean] {
+            var job = OfflineTranslationJobRecord(
+                comicID: comicID,
+                setID: manifest.id,
+                selection: .entireComic,
+                pageIndexes: [0],
+                providerID: providerID,
+                providerName: "test",
+                baseURL: manifest.baseURL,
+                visionModel: manifest.visionModel,
+                sourceLanguage: manifest.sourceLanguage,
+                targetLanguage: manifest.targetLanguage,
+                promptRevision: manifest.promptRevision,
+                promptSnapshot: manifest.promptSnapshot,
+                readingDirectionRaw: "leftToRight",
+                totalPages: 1
+            )
+            job.state = .running
+            try await storage.saveJob(job)
+        }
+
+        #expect(
+            (await storage.inProgressManifest(
+                for: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .english
+            ))?.id == japanese.id
+        )
+        #expect(
+            await storage.inProgressManifest(
+                for: comicID,
+                sourceLanguage: .french,
+                targetLanguage: .english
+            ) == nil
+        )
     }
 
     @Test func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {

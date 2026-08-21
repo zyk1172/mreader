@@ -1052,11 +1052,23 @@ struct ReaderView: View {
             OfflineTranslationStartView(
                 comic: comic,
                 currentPageIndex: currentPageIndex,
-                intent: .fromCurrent
+                intent: .fromCurrent,
+                onBackground: {
+                    showOfflineTranslationStart = false
+                    showOfflineTranslationManager = false
+                    dismiss()
+                }
             )
         }
         .sheet(isPresented: $showOfflineTranslationManager) {
-            OfflineTranslationManagerView(comic: comic)
+            OfflineTranslationManagerView(
+                comic: comic,
+                onBackground: {
+                    showOfflineTranslationStart = false
+                    showOfflineTranslationManager = false
+                    dismiss()
+                }
+            )
         }
         .alert("reader.bookmarkEditNote".localized, isPresented: $showBookmarkNoteAlert) {
             TextField("reader.bookmarkNotePlaceholder".localized, text: $bookmarkNoteText)
@@ -1304,6 +1316,11 @@ struct ReaderView: View {
                         set: { newValue in updateComic { $0.isAutoTranslationEnabled = newValue } }
                     ))
                     .disabled(!comic.isAITranslationEnabled || (aiTranslationMode == .ocr && !comic.isOCREnabled))
+
+                    Toggle("offlineTranslation.showLocal".localized, isOn: Binding(
+                        get: { comic.isOfflineTranslationOverlayEnabled },
+                        set: { newValue in updateComic { $0.isOfflineTranslationOverlayEnabled = newValue } }
+                    ))
 
                     Toggle("ocr.appleTranslation".localized, isOn: $useAppleLowLatency)
                         .disabled(!comic.isAITranslationEnabled || aiTranslationMode != .ocr)
@@ -3592,8 +3609,10 @@ struct LocalImageView: View {
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
-    @AppStorage("offline_translation_overlay_enabled") private var offlineTranslationOverlayEnabled = true
-    @AppStorage("translation_mask_original_text_enabled") private var translationMaskOriginalTextEnabled = true
+
+    private var shouldDisplayOfflineTranslation: Bool {
+        comic?.isOfflineTranslationOverlayEnabled ?? true
+    }
 
     private var aiTranslationMode: AITranslationMode {
         AITranslationMode(rawValue: aiTranslationModeRaw) ?? .ocr
@@ -3761,15 +3780,14 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: isAutoTranslationEnabled) { _, newValue in
-            guard newValue else { return }
+            guard newValue, shouldDisplayOfflineTranslation else { return }
             startTranslation()
         }
-        .onChange(of: offlineTranslationOverlayEnabled) { _, newValue in
+        .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
             offlineTranslationTask?.cancel()
             isOfflineTranslationDisplayed = false
             textBlocks.removeAll()
             guard newValue else {
-                if isAutoTranslationEnabled { startTranslation() }
                 return
             }
             Task {
@@ -3792,7 +3810,7 @@ struct LocalImageView: View {
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()
             isOfflineTranslationDisplayed = false
-            if isAutoTranslationEnabled {
+            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
                 Task {
                     let loaded = await loadOfflineTranslationIfAvailable()
                     if !loaded { startTranslation() }
@@ -3806,7 +3824,7 @@ struct LocalImageView: View {
             isOfflineTranslationDisplayed = false
             appleTranslationRequests.removeAll()
             clearStableSourceLanguage()
-            if isAutoTranslationEnabled {
+            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
                 Task {
                     let loaded = await loadOfflineTranslationIfAvailable()
                     if !loaded { startTranslation() }
@@ -3815,8 +3833,20 @@ struct LocalImageView: View {
         }
         .onChange(of: aiTranslationModeRaw) { _, _ in
             textBlocks.removeAll()
-            if isAutoTranslationEnabled {
+            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled {
                 startTranslation()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .offlineTranslationPageDidUpdate)) { notification in
+            guard shouldDisplayOfflineTranslation,
+                  let comicID = notification.userInfo?[OfflineTranslationNotificationKey.comicID] as? UUID,
+                  comicID == comic?.id,
+                  let updatedPageIndex = notification.userInfo?[OfflineTranslationNotificationKey.pageIndex] as? Int,
+                  updatedPageIndex == pageIndex else {
+                return
+            }
+            Task {
+                _ = await loadOfflineTranslationIfAvailable()
             }
         }
         .onChange(of: ocrRecognitionModeRaw) { _, _ in
@@ -3881,8 +3911,7 @@ struct LocalImageView: View {
 
     @ViewBuilder
     private func translationOverlay(in size: CGSize) -> some View {
-        if isOfflineTranslationDisplayed || canTranslate {
-            translationMaskOverlay(in: size)
+        if shouldDisplayOfflineTranslation && (isOfflineTranslationDisplayed || canTranslate) {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
                 ColorfulTranslatedText(
@@ -3899,20 +3928,6 @@ struct LocalImageView: View {
                 )
                 .frame(width: item.rect.width)
                 .position(x: item.rect.midX, y: item.rect.midY)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func translationMaskOverlay(in size: CGSize) -> some View {
-        if translationMaskOriginalTextEnabled {
-            ForEach(visibleTranslationBlocks) { block in
-                let rect = translationMaskRect(for: block, in: size)
-                RoundedRectangle(cornerRadius: min(max(rect.height * 0.18, 5), 14), style: .continuous)
-                    .fill(Color.white.opacity(0.94))
-                    .frame(width: rect.width, height: rect.height)
-                    .position(x: rect.midX, y: rect.midY)
-                    .allowsHitTesting(false)
             }
         }
     }
@@ -4025,16 +4040,6 @@ struct LocalImageView: View {
         )
     }
 
-    private func translationMaskRect(for block: TextBlock, in size: CGSize) -> CGRect {
-        let sourceRect = block.bubbleBox ?? block.boundingBox
-        let mapped = OCRCoordinateMapper.displayRect(
-            forNormalizedPageRect: sourceRect,
-            using: ocrDisplayTransform(in: size)
-        )
-        let padding = max(5, min(mapped.height * 0.18, 12))
-        return mapped.insetBy(dx: -padding, dy: -padding)
-    }
-
     private func ocrDisplayTransform(in size: CGSize) -> OCRDisplayTransform {
         let sourceSize: CGSize
         if let cgImage = uiImage?.cgImage {
@@ -4065,7 +4070,7 @@ struct LocalImageView: View {
     private func translationBubbleRect(for block: TextBlock, in size: CGSize) -> CGRect {
         let magnificationScale: CGFloat = isOCRMagnificationVisible ? 1.18 : 1
         let original = overlayRect(
-            forNormalizedPageRect: block.bubbleBox ?? block.boundingBox,
+            forNormalizedPageRect: block.boundingBox,
             in: size,
             scaleMultiplier: magnificationScale
         )
@@ -4094,7 +4099,7 @@ struct LocalImageView: View {
         let transform = ocrDisplayTransform(in: size)
         for item in initialItems {
             let original = item.rect
-            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.bubbleBox ?? $1.boundingBox) }
+            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
             let mappedSourceRect = OCRCoordinateMapper.displayRect(
                 forNormalizedPageRect: sourceRect,
                 using: transform
@@ -4197,7 +4202,7 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem = nil
             }
             let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
-            if isAutoTranslationEnabled, !hasOfflineTranslation {
+            if shouldDisplayOfflineTranslation, isAutoTranslationEnabled, !hasOfflineTranslation {
                 await MainActor.run { startTranslation() }
             }
             if isOCRMagnificationVisible {
@@ -4234,7 +4239,7 @@ struct LocalImageView: View {
             self.isLoadingImage = false
         }
         let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
-        if isAutoTranslationEnabled, !hasOfflineTranslation {
+        if shouldDisplayOfflineTranslation, isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
         if isOCRMagnificationVisible {
@@ -4242,9 +4247,9 @@ struct LocalImageView: View {
         }
     }
 
-    /// 只验证 active set 当前页的原图指纹；开关关闭或没有漫画上下文时不读取离线仓库。
+    /// 先检查运行中的 Set，再回退到 active Set；开关关闭或没有漫画上下文时不读取离线仓库。
     private func loadOfflineTranslationIfAvailable() async -> Bool {
-        guard offlineTranslationOverlayEnabled,
+        guard shouldDisplayOfflineTranslation,
               let comic,
               let pageIndex,
               uiImage != nil else {

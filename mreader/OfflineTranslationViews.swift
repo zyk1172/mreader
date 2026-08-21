@@ -5,6 +5,7 @@ struct OfflineTranslationStartView: View {
     let comic: ComicBook
     let currentPageIndex: Int
     let intent: OfflineTranslationStartIntent
+    let onBackground: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
     @AppStorage("translation_style_instructions") private var styleInstructions = AITranslator.defaultTranslationStyleInstructions
@@ -48,11 +49,13 @@ struct OfflineTranslationStartView: View {
     init(
         comic: ComicBook,
         currentPageIndex: Int,
-        intent: OfflineTranslationStartIntent = .entire
+        intent: OfflineTranslationStartIntent = .entire,
+        onBackground: (() -> Void)? = nil
     ) {
         self.comic = comic
         self.currentPageIndex = currentPageIndex
         self.intent = intent
+        self.onBackground = onBackground
         _sourceSetLoaded = State(initialValue: intent.sourceSetID == nil)
         _sourceLanguageRaw = State(initialValue: comic.translationSourceLanguageRaw)
         _targetLanguageRaw = State(
@@ -324,7 +327,13 @@ struct OfflineTranslationStartView: View {
                 }
             }
             .sheet(isPresented: $showingProgress) {
-                OfflineTranslationProgressView(comic: comic)
+                OfflineTranslationProgressView(comic: comic) {
+                    if let onBackground {
+                        onBackground()
+                    } else {
+                        dismiss()
+                    }
+                }
             }
         }
     }
@@ -332,10 +341,16 @@ struct OfflineTranslationStartView: View {
 
 struct OfflineTranslationProgressView: View {
     let comic: ComicBook
+    let onBackground: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
     @State private var showingCancelConfirmation = false
     @State private var showingRebind = false
+
+    init(comic: ComicBook, onBackground: (() -> Void)? = nil) {
+        self.comic = comic
+        self.onBackground = onBackground
+    }
 
     var body: some View {
         NavigationStack {
@@ -398,6 +413,15 @@ struct OfflineTranslationProgressView: View {
                     }
                     HStack {
                         if coordinator.isRunning {
+                            Button {
+                                if let onBackground {
+                                    onBackground()
+                                } else {
+                                    dismiss()
+                                }
+                            } label: {
+                                Label("offlineTranslation.runInBackground".localized, systemImage: "arrow.down.to.line")
+                            }
                             Button("offlineTranslation.pause".localized) { coordinator.pause() }
                             Button("offlineTranslation.cancel".localized, role: .destructive) {
                                 showingCancelConfirmation = true
@@ -543,6 +567,7 @@ private struct OfflineTranslationRebindView: View {
 
 struct OfflineTranslationManagerView: View {
     let comic: ComicBook
+    let onBackground: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var coordinator = OfflineTranslationCoordinator.shared
     @State private var summaries: [OfflineTranslationSetSummary] = []
@@ -550,6 +575,11 @@ struct OfflineTranslationManagerView: View {
     @State private var showingProgress = false
     @State private var startIntent: OfflineTranslationStartIntent = .entire
     @State private var setToDelete: OfflineTranslationSetSummary?
+
+    init(comic: ComicBook, onBackground: (() -> Void)? = nil) {
+        self.comic = comic
+        self.onBackground = onBackground
+    }
 
     var body: some View {
         NavigationStack {
@@ -644,11 +674,24 @@ struct OfflineTranslationManagerView: View {
                 OfflineTranslationStartView(
                     comic: comic,
                     currentPageIndex: comic.currentPageIndex,
-                    intent: startIntent
+                    intent: startIntent,
+                    onBackground: {
+                        if let onBackground {
+                            onBackground()
+                        } else {
+                            dismiss()
+                        }
+                    }
                 )
             }
             .sheet(isPresented: $showingProgress) {
-                OfflineTranslationProgressView(comic: comic)
+                OfflineTranslationProgressView(comic: comic) {
+                    if let onBackground {
+                        onBackground()
+                    } else {
+                        dismiss()
+                    }
+                }
             }
             .alert(item: $setToDelete) { summary in
                 Alert(

@@ -269,8 +269,6 @@ struct ContentView: View {
     @AppStorage("ocr_show_debug_boxes") private var isOCRDebugBoxesEnabled = false
     @AppStorage("ocr_visual_verification_enabled") private var isOCRVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrLocalRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
-    @AppStorage("offline_translation_overlay_enabled") private var offlineTranslationOverlayEnabled = true
-    @AppStorage("translation_mask_original_text_enabled") private var translationMaskOriginalTextEnabled = true
     @AppStorage("reading_daily_page_goal") private var readingDailyPageGoal = 40.0
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
     @AppStorage(ICloudMetadataSyncService.enabledKey) private var isICloudMetadataSyncEnabled = false
@@ -362,15 +360,24 @@ struct ContentView: View {
                 StorageManagerView(library: library)
             }
             .sheet(item: $offlineTranslationStartComic) { comic in
-                OfflineTranslationStartView(comic: comic, currentPageIndex: comic.currentPageIndex)
+                OfflineTranslationStartView(
+                    comic: comic,
+                    currentPageIndex: comic.currentPageIndex,
+                    onBackground: { offlineTranslationStartComic = nil }
+                )
             }
             .sheet(item: $offlineTranslationManagerComic) { comic in
-                OfflineTranslationManagerView(comic: comic)
+                OfflineTranslationManagerView(
+                    comic: comic,
+                    onBackground: { offlineTranslationManagerComic = nil }
+                )
             }
             .sheet(item: $backgroundTaskDestination) { destination in
                 if case .offlineTranslation(let comicID, _) = destination,
                    let comic = library.comics.first(where: { $0.id == comicID }) {
-                    OfflineTranslationProgressView(comic: comic)
+                    OfflineTranslationProgressView(comic: comic) {
+                        backgroundTaskDestination = nil
+                    }
                 }
             }
             .sheet(isPresented: $showActivity) {
@@ -1410,11 +1417,6 @@ struct ContentView: View {
             }
             Toggle("ocr.visualVerification".localized, isOn: $isOCRVisualVerificationEnabled)
             Toggle("ocr.showDebugBoxes".localized, isOn: $isOCRDebugBoxesEnabled)
-            Toggle("offlineTranslation.overlay".localized, isOn: $offlineTranslationOverlayEnabled)
-            Toggle("offlineTranslation.maskOriginalText".localized, isOn: $translationMaskOriginalTextEnabled)
-            Text("offlineTranslation.overlayFooter".localized)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
         }
     }
 
