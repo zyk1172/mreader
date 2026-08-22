@@ -8,6 +8,29 @@ nonisolated struct OPDSPublication: Hashable, Sendable {
     let mediaType: String?
 }
 
+nonisolated enum OPDSRemoteRevision {
+    /// Content-Length 只能描述大小，不能单独证明内容身份；至少需要 ETag、Last-Modified
+    /// 或 Content-Digest 之一。长度仅作为这些强身份的补充信息写入 revision。
+    static func value(
+        etag: String?,
+        lastModified: String?,
+        contentDigest: String?,
+        contentLength: String?
+    ) -> String? {
+        let strong = [
+            etag.map { "etag=\($0)" },
+            lastModified.map { "last=\($0)" },
+            contentDigest.map { "digest=\($0)" }
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !strong.isEmpty else { return nil }
+        let length = contentLength?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (strong + (length?.isEmpty == false ? ["length=\(length!)"] : []))
+            .joined(separator: "#")
+    }
+}
+
 nonisolated struct OPDSSourceSyncResult: Sendable {
     let source: MediaSource
     let comics: [ComicBook]
@@ -90,7 +113,17 @@ nonisolated enum OPDSProvider {
     /// 标记，避免伪装成一个可靠的远程 revision。
     static func sourceRevision(for comic: ComicBook) async -> String {
         let fallback = "opds-unverified:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.remoteCoverID ?? "")#\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
-        guard let sourceID = comic.mediaSourceID,
+        guard let sourceID = comic.mediaSourceID else {
+            return fallback
+        }
+        let publicationID = comic.remoteCoverID ?? comic.sourceURL ?? comic.chapterPath ?? ""
+        if let offlineURL = OfflinePageStore.opdsFile(sourceID: sourceID, publicationID: publicationID) {
+            guard let data = try? Data(contentsOf: offlineURL), !data.isEmpty else {
+                return fallback
+            }
+            return "opds-offline:\(OfflineTranslationFingerprint.sha256(for: data))"
+        }
+        guard
               let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
               let credential = KomgaProvider.apiKey(for: sourceID),
               let value = comic.sourceURL ?? comic.chapterPath,
@@ -334,17 +367,13 @@ nonisolated private struct OPDSClient: Sendable {
                   (200..<300).contains(httpResponse.statusCode) else {
                 return nil
             }
-            let headers = httpResponse.allHeaderFields
-            let etag = (headers["Etag"] ?? headers["ETag"]) as? String
-            let lastModified = (headers["Last-Modified"] ?? headers["LastModified"]) as? String
-            let contentLength = (headers["Content-Length"] ?? headers["ContentLength"]).map { String(describing: $0) }
-            let values = [etag, lastModified, contentLength].compactMap { value -> String? in
-                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-                    return nil
-                }
-                return value
-            }
-            return values.isEmpty ? nil : values.joined(separator: "#")
+            return OPDSRemoteRevision.value(
+                etag: httpResponse.value(forHTTPHeaderField: "ETag"),
+                lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified"),
+                contentDigest: httpResponse.value(forHTTPHeaderField: "Content-Digest")
+                    ?? httpResponse.value(forHTTPHeaderField: "Digest"),
+                contentLength: httpResponse.value(forHTTPHeaderField: "Content-Length")
+            )
         } catch {
             return nil
         }

@@ -510,15 +510,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 for: comic,
                 session: sourceSession
             )
-            // startNewJob 已在建 Set 前生成 revision，resume/rebind 也已经强制校验；目录
-            // 漫画从这里开始节流，避免每 3 页都递归扫描一遍整本图片目录。
+            let shouldPeriodicallyValidateRevision = OfflineTranslationPageProvider
+                .shouldPeriodicallyValidateSourceRevision(for: comic)
+            // startNewJob 已在建 Set 前生成 revision，resume/rebind 也已经强制校验。目录
+            // 漫画只在最终激活前再次做全内容哈希；远程源才按页数/时间轮询版本 metadata。
             var lastFullRevisionValidation = Date()
             var pagesSinceFullRevisionValidation = 0
             while true {
                 try Task.checkCancellation()
                 if !usesExpensiveRevision
-                    || pagesSinceFullRevisionValidation >= Self.expensiveRevisionValidationPageInterval
-                    || Date().timeIntervalSince(lastFullRevisionValidation) >= Self.expensiveRevisionValidationTimeInterval {
+                    || (shouldPeriodicallyValidateRevision
+                        && (pagesSinceFullRevisionValidation >= Self.expensiveRevisionValidationPageInterval
+                            || Date().timeIntervalSince(lastFullRevisionValidation) >= Self.expensiveRevisionValidationTimeInterval)) {
                     try await validateSourceRevision(
                         for: record,
                         comic: comic,

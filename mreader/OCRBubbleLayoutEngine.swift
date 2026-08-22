@@ -104,10 +104,10 @@ nonisolated enum OCRBubbleLayoutEngine {
         let width = safeBounds.width
         let smallestFontSize: CGFloat = 0.1
         guard layout(fontSize: smallestFontSize, width: width) != nil else {
-            // 只有病态超长文本才会到这里；宁可让气泡最后有限外扩，也不能返回被截断的高度。
-            let height = measuredHeight(fontSize: smallestFontSize, contentWidth: max(width - padding * 2, 1))
+            // 病态文本仍不得突破漫画原气泡/allowedBounds。字号继续按既定策略缩到最小值；
+            // 仅允许文字渲染自身退化，边框绝不能因为兜底分支扩到漫画画面之外。
             return TranslationLayout(
-                rect: rect(width: width, height: height),
+                rect: safeBounds,
                 fontSize: smallestFontSize
             )
         }

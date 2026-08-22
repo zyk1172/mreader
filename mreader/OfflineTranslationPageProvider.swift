@@ -1,30 +1,6 @@
 import Foundation
 import UIKit
 
-nonisolated private final class OfflineTranslationFingerprintCache: @unchecked Sendable {
-    static let shared = OfflineTranslationFingerprintCache()
-
-    private let lock = NSLock()
-    private var values: [String: String] = [:]
-
-    func value(for key: String, data: Data) -> String {
-        lock.lock()
-        if let cached = values[key] {
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-        let fingerprint = OfflineTranslationFingerprint.sha256(for: data)
-        lock.lock()
-        values[key] = fingerprint
-        if values.count > 512 {
-            values.removeValue(forKey: values.keys.first!)
-        }
-        lock.unlock()
-        return fingerprint
-    }
-}
-
 nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
     case sourceUnavailable
     case pageUnavailable(Int)
@@ -71,9 +47,8 @@ nonisolated enum OfflineTranslationPageProvider {
         SourceSession(comic: comic)
     }
 
-    /// 目录漫画的 revision 需要枚举每张图片；与 CBZ/PDF 的单文件 stat 不同，不能在
-    /// 每个并发 batch 都重复调用。Coordinator 对此源类型按页数/时间节流，开始、恢复
-    /// 和最终激活前仍会强制完整核验。
+    /// 目录漫画的 revision 会读取每张图片并汇总内容哈希；与 CBZ/PDF 的单文件 stat
+    /// 不同，不能在每个并发 batch 都重复调用。它仅在建任务、恢复和最终激活前完整核验。
     static func usesExpensiveSourceRevision(
         for comic: ComicBook,
         session: SourceSession? = nil
@@ -91,8 +66,16 @@ nonisolated enum OfflineTranslationPageProvider {
 
     static func isReliableSourceRevision(_ revision: String?) -> Bool {
         guard let revision else { return false }
-        return !revision.hasPrefix("komga-unverified:")
-            && !revision.hasPrefix("opds-unverified:")
+        return !revision.contains("-unverified:")
+    }
+
+    static func shouldPeriodicallyValidateSourceRevision(for comic: ComicBook) -> Bool {
+        switch comic.sourceType {
+        case .komga, .opds:
+            return true
+        case .local:
+            return false
+        }
     }
 
     static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) async -> String {
@@ -140,9 +123,8 @@ nonisolated enum OfflineTranslationPageProvider {
         }
     }
 
-    /// 文件夹漫画的父目录 mtime 不会随着内部图片内容替换而稳定更新。这里仅汇总每张
-    /// 图片的相对路径、文件大小和 mtime，不读取图片字节，既能识别替换又不会为续传
-    /// 额外计算整本文件内容哈希。
+    /// 文件夹漫画的父目录 mtime 不会随着内部图片内容替换而稳定更新；每个条目必须以
+    /// 实际字节 SHA256 标识，避免同尺寸、恢复 mtime 的原地替换绕过版本检查。
     static func localFolderSourceRevision(
         at rootURL: URL,
         fallbackPath: String,
@@ -160,6 +142,7 @@ nonisolated enum OfflineTranslationPageProvider {
         let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "tif", "tiff"]
         let rootPath = rootURL.standardizedFileURL.path
         var descriptors: [String] = []
+        var couldNotHashEveryPage = false
         for case let fileURL as URL in enumerator {
             guard imageExtensions.contains(fileURL.pathExtension.lowercased()),
                   let values = try? fileURL.resourceValues(forKeys: keys),
@@ -170,9 +153,14 @@ nonisolated enum OfflineTranslationPageProvider {
             let relativePath = absolutePath.hasPrefix(rootPath + "/")
                 ? String(absolutePath.dropFirst(rootPath.count + 1))
                 : absolutePath
-            let size = values.fileSize ?? 0
-            let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
-            descriptors.append("\(relativePath)#\(size)#\(modified)")
+            guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
+                couldNotHashEveryPage = true
+                break
+            }
+            descriptors.append("\(relativePath)#\(OfflineTranslationFingerprint.sha256(for: data))")
+        }
+        guard !couldNotHashEveryPage else {
+            return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
         descriptors.sort()
         let metadata = descriptors.joined(separator: "\n")
@@ -220,23 +208,10 @@ nonisolated enum OfflineTranslationPageProvider {
         return image
     }
 
+    /// 数据已经为 OCR/翻译读取到内存；直接计算内容哈希比信任 path + size + mtime 更可靠。
+    /// 外部工具可以原地替换同尺寸图片并恢复 mtime，metadata 缓存会把新图误判为旧图。
     static func fingerprint(for data: Data, pageURL: URL? = nil) -> String {
-        if let pageURL,
-           let key = cacheKey(for: pageURL) {
-            return OfflineTranslationFingerprintCache.shared.value(for: key, data: data)
-        }
         return OfflineTranslationFingerprint.sha256(for: data)
-    }
-
-    private static func cacheKey(for pageURL: URL) -> String? {
-        if ComicManager.isArchivePageURL(pageURL) {
-            return ComicManager.archivePageCacheKey(for: pageURL)
-        }
-        guard !RemotePageLoader.isRemotePageURL(pageURL),
-              let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
-            return nil
-        }
-        return "\(pageURL.path)#\(values.fileSize ?? 0)#\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
     }
 
     private static func localData(for comic: ComicBook, pageURL: URL, session: SourceSession?) async -> Data? {

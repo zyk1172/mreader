@@ -121,6 +121,27 @@ struct mreaderTests {
         #expect(book.contentRevision?.contains("pages=200") == true)
     }
 
+    @Test func opdsRevisionRequiresAContentIdentityHeader() {
+        #expect(OPDSRemoteRevision.value(
+            etag: nil,
+            lastModified: nil,
+            contentDigest: nil,
+            contentLength: "48123456"
+        ) == nil)
+        #expect(OPDSRemoteRevision.value(
+            etag: "\"book-v2\"",
+            lastModified: nil,
+            contentDigest: nil,
+            contentLength: "48123456"
+        )?.contains("etag=") == true)
+        #expect(OPDSRemoteRevision.value(
+            etag: nil,
+            lastModified: "Fri, 22 Aug 2026 09:00:00 GMT",
+            contentDigest: nil,
+            contentLength: nil
+        )?.contains("last=") == true)
+    }
+
     @Test func pageTranslationParserAcceptsStableIdenticalTokens() throws {
         let expected = [
             AIPageTranslationItem(id: "b0", sourceText: "NASA", order: 0),
@@ -652,6 +673,21 @@ struct mreaderTests {
         #expect(layout.fontSize < 12)
         #expect(allowed.contains(layout.rect))
         #expect(layout.rect.height <= allowed.height)
+    }
+
+    @Test @MainActor func translationLayoutNeverEscapesAllowedBoundsForPathologicalText() {
+        let allowed = CGRect(x: 0, y: 0, width: 28, height: 18)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: Array(repeating: String(repeating: "非常长的译文\\n", count: 100), count: 20).joined(),
+            sourceFontSize: 22,
+            sourceRect: CGRect(x: 3, y: 3, width: 12, height: 8),
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(allowed.contains(layout.rect))
+        #expect(layout.rect == allowed)
+        #expect(layout.fontSize == 0.1)
     }
 
     @Test @MainActor func translationLayoutPrefersNaturalWrappingOverNeedlessSuggestedBreaks() {
@@ -3211,25 +3247,35 @@ private func makeTestPageRequest(
         #expect(first.count == 64)
     }
 
-    @Test func offlineTranslationFolderRevisionTracksIndividualPageMetadata() throws {
+    @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let pageURL = root.appendingPathComponent("001.jpg")
-        try Data("first".utf8).write(to: pageURL)
+        let originalDate = Date(timeIntervalSince1970: 1_234_567)
+        try Data("AAAAA".utf8).write(to: pageURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: pageURL.path)
         let first = OfflineTranslationPageProvider.localFolderSourceRevision(
             at: root,
             fallbackPath: root.path,
             pageCount: 1
         )
-        try Data("replacement-with-a-different-size".utf8).write(to: pageURL)
+        try Data("BBBBB".utf8).write(to: pageURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: pageURL.path)
         let second = OfflineTranslationPageProvider.localFolderSourceRevision(
             at: root,
             fallbackPath: root.path,
             pageCount: 1
         )
         #expect(first != second)
+        #expect(OfflineTranslationPageProvider.fingerprint(
+            for: Data("AAAAA".utf8),
+            pageURL: pageURL
+        ) != OfflineTranslationPageProvider.fingerprint(
+            for: Data("BBBBB".utf8),
+            pageURL: pageURL
+        ))
     }
 
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
