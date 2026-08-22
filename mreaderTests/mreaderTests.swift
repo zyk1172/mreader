@@ -383,6 +383,23 @@ struct mreaderTests {
         #expect(hypot(placed.midX - 195, placed.midY - 235) < 220)
     }
 
+    @Test func translationBubbleAvoidanceDoesNotShrinkMeasuredBubbleAtImageEdge() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        // 已按文本实际尺寸测量出的气泡恰好贴近页面边缘时，避让阶段只能移动，不能裁掉内边距。
+        let original = CGRect(x: 0, y: 186, width: 214, height: 84)
+        let placed = OCRBubbleLayoutEngine.nonOverlappingRect(
+            original,
+            anchor: CGPoint(x: original.midX, y: original.midY),
+            occupiedRects: [],
+            bounds: bounds,
+            margin: 0
+        )
+
+        #expect(placed.width == original.width)
+        #expect(placed.height == original.height)
+        #expect(bounds.contains(placed))
+    }
+
     @Test @MainActor func translationBubbleMeasurementFitsDenseTextInsideImage() {
         let bounds = CGRect(x: 40, y: 0, width: 310, height: 780)
         let source = CGRect(x: 250, y: 680, width: 70, height: 40)

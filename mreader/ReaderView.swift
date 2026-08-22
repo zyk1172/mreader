@@ -4141,7 +4141,11 @@ struct LocalImageView: View {
                 original,
                 anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
                 occupiedRects: occupiedRects,
-                bounds: transform.imageRect
+                bounds: transform.imageRect,
+                // original 已由 anchoredTranslationLayout 按整本离线翻译相同的文字测量结果生成。
+                // 这里仅为普通 OCR/视觉翻译做避让，不能再用 12pt 页边距压缩气泡，
+                // 否则靠近页面边缘时边框会小于已测量的字形范围。
+                margin: 0
             )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect, fontSize: item.fontSize))
