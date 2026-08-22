@@ -416,6 +416,10 @@ struct ContentView: View {
                     readingActivity.mergeSyncedDays(payload.activityDays)
                 }
             }
+            .task(id: library.isLoaded) {
+                guard library.isLoaded else { return }
+                library.runStartupRemoteMaintenance()
+            }
             .onReceive(library.$comics.debounce(for: .seconds(2), scheduler: RunLoop.main)) { comics in
                 iCloudSync.push(comics: comics, activityDays: readingActivity.days)
             }
@@ -2362,7 +2366,7 @@ struct ComicCoverCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack(alignment: .topTrailing) {
-                CoverImageView(path: comic.coverImagePath)
+                CoverImageView(comic: comic)
                     .frame(width: cardWidth, height: coverHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .clipped()
@@ -2454,7 +2458,7 @@ struct ComicListRow: View {
             Color.clear
                 .frame(width: 62, height: 90)
                 .overlay {
-                    CoverImageView(path: comic.coverImagePath)
+                    CoverImageView(comic: comic)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
 
@@ -2519,7 +2523,7 @@ struct SeriesListRow: View {
                         }
                 } else {
                     ForEach(Array(covers.enumerated()), id: \.element.id) { index, comic in
-                        CoverImageView(path: comic.coverImagePath)
+                        CoverImageView(comic: comic)
                             .frame(width: 58, height: 84)
                             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                             .rotationEffect(.degrees(Double(index - 1) * 3))
@@ -2586,7 +2590,7 @@ struct SeriesCard: View {
                     if !stackedCovers.isEmpty {
                         ZStack {
                             ForEach(Array(stackedCovers.enumerated()), id: \.element.id) { index, comic in
-                                CoverImageView(path: comic.coverImagePath)
+                                CoverImageView(comic: comic)
                                     .frame(width: cardWidth - 14, height: coverHeight - 12)
                                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                     .clipped()
@@ -2684,7 +2688,7 @@ struct ContinueReadingCard: View {
             Color.clear
                 .frame(width: 86, height: 126)
                 .overlay {
-                    CoverImageView(path: comic.coverImagePath)
+                    CoverImageView(comic: comic)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .shadow(color: .black.opacity(0.16), radius: 10, y: 5)
@@ -3398,7 +3402,7 @@ private struct TopComicRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            CoverImageView(path: comic.coverImagePath)
+            CoverImageView(comic: comic)
                 .frame(width: 46, height: 66)
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .clipped()
@@ -3433,7 +3437,25 @@ private struct TopComicRow: View {
 
 struct CoverImageView: View {
     let path: String?
+    let remoteSourceID: UUID?
+    let remoteBookID: String?
     @State private var image: UIImage?
+
+    init(path: String?) {
+        self.path = path
+        self.remoteSourceID = nil
+        self.remoteBookID = nil
+    }
+
+    init(comic: ComicBook) {
+        self.path = comic.coverImagePath
+        self.remoteSourceID = comic.sourceType == .komga ? comic.mediaSourceID : nil
+        self.remoteBookID = comic.sourceType == .komga ? comic.komgaBookID : nil
+    }
+
+    private var coverTaskID: String {
+        "\(path ?? "")|\(remoteSourceID?.uuidString ?? "")|\(remoteBookID ?? "")"
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -3454,16 +3476,21 @@ struct CoverImageView: View {
                 }
             }
         }
-        .task(id: path) { await loadCover() }
+        .task(id: coverTaskID) { await loadCover() }
     }
 
     private func loadCover() async {
-        guard let path else {
+        let resolvedPath = RemoteImageLoader.resolvedCoverPath(
+            persistedPath: path,
+            sourceID: remoteSourceID,
+            bookID: remoteBookID
+        )
+        guard let resolvedPath else {
             image = nil
             return
         }
         let loadedImage = await Task.detached(priority: .utility) {
-            await Self.makeThumbnail(path: path, maxPixelSize: 640)
+            await Self.makeThumbnail(path: resolvedPath, maxPixelSize: 640)
         }.value
         image = loadedImage
     }

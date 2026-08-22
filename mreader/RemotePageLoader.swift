@@ -30,6 +30,22 @@ nonisolated enum RemoteImageLoader {
         return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
     }
 
+    /// 优先使用当前容器中按稳定远程身份计算出的缓存路径，避免依赖 library.json
+    /// 中可能已经过期的绝对沙盒路径。没有缓存时保留传入路径，交给调用方决定是否
+    /// 继续使用远程引用或显示占位图。
+    static func resolvedCoverPath(
+        persistedPath: String?,
+        sourceID: UUID?,
+        bookID: String?
+    ) -> String? {
+        if let sourceID,
+           let bookID,
+           let cachedPath = cachedCoverPath(sourceID: sourceID, bookID: bookID) {
+            return cachedPath
+        }
+        return persistedPath
+    }
+
     static func cacheCoverData(_ data: Data, sourceID: UUID, bookID: String) -> String? {
         let url = coverURL(sourceID: sourceID, bookID: bookID)
         do {

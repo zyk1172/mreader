@@ -215,6 +215,7 @@ final class ComicLibraryStore: ObservableObject {
     private var comicsSaveRevision = 0
     private var lastKomgaSyncCount = 0
     private var lastOPDSSyncCount = 0
+    private var didStartStartupRemoteMaintenance = false
 
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -224,6 +225,8 @@ final class ComicLibraryStore: ObservableObject {
         Task {
             await load()
             purgeNetworkLibraryState()
+            restoreCachedRemoteCoverPaths()
+            isLoaded = true
         }
     }
 
@@ -465,6 +468,15 @@ final class ComicLibraryStore: ObservableObject {
             await self.performLibrarySync(scope: requestedScope)
         }
         HapticManager.shared.play(.success)
+    }
+
+    /// 启动时只恢复远程媒体源，不重新扫描本地漫画目录，也不产生刷新成功震动。
+    /// 本地库仍然先使用磁盘快照显示；Komga/OPDS 同步在后台增量更新书架。
+    func syncStartupRemoteLibrariesAsync() async {
+        await syncCoordinator.perform(scope: .startupRemote) { [weak self] requestedScope in
+            guard let self else { return }
+            await self.performLibrarySync(scope: requestedScope)
+        }
     }
 
     private func performLibrarySync(scope: LibrarySyncScope) async {
@@ -820,7 +832,27 @@ final class ComicLibraryStore: ObservableObject {
                 print("书架加载异常: \(issue.userMessage)")
             }
         }
-        isLoaded = true
+    }
+
+    /// library.json 可能保存了旧容器中的绝对 Application Support 路径。
+    /// Komga 封面缓存的稳定身份是 sourceID + bookID，启动加载后据此恢复当前路径。
+    private func restoreCachedRemoteCoverPaths() {
+        var changed = false
+        for index in comics.indices {
+            let comic = comics[index]
+            guard comic.sourceType == .komga,
+                  let sourceID = comic.mediaSourceID,
+                  let bookID = comic.komgaBookID,
+                  let currentPath = RemoteImageLoader.cachedCoverPath(sourceID: sourceID, bookID: bookID),
+                  comic.coverImagePath != currentPath else {
+                continue
+            }
+            comics[index].coverImagePath = currentPath
+            changed = true
+        }
+        if changed {
+            save()
+        }
     }
 
     private func sortAndSave() {
@@ -836,6 +868,15 @@ final class ComicLibraryStore: ObservableObject {
     func runStartupMaintenance() {
         Task {
             await syncAllLibrariesAsync()
+        }
+    }
+
+    func runStartupRemoteMaintenance() {
+        guard !didStartStartupRemoteMaintenance else { return }
+        didStartStartupRemoteMaintenance = true
+        Task { [weak self] in
+            guard let self else { return }
+            await self.syncStartupRemoteLibrariesAsync()
         }
     }
 
@@ -973,6 +1014,13 @@ final class ComicLibraryStore: ObservableObject {
             let existing = comics[index]
             var merged = comic
             merged.id = existing.id
+            if comic.sourceType == .komga {
+                merged.coverImagePath = RemoteImageLoader.resolvedCoverPath(
+                    persistedPath: comic.coverImagePath ?? existing.coverImagePath,
+                    sourceID: comic.mediaSourceID ?? existing.mediaSourceID,
+                    bookID: comic.komgaBookID ?? existing.komgaBookID
+                )
+            }
             if comic.sourceType == .opds {
                 merged.totalPages = max(existing.totalPages, comic.totalPages)
                 merged.remotePageCount = existing.remotePageCount ?? comic.remotePageCount

@@ -9,6 +9,7 @@ nonisolated struct LibrarySyncScope: OptionSet, Sendable {
     static let prewarmKomga = LibrarySyncScope(rawValue: 1 << 3)
 
     static let all: LibrarySyncScope = [.local, .komga, .opds]
+    static let startupRemote: LibrarySyncScope = [.komga, .opds, .prewarmKomga]
 }
 
 /// Serializes library refreshes and folds overlapping requests into one trailing pass.
