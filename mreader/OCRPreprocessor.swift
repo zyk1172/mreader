@@ -4,7 +4,7 @@ import ImageIO
 import UIKit
 @preconcurrency import Vision
 
-nonisolated enum OCRRecognitionMode: String, CaseIterable, Sendable {
+nonisolated enum OCRRecognitionMode: String, Codable, CaseIterable, Sendable {
     case adaptive
     case maximumAccuracy
 
@@ -342,6 +342,11 @@ struct OCRPreprocessor {
                         sliceRect: variant.sliceRect,
                         fullPixelSize: variant.fullPixelSize
                     )
+                    let geometry = localOCRGeometry(
+                        observationRect: observation.boundingBox,
+                        observationPixelSize: CGSize(width: cgImage.width, height: cgImage.height),
+                        normalizedPageRect: rect
+                    )
                     let textColor = variant.name == "original"
                         ? representativeTextColorHex(in: cgImage, visionRect: observation.boundingBox)
                         : nil
@@ -351,9 +356,11 @@ struct OCRPreprocessor {
                             boundingBox: rect,
                             confidence: Double(candidate.confidence),
                             ocrSource: "\(variant.name):\(passName)",
-                            // 竖排列的字号≈列宽，横排行的字号≈行高
-                            estimatedFontScale: Double(min(rect.width, rect.height)),
-                            textColorHex: textColor
+                            // 横排取 normalized 高度，竖排取 normalized 宽度；显示时由
+                            // sourceFontSize(in:) 分别乘页面的高/宽轴。
+                            estimatedFontScale: geometry.fontScale,
+                            textColorHex: textColor,
+                            textOrientation: geometry.orientation
                         ))
                     }
                 }
@@ -375,6 +382,33 @@ struct OCRPreprocessor {
                 }
             }
         }
+    }
+
+    nonisolated static func localOCRGeometryForDiagnostics(
+        observationRect: CGRect,
+        observationPixelSize: CGSize,
+        normalizedPageRect: CGRect
+    ) -> (orientation: TextOrientation, fontScale: Double) {
+        localOCRGeometry(
+            observationRect: observationRect,
+            observationPixelSize: observationPixelSize,
+            normalizedPageRect: normalizedPageRect
+        )
+    }
+
+    nonisolated private static func localOCRGeometry(
+        observationRect: CGRect,
+        observationPixelSize: CGSize,
+        normalizedPageRect: CGRect
+    ) -> (orientation: TextOrientation, fontScale: Double) {
+        // 方向在物理像素轴上判定；字号尺度仍回写到对应的 normalized 页面轴。
+        let physicalWidth = observationRect.width * observationPixelSize.width
+        let physicalHeight = observationRect.height * observationPixelSize.height
+        let orientation: TextOrientation = physicalWidth >= physicalHeight ? .horizontal : .vertical
+        let fontScale = orientation == .horizontal
+            ? Double(normalizedPageRect.height)
+            : Double(normalizedPageRect.width)
+        return (orientation, fontScale)
     }
 
     nonisolated private static func mapVisionRect(_ visionRect: CGRect, sliceRect: CGRect, fullPixelSize: CGSize) -> CGRect {
@@ -504,7 +538,7 @@ struct OCRPreprocessor {
     }
 
     /// #8：最高精度模式也必须尊重 sourceLanguagePreference。
-    private static func maximumAccuracyPasses(for options: Options) -> [(name: String, languages: [String])] {
+    nonisolated private static func maximumAccuracyPasses(for options: Options) -> [(name: String, languages: [String])] {
         if let source = options.sourceLanguagePreference, source != .automatic {
             let effective = effectiveLanguages(for: options)
             let primaryIDs = filteredLanguages(

@@ -16,7 +16,8 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            "local-ocr-v1",
+            // v2：字号尺度现在按 observation 的物理方向写入，不能复用旧的 normalized min(width,height) 缓存。
+            "local-ocr-v2",
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", options.minimumTextHeight),
@@ -41,6 +42,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
     let source: String
     let estimatedFontScale: Double
     let textColorHex: String?
+    let textOrientation: TextOrientation?
 
     init(_ block: TextBlock) {
         id = block.id
@@ -53,6 +55,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
         source = block.ocrSource
         estimatedFontScale = block.estimatedFontScale
         textColorHex = block.textColorHex
+        textOrientation = block.textOrientation
     }
 
     var textBlock: TextBlock {
@@ -63,7 +66,8 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
             confidence: confidence,
             ocrSource: source,
             estimatedFontScale: estimatedFontScale,
-            textColorHex: textColorHex
+            textColorHex: textColorHex,
+            textOrientation: textOrientation
         )
     }
 }

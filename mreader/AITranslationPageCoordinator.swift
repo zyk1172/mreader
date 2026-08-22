@@ -18,6 +18,11 @@ nonisolated enum AITranslationPrefetchPolicy {
 }
 
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
+    /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
+    /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
+    static let translationCacheRevision = "translation-v7"
+    static let ocrGeometryRevision = "physical-axis-v2"
+
     let pageURL: URL
     let image: UIImage
     let mode: AITranslationMode
@@ -32,6 +37,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     let usesVisualOCRVerification: Bool
     let viewportAspect: CGFloat
     let sourceLanguagePreference: TranslationSourceLanguage?
+    let previousContext: String
 
     var cacheKey: String {
         let sourceIdentity: String
@@ -53,7 +59,8 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             modelIdentity = "vision=\(configuration.visionModel)|text=\(configuration.textModel)"
         }
         let rawValue = [
-            "v5",
+            Self.translationCacheRevision,
+            "ocr-geometry=\(Self.ocrGeometryRevision)",
             sourceIdentity,
             mode.rawValue,
             configuration.profileID.uuidString,
@@ -67,11 +74,17 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             usesVisualOCRVerification ? "visual-review" : "local-only",
             String(format: "%.3f", Double(viewportAspect)),
             sourceLanguagePreference?.rawValue ?? "auto",
+            previousContext,
             translationPromptTemplate,
             visionPromptTemplate
         ].joined(separator: "|")
         return SHA256.hash(data: Data(rawValue.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+nonisolated struct AITranslationOCRResult: Sendable {
+    let blocks: [TextBlock]
+    let missingBlockIDs: [UUID]
 }
 
 nonisolated private struct CachedTranslationBlock: Codable, Sendable {
@@ -82,10 +95,15 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let y: Double
     let width: Double
     let height: Double
+    let bubbleX: Double?
+    let bubbleY: Double?
+    let bubbleWidth: Double?
+    let bubbleHeight: Double?
     let confidence: Double
     let ocrSource: String
     let estimatedFontScale: Double
     let textColorHex: String?
+    let textOrientation: TextOrientation?
     let polygon: [CachedPoint]
     let translationLines: [String]
 
@@ -97,16 +115,27 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
         y = block.boundingBox.minY
         width = block.boundingBox.width
         height = block.boundingBox.height
+        bubbleX = block.bubbleBox.map { Double($0.minX) }
+        bubbleY = block.bubbleBox.map { Double($0.minY) }
+        bubbleWidth = block.bubbleBox.map { Double($0.width) }
+        bubbleHeight = block.bubbleBox.map { Double($0.height) }
         confidence = block.confidence
         ocrSource = block.ocrSource
         estimatedFontScale = block.estimatedFontScale
         textColorHex = block.textColorHex
+        textOrientation = block.textOrientation
         polygon = block.polygon.map(CachedPoint.init)
         translationLines = block.translationLines
     }
 
     var textBlock: TextBlock {
-        TextBlock(
+        let bubbleBox: CGRect?
+        if let bubbleX, let bubbleY, let bubbleWidth, let bubbleHeight {
+            bubbleBox = CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight)
+        } else {
+            bubbleBox = nil
+        }
+        return TextBlock(
             id: id,
             text: text,
             boundingBox: CGRect(x: x, y: y, width: width, height: height),
@@ -115,8 +144,10 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
             ocrSource: ocrSource,
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
+            bubbleBox: bubbleBox,
             polygon: polygon.map(\.point),
-            translationLines: translationLines
+            translationLines: translationLines,
+            textOrientation: textOrientation
         )
     }
 }
@@ -267,7 +298,7 @@ nonisolated enum AITranslationPagePipeline {
     static func translate(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
         switch request.mode {
         case .ocr:
-            return try await translateOCR(request)
+            return try await translateOCRPageWithStatus(request).blocks
         case .vision:
             return try await AITranslator.translateVisionPage(
                 image: request.image,
@@ -284,7 +315,50 @@ nonisolated enum AITranslationPagePipeline {
         }
     }
 
+    /// Vision 明确返回空页但本地 OCR 已经识别到正文时，复用该 OCR 结果走 Text Model。
+    /// 这避免将有文字的页静默写成 noText，也避免为了补译再跑一次 OCR。
+    static func translateExistingOCRBubbles(
+        _ bubbles: [TextBlock],
+        request: AITranslationPageRequest
+    ) async throws -> AITranslationOCRResult {
+        var translated = bubbles
+        guard !translated.isEmpty else {
+            return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
+        }
+
+        try await applyBatchTranslationSafely(
+            to: &translated,
+            indexes: Array(translated.indices),
+            request: request
+        )
+        let missing = translated.indices.filter {
+            (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !missing.isEmpty {
+            try await applyBatchTranslationSafely(
+                to: &translated,
+                indexes: missing,
+                request: request
+            )
+        }
+        let completed = translated.filter {
+            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !completed.isEmpty else {
+            throw AITranslationRequestError.invalidResponse(model: request.configuration.textModel)
+        }
+        let missingIDs = translated.indices.compactMap { index in
+            let translation = (translated[index].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return translation.isEmpty ? translated[index].id : nil
+        }
+        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingIDs)
+    }
+
     private static func translateOCR(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
+        try await translateOCRPageWithStatus(request).blocks
+    }
+
+    static func translateOCRPageWithStatus(_ request: AITranslationPageRequest) async throws -> AITranslationOCRResult {
         let options = OCRPreprocessor.Options(
             isRightToLeft: request.isRightToLeft,
             minimumTextHeight: request.minimumTextHeight,
@@ -303,7 +377,7 @@ nonisolated enum AITranslationPagePipeline {
                 from: request.pageURL,
                 fallback: request.image
             ) ?? request.image
-            resolvedBlocks = await AITranslator.visualVerifyOCRRegions(
+            resolvedBlocks = try await AITranslator.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: localResult.resolvedBlocks,
                 apiKey: request.configuration.apiKey,
@@ -325,7 +399,9 @@ nonisolated enum AITranslationPagePipeline {
             visibleBlocks,
             isRightToLeft: request.isRightToLeft
         ).bubbles
-        guard !translated.isEmpty else { return [] }
+        guard !translated.isEmpty else {
+            return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
+        }
 
         try await applyBatchTranslationSafely(to: &translated, indexes: Array(translated.indices), request: request)
         let missing = translated.indices.filter {
@@ -334,9 +410,33 @@ nonisolated enum AITranslationPagePipeline {
         if !missing.isEmpty {
             try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: request)
         }
-        return translated.filter {
+        let completed = translated.filter {
             !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        let missingBlockIDs = translated.compactMap { block in
+            let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return translation.isEmpty ? block.id : nil
+        }
+        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingBlockIDs)
+    }
+
+    /// Vision=noText 的复核必须复用正常 OCR 的 annotate -> filter -> segment 链路，
+    /// 不能直接把低阈值识别出的原始 bubble 当正文。
+    static func filteredOCRBubbles(
+        from localResult: OCRPipelineResult,
+        minimumTextHeight: Double,
+        isRightToLeft: Bool
+    ) -> [TextBlock] {
+        let annotated = AITranslator.annotatedMangaTextBlocks(
+            localResult.resolvedBlocks,
+            safeAreaInset: 0,
+            minimumTextHeight: minimumTextHeight,
+            isRightToLeft: isRightToLeft
+        )
+        return MangaTextSegmenter.segment(
+            annotated.filter { !$0.isFiltered },
+            isRightToLeft: isRightToLeft
+        ).bubbles
     }
 
     /// 整页 JSON 翻译，失败时若属于“格式/协议类”错误，则缩小为逐气泡纯文本兜底（审查 #7），
@@ -365,15 +465,19 @@ nonisolated enum AITranslationPagePipeline {
         let target = request.target
         var successCount = 0
         var firstError: Error?
-        await withTaskGroup(of: (Int, Result<String, Error>).self) { group in
+        try await withThrowingTaskGroup(of: (Int, Result<String, Error>).self) { group in
             var nextIndex = 0
 
             func submit(_ localIndex: Int) {
                 let index = indexes[localIndex]
                 let block = blocks[index]
-                let pageContext = blocks.count > 1
+                let localContext = blocks.count > 1
                     ? AITranslator.pageContextDescription(blocks: blocks, currentIndex: index)
                     : ""
+                let pageContext = [request.previousContext, localContext]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
                 group.addTask {
                     do {
                         let text = try await AITranslator.translate(
@@ -383,11 +487,13 @@ nonisolated enum AITranslationPagePipeline {
                             apiKey: configuration.apiKey,
                             baseURL: configuration.baseURL,
                             model: configuration.textModel,
-                            targetLanguage: target.modelInstruction,
+                            targetLanguage: target,
                             promptTemplate: request.translationPromptTemplate,
                             requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
                         )
                         return (index, .success(text))
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         return (index, .failure(error))
                     }
@@ -398,10 +504,10 @@ nonisolated enum AITranslationPagePipeline {
                 submit(nextIndex)
                 nextIndex += 1
             }
-            while let (index, result) = await group.next() {
+            while let (index, result) = try await group.next() {
                 if Task.isCancelled {
                     group.cancelAll()
-                    return
+                    throw CancellationError()
                 }
                 switch result {
                 case .success(let text):
@@ -421,9 +527,9 @@ nonisolated enum AITranslationPagePipeline {
         }
         // 全部失败必须向上抛错（项2），不允许“全失败却像成功一样结束”。
         if successCount == 0, let firstError {
-            throw AITranslationRequestError.invalidConfiguration(
-                "逐气泡翻译全部失败：\(firstError.localizedDescription)"
-            )
+            // 保留原始错误类型及其 statusCode/retryAfter，交给离线重试策略处理
+            // 429、503、鉴权失败和内容策略拒绝，而不是降级成字符串错误。
+            throw firstError
         }
     }
 
@@ -441,7 +547,8 @@ nonisolated enum AITranslationPagePipeline {
             model: request.configuration.textModel,
             target: request.target,
             promptTemplate: request.translationPromptTemplate,
-            sourceLanguage: request.sourceLanguagePreference
+            sourceLanguage: request.sourceLanguagePreference,
+            previousContext: request.previousContext
         )
         // 线上 ID 是 b0/b1/...，顺序 = requestedBlocks（即 indexes）中的位置
         for (position, index) in indexes.enumerated() {

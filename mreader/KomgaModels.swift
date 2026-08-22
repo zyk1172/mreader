@@ -123,6 +123,10 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
     let number: String?
     let pagesCount: Int?
     let pageCountValue: Int?
+    let fileSize: Int?
+    let fileHash: String?
+    let fileLastModified: String?
+    let lastModified: String?
     let metadata: KomgaMetadataDTO?
     let media: KomgaBookMediaDTO?
     let readProgress: KomgaReadProgressDTO?
@@ -143,6 +147,28 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
         pagesCount ?? pageCountValue ?? media?.pagesCount ?? media?.pageCount
     }
 
+    /// 不同 Komga 版本会把文件版本放在 Book 或 media 中。优先使用真正的文件 hash/
+    /// 修改时间；两者都不存在时返回 nil，由离线续传按“不可验证远程源”处理。
+    var contentRevision: String? {
+        let values = [
+            fileHash,
+            fileLastModified,
+            media?.fileHash,
+            media?.fileLastModified,
+            lastModified,
+            media?.lastModified
+        ]
+        let usable = values.compactMap { value -> String? in
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+        guard !usable.isEmpty else { return nil }
+        return (["pages=\(pageCount ?? 0)", "size=\(fileSize ?? media?.fileSize ?? 0)"] + usable)
+            .joined(separator: "#")
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id
         case seriesId
@@ -153,6 +179,10 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
         case number
         case pagesCount
         case pageCountValue = "pageCount"
+        case fileSize
+        case fileHash
+        case fileLastModified
+        case lastModified
         case metadata
         case media
         case readProgress
@@ -172,6 +202,10 @@ nonisolated struct KomgaBookDTO: Decodable, Hashable, Sendable {
         number = container.decodeFlexibleString(forKey: .number)
         pagesCount = container.decodeFlexibleInt(forKey: .pagesCount)
         pageCountValue = container.decodeFlexibleInt(forKey: .pageCountValue)
+        fileSize = container.decodeFlexibleInt(forKey: .fileSize)
+        fileHash = container.decodeFlexibleString(forKey: .fileHash)
+        fileLastModified = container.decodeFlexibleString(forKey: .fileLastModified)
+        lastModified = container.decodeFlexibleString(forKey: .lastModified)
         metadata = try? container.decodeIfPresent(KomgaMetadataDTO.self, forKey: .metadata)
         media = try? container.decodeIfPresent(KomgaBookMediaDTO.self, forKey: .media)
         readProgress = try? container.decodeIfPresent(KomgaReadProgressDTO.self, forKey: .readProgress)
@@ -185,16 +219,28 @@ nonisolated struct KomgaMetadataDTO: Decodable, Hashable, Sendable {
 nonisolated struct KomgaBookMediaDTO: Decodable, Hashable, Sendable {
     let pagesCount: Int?
     let pageCount: Int?
+    let fileSize: Int?
+    let fileHash: String?
+    let fileLastModified: String?
+    let lastModified: String?
 
     private enum CodingKeys: String, CodingKey {
         case pagesCount
         case pageCount
+        case fileSize
+        case fileHash
+        case fileLastModified
+        case lastModified
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         pagesCount = container.decodeFlexibleInt(forKey: .pagesCount)
         pageCount = container.decodeFlexibleInt(forKey: .pageCount)
+        fileSize = container.decodeFlexibleInt(forKey: .fileSize)
+        fileHash = container.decodeFlexibleString(forKey: .fileHash)
+        fileLastModified = container.decodeFlexibleString(forKey: .fileLastModified)
+        lastModified = container.decodeFlexibleString(forKey: .lastModified)
     }
 }
 

@@ -8,6 +8,29 @@ nonisolated struct OPDSPublication: Hashable, Sendable {
     let mediaType: String?
 }
 
+nonisolated enum OPDSRemoteRevision {
+    /// Content-Length 只能描述大小，不能单独证明内容身份；至少需要 ETag、Last-Modified
+    /// 或 Content-Digest 之一。长度仅作为这些强身份的补充信息写入 revision。
+    static func value(
+        etag: String?,
+        lastModified: String?,
+        contentDigest: String?,
+        contentLength: String?
+    ) -> String? {
+        let strong = [
+            etag.map { "etag=\($0)" },
+            lastModified.map { "last=\($0)" },
+            contentDigest.map { "digest=\($0)" }
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !strong.isEmpty else { return nil }
+        let length = contentLength?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (strong + (length?.isEmpty == false ? ["length=\(length!)"] : []))
+            .joined(separator: "#")
+    }
+}
+
 nonisolated struct OPDSSourceSyncResult: Sendable {
     let source: MediaSource
     let comics: [ComicBook]
@@ -83,6 +106,37 @@ nonisolated enum OPDSProvider {
             }
         }
         return results
+    }
+
+    /// OPDS 没有统一的 book metadata API；优先以 acquisition 响应的 ETag/Last-Modified/
+    /// Content-Length 建立版本标识。服务端不提供这些 headers 时保留显式 unverified
+    /// 标记，避免伪装成一个可靠的远程 revision。
+    static func sourceRevision(for comic: ComicBook) async -> String {
+        let fallback = "opds-unverified:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.remoteCoverID ?? "")#\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
+        guard let sourceID = comic.mediaSourceID else {
+            return fallback
+        }
+        let publicationID = comic.remoteCoverID ?? comic.sourceURL ?? comic.chapterPath ?? ""
+        if let offlineURL = OfflinePageStore.opdsFile(sourceID: sourceID, publicationID: publicationID) {
+            guard let data = try? Data(contentsOf: offlineURL), !data.isEmpty else {
+                return fallback
+            }
+            return "opds-offline:\(OfflineTranslationFingerprint.sha256(for: data))"
+        }
+        guard
+              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let credential = KomgaProvider.apiKey(for: sourceID),
+              let value = comic.sourceURL ?? comic.chapterPath,
+              let acquisitionURL = URL(string: value) else {
+            return fallback
+        }
+        var resolvedSource = source
+        resolvedSource.baseURL = await KomgaProvider.resolveBestURL(source: source)
+        let client = OPDSClient(source: resolvedSource, credential: credential)
+        guard let revision = await client.contentRevision(for: acquisitionURL) else {
+            return fallback
+        }
+        return "opds:\(sourceID.uuidString)#\(comic.remoteCoverID ?? acquisitionURL.absoluteString)#\(revision)"
     }
 
     static func loadPages(for comic: ComicBook) async -> ComicManager.LoadResult? {
@@ -298,6 +352,31 @@ nonisolated private struct OPDSClient: Sendable {
 
     func data(from url: URL) async throws -> Data {
         try await responseData(from: url).0
+    }
+
+    func contentRevision(for url: URL) async -> String? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 20
+        if shouldForwardAuthorization(to: url) {
+            applyAuthorization(to: &request)
+        }
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else {
+                return nil
+            }
+            return OPDSRemoteRevision.value(
+                etag: httpResponse.value(forHTTPHeaderField: "ETag"),
+                lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified"),
+                contentDigest: httpResponse.value(forHTTPHeaderField: "Content-Digest")
+                    ?? httpResponse.value(forHTTPHeaderField: "Digest"),
+                contentLength: httpResponse.value(forHTTPHeaderField: "Content-Length")
+            )
+        } catch {
+            return nil
+        }
     }
 
     func download(_ url: URL, publicationID: String) async throws -> URL {

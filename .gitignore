@@ -1,1 +1,12 @@
 .superpowers/
+
+# Xcode user-specific state (shared schemes live in xcshareddata/ and are committed)
+xcuserdata/
+*.xcuserstate
+
+# Local build output
+DerivedData/
+build/
+
+# macOS
+.DS_Store

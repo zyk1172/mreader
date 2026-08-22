@@ -70,7 +70,8 @@ nonisolated enum OCRCandidateResolver {
                 estimatedFontScale: representative.estimatedFontScale,
                 textColorHex: inheritedColor,
                 polygon: representative.polygon,
-                translationLines: representative.translationLines
+                translationLines: representative.translationLines,
+                textOrientation: representative.textOrientation
             ))
             rejected.append(contentsOf: group.filter { $0.id != representative.id })
         }

@@ -65,6 +65,115 @@ struct mreaderTests {
         #expect(!TranslationOutputValidator.isCompatible("これは英語ではありません", target: .english))
         #expect(TranslationOutputValidator.isCompatible("这是正确的译文", target: .simplifiedChinese))
         #expect(!TranslationOutputValidator.isCompatible("이것은 중국어가 아닙니다", target: .simplifiedChinese))
+        // 短对白也必须经过脚本冲突检查，不能因为少于 3 字而漏过目标中文校验。
+        #expect(!TranslationOutputValidator.isCompatible("はい", target: .simplifiedChinese))
+        #expect(!TranslationOutputValidator.isCompatible("안녕", target: .simplifiedChinese))
+    }
+
+    @Test func translationValidatorAllowsStableTokensButRejectsUntranslatedSentences() {
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "NASA", sourceText: "NASA", target: .english
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "OK", sourceText: "OK", target: .simplifiedChinese
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "iPhone", sourceText: "iPhone", target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "ありがとう", sourceText: "ありがとう", target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "这是中文", sourceText: "这是中文", target: .english
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "山田", sourceText: "山田", target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "大丈夫", sourceText: "大丈夫", target: .korean
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "没有", sourceText: "没有", target: .japanese
+        ))
+    }
+
+    @Test func translationValidatorNormalizesChineseTargetGlyphs() {
+        #expect(TranslationOutputValidator.normalizedAcceptableTranslation(
+            "這是測試", sourceText: "これはテストです", target: .simplifiedChinese
+        ) == "这是测试")
+        #expect(TranslationOutputValidator.normalizedAcceptableTranslation(
+            "这是测试", sourceText: "これはテストです", target: .traditionalChinese
+        ) == "這是測試")
+    }
+
+    @Test func komgaBookContentRevisionUsesFileMetadata() throws {
+        let data = Data("""
+        {
+          "id": "book-1",
+          "pageCount": 200,
+          "fileSize": 12345,
+          "fileHash": "sha256:abc",
+          "fileLastModified": "2026-08-22T08:00:00Z"
+        }
+        """.utf8)
+        let book = try JSONDecoder().decode(KomgaBookDTO.self, from: data)
+        #expect(book.contentRevision?.contains("sha256:abc") == true)
+        #expect(book.contentRevision?.contains("pages=200") == true)
+    }
+
+    @Test func opdsRevisionRequiresAContentIdentityHeader() {
+        #expect(OPDSRemoteRevision.value(
+            etag: nil,
+            lastModified: nil,
+            contentDigest: nil,
+            contentLength: "48123456"
+        ) == nil)
+        #expect(OPDSRemoteRevision.value(
+            etag: "\"book-v2\"",
+            lastModified: nil,
+            contentDigest: nil,
+            contentLength: "48123456"
+        )?.contains("etag=") == true)
+        #expect(OPDSRemoteRevision.value(
+            etag: nil,
+            lastModified: "Fri, 22 Aug 2026 09:00:00 GMT",
+            contentDigest: nil,
+            contentLength: nil
+        )?.contains("last=") == true)
+    }
+
+    @Test func pageTranslationParserAcceptsStableIdenticalTokens() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "NASA", order: 0),
+            AIPageTranslationItem(id: "b1", sourceText: "ありがとう", order: 1)
+        ]
+        let result = try AIPageTranslationParser.parse(
+            "{\"items\":[{\"id\":\"b0\",\"translation\":\"NASA\"},{\"id\":\"b1\",\"translation\":\"ありがとう\"}]}",
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(result.items.map(\.id) == ["b0"])
+        #expect(result.missingIDs == ["b1"])
+    }
+
+    @Test func offlineTranslationLanguageConsensusNeedsMultiplePageVotes() {
+        var consensus = OfflineTranslationSourceLanguageConsensus()
+        consensus.register(languageCode: "en", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == nil)
+        consensus.register(languageCode: "ja", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == nil)
+        consensus.register(languageCode: "ja", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == "ja")
+    }
+
+    @Test func offlineTranslationBackgroundStateWhitelistExcludesPausedAndConfiguration() {
+        #expect(OfflineTranslationJobState.queued.isBackgroundResumable)
+        #expect(OfflineTranslationJobState.interrupted.isBackgroundResumable)
+        #expect(OfflineTranslationJobState.running.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.paused.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.needsConfiguration.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.completed.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.cancelled.isBackgroundResumable)
     }
 
     @Test func pageTranslationPromptContainsStableIDsAndExplicitTarget() throws {
@@ -276,6 +385,68 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
+    @Test func mangaSegmenterRetainsSharedVisualBubbleAfterMultiLineMerge() {
+        let bubble = CGRect(x: 0.10, y: 0.15, width: 0.42, height: 0.24)
+        let polygon = [CGPoint(x: 0.10, y: 0.15), CGPoint(x: 0.52, y: 0.15)]
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "我不知道",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: bubble,
+                bubblePolygon: polygon
+            ),
+            TextBlock(
+                text: "你在说什么",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.24, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: bubble,
+                bubblePolygon: polygon
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].bubbleBox == bubble)
+        #expect(result.bubbles[0].bubblePolygon == polygon)
+    }
+
+    @Test func mangaSegmenterDoesNotMergeBlocksWithDistinctVisualBubbles() {
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "第一句",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: CGRect(x: 0.10, y: 0.15, width: 0.34, height: 0.09)
+            ),
+            TextBlock(
+                text: "第二句",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: CGRect(x: 0.10, y: 0.25, width: 0.34, height: 0.09)
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 2)
+    }
+
+    @Test func mangaSegmenterKeepsPureOCRMergeBehaviorWithoutVisualBubbles() {
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "第一行",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06
+            ),
+            TextBlock(
+                text: "第二行",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].bubbleBox == nil)
+    }
+
     @Test func ocrLanguagePassesSeparateJapaneseFromChineseKorean() {
         let passes = OCRPreprocessor.languagePassesForDiagnostics()
 
@@ -383,6 +554,23 @@ struct mreaderTests {
         #expect(hypot(placed.midX - 195, placed.midY - 235) < 220)
     }
 
+    @Test func translationBubbleAvoidanceDoesNotShrinkMeasuredBubbleAtImageEdge() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        // 已按文本实际尺寸测量出的气泡恰好贴近页面边缘时，避让阶段只能移动，不能裁掉内边距。
+        let original = CGRect(x: 0, y: 186, width: 214, height: 84)
+        let placed = OCRBubbleLayoutEngine.nonOverlappingRect(
+            original,
+            anchor: CGPoint(x: original.midX, y: original.midY),
+            occupiedRects: [],
+            bounds: bounds,
+            margin: 0
+        )
+
+        #expect(placed.width == original.width)
+        #expect(placed.height == original.height)
+        #expect(bounds.contains(placed))
+    }
+
     @Test @MainActor func translationBubbleMeasurementFitsDenseTextInsideImage() {
         let bounds = CGRect(x: 40, y: 0, width: 310, height: 780)
         let source = CGRect(x: 250, y: 680, width: 70, height: 40)
@@ -400,10 +588,262 @@ struct mreaderTests {
         #expect(rect.width <= 220)
     }
 
-    @Test func translatedFontIsOnlySlightlyLargerThanSourceFont() {
-        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 17.6) < 0.01)
-        #expect(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) == 22)
-        #expect(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) == 9)
+    @Test func translatedFontStartsAtSourceScaleWithoutGlobalClamp() {
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 16) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) - 30) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
+    }
+
+    @Test func sourceFontSizeUsesTheMatchingDisplayAxisForTextDirection() {
+        let displayedPage = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let horizontal = TextBlock(
+            text: "横排对白",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.32, height: 0.04),
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let vertical = TextBlock(
+            text: "竖排",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.04, height: 0.32),
+            estimatedFontScale: 0.04,
+            textOrientation: .vertical
+        )
+
+        #expect(abs(horizontal.sourceFontSize(in: displayedPage) - 31.2) < 0.001)
+        #expect(abs(vertical.sourceFontSize(in: displayedPage) - 15.6) < 0.001)
+    }
+
+    @Test func localOCRGeometryUsesPhysicalObservationAxis() {
+        let geometry = OCRPreprocessor.localOCRGeometryForDiagnostics(
+            observationRect: CGRect(x: 0, y: 0, width: 20.0 / 390.0, height: 40.0 / 780.0),
+            observationPixelSize: CGSize(width: 390, height: 780),
+            normalizedPageRect: CGRect(x: 0.2, y: 0.3, width: 20.0 / 390.0, height: 40.0 / 780.0)
+        )
+
+        #expect(geometry.orientation == .vertical)
+        #expect(abs(geometry.fontScale - 20.0 / 390.0) < 0.0001)
+    }
+
+    @Test @MainActor func anchoredTranslationLayoutKeepsSourceCenterAndExpandsBeforeShrinking() {
+        let source = CGRect(x: 130, y: 210, width: 80, height: 34)
+        let allowed = CGRect(x: 70, y: 145, width: 210, height: 170)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "这是一段需要比原始文字区域更宽才能自然排下的中文译文。",
+            sourceFontSize: 16,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(abs(layout.rect.midX - source.midX) < 0.01)
+        #expect(abs(layout.rect.midY - source.midY) < 0.01)
+        #expect(layout.rect.width >= source.width)
+        #expect(layout.fontSize <= 16)
+        #expect(layout.fontSize >= 9.6)
+        #expect(allowed.contains(layout.rect))
+    }
+
+    @Test @MainActor func translationLayoutMovesMinimallyBeforeShrinkingFont() {
+        let source = CGRect(x: 8, y: 34, width: 30, height: 24)
+        let allowed = CGRect(x: 0, y: 0, width: 220, height: 110)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "这是一段应当优先向右扩展而不是过早缩小字号的译文。",
+            sourceFontSize: 20,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(abs(layout.fontSize - 20) < 0.01)
+        #expect(layout.rect.midX > source.midX)
+        #expect(allowed.contains(layout.rect))
+    }
+
+    @Test @MainActor func translationLayoutContinuesShrinkingUntilTextActuallyFits() {
+        let source = CGRect(x: 24, y: 10, width: 22, height: 20)
+        let allowed = CGRect(x: 0, y: 0, width: 70, height: 45)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: String(repeating: "超长译文", count: 42),
+            sourceFontSize: 20,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(layout.fontSize < 12)
+        #expect(allowed.contains(layout.rect))
+        #expect(layout.rect.height <= allowed.height)
+    }
+
+    @Test @MainActor func translationLayoutNeverEscapesAllowedBoundsForPathologicalText() {
+        let allowed = CGRect(x: 0, y: 0, width: 28, height: 18)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: Array(repeating: String(repeating: "非常长的译文\\n", count: 100), count: 20).joined(),
+            sourceFontSize: 22,
+            sourceRect: CGRect(x: 3, y: 3, width: 12, height: 8),
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(allowed.contains(layout.rect))
+        #expect(layout.rect == allowed)
+        #expect(layout.fontSize == 0.1)
+    }
+
+    @Test @MainActor func translationLayoutPrefersNaturalWrappingOverNeedlessSuggestedBreaks() {
+        let source = CGRect(x: 45, y: 30, width: 42, height: 18)
+        let allowed = CGRect(x: 0, y: 0, width: 140, height: 78)
+        let translation = "I really do not know what you are talking about"
+        let suggestedLines = ["I really", "do not", "know what", "you are", "talking", "about"]
+        let natural = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: translation,
+            sourceFontSize: 18,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+        let suggested = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: suggestedLines.joined(separator: "\n"),
+            sourceFontSize: 18,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
+            translation: translation,
+            translationLines: suggestedLines,
+            sourceFontSize: 18,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(natural.fontSize > suggested.fontSize)
+        #expect(choice.usesSuggestedLineBreaks == false)
+        #expect(choice.text == translation)
+        #expect(abs(choice.layout.fontSize - natural.fontSize) < 0.001)
+    }
+
+    @Test func translationBubbleBoxAllowsSmallOCRMappingTolerance() {
+        let bubble = CGRect(x: 40, y: 80, width: 140, height: 90)
+        let text = CGRect(x: 38, y: 82, width: 68, height: 32)
+
+        #expect(!OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, toleranceX: 0, toleranceY: 0))
+        #expect(OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, toleranceX: 3, toleranceY: 3))
+    }
+
+    @Test func translationGeometryRefinerUsesLocalOCRTextBoxButRetainsModelBubbleBox() {
+        let modelBubble = CGRect(x: 0.08, y: 0.10, width: 0.55, height: 0.24)
+        let vision = TextBlock(
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.36, y: 0.44, width: 0.18, height: 0.06),
+            translation: "你好",
+            estimatedFontScale: 0.02,
+            bubbleBox: modelBubble
+        )
+        let local = TextBlock(
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.15, y: 0.22, width: 0.30, height: 0.08),
+            confidence: 0.94,
+            ocrSource: "local",
+            estimatedFontScale: 0.052
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [local],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(refined[0].boundingBox == local.boundingBox)
+        #expect(refined[0].estimatedFontScale == local.estimatedFontScale)
+        #expect(refined[0].bubbleBox == modelBubble)
+        #expect(refined[0].translation == "你好")
+    }
+
+    @Test func translationGeometryRefinerUnionsMultipleLocalLinesAndKeepsOrientation() {
+        let vision = TextBlock(
+            text: "あいうえ",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.18),
+            translation: "你好",
+            estimatedFontScale: 0.03
+        )
+        let firstLine = TextBlock(
+            text: "あい",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.05),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.05,
+            textOrientation: .horizontal
+        )
+        let secondLine = TextBlock(
+            text: "うえ",
+            boundingBox: CGRect(x: 0.2, y: 0.27, width: 0.30, height: 0.05),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.05,
+            textOrientation: .horizontal
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [firstLine, secondLine],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(refined[0].boundingBox == CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.12))
+        #expect(refined[0].textOrientation == .horizontal)
+        #expect(refined[0].estimatedFontScale == 0.05)
+    }
+
+    @Test func translationGeometryRefinerRejectsAdjacentRepeatedShortText() {
+        let vision = TextBlock(
+            text: "あいう",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.15),
+            translation: "你好",
+            estimatedFontScale: 0.03
+        )
+        let firstLine = TextBlock(
+            text: "あ",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let secondLine = TextBlock(
+            text: "い",
+            boundingBox: CGRect(x: 0.2, y: 0.255, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let thirdLine = TextBlock(
+            text: "う",
+            boundingBox: CGRect(x: 0.2, y: 0.31, width: 0.30, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let adjacentBubble = TextBlock(
+            text: "あ",
+            boundingBox: CGRect(x: 0.62, y: 0.22, width: 0.08, height: 0.04),
+            ocrSource: "local-line",
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+
+        let refined = TranslationGeometryRefiner.refine(
+            visionBlocks: [vision],
+            localOCRBlocks: [firstLine, secondLine, thirdLine, adjacentBubble],
+            isRightToLeft: false
+        )
+
+        #expect(refined.count == 1)
+        #expect(abs(refined[0].boundingBox.minX - 0.2) < 0.0001)
+        #expect(abs(refined[0].boundingBox.minY - 0.2) < 0.0001)
+        #expect(abs(refined[0].boundingBox.width - 0.30) < 0.0001)
+        #expect(abs(refined[0].boundingBox.height - 0.15) < 0.0001)
+        #expect(refined[0].estimatedFontScale == 0.04)
     }
 
     @Test func ocrTranslationUsesBoundedTimeoutAndFastFallbackPolicy() {
@@ -428,6 +868,107 @@ struct mreaderTests {
         #expect(regions[0].blockID == blocks[1].id)
         #expect(regions[0].sourceRect.minX < blocks[1].boundingBox.minX)
         #expect(regions[0].sourceRect.maxX > blocks[1].boundingBox.maxX)
+    }
+
+    @Test func visualOCRVerificationMatchesNearbyTextAndMapsCropFontScale() {
+        let sourceRect = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.1)
+        let original = TextBlock(
+            text: "甲",
+            boundingBox: CGRect(x: 0.4, y: 0.31, width: 0.12, height: 0.02),
+            estimatedFontScale: 0.02,
+            textOrientation: .horizontal
+        )
+        let matchingCandidate = TextBlock(
+            text: "甲",
+            boundingBox: CGRect(x: 0.25, y: 0.1, width: 0.3, height: 0.2),
+            confidence: 0.55,
+            estimatedFontScale: 0.20,
+            bubbleBox: CGRect(x: 0.20, y: 0.0, width: 0.4, height: 0.4),
+            bubblePolygon: [CGPoint(x: 0.2, y: 0), CGPoint(x: 0.6, y: 0)],
+            textOrientation: .horizontal
+        )
+        let nearbyDifferentText = TextBlock(
+            text: "乙",
+            boundingBox: CGRect(x: 0.75, y: 0.1, width: 0.15, height: 0.2),
+            confidence: 0.99,
+            estimatedFontScale: 0.20,
+            textOrientation: .horizontal
+        )
+
+        let match = AITranslator.visualVerificationMatch(
+            for: original,
+            candidates: [matchingCandidate, nearbyDifferentText],
+            sourceRect: sourceRect
+        )
+        #expect(match?.block.id == matchingCandidate.id)
+        #expect(abs((match?.pageBoundingBox.height ?? 0) - 0.02) < 0.0001)
+        #expect(abs(AITranslator.visualVerificationMappedFontScale(
+            for: matchingCandidate,
+            sourceRect: sourceRect,
+            correctedBox: match?.pageBoundingBox ?? .zero
+        ) - 0.02) < 0.0001)
+        let mappedBubble = AITranslator.visualVerificationMappedBubbleGeometry(
+            for: matchingCandidate,
+            sourceRect: sourceRect,
+            correctedBox: match?.pageBoundingBox ?? .zero
+        )
+        #expect(abs((mappedBubble.bubbleBox?.minX ?? 0) - 0.38) < 0.0001)
+        #expect(abs((mappedBubble.bubbleBox?.minY ?? 0) - 0.3) < 0.0001)
+        #expect(abs((mappedBubble.bubbleBox?.width ?? 0) - 0.16) < 0.0001)
+        #expect(abs((mappedBubble.bubbleBox?.height ?? 0) - 0.04) < 0.0001)
+        #expect(mappedBubble.bubblePolygon == [CGPoint(x: 0.38, y: 0.3), CGPoint(x: 0.54, y: 0.3)])
+
+        let verticalCandidate = TextBlock(
+            text: "縦",
+            boundingBox: CGRect(x: 0.2, y: 0.1, width: 0.1, height: 0.4),
+            estimatedFontScale: 0.20,
+            textOrientation: .vertical
+        )
+        #expect(abs(AITranslator.visualVerificationMappedFontScale(
+            for: verticalCandidate,
+            sourceRect: sourceRect,
+            correctedBox: .zero
+        ) - 0.08) < 0.0001)
+
+        let invalidBubble = TextBlock(
+            text: "甲",
+            boundingBox: matchingCandidate.boundingBox,
+            bubbleBox: CGRect(x: 0.8, y: 0.8, width: 0.1, height: 0.1)
+        )
+        #expect(AITranslator.visualVerificationMappedBubbleGeometry(
+            for: invalidBubble,
+            sourceRect: sourceRect,
+            correctedBox: match?.pageBoundingBox ?? .zero
+        ).bubbleBox == nil)
+    }
+
+    @Test func visualOCRVerificationRejectsUnqualifiedNearbyCandidateButAllowsStrongGeometry() {
+        let sourceRect = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.1)
+        let original = TextBlock(
+            text: "甲",
+            boundingBox: CGRect(x: 0.4, y: 0.31, width: 0.12, height: 0.02)
+        )
+        let unrelated = TextBlock(
+            text: "完全不同",
+            boundingBox: CGRect(x: 0.75, y: 0.1, width: 0.15, height: 0.2),
+            confidence: 0.99
+        )
+        #expect(AITranslator.visualVerificationMatch(
+            for: original,
+            candidates: [unrelated],
+            sourceRect: sourceRect
+        ) == nil)
+
+        let geometryMatch = TextBlock(
+            text: "识别有误",
+            boundingBox: CGRect(x: 0.25, y: 0.1, width: 0.3, height: 0.2),
+            confidence: 0.55
+        )
+        #expect(AITranslator.visualVerificationMatch(
+            for: original,
+            candidates: [geometryMatch],
+            sourceRect: sourceRect
+        )?.block.id == geometryMatch.id)
     }
 
     @Test @MainActor func backgroundTaskCenterTracksAndFinishesTasks() {
@@ -922,7 +1463,8 @@ struct mreaderTests {
         #expect(
             AITranslator.sanitizedTranslationTextForDiagnostics(
                 "译文：こんにちは",
-                sourceText: "你好"
+                sourceText: "你好",
+                target: .japanese
             ) == "こんにちは"
         )
     }
@@ -1513,7 +2055,7 @@ private actor LibrarySyncProbe {
         #expect(resolution.furthestPageIndex == 320)
     }
 
-    @Test func ocrCoordinateMapperOriginalDoesNotUpscale() {
+    @Test @MainActor func ocrCoordinateMapperOriginalDoesNotUpscale() {
         // “原始尺寸”语义：小图 1:1（1 image pixel = 1 point），不再等同 fitScreen。
         let transform = OCRCoordinateMapper.displayTransform(
             sourcePixelSize: CGSize(width: 400, height: 300),
@@ -1702,7 +2244,8 @@ private func makeTestPageRequest(
         safeAreaInset: 0,
         usesVisualOCRVerification: visualVerify,
         viewportAspect: 1.5,
-        sourceLanguagePreference: nil
+        sourceLanguagePreference: nil,
+        previousContext: ""
     )
 }
 
@@ -1859,8 +2402,1341 @@ private func makeTestPageRequest(
         )
     }
 
-@MainActor
-private final class InMemoryAICredentialStore: AICredentialStoring {
+    // MARK: - 整本离线翻译回归测试
+
+    @Test func offlineTranslationSelectionUsesZeroBasedIndexesAndValidatesRanges() throws {
+        #expect(try OfflineTranslationSelection.entireComic.pageIndexes(totalPages: 4) == [0, 1, 2, 3])
+        #expect(try OfflineTranslationSelection.fromPage(2).pageIndexes(totalPages: 4) == [2, 3])
+        #expect(try OfflineTranslationSelection.range(start: 1, end: 2).pageIndexes(totalPages: 4) == [1, 2])
+        #expect(
+            try OfflineTranslationSelection.missingPages.pageIndexes(
+                totalPages: 4,
+                existingStates: [0: .completed, 1: .failed, 2: .noText]
+            ) == [1, 3]
+        )
+        #expect(try OfflineTranslationSelection.failedPages.pageIndexes(totalPages: 4, existingStates: [1: .failed]) == [1])
+        #expect(throws: OfflineTranslationSelectionError.self) {
+            try OfflineTranslationSelection.range(start: 3, end: 1).pageIndexes(totalPages: 4)
+        }
+        #expect(throws: OfflineTranslationSelectionError.self) {
+            try OfflineTranslationSelection.fromPage(4).pageIndexes(totalPages: 4)
+        }
+    }
+
+    @Test func offlineTranslationPageFactsRetryPartialAndFailedPagesFromDiskState() {
+        let planned = [0, 1, 2, 3]
+        let states: [Int: OfflineTranslationPageState] = [
+            0: .completed,
+            1: .noText,
+            2: .partial,
+            3: .failed
+        ]
+        #expect(
+            OfflineTranslationPageFacts.remainingPageIndexes(
+                plannedPageIndexes: planned,
+                states: states
+            ) == [2, 3]
+        )
+        #expect(
+            OfflineTranslationPageFacts.remainingPageIndexes(
+                plannedPageIndexes: planned,
+                states: states,
+                excluding: [2]
+            ) == [3]
+        )
+        #expect(
+            OfflineTranslationPageFacts.processedPageCount(
+                plannedPageIndexes: planned,
+                states: states
+            ) == 4
+        )
+    }
+
+    @Test @MainActor func offlineTranslationDisplayPreferenceIsPerComicAndLegacyDefaultsToEnabled() throws {
+        let comic = ComicBook(title: "test", bookmarkData: Data(), totalPages: 1)
+        #expect(comic.isOfflineTranslationOverlayEnabled)
+
+        var hidden = comic
+        hidden.isOfflineTranslationOverlayEnabled = false
+        let decoded = try JSONDecoder().decode(
+            ComicBook.self,
+            from: JSONEncoder().encode(hidden)
+        )
+        #expect(!decoded.isOfflineTranslationOverlayEnabled)
+
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(comic)) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "isOfflineTranslationOverlayEnabled")
+        let legacy = try JSONDecoder().decode(
+            ComicBook.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        #expect(legacy.isOfflineTranslationOverlayEnabled)
+    }
+
+    @Test func offlineTranslationPromptKeepsProtocolSeparateFromStyle() {
+        let prompt = OfflineTranslationPromptBuilder.make(
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            isRightToLeft: true,
+            styleInstructions: "保持自然口语",
+            previousContext: "前页：先走吧"
+        )
+        #expect(prompt.contains("保持自然口语"))
+        #expect(prompt.contains("coordinateSpace=\"normalized\""))
+        #expect(prompt.contains("前页：先走吧"))
+        #expect(prompt.contains("右到左"))
+        #expect(prompt.contains("sourceText"))
+        #expect(prompt.contains("translationLines"))
+        #expect(prompt.contains("textBox"))
+        #expect(prompt.contains("bubblePolygon"))
+        #expect(!prompt.contains("{targetLanguage}"))
+    }
+
+    @Test func offlineVisionTranslationRequiresTextBoxAndPreservesCoordinateDiagnostics() throws {
+        let valid = """
+        {"coordinateSpace":"normalized","items":[{
+          "id":"a","sourceText":"こんにちは","translation":"你好","translationLines":["你好"],
+          "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
+          "bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},
+          "textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],
+          "bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"
+        }]}
+        """
+        let blocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: valid,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        )
+        #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
+
+        let unmatchedMultiLine = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"一二三四五六七八九十一二三四五六","translation":"多行译文","textBox":{"x":0.2,"y":0.25,"width":0.16,"height":0.24},"bubbleBox":{"x":0.1,"y":0.2,"width":0.4,"height":0.35},"confidence":0.9,"classification":"dialogue"}]}
+        """
+        let unmatchedBlocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: unmatchedMultiLine,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        )
+        // 没有本地 OCR line 可校准时，多行 Vision textBox 也不能把整个短边当单行字号。
+        #expect((unmatchedBlocks.first?.estimatedFontScale ?? 1) < 0.07)
+        #expect((unmatchedBlocks.first?.estimatedFontScale ?? 0) > 0.04)
+
+        let verticalVision = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"上下","translation":"上下","textBox":{"x":0.2,"y":0.25,"width":20.0/390.0,"height":40.0/780.0},"bubbleBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.2},"confidence":0.9,"classification":"dialogue"}]}
+        """.replacingOccurrences(of: "20.0/390.0", with: "0.05128205")
+            .replacingOccurrences(of: "40.0/780.0", with: "0.05128205")
+        let verticalVisionBlock = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: verticalVision,
+            inputPixelSize: CGSize(width: 390, height: 780),
+            requiresTextBox: true
+        ).first
+        #expect(verticalVisionBlock?.textOrientation == .vertical)
+        #expect(abs((verticalVisionBlock?.estimatedFontScale ?? 0) - 20.0 / 390.0) < 0.001)
+
+        let emptyLines = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":[],"textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"confidence":0.9,"classification":"dialogue"}]}
+        """
+        let emptyLineBlocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: emptyLines,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        )
+        #expect(emptyLineBlocks.first?.translation == "你好")
+        #expect(emptyLineBlocks.first?.translationLines.isEmpty == true)
+
+        let missingTextBox = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: missingTextBox,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("离线视觉翻译不应以 bubbleBox 代替必需 textBox")
+        } catch {
+            #expect(error.localizedDescription.contains("textBox"))
+        }
+
+        let emptyTranslation = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"https://example.com","translation":"","textBox":{"x":0.1,"y":0.2,"width":0.3,"height":0.05}}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: emptyTranslation,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("离线视觉协议不应接受带空译文的 item")
+        } catch {
+            #expect(error.localizedDescription.contains("缺少必需译文"))
+        }
+
+        let invalidCoordinates = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
+        """
+        do {
+            _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                from: invalidCoordinates,
+                inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                requiresTextBox: true
+            )
+            Issue.record("无效坐标不应被改写为有效结果")
+        } catch {
+            #expect(error.localizedDescription.contains("坐标"))
+        }
+
+        let emptyPage = """
+        {"coordinateSpace":"normalized","items":[]}
+        """
+        #expect(try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: emptyPage,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        ).isEmpty)
+
+        for malformed in ["{}", "{\"coordinateSpace\":\"normalized\"}", "{\"coordinateSpace\":\"pixels\",\"items\":[]}"] {
+            do {
+                _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+                    from: malformed,
+                    inputPixelSize: CGSize(width: 2_048, height: 1_024),
+                    requiresTextBox: true
+                )
+                Issue.record("strict 离线视觉协议不应接受缺失或错误的顶层字段")
+            } catch {
+                #expect(error.localizedDescription.contains("协议错误"))
+            }
+        }
+    }
+
+    @Test func offlineTranslationPageDTOConvertsWithoutTextBlockJSON() throws {
+        let block = TextBlock(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.1),
+            translation: "你好",
+            confidence: 0.91,
+            ocrSource: "vision",
+            estimatedFontScale: 0.04,
+            bubbleBox: CGRect(x: 0.05, y: 0.15, width: 0.4, height: 0.2),
+            polygon: [CGPoint(x: 0.1, y: 0.2), CGPoint(x: 0.4, y: 0.2)]
+        )
+        let dto = OfflineTranslatedBlock(block: block, id: "b0")
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(dto)
+        )
+        let roundTrip = decoded.textBlock()
+        #expect(decoded.id == "b0")
+        #expect(roundTrip.text == "こんにちは")
+        #expect(roundTrip.translation == "你好")
+        #expect(abs(roundTrip.boundingBox.minX - 0.1) < 0.0001)
+        #expect(abs((roundTrip.bubbleBox?.minX ?? 0) - 0.05) < 0.0001)
+    }
+
+    @Test func offlineTranslationDTOWritesCanonicalGeometryKeysAndReadsLegacyKeys() throws {
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08),
+            translation: "译文",
+            bubbleBox: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.3),
+            polygon: [CGPoint(x: 0.2, y: 0.3)],
+            bubblePolygon: [CGPoint(x: 0.1, y: 0.2)],
+            translationLines: ["译文"]
+        )
+        let encoded = try JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        #expect(object?["translationLines"] != nil)
+        #expect(object?["textPolygon"] != nil)
+        #expect(object?["bubblePolygon"] != nil)
+        #expect(object?["lines"] == nil)
+        #expect(object?["polygon"] == nil)
+
+        let legacy = """
+        {"id":"legacy","sourceText":"原文","translation":"译文","lines":["译文"],
+        "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"polygon":[{"x":0.2,"y":0.3}],
+        "confidence":0.9,"classification":"dialogue","estimatedFontScale":0.04}
+        """
+        let decoded = try JSONDecoder().decode(OfflineTranslatedBlock.self, from: Data(legacy.utf8))
+        #expect(decoded.translationLines == ["译文"])
+        #expect(decoded.textPolygon.count == 1)
+    }
+
+    @Test func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 2
+        )
+        try await storage.saveManifest(set, activate: true)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: set.id,
+            pageIndex: 0,
+            sourceFingerprint: "fingerprint-a",
+            pixelWidth: 1200,
+            pixelHeight: 1800,
+            blocks: [],
+            state: .noText,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        let reloaded = await storage.page(comicID: comicID, setID: set.id, pageIndex: 0)
+        let manifest = await storage.manifest(comicID: comicID, setID: set.id)
+        #expect(reloaded?.sourceFingerprint == "fingerprint-a")
+        #expect(reloaded?.state == .noText)
+        #expect(manifest?.noTextPageCount == 1)
+        #expect(manifest?.coverage == 0.5)
+        #expect((await storage.activeManifest(for: comicID))?.id == set.id)
+    }
+
+    @Test func offlineTranslationStorageMarksFingerprintMismatchStaleAndSwitchesSets() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-switch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        func makeSet() -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: .english,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision-test",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let setA = makeSet()
+        let setB = makeSet()
+        try await storage.saveManifest(setA, activate: true)
+        try await storage.saveManifest(setB)
+        try await storage.setActive(comicID: comicID, setID: setB.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == setB.id)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: setB.id,
+            pageIndex: 0,
+            sourceFingerprint: "before",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [],
+            state: .completed,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        await storage.markPageStale(comicID: comicID, setID: setB.id, pageIndex: 0)
+        #expect((await storage.page(comicID: comicID, setID: setB.id, pageIndex: 0))?.state == .stale)
+        try await storage.deleteSet(comicID: comicID, setID: setA.id)
+        #expect((await storage.summaries(for: comicID)).count == 1)
+        try await storage.deleteComicTranslations(comicID: comicID)
+        #expect(await storage.index(for: comicID) == nil)
+    }
+
+    @Test func offlineTranslationKeepsAnActiveSetPerTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-active-target-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: target,
+                providerID: UUID(),
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let chinese = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        try await storage.saveManifest(chinese, activate: true)
+        try await storage.saveManifest(english, activate: true)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
+    @Test func offlineTranslationDeletingActiveSetRestoresUsableSameTargetFallback() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-delete-active-target-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: target,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+
+        func makeUsable(_ set: OfflineTranslationSetManifest) async throws {
+            try await storage.saveManifest(set, activate: true)
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: set.id,
+                    pageIndex: 0,
+                    sourceFingerprint: set.id.uuidString,
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [],
+                    state: .noText,
+                    providerID: providerID,
+                    visionModel: "vision"
+                )
+            )
+        }
+
+        let chinesePrevious = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        let chineseCurrent = makeSet(.simplifiedChinese)
+        try await makeUsable(chinesePrevious)
+        try await makeUsable(english)
+        try await makeUsable(chineseCurrent)
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chineseCurrent.id)
+        try await storage.deleteSet(comicID: comicID, setID: chineseCurrent.id)
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinesePrevious.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == chinesePrevious.id)
+    }
+
+    @Test func offlineTranslationRenderableSetLookupRequiresSourceAndTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-running-language-(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+
+        func makeManifest(source: TranslationSourceLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: source,
+                targetLanguage: .english,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+
+        let japanese = makeManifest(source: .japanese)
+        let korean = makeManifest(source: .korean)
+        try await storage.saveManifest(japanese)
+        try await storage.saveManifest(korean)
+        for manifest in [japanese, korean] {
+            var job = OfflineTranslationJobRecord(
+                comicID: comicID,
+                setID: manifest.id,
+                selection: .entireComic,
+                pageIndexes: [0],
+                providerID: providerID,
+                providerName: "test",
+                baseURL: manifest.baseURL,
+                visionModel: manifest.visionModel,
+                sourceLanguage: manifest.sourceLanguage,
+                targetLanguage: manifest.targetLanguage,
+                promptRevision: manifest.promptRevision,
+                promptSnapshot: manifest.promptSnapshot,
+                readingDirectionRaw: "leftToRight",
+                totalPages: 1
+            )
+            job.state = manifest.id == japanese.id ? .paused : .completedWithFailures
+            try await storage.saveJob(job)
+        }
+
+        #expect(
+            (await storage.latestRenderableManifest(
+                for: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .english
+            ))?.id == japanese.id
+        )
+        #expect(
+            await storage.latestRenderableManifest(
+                for: comicID,
+                sourceLanguage: .french,
+                targetLanguage: .english
+            ) == nil
+        )
+        #expect(
+            (await storage.latestRenderableManifest(
+                for: comicID,
+                sourceLanguage: .korean,
+                targetLanguage: .english
+            ))?.id == korean.id
+        )
+    }
+
+    @Test func offlineTranslationCompletedRangeRemainsRenderable() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-range-visible-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 100
+        )
+        try await storage.saveManifest(set)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: set.id,
+            pageIndex: 49,
+            sourceFingerprint: "range-page",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [OfflineTranslatedBlock(block: TextBlock(
+                text: "原文",
+                boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
+                translation: "译文"
+            ))],
+            state: .completed,
+            providerID: providerID,
+            visionModel: "vision"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        var job = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: set.id,
+            selection: .range(start: 49, end: 99),
+            pageIndexes: Array(49...99),
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 100
+        )
+        job.state = .completed
+        job.updatedAt = Date()
+        try await storage.saveJob(job)
+
+        #expect((await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ))?.id == set.id)
+    }
+
+    @Test func offlineTranslationStoppedJobKeepsCompletedPagesRenderable() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-stop-keep-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let baseDate = Date()
+
+        func makeSet() -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 2
+            )
+        }
+        func saveCompletedPage(to set: OfflineTranslationSetManifest) async throws {
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: set.id,
+                    pageIndex: 0,
+                    sourceFingerprint: "page-0",
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [OfflineTranslatedBlock(block: TextBlock(
+                        text: "原文",
+                        boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
+                        translation: "译文"
+                    ))],
+                    state: .completed,
+                    providerID: providerID,
+                    visionModel: "vision"
+                )
+            )
+        }
+
+        var active = makeSet()
+        active.updatedAt = baseDate.addingTimeInterval(10)
+        try await storage.saveManifest(active, activate: true)
+
+        let stopped = makeSet()
+        try await storage.saveManifest(stopped)
+        try await saveCompletedPage(to: stopped)
+        let savedStoppedManifest = await storage.manifest(comicID: comicID, setID: stopped.id)
+        var stoppedManifest = try #require(savedStoppedManifest)
+        stoppedManifest.updatedAt = baseDate.addingTimeInterval(20)
+        try await storage.saveManifest(stoppedManifest)
+        var stoppedJob = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: stopped.id,
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: providerID,
+            providerName: "test",
+            baseURL: stopped.baseURL,
+            visionModel: stopped.visionModel,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: stopped.promptRevision,
+            promptSnapshot: stopped.promptSnapshot,
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2
+        )
+        stoppedJob.state = .cancelled
+        stoppedJob.updatedAt = baseDate.addingTimeInterval(20)
+        try await storage.saveJob(stoppedJob)
+
+        #expect((await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ))?.id == stopped.id)
+
+        var newerActive = makeSet()
+        newerActive.updatedAt = baseDate.addingTimeInterval(30)
+        try await storage.saveManifest(newerActive, activate: true)
+        #expect(await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ) == nil)
+    }
+
+    @Test func offlineTranslationRangeJobsInheritLatestRenderablePages() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-range-inheritance-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        func makeSet(derivedFromSetID: UUID? = nil) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 30,
+                derivedFromSetID: derivedFromSetID,
+                sourceRevision: "revision-1"
+            )
+        }
+        func savePage(_ pageIndex: Int, to set: OfflineTranslationSetManifest, label: String) async throws {
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: set.id,
+                    pageIndex: pageIndex,
+                    sourceFingerprint: "page-\(pageIndex)",
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [OfflineTranslatedBlock(block: TextBlock(
+                        text: "原文",
+                        boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
+                        translation: label
+                    ))],
+                    state: .completed,
+                    providerID: providerID,
+                    visionModel: "vision"
+                )
+            )
+        }
+
+        let first = makeSet()
+        try await storage.saveManifest(first)
+        for pageIndex in 0...9 {
+            try await savePage(pageIndex, to: first, label: "第一次范围")
+        }
+        var firstJob = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: first.id,
+            selection: .range(start: 0, end: 9),
+            pageIndexes: Array(0...9),
+            providerID: providerID,
+            providerName: "test",
+            baseURL: first.baseURL,
+            visionModel: first.visionModel,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: first.promptRevision,
+            promptSnapshot: first.promptSnapshot,
+            readingDirectionRaw: "leftToRight",
+            totalPages: 30
+        )
+        firstJob.state = .completed
+        try await storage.saveJob(firstJob)
+
+        let inheritedSource = await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        )
+        #expect(inheritedSource?.id == first.id)
+
+        let second = makeSet(derivedFromSetID: inheritedSource?.id)
+        try await storage.saveManifest(second)
+        _ = try await storage.copyValidPages(
+            from: try #require(inheritedSource).id,
+            to: second,
+            excludingPageIndexes: Set(20...29)
+        )
+        for pageIndex in 20...29 {
+            try await savePage(pageIndex, to: second, label: "第二次范围")
+        }
+        var secondJob = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: second.id,
+            selection: .range(start: 20, end: 29),
+            pageIndexes: Array(20...29),
+            providerID: providerID,
+            providerName: "test",
+            baseURL: second.baseURL,
+            visionModel: second.visionModel,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: second.promptRevision,
+            promptSnapshot: second.promptSnapshot,
+            readingDirectionRaw: "leftToRight",
+            totalPages: 30
+        )
+        secondJob.state = .completed
+        try await storage.saveJob(secondJob)
+
+        #expect(await storage.page(comicID: comicID, setID: second.id, pageIndex: 0)?.blocks.first?.translation == "第一次范围")
+        #expect(await storage.page(comicID: comicID, setID: second.id, pageIndex: 20)?.blocks.first?.translation == "第二次范围")
+        #expect(await storage.page(comicID: comicID, setID: second.id, pageIndex: 10) == nil)
+        #expect((await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ))?.id == second.id)
+    }
+
+    @Test func offlineTranslationNewActiveSuppressesOlderStoppedJob() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-active-precedence-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1_000)
+
+        func makeSet(createdAt: Date) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 2,
+                createdAt: createdAt
+            )
+        }
+
+        var oldSet = makeSet(createdAt: baseDate)
+        oldSet.updatedAt = baseDate.addingTimeInterval(10)
+        try await storage.saveManifest(oldSet)
+        var oldJob = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: oldSet.id,
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2,
+            createdAt: baseDate
+        )
+        oldJob.state = .needsConfiguration
+        oldJob.updatedAt = baseDate.addingTimeInterval(10)
+        try await storage.saveJob(oldJob)
+
+        var activeSet = makeSet(createdAt: baseDate.addingTimeInterval(20))
+        activeSet.updatedAt = baseDate.addingTimeInterval(30)
+        try await storage.saveManifest(activeSet, activate: true)
+
+        #expect(await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ) == nil)
+    }
+
+    @Test func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {
+        let first = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
+        let same = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
+        let changed = OfflineTranslationFingerprint.sha256(for: Data("page-b".utf8))
+        #expect(first == same)
+        #expect(first != changed)
+        #expect(first.count == 64)
+    }
+
+    @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let pageURL = root.appendingPathComponent("001.jpg")
+        let originalDate = Date(timeIntervalSince1970: 1_234_567)
+        try Data("AAAAA".utf8).write(to: pageURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: pageURL.path)
+        let first = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+        try Data("BBBBB".utf8).write(to: pageURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: pageURL.path)
+        let second = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+        #expect(first != second)
+        #expect(OfflineTranslationPageProvider.fingerprint(
+            for: Data("AAAAA".utf8),
+            pageURL: pageURL
+        ) != OfflineTranslationPageProvider.fingerprint(
+            for: Data("BBBBB".utf8),
+            pageURL: pageURL
+        ))
+    }
+
+    @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .automatic,
+                targetLanguage: target,
+                providerID: UUID(),
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+        let chinese = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        try await storage.saveManifest(chinese, activate: true)
+        try await storage.saveManifest(english, activate: true)
+        let legacyIndex = OfflineTranslationIndex(
+            comicID: comicID,
+            activeSetID: chinese.id,
+            activeSetIDsByTargetLanguage: [TranslationTargetLanguage.english.rawValue: english.id],
+            setIDs: [chinese.id, english.id]
+        )
+        try JSONEncoder().encode(legacyIndex).write(
+            to: root.appendingPathComponent(comicID.uuidString).appendingPathComponent("index.json"),
+            options: .atomic
+        )
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
+        #expect((await storage.index(for: comicID))?.activeSetIDsByTargetLanguage[TranslationTargetLanguage.simplifiedChinese.rawValue] == chinese.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
+    @Test func offlineTranslationReconcilesManifestFromPageFiles() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-reconcile-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 1
+        )
+        try await storage.saveManifest(set)
+        try await storage.savePageAndUpdateManifest(
+            OfflineTranslatedPage(
+                comicID: comicID,
+                setID: set.id,
+                pageIndex: 0,
+                sourceFingerprint: "stable",
+                pixelWidth: 100,
+                pixelHeight: 100,
+                blocks: [],
+                state: .partial,
+                providerID: set.providerID,
+                visionModel: set.visionModel
+            )
+        )
+        try await storage.saveManifest(set)
+        let repaired = try await storage.reconcileManifest(comicID: comicID, setID: set.id)
+        #expect(repaired?.partialPageCount == 1)
+        #expect(repaired?.coveredPageCount == 1)
+    }
+
+    @Test func offlineTranslationDerivedSetCopiesOnlyOutsideSelectedPagesAndSwitchesAfterCompletion() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-derived-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let sourcePageProviderID = UUID()
+        func makeManifest(id: UUID, derivedFromSetID: UUID? = nil) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                id: id,
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision-test",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 2,
+                derivedFromSetID: derivedFromSetID,
+                sourceRevision: "revision-1"
+            )
+        }
+        let source = makeManifest(id: UUID())
+        let derived = makeManifest(id: UUID(), derivedFromSetID: source.id)
+        try await storage.saveManifest(source, activate: true)
+        for pageIndex in 0..<2 {
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: source.id,
+                    pageIndex: pageIndex,
+                    sourceFingerprint: "source-\(pageIndex)",
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [],
+                    state: .noText,
+                    providerID: sourcePageProviderID,
+                    visionModel: "source-vision"
+                )
+            )
+        }
+        try await storage.saveManifest(derived)
+        _ = try await storage.copyValidPages(
+            from: source.id,
+            to: derived,
+            excludingPageIndexes: [1]
+        )
+        #expect((await storage.activeManifest(for: comicID))?.id == source.id)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0)?.providerID == sourcePageProviderID)
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 0)?.visionModel == "source-vision")
+        #expect(await storage.page(comicID: comicID, setID: derived.id, pageIndex: 1) == nil)
+
+        try await storage.savePageAndUpdateManifest(
+            OfflineTranslatedPage(
+                comicID: comicID,
+                setID: derived.id,
+                pageIndex: 1,
+                sourceFingerprint: "new-1",
+                pixelWidth: 100,
+                pixelHeight: 100,
+                blocks: [],
+                state: .noText,
+                providerID: providerID,
+                visionModel: "vision-test"
+            )
+        )
+        try await storage.setActive(comicID: comicID, setID: derived.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == derived.id)
+    }
+
+    @Test func offlineTranslationStatesTreatNoTextAsSuccessfulCoverage() {
+        #expect(OfflineTranslationPageState.noText.countsAsCoverage)
+        #expect(OfflineTranslationPageState.noText.isUsableOverlay)
+        #expect(!OfflineTranslationPageState.failed.countsAsCoverage)
+        #expect(!OfflineTranslationPageState.stale.isUsableOverlay)
+        #expect(OfflineTranslationJobState.interrupted.isTerminal == false)
+        #expect(OfflineTranslationJobState.completedWithFailures.isTerminal)
+        #expect(OfflineTranslationJobState.completionState(failedPageCount: 0, partialPageCount: 0) == .completed)
+        #expect(OfflineTranslationJobState.completionState(failedPageCount: 0, partialPageCount: 1) == .completedWithFailures)
+        #expect(OfflineTranslationPageState.partial.needsTranslationWork)
+        #expect(!OfflineTranslationPageState.completed.needsTranslationWork)
+    }
+
+    @Test func offlineTranslationFreezesOCRConfigurationAndRoundTripsIt() throws {
+        let job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-model",
+            sourceLanguage: .japanese,
+            targetLanguage: .english,
+            promptRevision: "test",
+            promptSnapshot: "snapshot",
+            styleInstructions: "natural",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2,
+            processingMode: .ocrText,
+            textModel: "text-model",
+            ocrRecognitionMode: .maximumAccuracy,
+            usesVisualOCRVerification: false
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslationJobRecord.self,
+            from: JSONEncoder().encode(job)
+        )
+        #expect(decoded.processingMode == .ocrText)
+        #expect(decoded.textModel == "text-model")
+        #expect(decoded.ocrRecognitionMode == .maximumAccuracy)
+        #expect(decoded.usesVisualOCRVerification == false)
+    }
+
+    @Test func offlineTranslationBlocksPreserveBubbleBoxThroughDTO() throws {
+        let bubbleBox = CGRect(x: 0.12, y: 0.2, width: 0.5, height: 0.24)
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.2, y: 0.28, width: 0.2, height: 0.08),
+            translation: "translated",
+            bubbleBox: bubbleBox
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        )
+        #expect(decoded.textBlock().bubbleBox == bubbleBox)
+        #expect(decoded.textBlock().boundingBox != bubbleBox)
+    }
+
+    @Test func offlineTranslationPreservesClassificationAfterGeometryRefinement() {
+        let block = TextBlock(
+            text: "旁白",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
+            translation: "Narration",
+            ocrSource: "vision-model:narration+local-geometry"
+        )
+
+        #expect(OfflineTranslatedBlock(block: block).classification == "narration")
+    }
+
+    @Test func offlineTranslationPartialPagePrefersMatchingCompleteFallback() {
+        let comicID = UUID()
+        let newSetID = UUID()
+        let parentSetID = UUID()
+        let providerID = UUID()
+        let partial = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: newSetID,
+            pageIndex: 0,
+            sourceFingerprint: "same-page",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [OfflineTranslatedBlock(block: TextBlock(
+                text: "第一句",
+                boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.08),
+                translation: "new"
+            ))],
+            state: .partial,
+            providerID: providerID,
+            visionModel: "vision"
+        )
+        let completeFallback = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: parentSetID,
+            pageIndex: 0,
+            sourceFingerprint: "same-page",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [OfflineTranslatedBlock(block: TextBlock(
+                text: "第一句",
+                boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.08),
+                translation: "old"
+            ))],
+            state: .completed,
+            providerID: providerID,
+            visionModel: "vision"
+        )
+
+        let preferred = OfflineTranslationOverlayProvider.preferredOverlayPage(
+            primary: partial,
+            fallbackPages: [completeFallback]
+        )
+        #expect(preferred.setID == parentSetID)
+        #expect(preferred.blocks.first?.translation == "old")
+    }
+
+    @Test func offlineTranslationPersistsExplicitTextOrientationThroughDTO() throws {
+        let block = TextBlock(
+            text: "多行横排对白",
+            boundingBox: CGRect(x: 0.42, y: 0.18, width: 0.08, height: 0.28),
+            estimatedFontScale: 0.04,
+            textOrientation: .horizontal
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        )
+
+        #expect(decoded.textOrientation == .horizontal)
+        #expect(decoded.textBlock().textOrientation == .horizontal)
+    }
+
+    @Test func offlineTranslationIntentAndPolicyCircuitAreExplicit() {
+        #expect(OfflineTranslationStartIntent.fromCurrent.sourceSetID == nil)
+        let explicitIndexes = try? OfflineTranslationSelection.explicitPages([1, 3]).pageIndexes(totalPages: 4)
+        #expect(explicitIndexes == [1, 3])
+        let refusal = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 400,
+            message: "[1301] content policy refusal"
+        )
+        #expect(OfflineTranslationPolicyCircuit.isProviderRefusal(refusal))
+        #expect(OfflineTranslationPolicyCircuit.refusalThreshold == 3)
+    }
+
+    @Test func offlineTranslationRetryPolicyStopsAtFiniteBackoffAndPausesForAuth() {
+        let unauthorized = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 401,
+            message: "unauthorized"
+        )
+        let rateLimited = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 429,
+            message: "too many requests"
+        )
+        let serverRetryAfter = AITranslationRequestError.serverWithRetryAfter(
+            model: "vision",
+            statusCode: 503,
+            message: "temporarily unavailable",
+            retryAfterSeconds: 8
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: unauthorized, attempt: 0) == .needsConfiguration)
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 0) == .retry(afterSeconds: 2))
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 2) == .retry(afterSeconds: 15))
+        #expect(OfflineTranslationRetryPolicy.decision(for: rateLimited, attempt: 3) == .fail)
+        #expect(OfflineTranslationRetryPolicy.decision(for: serverRetryAfter, attempt: 0) == .retry(afterSeconds: 8))
+        #expect(
+            OfflineTranslationRetryPolicy.decision(
+                for: AITranslationRequestError.invalidTranslationJSON(model: "vision", excerpt: "{}"),
+                attempt: 0
+            ) == .retry(afterSeconds: 2)
+        )
+        let moderation = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 403,
+            message: "content policy refusal"
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: moderation, attempt: 0) == .fail)
+        #expect(OfflineTranslationPolicyCircuit.isProviderRefusal(moderation))
+        let forbidden = AITranslationRequestError.server(
+            model: "vision",
+            statusCode: 403,
+            message: "invalid API key"
+        )
+        #expect(OfflineTranslationRetryPolicy.decision(for: forbidden, attempt: 0) == .needsConfiguration)
+    }
+
+    @Test func offlineTranslationJobJSONNeverContainsAPIKey() throws {
+        let job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .fromPage(2),
+            pageIndexes: [2, 3],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            sourceLanguage: .automatic,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            styleInstructions: "保持自然",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 4
+        )
+        let data = try JSONEncoder().encode(job)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("apiKey"))
+        #expect(json.contains("styleInstructions"))
+    }
+
+    @Test func offlineTranslationRestartMarksRunningJobsInterruptedWithoutDeletingPages() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-interruption-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let set = OfflineTranslationSetManifest(
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 2
+        )
+        try await storage.saveManifest(set, activate: true)
+        let page = OfflineTranslatedPage(
+            comicID: comicID,
+            setID: set.id,
+            pageIndex: 0,
+            sourceFingerprint: "stable",
+            pixelWidth: 100,
+            pixelHeight: 100,
+            blocks: [],
+            state: .noText,
+            providerID: providerID,
+            visionModel: "vision-test"
+        )
+        try await storage.savePageAndUpdateManifest(page)
+        var job = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: set.id,
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: providerID,
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2
+        )
+        job.state = .running
+        try await storage.saveJob(job)
+        #expect(try await storage.markRunningJobsInterrupted() == 1)
+        #expect((await storage.job(comicID: comicID, jobID: job.id))?.state == .interrupted)
+        #expect((await storage.page(comicID: comicID, setID: set.id, pageIndex: 0))?.state == .noText)
+    }
+
+    @Test func offlineTranslationCorruptPageJSONIsIgnoredForRegeneration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-corrupt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let setID = UUID()
+        let manifest = OfflineTranslationSetManifest(
+            id: setID,
+            comicID: comicID,
+            sourceLanguage: .automatic,
+            targetLanguage: .english,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision-test",
+            promptRevision: OfflineTranslationPromptBuilder.revision,
+            promptSnapshot: "fixed",
+            totalPages: 1
+        )
+        try await storage.saveManifest(manifest, activate: true)
+        let pagesURL = root
+            .appendingPathComponent(comicID.uuidString)
+            .appendingPathComponent("sets")
+            .appendingPathComponent(setID.uuidString)
+            .appendingPathComponent("pages")
+        try FileManager.default.createDirectory(at: pagesURL, withIntermediateDirectories: true)
+        try Data("{not-json".utf8).write(
+            to: pagesURL.appendingPathComponent("000000.json"),
+            options: .atomic
+        )
+        #expect(await storage.page(comicID: comicID, setID: setID, pageIndex: 0) == nil)
+        #expect(await storage.pageStates(comicID: comicID, setID: setID).isEmpty)
+    }
+
+    @MainActor
+    private final class InMemoryAICredentialStore: AICredentialStoring {
     private var values: [UUID: String] = [:]
 
     func apiKey(for profileID: UUID) -> String? {

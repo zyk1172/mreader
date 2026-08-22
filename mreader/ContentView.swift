@@ -254,6 +254,9 @@ struct ContentView: View {
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
+    @State private var offlineTranslationStartComic: ComicBook?
+    @State private var offlineTranslationManagerComic: ComicBook?
+    @State private var backgroundTaskDestination: BackgroundTaskDestination?
     @State private var showTranslationPrompt = false
     @State private var showVisionPrompt = false
     @State private var showOCRSearch = false
@@ -355,6 +358,27 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showStorageManager) {
                 StorageManagerView(library: library)
+            }
+            .sheet(item: $offlineTranslationStartComic) { comic in
+                OfflineTranslationStartView(
+                    comic: comic,
+                    currentPageIndex: comic.currentPageIndex,
+                    onBackground: { offlineTranslationStartComic = nil }
+                )
+            }
+            .sheet(item: $offlineTranslationManagerComic) { comic in
+                OfflineTranslationManagerView(
+                    comic: comic,
+                    onBackground: { offlineTranslationManagerComic = nil }
+                )
+            }
+            .sheet(item: $backgroundTaskDestination) { destination in
+                if case .offlineTranslation(let comicID, _) = destination,
+                   let comic = library.comics.first(where: { $0.id == comicID }) {
+                    OfflineTranslationProgressView(comic: comic) {
+                        backgroundTaskDestination = nil
+                    }
+                }
             }
             .sheet(isPresented: $showActivity) {
                 ShelfActivityView(comics: library.comics)
@@ -546,6 +570,7 @@ struct ContentView: View {
 
     private struct ShelfToolbarModifiers: ViewModifier {
         @ObservedObject var backgroundTasks: BackgroundTaskCenter
+        @Binding var backgroundTaskDestination: BackgroundTaskDestination?
         var shelfActionMenu: ShelfActionMenuContent
 
         func body(content: Content) -> some View {
@@ -553,7 +578,10 @@ struct ContentView: View {
                 .toolbar {
                     if backgroundTasks.isActive {
                         ToolbarItem(placement: .navigationBarTrailing) {
-                            BackgroundTaskIndicator(center: backgroundTasks)
+                            BackgroundTaskIndicator(
+                                center: backgroundTasks,
+                                onSelect: { backgroundTaskDestination = $0 }
+                            )
                         }
                     }
                     ToolbarItem(placement: .navigationBarTrailing) {
@@ -689,6 +717,7 @@ struct ContentView: View {
     private var shelfToolbarModifiers: ShelfToolbarModifiers {
         ShelfToolbarModifiers(
             backgroundTasks: backgroundTasks,
+            backgroundTaskDestination: $backgroundTaskDestination,
             shelfActionMenu: ShelfActionMenuContent(
                 isSelectionMode: $isSelectionMode,
                 selectedComicIDs: $selectedComicIDs,
@@ -1706,6 +1735,20 @@ struct ContentView: View {
             } else {
                 Label("ocr.index.build".localized, systemImage: "text.magnifyingglass")
             }
+        }
+
+        Button {
+            HapticManager.shared.play(.light)
+            offlineTranslationStartComic = comic
+        } label: {
+            Label("offlineTranslation.start".localized, systemImage: "text.bubble.fill")
+        }
+
+        Button {
+            HapticManager.shared.play(.light)
+            offlineTranslationManagerComic = comic
+        } label: {
+            Label("offlineTranslation.manage".localized, systemImage: "list.bullet.rectangle")
         }
 
         if comic.sourceType == .komga || comic.sourceType == .opds {
@@ -3486,6 +3529,7 @@ struct StorageManagerView: View {
                     LabeledContent("storage.pageCache".localized, value: formattedFileSize(cacheSnapshot.remotePages))
                     LabeledContent("storage.generatedCache".localized, value: formattedFileSize(cacheSnapshot.generatedAssets))
                     LabeledContent("storage.tempExtractCache".localized, value: formattedFileSize(cacheSnapshot.temporaryFiles))
+                    LabeledContent("offlineTranslation.storage".localized, value: formattedFileSize(cacheSnapshot.offlineTranslations))
                     LabeledContent("storage.totalCache".localized, value: formattedFileSize(cacheSnapshot.readerCacheTotal))
                     Button(role: .destructive) {
                         clearReaderCaches()

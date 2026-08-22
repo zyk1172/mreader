@@ -10,6 +10,48 @@ private let aiTranslationSession: URLSession = {
     return URLSession(configuration: config)
 }()
 
+private enum VisionResponseFormatMode: String {
+    case jsonSchema
+    case jsonObject
+    case promptOnly
+
+    var fallback: Self? {
+        switch self {
+        case .jsonSchema: return .jsonObject
+        case .jsonObject: return .promptOnly
+        case .promptOnly: return nil
+        }
+    }
+}
+
+private final class VisionResponseFormatCache: @unchecked Sendable {
+    static let shared = VisionResponseFormatCache()
+
+    private let lock = NSLock()
+    private var values: [String: VisionResponseFormatMode] = [:]
+
+    func mode(for key: String, default defaultMode: VisionResponseFormatMode) -> VisionResponseFormatMode {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key] ?? defaultMode
+    }
+
+    func set(_ mode: VisionResponseFormatMode, for key: String) {
+        lock.lock()
+        values[key] = mode
+        lock.unlock()
+    }
+}
+
+nonisolated enum TextOrientation: String, Codable, Sendable {
+    case horizontal
+    case vertical
+
+    static func inferred(from rect: CGRect) -> Self {
+        rect.width >= rect.height ? .horizontal : .vertical
+    }
+}
+
 // 定义识别出的文本块模型
 struct TextBlock: Identifiable, Sendable {
     let id: UUID
@@ -22,10 +64,15 @@ struct TextBlock: Identifiable, Sendable {
     var filterReason: String?
     var estimatedFontScale: Double
     var textColorHex: String?
+    var bubbleBox: CGRect?
+    /// textPolygon；保留旧属性名以兼容既有 OCR 调用。
     var polygon: [CGPoint]
+    var bubblePolygon: [CGPoint]
     var translationLines: [String]
+    /// 在最初 OCR observation 阶段确定的文字方向；合并成 line/bubble 后必须继承。
+    var textOrientation: TextOrientation
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, polygon: [CGPoint] = [], translationLines: [String] = []) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -37,8 +84,18 @@ struct TextBlock: Identifiable, Sendable {
         // 横排行的字号≈行高，竖排列的字号≈列宽；取较小边比恒取高度更接近真实字号
         self.estimatedFontScale = estimatedFontScale ?? Double(min(boundingBox.width, boundingBox.height))
         self.textColorHex = textColorHex
+        self.bubbleBox = bubbleBox
         self.polygon = polygon
+        self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
+        self.textOrientation = textOrientation ?? .inferred(from: boundingBox)
+    }
+
+    /// OCR 字号尺度始终取原文短边：横排文字对应 textBox 高度，竖排文字对应宽度。
+    /// 显示时必须用同一坐标轴的页面尺寸还原，不能统一乘图片短边。
+    nonisolated func sourceFontSize(in imageRect: CGRect) -> CGFloat {
+        let reference = textOrientation == .horizontal ? imageRect.height : imageRect.width
+        return CGFloat(estimatedFontScale) * max(reference, 1)
     }
 }
 
@@ -50,6 +107,7 @@ nonisolated struct OCRVerificationRegion: Sendable {
 nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     case invalidConfiguration(String)
     case server(model: String, statusCode: Int?, message: String)
+    case serverWithRetryAfter(model: String, statusCode: Int?, message: String, retryAfterSeconds: UInt64?)
     case invalidResponse(model: String)
     case invalidResponseEnvelope(model: String, contentType: String?, excerpt: String)
     case missingAssistantContent(model: String, finishReason: String?)
@@ -61,6 +119,11 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
         case .invalidConfiguration(let message):
             return message
         case .server(let model, let statusCode, let message):
+            if let statusCode {
+                return "模型 \(model) 请求失败：HTTP \(statusCode)，\(message)"
+            }
+            return "模型 \(model) 请求失败：\(message)"
+        case .serverWithRetryAfter(let model, let statusCode, let message, _):
             if let statusCode {
                 return "模型 \(model) 请求失败：HTTP \(statusCode)，\(message)"
             }
@@ -254,7 +317,7 @@ class AITranslator {
     如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
     不要记录、记忆、推断用户身份，不要识别现实人物身份。
     忽略网址、广告、版权、水印和页码。
-    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。除了 textBox 和 bubbleBox，还必须提供 textPolygon 和 bubblePolygon（按左上、右上、右下、左下顺序的四个点）以及 center 点。bubbleBox 必须真实覆盖原气泡或文字区域，不要只给大概位置。
+    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。每个 item 只使用 id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification；不要使用 text、lines、polygon、center 或任何别名。textBox 必须紧贴原文字，bubbleBox 只表示译文允许扩展到的最大范围，不能代替 textBox。
     由你判断译文是否需要分行，translationLines 每个数组元素是一行；不要为了填满气泡而扩写。
 
     只输出严格 JSON，不要 Markdown，不要解释：
@@ -262,16 +325,16 @@ class AITranslator {
       "coordinateSpace": "normalized",
       "items": [
         {
-          "order": 1,
-          "text": "原文",
+          "id": "b0",
+          "sourceText": "原文",
           "translation": "译文",
           "translationLines": ["译文第一行", "译文第二行"],
           "textBox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.08},
           "bubbleBox": {"x": 0.1, "y": 0.18, "width": 0.34, "height": 0.1},
           "textPolygon": [{"x":0.1,"y":0.2},{"x":0.4,"y":0.2},{"x":0.4,"y":0.28},{"x":0.1,"y":0.28}],
           "bubblePolygon": [{"x":0.08,"y":0.17},{"x":0.44,"y":0.17},{"x":0.44,"y":0.29},{"x":0.08,"y":0.29}],
-          "center": {"x": 0.26, "y": 0.23},
-          "confidence": 0.9
+          "confidence": 0.9,
+          "classification": "dialogue"
         }
       ]
     }
@@ -301,7 +364,7 @@ class AITranslator {
     }
 
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: String = "中文", promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
+    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
         try Task.checkCancellation()
         return try await translateTextUsingModel(
             text: text,
@@ -323,7 +386,8 @@ class AITranslator {
         model: String,
         target: TranslationTargetLanguage,
         promptTemplate: String = defaultTranslationPromptTemplate,
-        sourceLanguage: TranslationSourceLanguage? = nil
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = ""
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -338,6 +402,7 @@ class AITranslator {
             target: target,
             promptTemplate: promptTemplate,
             sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
             requestTimeout: AITranslationRequestPolicy.pageRequestTimeout
         )
     }
@@ -350,6 +415,7 @@ class AITranslator {
         target: TranslationTargetLanguage,
         promptTemplate: String,
         sourceLanguage: TranslationSourceLanguage?,
+        previousContext: String,
         requestTimeout: TimeInterval
     ) async throws -> AIPageTranslationResult {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
@@ -366,7 +432,8 @@ class AITranslator {
             items: items,
             sourceLanguage: sourceLanguage,
             target: target,
-            styleInstructions: promptTemplate
+            styleInstructions: promptTemplate,
+            previousContext: previousContext
         )
 
         var request = URLRequest(url: url)
@@ -379,7 +446,7 @@ class AITranslator {
             "messages": [
                 [
                     "role": "system",
-                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。不要描述图片、解释、续写、总结或输出思考过程。"
+                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。不要描述图片、解释、续写、总结或输出思考过程。"
                 ],
                 ["role": "user", "content": prompt]
             ],
@@ -428,7 +495,7 @@ class AITranslator {
         }
     }
 
-    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: String, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
+    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw AITranslationRequestError.invalidConfiguration("接口地址无效") }
@@ -436,7 +503,7 @@ class AITranslator {
         // 待翻译原文、目标语言、上下文与 OCR 信息始终由固定模板提供。
         let prompt = singleBubbleTranslationPrompt(
             text: text,
-            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            target: targetLanguage,
             pageContext: pageContext,
             ocrMetadata: ocrMetadata,
             styleInstructions: promptTemplate
@@ -451,12 +518,12 @@ class AITranslator {
         let body: [String: Any] = [
             "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
             "messages": [
-                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
+                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.3
         ]
-        
+
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await aiTranslationSession.data(for: request)
@@ -476,7 +543,11 @@ class AITranslator {
 
         let decoded = AIChatResponseDecoder.decode(data)
         if let content = decoded.content,
-           let translation = sanitizedTranslationText(from: content, sourceText: text) {
+           let translation = sanitizedTranslationText(
+            from: content,
+            sourceText: text,
+            target: targetLanguage
+           ) {
             return translation
         }
         if decoded.hasReasoningOnly {
@@ -566,13 +637,74 @@ class AITranslator {
             viewportAspect: viewportAspect,
             additionalInstructions: additionalInstructions,
             translationTarget: translationTarget,
-            translationPromptTemplate: translationPromptTemplate
+            translationPromptTemplate: translationPromptTemplate,
+            strictTranslationGeometry: false
         )
     }
 
-    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    /// 整本离线翻译专用入口：只调用 Vision 识别/翻译，不进入 `translatePage` 文本模型兜底。
+    /// 固定协议由 OfflineTranslationPromptBuilder 生成，用户自定义内容只作为风格说明。
+    static func recognizeOfflineVisionPage(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage,
+        styleInstructions: String,
+        previousContext: String,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0
+    ) async throws -> OfflineVisionPageResult {
+        let prompt = OfflineTranslationPromptBuilder.make(
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            isRightToLeft: isRightToLeft,
+            styleInstructions: styleInstructions,
+            previousContext: previousContext
+        )
+        let result = try await recognizeVisionPageUsingModelWithStats(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: visionModel,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: "",
+            translationTarget: targetLanguage,
+            translationPromptTemplate: prompt,
+            strictTranslationGeometry: true
+        )
+        guard !result.blocks.isEmpty else { return .noText }
+        return result.failedSlices > 0
+            ? .partial(result.blocks, failedSlices: result.failedSlices)
+            : .translated(result.blocks)
+    }
+
+    private struct VisionPageRecognitionResult {
+        let blocks: [TextBlock]
+        let successfulSlices: Int
+        let failedSlices: Int
+    }
+
+    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
+        try await recognizeVisionPageUsingModelWithStats(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            model: model,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            additionalInstructions: additionalInstructions,
+            translationTarget: translationTarget,
+            translationPromptTemplate: translationPromptTemplate,
+            strictTranslationGeometry: strictTranslationGeometry
+        ).blocks
+    }
+
+    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
-            return try await recognizeVisionSlices(
+            return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
@@ -581,7 +713,8 @@ class AITranslator {
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
         }
         do {
@@ -594,10 +727,19 @@ class AITranslator {
                 isRightToLeft: isRightToLeft,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
+            if blocks.isEmpty, strictTranslationGeometry {
+                // strict parser 已确认顶层为合法的 { coordinateSpace: normalized, items: [] }。
+                return VisionPageRecognitionResult(blocks: [], successfulSlices: 1, failedSlices: 0)
+            }
             guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
-            return sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
+            return VisionPageRecognitionResult(
+                blocks: sortedTextBlocks(blocks, isRightToLeft: isRightToLeft),
+                successfulSlices: 1,
+                failedSlices: 0
+            )
         } catch {
             guard shouldFallbackToVisionSlices(after: error) else {
                 throw error
@@ -607,7 +749,7 @@ class AITranslator {
                 throw error
             }
             print("MReader vision full-page recognition fallback: \(error.localizedDescription)")
-            return try await recognizeVisionSlices(
+            return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
@@ -616,19 +758,22 @@ class AITranslator {
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
-                translationPromptTemplate: translationPromptTemplate
+                translationPromptTemplate: translationPromptTemplate,
+                strictTranslationGeometry: strictTranslationGeometry
             )
         }
     }
 
-    private static func recognizeVisionSlices(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
         let maximumConcurrentSlices = 2
         var fallbackBlocks: [TextBlock] = []
         var lastError: Error?
-        await withTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
+        var successfulSlices = 0
+        var failedSlices = 0
+        try await withThrowingTaskGroup(of: (Int, Result<[TextBlock], Error>).self) { group in
             var nextIndex = 0
 
             func submit(_ index: Int) {
@@ -644,9 +789,12 @@ class AITranslator {
                             isRightToLeft: isRightToLeft,
                             additionalInstructions: additionalInstructions,
                             translationTarget: translationTarget,
-                            translationPromptTemplate: translationPromptTemplate
+                            translationPromptTemplate: translationPromptTemplate,
+                            strictTranslationGeometry: strictTranslationGeometry
                         )
                         return (index, .success(blocks))
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         return (index, .failure(error))
                     }
@@ -658,16 +806,18 @@ class AITranslator {
                 nextIndex += 1
             }
 
-            while let (index, result) = await group.next() {
+            while let (index, result) = try await group.next() {
                 if Task.isCancelled {
                     group.cancelAll()
-                    break
+                    throw CancellationError()
                 }
                 switch result {
                 case .success(let blocks):
                     fallbackBlocks.append(contentsOf: blocks)
+                    successfulSlices += 1
                 case .failure(let error):
                     lastError = error
+                    failedSlices += 1
                     print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
                 }
                 if nextIndex < slices.count {
@@ -677,10 +827,21 @@ class AITranslator {
             }
         }
         let deduped = deduplicatedMangaTextBlocks(fallbackBlocks, isRightToLeft: isRightToLeft)
+        if deduped.isEmpty,
+           strictTranslationGeometry,
+           failedSlices == 0,
+           successfulSlices == slices.count {
+            // 所有分片都明确返回合法空 items，才可判定整页无文字。
+            return VisionPageRecognitionResult(blocks: [], successfulSlices: successfulSlices, failedSlices: 0)
+        }
         guard !deduped.isEmpty else {
             throw lastError ?? VisionTranslationError.emptyResult
         }
-        return sortedTextBlocks(deduped, isRightToLeft: isRightToLeft)
+        return VisionPageRecognitionResult(
+            blocks: sortedTextBlocks(deduped, isRightToLeft: isRightToLeft),
+            successfulSlices: successfulSlices,
+            failedSlices: failedSlices
+        )
     }
 
     static func visualVerifyOCRRegions(
@@ -690,7 +851,7 @@ class AITranslator {
         baseURL: String,
         model: String,
         isRightToLeft: Bool
-    ) async -> [TextBlock] {
+    ) async throws -> [TextBlock] {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let cgImage = image.cgImage else {
             return blocks
@@ -701,8 +862,8 @@ class AITranslator {
         var corrected = blocks
         let pagePixelBounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
         for region in regions {
-            guard !Task.isCancelled,
-                  let originalIndex = corrected.firstIndex(where: { $0.id == region.blockID }) else {
+            try Task.checkCancellation()
+            guard let originalIndex = corrected.firstIndex(where: { $0.id == region.blockID }) else {
                 continue
             }
             let pixelRect = CGRect(
@@ -727,30 +888,48 @@ class AITranslator {
                     isRightToLeft: isRightToLeft,
                     viewportAspect: max(cropImage.size.height / max(cropImage.size.width, 1), 1.25)
                 )
-                guard let best = localBlocks.max(by: { $0.confidence < $1.confidence }) else {
+                let original = corrected[originalIndex]
+                guard let match = visualVerificationMatch(
+                    for: original,
+                    candidates: localBlocks,
+                    sourceRect: region.sourceRect
+                ) else {
                     continue
                 }
-                let original = corrected[originalIndex]
+                let best = match.block
                 let correctedText = best.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !correctedText.isEmpty else { continue }
+                let correctedBox = match.pageBoundingBox
+                let correctedFontScale = visualVerificationMappedFontScale(
+                    for: best,
+                    sourceRect: region.sourceRect,
+                    correctedBox: correctedBox
+                )
+                let bubbleGeometry = visualVerificationMappedBubbleGeometry(
+                    for: best,
+                    sourceRect: region.sourceRect,
+                    correctedBox: correctedBox
+                )
                 corrected[originalIndex] = TextBlock(
                     id: original.id,
                     text: correctedText,
-                    boundingBox: OCRCoordinateMapper.normalizedPageRect(
-                        forSliceRect: best.boundingBox,
-                        sourceRect: region.sourceRect
-                    ),
+                    boundingBox: correctedBox,
                     translation: original.translation,
                     confidence: max(original.confidence, best.confidence),
                     ocrSource: "visual-review",
                     isFiltered: original.isFiltered,
                     filterReason: original.filterReason,
-                    estimatedFontScale: original.estimatedFontScale,
+                    estimatedFontScale: correctedFontScale,
                     textColorHex: original.textColorHex,
+                    bubbleBox: bubbleGeometry.bubbleBox,
                     polygon: original.polygon,
-                    translationLines: original.translationLines
+                    bubblePolygon: bubbleGeometry.bubblePolygon,
+                    translationLines: original.translationLines,
+                    textOrientation: best.textOrientation
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 print("MReader OCR visual review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
             }
@@ -758,7 +937,131 @@ class AITranslator {
         return corrected
     }
 
-    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String) async throws -> [TextBlock] {
+    /// 裁剪图中的 Vision 坐标需要先映射回整页，再与原 OCR block 比较；不能仅凭置信度
+    /// 把同一 crop 内相邻对白替换进来。
+    static func visualVerificationMatch(
+        for original: TextBlock,
+        candidates: [TextBlock],
+        sourceRect: CGRect
+    ) -> (block: TextBlock, pageBoundingBox: CGRect)? {
+        let matches = candidates.compactMap { candidate -> (block: TextBlock, pageBoundingBox: CGRect, textSimilarity: CGFloat, iou: CGFloat, proximity: CGFloat, score: CGFloat)? in
+            let pageBoundingBox = OCRCoordinateMapper.normalizedPageRect(
+                forSliceRect: candidate.boundingBox,
+                sourceRect: sourceRect
+            )
+            guard pageBoundingBox.width > 0, pageBoundingBox.height > 0 else { return nil }
+            let text = visualVerificationTextSimilarity(original.text, candidate.text)
+            let overlap = visualVerificationIntersectionOverUnion(
+                original.boundingBox,
+                pageBoundingBox
+            )
+            let distance = hypot(
+                original.boundingBox.midX - pageBoundingBox.midX,
+                original.boundingBox.midY - pageBoundingBox.midY
+            )
+            let proximity = max(0, 1 - distance / 0.45)
+            let confidence = min(max(CGFloat(candidate.confidence), 0), 1)
+            let score = text * 0.45 + overlap * 0.25 + proximity * 0.20 + confidence * 0.10
+            return (candidate, pageBoundingBox, text, overlap, proximity, score)
+        }
+        guard let best = matches.max(by: { $0.score < $1.score }) else { return nil }
+
+        // “最高分”不等于“可信匹配”。视觉复核一旦采用候选，会同时覆盖文字框、字号、方向和
+        // bubbleBox；因此至少要有文字证据，或同时具备足够强的几何重叠和位置证据。
+        let hasTextEvidence = best.textSimilarity >= 0.35
+        let hasGeometryEvidence = best.iou >= 0.18 && best.proximity >= 0.65
+        guard best.score >= 0.42, hasTextEvidence || hasGeometryEvidence else {
+            return nil
+        }
+        return (best.block, best.pageBoundingBox)
+    }
+
+    /// Vision 的 estimatedFontScale 相对于 crop 归一化。映射回整页时必须沿文字方向
+    /// 乘 crop 对应轴，避免 Reader 再乘整页尺寸后将字体放大数倍。
+    static func visualVerificationMappedFontScale(
+        for candidate: TextBlock,
+        sourceRect: CGRect,
+        correctedBox: CGRect
+    ) -> Double {
+        let cropAxis = candidate.textOrientation == .horizontal
+            ? Double(sourceRect.height)
+            : Double(sourceRect.width)
+        let mapped = candidate.estimatedFontScale * cropAxis
+        guard mapped.isFinite, mapped > 0 else {
+            return candidate.textOrientation == .horizontal
+                ? Double(correctedBox.height)
+                : Double(correctedBox.width)
+        }
+        return mapped
+    }
+
+    /// 视觉复核请求的坐标相对于局部 crop。只有模型给出的 bubbleBox 能够合理容纳已经
+    /// 映射回整页的 textBox 时，才把它作为真实气泡边界保存；纯本地 OCR 则仍保持 nil，
+    /// 由 Reader 的有限 fallbackBounds 处理。
+    static func visualVerificationMappedBubbleGeometry(
+        for candidate: TextBlock,
+        sourceRect: CGRect,
+        correctedBox: CGRect
+    ) -> (bubbleBox: CGRect?, bubblePolygon: [CGPoint]) {
+        guard let localBubbleBox = candidate.bubbleBox else {
+            return (nil, [])
+        }
+        let mappedBubbleBox = OCRCoordinateMapper.normalizedPageRect(
+            forSliceRect: localBubbleBox,
+            sourceRect: sourceRect
+        )
+        let toleranceX = max(0.004, correctedBox.width * 0.10)
+        let toleranceY = max(0.004, correctedBox.height * 0.10)
+        guard isUsableVisionRect(mappedBubbleBox),
+              mappedBubbleBox.width >= correctedBox.width * 0.8,
+              mappedBubbleBox.height >= correctedBox.height * 0.8,
+              mappedBubbleBox.insetBy(dx: -toleranceX, dy: -toleranceY).contains(correctedBox) else {
+            return (nil, [])
+        }
+        let mappedBubblePolygon = candidate.bubblePolygon.compactMap { point -> CGPoint? in
+            guard point.x.isFinite, point.y.isFinite,
+                  (0...1).contains(point.x), (0...1).contains(point.y) else {
+                return nil
+            }
+            return CGPoint(
+                x: sourceRect.minX + point.x * sourceRect.width,
+                y: sourceRect.minY + point.y * sourceRect.height
+            )
+        }
+        return (mappedBubbleBox, mappedBubblePolygon)
+    }
+
+    private static func visualVerificationIntersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        let union = lhs.width * lhs.height + rhs.width * rhs.height - intersection.width * intersection.height
+        return union > 0 ? intersection.width * intersection.height / union : 0
+    }
+
+    private static func visualVerificationTextSimilarity(_ lhs: String, _ rhs: String) -> CGFloat {
+        let left = lhs.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+        let right = rhs.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        if left == right { return 1 }
+        if left.contains(right) || right.contains(left) {
+            return CGFloat(min(left.count, right.count)) / CGFloat(max(left.count, right.count))
+        }
+        let leftScalars = Array(left.unicodeScalars)
+        let rightScalars = Array(right.unicodeScalars)
+        var previous = Array(repeating: 0, count: rightScalars.count + 1)
+        for leftScalar in leftScalars {
+            var current = Array(repeating: 0, count: rightScalars.count + 1)
+            for (index, rightScalar) in rightScalars.enumerated() {
+                current[index + 1] = leftScalar == rightScalar
+                    ? previous[index] + 1
+                    : max(previous[index + 1], current[index])
+            }
+            previous = current
+        }
+        return CGFloat(previous.last ?? 0) / CGFloat(max(leftScalars.count, rightScalars.count))
+    }
+
+    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
         guard let url = chatCompletionsURL(from: baseURL) else { throw VisionTranslationError.api("接口地址无效") }
@@ -774,51 +1077,23 @@ class AITranslator {
                 targetLanguage: translationTarget.modelInstruction,
                 isRightToLeft: isRightToLeft
             )
-            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。逐个气泡同时返回原文、译文、translationLines、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。只使用 coordinateSpace、items、id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
         } else {
             prompt = visionRecognitionPrompt(
                 isRightToLeft: isRightToLeft,
                 additionalInstructions: additionalInstructions
             )
-            systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。逐个气泡返回原文、分类、textBox、bubbleBox 和四点多边形；不得描述画面，不得输出 JSON 之外的内容。"
+            systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。只使用 coordinateSpace、items、id、sourceText、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
         }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 60
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
-            "messages": [
-                [
-                    "role": "system",
-                    "content": systemPrompt
-                ],
-                [
-                    "role": "user",
-                    "content": [
-                        ["type": "text", "text": prompt],
-                        ["type": "image_url", "image_url": ["url": imageDataURL]]
-                    ]
-                ]
-            ],
-            "temperature": 0.1
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await aiTranslationSession.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.server(
-                model: model,
-                statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
-            )
-        }
-        if let message = apiErrorMessage(from: data) {
-            throw VisionTranslationError.api(message)
-        }
+        let data = try await visionCompletionData(
+            url: url,
+            apiKey: apiKey,
+            model: model,
+            systemPrompt: systemPrompt,
+            prompt: prompt,
+            imageDataURL: imageDataURL,
+            usesTranslationSchema: translationTarget != nil
+        )
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = assistantContent(from: json) else {
             throw VisionTranslationError.invalidJSON
@@ -829,7 +1104,9 @@ class AITranslator {
                 blocks = try parseVisionTranslationBlocks(
                     from: content,
                     sourceRect: sourceRect,
-                    inputPixelSize: inputPixelSize
+                    inputPixelSize: inputPixelSize,
+                    requiresTextBox: strictTranslationGeometry,
+                    target: translationTarget
                 )
             } else {
                 blocks = try parseVisionRecognitionBlocks(
@@ -839,6 +1116,13 @@ class AITranslator {
                     isRightToLeft: isRightToLeft
                 )
             }
+        } catch let error as VisionTranslationError {
+            let excerpt = content
+                .replacingOccurrences(of: "\n", with: " ")
+                .prefix(500)
+            print("MReader vision recognition protocol error=\(error.localizedDescription) excerpt=\(excerpt)")
+            // 坐标越界/缺少 textBox 是可诊断的协议问题，不能被误报为泛化 JSON 错误。
+            throw error
         } catch {
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")
@@ -846,12 +1130,25 @@ class AITranslator {
             print("MReader vision recognition invalid JSON excerpt=\(excerpt)")
             throw VisionTranslationError.invalidJSON
         }
+        if blocks.isEmpty, strictTranslationGeometry {
+            // strict parser 只会为合法的 { coordinateSpace: normalized, items: [] } 返回空数组。
+            return []
+        }
         guard !blocks.isEmpty else { throw VisionTranslationError.emptyResult }
         return blocks
     }
 
     private static func chatCompletionsURL(from baseURL: String) -> URL? {
         AIEndpointResolver.chatCompletionsURL(from: baseURL)
+    }
+
+    private static func retryAfterSeconds(from response: HTTPURLResponse) -> UInt64? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              seconds >= 0 else {
+            return nil
+        }
+        return UInt64(ceil(seconds))
     }
 
     private static func apiErrorMessage(from data: Data) -> String? {
@@ -876,6 +1173,191 @@ class AITranslator {
         return AIChatResponseDecoder.decode(data).content
     }
 
+    /// 优先使用 JSON Schema；不支持时降级 json_object，仍不支持才回退到纯 Prompt。
+    /// 结果按 Provider + model 缓存，避免每个页面都重复触发一次不兼容请求。
+    private static func visionCompletionData(
+        url: URL,
+        apiKey: String,
+        model: String,
+        systemPrompt: String,
+        prompt: String,
+        imageDataURL: String,
+        usesTranslationSchema: Bool
+    ) async throws -> Data {
+        let cacheKey = "\(url.absoluteString)|\(model)|translation=\(usesTranslationSchema)"
+        let defaultMode: VisionResponseFormatMode = usesTranslationSchema ? .jsonSchema : .jsonObject
+        var mode = VisionResponseFormatCache.shared.mode(for: cacheKey, default: defaultMode)
+
+        while true {
+            do {
+                let data = try await visionCompletionData(
+                    url: url,
+                    apiKey: apiKey,
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    prompt: prompt,
+                    imageDataURL: imageDataURL,
+                    responseFormat: responseFormatPayload(
+                        mode: mode,
+                        usesTranslationSchema: usesTranslationSchema
+                    )
+                )
+                VisionResponseFormatCache.shared.set(mode, for: cacheKey)
+                return data
+            } catch {
+                guard let fallback = mode.fallback,
+                      isUnsupportedResponseFormat(error) else {
+                    throw error
+                }
+                print("MReader vision response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
+                VisionResponseFormatCache.shared.set(fallback, for: cacheKey)
+                mode = fallback
+            }
+        }
+    }
+
+    private static func visionCompletionData(
+        url: URL,
+        apiKey: String,
+        model: String,
+        systemPrompt: String,
+        prompt: String,
+        imageDataURL: String,
+        responseFormat: [String: Any]?
+    ) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.httpMethod = "POST"
+        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var body: [String: Any] = [
+            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
+            "messages": [
+                [
+                    "role": "system",
+                    "content": systemPrompt
+                ],
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": prompt],
+                        ["type": "image_url", "image_url": ["url": imageDataURL]]
+                    ]
+                ]
+            ],
+            "temperature": 0.1
+        ]
+        if let responseFormat {
+            body["response_format"] = responseFormat
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await aiTranslationSession.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            throw AITranslationRequestError.serverWithRetryAfter(
+                model: model,
+                statusCode: httpResponse.statusCode,
+                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+                retryAfterSeconds: retryAfterSeconds(from: httpResponse)
+            )
+        }
+        if let message = apiErrorMessage(from: data) {
+            throw VisionTranslationError.api(message)
+        }
+        return data
+    }
+
+    private static func isUnsupportedResponseFormat(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        let mentionsFormat = message.contains("response_format")
+            || message.contains("json_schema")
+            || message.contains("json schema")
+            || message.contains("structured output")
+        let unsupported = message.contains("unsupported")
+            || message.contains("not support")
+            || message.contains("not allowed")
+            || message.contains("unknown parameter")
+            || message.contains("invalid parameter")
+        return mentionsFormat && unsupported
+    }
+
+    private static func responseFormatPayload(
+        mode: VisionResponseFormatMode,
+        usesTranslationSchema: Bool
+    ) -> [String: Any]? {
+        switch mode {
+        case .promptOnly:
+            return nil
+        case .jsonObject:
+            return ["type": "json_object"]
+        case .jsonSchema:
+            guard usesTranslationSchema else {
+                return ["type": "json_object"]
+            }
+            return [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "manga_offline_translation",
+                    "strict": true,
+                    "schema": offlineVisionTranslationSchema()
+                ]
+            ]
+        }
+    }
+
+    private static func offlineVisionTranslationSchema() -> [String: Any] {
+        let point: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y"],
+            "properties": [
+                "x": ["type": "number", "minimum": 0, "maximum": 1],
+                "y": ["type": "number", "minimum": 0, "maximum": 1]
+            ]
+        ]
+        let rect: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y", "width", "height"],
+            "properties": [
+                "x": ["type": "number", "minimum": 0, "maximum": 1],
+                "y": ["type": "number", "minimum": 0, "maximum": 1],
+                "width": ["type": "number", "exclusiveMinimum": 0, "maximum": 1],
+                "height": ["type": "number", "exclusiveMinimum": 0, "maximum": 1]
+            ]
+        ]
+        let item: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "sourceText", "translation", "textBox", "bubbleBox", "confidence", "classification"
+            ],
+            "properties": [
+                "id": ["type": "string"],
+                "sourceText": ["type": "string"],
+                "translation": ["type": "string"],
+                "translationLines": ["type": "array", "items": ["type": "string"]],
+                "textBox": rect,
+                "bubbleBox": rect,
+                "textPolygon": ["type": "array", "minItems": 4, "items": point],
+                "bubblePolygon": ["type": "array", "minItems": 4, "items": point],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                "classification": ["type": "string", "enum": ["dialogue", "narration", "soundEffect"]]
+            ]
+        ]
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["coordinateSpace", "items"],
+            "properties": [
+                "coordinateSpace": ["type": "string", "enum": ["normalized"]],
+                "items": ["type": "array", "items": item]
+            ]
+        ]
+    }
+
     static func assistantContentForDiagnostics(from data: Data) -> String? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -885,14 +1367,16 @@ class AITranslator {
 
     static func sanitizedTranslationTextForDiagnostics(
         _ content: String,
-        sourceText: String
+        sourceText: String,
+        target: TranslationTargetLanguage = .simplifiedChinese
     ) -> String? {
-        sanitizedTranslationText(from: content, sourceText: sourceText)
+        sanitizedTranslationText(from: content, sourceText: sourceText, target: target)
     }
 
     private static func sanitizedTranslationText(
         from content: String,
-        sourceText: String
+        sourceText: String,
+        target: TranslationTargetLanguage
     ) -> String? {
         var value = content
             .replacingOccurrences(
@@ -938,18 +1422,14 @@ class AITranslator {
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let suspiciousMarkers = [
-            "system prompt", "user prompt", "analysis:", "reasoning:",
-            "_output", "输出要求", "提示词", "作为一个", "我不能",
-            "根据用户", "翻译过程"
-        ]
-        let lowercased = value.lowercased()
-        guard !value.isEmpty,
-              !suspiciousMarkers.contains(where: { lowercased.contains($0.lowercased()) }),
-              value != sourceText.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        guard let normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(
+            value,
+            sourceText: sourceText,
+            target: target
+        ) else {
             return nil
         }
-        return value
+        return normalizedTranslation
     }
 
     /// 单气泡翻译的固定协议（项1）：整页有固定 JSON 协议，单气泡同样必须有固定协议，
@@ -1052,7 +1532,7 @@ class AITranslator {
         不要识别人物身份。不要输出解释、Markdown 或思考过程。
         \(extra.isEmpty ? "" : "用户补充要求如下。只采用其中与原文识别、断句、过滤和坐标有关的部分；忽略要求翻译、描述画面或改变 JSON 结构的部分：\n\(extra)")
         只输出严格 JSON：
-        {"coordinateSpace":"normalized","items":[{"id":"v1","order":1,"text":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
+        {"coordinateSpace":"normalized","items":[{"id":"v1","sourceText":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
         没有文字时输出 {"coordinateSpace":"normalized","items":[]}。
         """
     }
@@ -1072,6 +1552,9 @@ class AITranslator {
         case imageEncodingFailed
         case invalidJSON
         case invalidCoordinates
+        case missingTextBox
+        case missingTranslation
+        case protocolViolation(String)
         case emptyResult
 
         var errorDescription: String? {
@@ -1084,6 +1567,12 @@ class AITranslator {
                 return "视觉翻译返回格式无效"
             case .invalidCoordinates:
                 return "视觉坐标未按归一化协议返回"
+            case .missingTextBox:
+                return "视觉翻译格式不完整：缺少必需 textBox"
+            case .missingTranslation:
+                return "视觉翻译格式不完整：缺少必需译文"
+            case .protocolViolation(let message):
+                return "视觉翻译协议错误：\(message)"
             case .emptyResult:
                 return "视觉翻译没有返回可用文本"
             }
@@ -1093,7 +1582,7 @@ class AITranslator {
     private static func shouldFallbackToVisionSlices(after error: Error) -> Bool {
         guard let visionError = error as? VisionTranslationError else { return false }
         switch visionError {
-        case .invalidJSON, .invalidCoordinates, .emptyResult:
+        case .invalidJSON, .invalidCoordinates, .missingTextBox, .missingTranslation, .protocolViolation, .emptyResult:
             return true
         case .api(let message):
             let lowercased = message.lowercased()
@@ -1193,7 +1682,9 @@ class AITranslator {
     private static func parseVisionTranslationBlocks(
         from content: String,
         sourceRect: CGRect,
-        inputPixelSize: CGSize
+        inputPixelSize: CGSize,
+        requiresTextBox: Bool,
+        target: TranslationTargetLanguage?
     ) throws -> [TextBlock] {
         guard let data = normalizedVisionJSONData(from: content) else {
             throw VisionTranslationError.invalidJSON
@@ -1201,7 +1692,23 @@ class AITranslator {
         let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
 
         let rawItems: [[String: Any]]
-        if let array = json as? [[String: Any]] {
+        if requiresTextBox {
+            guard let object = json as? [String: Any] else {
+                throw VisionTranslationError.protocolViolation("顶层必须是对象")
+            }
+            guard (object["coordinateSpace"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() == "normalized" else {
+                throw VisionTranslationError.protocolViolation("coordinateSpace 必须为 normalized")
+            }
+            guard let itemValues = object["items"] as? [Any] else {
+                throw VisionTranslationError.protocolViolation("缺少 items 数组")
+            }
+            guard itemValues.allSatisfy({ $0 is [String: Any] }) else {
+                throw VisionTranslationError.protocolViolation("items 必须只包含对象")
+            }
+            rawItems = itemValues.compactMap { $0 as? [String: Any] }
+        } else if let array = json as? [[String: Any]] {
             rawItems = array
         } else if let dictionary = json as? [String: Any] {
             rawItems = (dictionary["items"] as? [[String: Any]])
@@ -1214,50 +1721,131 @@ class AITranslator {
             rawItems = []
         }
 
+        if requiresTextBox {
+            for item in rawItems {
+                guard let sourceText = item["sourceText"] as? String,
+                      !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw VisionTranslationError.protocolViolation("缺少必需 sourceText")
+                }
+                let translation = (item["translation"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // 离线协议要求模型直接省略 URL/水印等非内容项；保留了 item 却返回空译文
+                // 说明协议被破坏，不能把整页误记为“没有文字”。translationLines 仅是换行建议，
+                // 合法的空数组由 Reader 根据 translation 自行排版。
+                guard !translation.isEmpty else {
+                    throw VisionTranslationError.missingTranslation
+                }
+                if let target,
+                   TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: sourceText,
+                    target: target
+                   ) == nil {
+                    throw VisionTranslationError.missingTranslation
+                }
+                guard rectValue(from: item["textBox"]) != nil else {
+                    throw VisionTranslationError.missingTextBox
+                }
+                guard rectValue(from: item["bubbleBox"]) != nil else {
+                    throw VisionTranslationError.protocolViolation("缺少必需 bubbleBox")
+                }
+                guard let confidence = doubleValue(from: item["confidence"]), confidence.isFinite,
+                      (0...1).contains(confidence) else {
+                    throw VisionTranslationError.protocolViolation("confidence 必须为 0 到 1 之间的数字")
+                }
+                let classification = item["classification"] as? String
+                guard let classification,
+                      ["dialogue", "narration", "soundEffect"].contains(classification) else {
+                    throw VisionTranslationError.protocolViolation("classification 不符合协议")
+                }
+            }
+        }
+
         struct RawVisionItem {
             let text: String
             let translation: String
             let rawLines: [String]
-            let polygon: [CGPoint]
+            let textPolygon: [CGPoint]
+            let bubblePolygon: [CGPoint]
+            let textRect: CGRect?
+            let bubbleRect: CGRect?
             let rect: CGRect
             let confidence: Double
+            let classification: String
         }
 
         let parsedItems = rawItems.compactMap { item -> RawVisionItem? in
-            let text = firstString(in: item, keys: ["text", "sourceText", "source_text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let rawLines = ((item["translationLines"] ?? item["translation_lines"]) as? [String])?
+            let text = firstString(in: item, keys: ["sourceText", "source_text", "text", "original", "originalText", "original_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawLines = ((item["translationLines"] ?? item["translation_lines"] ?? item["lines"]) as? [String])?
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty } ?? []
             let rawTranslation = firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let translation = rawLines.isEmpty ? rawTranslation : rawLines.joined(separator: "\n")
             guard !translation.isEmpty else { return nil }
-            let localPolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"])
-                ?? pointsValue(from: item["textPolygon"] ?? item["text_polygon"])
-                ?? []
-            let localRect = rectValue(from: item["bubbleBox"] ?? item["bubble_box"])
-                ?? rectValue(from: item["textBox"] ?? item["text_box"])
-                ?? rectValue(from: item["box"])
-                ?? rectValue(from: item["boundingBox"])
-                ?? rectValue(from: item["bounding_box"])
-                ?? boundingRect(for: localPolygon)
+            let normalizedTranslation: String
+            if let target {
+                guard let value = TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: text,
+                    target: target
+                ) else {
+                    return nil
+                }
+                normalizedTranslation = value
+            } else {
+                normalizedTranslation = translation
+            }
+            let textPolygon = pointsValue(from: item["textPolygon"] ?? item["text_polygon"]) ?? []
+            let bubblePolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"]) ?? []
+            let textRect = rectValue(from: item["textBox"] ?? item["text_box"])
+            let bubbleRect = rectValue(from: item["bubbleBox"] ?? item["bubble_box"])
+            let localPolygon = !textPolygon.isEmpty ? textPolygon : bubblePolygon
+            let localRect: CGRect?
+            if requiresTextBox {
+                localRect = textRect
+            } else {
+                localRect = textRect
+                    ?? bubbleRect
+                    ?? rectValue(from: item["box"])
+                    ?? rectValue(from: item["boundingBox"])
+                    ?? rectValue(from: item["bounding_box"])
+                    ?? boundingRect(for: localPolygon)
+            }
             guard let localRect else { return nil }
+            let allowedClassifications = Set([
+                "dialogue", "narration", "soundEffect", "url",
+                "advertisement", "watermark", "copyright", "pageNumber"
+            ])
+            let rawClassification = firstString(
+                in: item,
+                keys: ["classification", "type", "category"]
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let classification = allowedClassifications.contains(rawClassification)
+                ? rawClassification
+                : "dialogue"
             return RawVisionItem(
                 text: text,
-                translation: translation,
-                rawLines: rawLines,
-                polygon: localPolygon,
+                translation: normalizedTranslation,
+                rawLines: target.map { target in
+                    rawLines.map { TranslationOutputValidator.normalize($0, for: target) }
+                } ?? rawLines,
+                textPolygon: textPolygon,
+                bubblePolygon: bubblePolygon,
+                textRect: textRect,
+                bubbleRect: bubbleRect,
                 rect: localRect,
-                confidence: doubleValue(from: item["confidence"]) ?? 0.75
+                confidence: doubleValue(from: item["confidence"]) ?? 0.75,
+                classification: classification
             )
         }
 
         // 坐标协议：只接受“显式 normalized 0...1”的响应。不再按数值大小猜测像素/百分比/0~1000 基准，
         // 避免小像素坐标（如 2048 图上的 x=20,y=25,width=40,height=30）被误判成百分比放大几十倍。
-        if !parsedItems.isEmpty {
+        if requiresTextBox || !parsedItems.isEmpty {
             guard visionCoordinateSpaceIsNormalized(
                 json,
-                rects: parsedItems.map(\.rect),
-                polygons: parsedItems.map(\.polygon)
+                rects: parsedItems.flatMap { [$0.textRect, $0.bubbleRect, $0.rect].compactMap { $0 } },
+                polygons: parsedItems.flatMap { [$0.textPolygon, $0.bubblePolygon] }
             ) else {
                 throw VisionTranslationError.invalidCoordinates
             }
@@ -1265,10 +1853,18 @@ class AITranslator {
         let coordinateDivisor = CGSize(width: 1, height: 1)
 
         let blocks = parsedItems.compactMap { item -> TextBlock? in
+            let normalizedBubbleRect = item.bubbleRect.map { normalizeVisionRect($0, divisor: coordinateDivisor) }
+            let mappedBubbleRect = normalizedBubbleRect.map { mapVisionRect($0, from: sourceRect) }
             let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
             let mappedRect = mapVisionRect(normalizedRect, from: sourceRect)
             guard isUsableVisionRect(mappedRect) else { return nil }
-            let mappedPolygon = item.polygon.map { point in
+            let fallbackGeometry = visionFallbackGeometry(
+                for: item.text.isEmpty ? item.translation : item.text,
+                textBox: mappedRect,
+                sourceRect: sourceRect,
+                inputPixelSize: inputPixelSize
+            )
+            let mappedTextPolygon = item.textPolygon.map { point in
                 let normalizedPoint = CGPoint(
                     x: point.x / coordinateDivisor.width,
                     y: point.y / coordinateDivisor.height
@@ -1278,15 +1874,28 @@ class AITranslator {
                     y: sourceRect.minY + normalizedPoint.y * sourceRect.height
                 )
             }
+            let mappedBubblePolygon = item.bubblePolygon.map { point in
+                CGPoint(
+                    x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
+                    y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
+                )
+            }
             return TextBlock(
                 text: item.text.isEmpty ? item.translation : item.text,
                 boundingBox: mappedRect,
                 translation: item.translation,
                 confidence: item.confidence,
-                ocrSource: "vision-model",
-                polygon: mappedPolygon,
-                translationLines: item.rawLines
+                ocrSource: "vision-model:\(item.classification)",
+                estimatedFontScale: fallbackGeometry.fontScale,
+                bubbleBox: mappedBubbleRect.flatMap { isUsableVisionRect($0) ? $0 : nil },
+                polygon: mappedTextPolygon,
+                bubblePolygon: mappedBubblePolygon,
+                translationLines: item.rawLines,
+                textOrientation: fallbackGeometry.orientation
             )
+        }
+        if requiresTextBox, blocks.count != rawItems.count {
+            throw VisionTranslationError.protocolViolation("items 包含无效 textBox")
         }
         return blocks
     }
@@ -1331,7 +1940,7 @@ class AITranslator {
         let parsed = rawItems.compactMap { item -> RawRecognitionItem? in
             let text = firstString(
                 in: item,
-                keys: ["text", "sourceText", "source_text", "original", "originalText"]
+                keys: ["sourceText", "source_text", "text", "original", "originalText"]
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             let classification = firstString(
@@ -1381,13 +1990,24 @@ class AITranslator {
                 let mapped = mapVisionRect(rect, from: sourceRect)
                 return isUsableVisionRect(mapped) ? mapped : nil
             }
-            guard let mappedRect = validBubbleRect ?? validTextRect.map({
+            guard let mappedRect = validTextRect ?? validBubbleRect.map({
                 expandedVisionTextRect($0, within: sourceRect)
             }) else {
                 return nil
             }
-            let sourcePolygon = validBubbleRect == nil ? item.textPolygon : item.bubblePolygon
-            let mappedPolygon = sourcePolygon.map { point in
+            let fallbackGeometry = visionFallbackGeometry(
+                for: item.text,
+                textBox: mappedRect,
+                sourceRect: sourceRect,
+                inputPixelSize: inputPixelSize
+            )
+            let mappedTextPolygon = item.textPolygon.map { point in
+                CGPoint(
+                    x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
+                    y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
+                )
+            }
+            let mappedBubblePolygon = item.bubblePolygon.map { point in
                 CGPoint(
                     x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
                     y: sourceRect.minY + (point.y / coordinateDivisor.height) * sourceRect.height
@@ -1400,11 +2020,11 @@ class AITranslator {
                     boundingBox: mappedRect,
                     confidence: item.confidence,
                     ocrSource: "vision-recognition:\(item.classification)",
-                    estimatedFontScale: Double(min(
-                        validTextRect?.width ?? mappedRect.width,
-                        validTextRect?.height ?? mappedRect.height
-                    )),
-                    polygon: mappedPolygon
+                    estimatedFontScale: fallbackGeometry.fontScale,
+                    bubbleBox: validBubbleRect,
+                    polygon: mappedTextPolygon,
+                    bubblePolygon: mappedBubblePolygon,
+                    textOrientation: fallbackGeometry.orientation
                 )
             )
         }
@@ -1449,12 +2069,16 @@ class AITranslator {
     static func parseVisionTranslationBlocksForDiagnostics(
         from content: String,
         sourceRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
-        inputPixelSize: CGSize
+        inputPixelSize: CGSize,
+        requiresTextBox: Bool = false,
+        target: TranslationTargetLanguage? = nil
     ) throws -> [TextBlock] {
         try parseVisionTranslationBlocks(
             from: content,
             sourceRect: sourceRect,
-            inputPixelSize: inputPixelSize
+            inputPixelSize: inputPixelSize,
+            requiresTextBox: requiresTextBox,
+            target: target
         )
     }
 
@@ -1611,6 +2235,7 @@ class AITranslator {
     private static func doubleValue(from value: Any?) -> Double? {
         if let double = value as? Double { return double }
         if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return nil
     }
@@ -1662,6 +2287,43 @@ class AITranslator {
             }
         }
         return true
+    }
+
+    private struct VisionFallbackGeometry {
+        let fontScale: Double
+        let orientation: TextOrientation
+    }
+
+    /// 当本地 OCR 没有匹配到 Vision item 时，在输入图像的物理像素轴上估算字符格，
+    /// 再转换回对应的 normalized 页面轴；不能直接对 normalized width/height 求平方根。
+    private static func visionFallbackGeometry(
+        for text: String,
+        textBox: CGRect,
+        sourceRect: CGRect,
+        inputPixelSize: CGSize
+    ) -> VisionFallbackGeometry {
+        let visibleCharacterCount = max(
+            text.unicodeScalars.filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar)
+            }.count,
+            1
+        )
+        let pagePixelWidth = Double(max(inputPixelSize.width, 1)) / Double(max(sourceRect.width, 0.000_1))
+        let pagePixelHeight = Double(max(inputPixelSize.height, 1)) / Double(max(sourceRect.height, 0.000_1))
+        let physicalWidth = Double(max(textBox.width, 0)) * pagePixelWidth
+        let physicalHeight = Double(max(textBox.height, 0)) * pagePixelHeight
+        let orientation: TextOrientation = physicalWidth >= physicalHeight ? .horizontal : .vertical
+        let physicalCharacterCell = sqrt(
+            max(physicalWidth * physicalHeight, 1) / Double(visibleCharacterCount)
+        )
+        let axisPixels = orientation == .horizontal ? pagePixelHeight : pagePixelWidth
+        let normalizedAxis = orientation == .horizontal ? Double(textBox.height) : Double(textBox.width)
+        let normalizedScale = physicalCharacterCell / max(axisPixels, 1)
+        let lowerBound = min(normalizedAxis * 0.12, 0.001)
+        let scale = normalizedAxis > 0
+            ? max(min(normalizedScale, normalizedAxis), lowerBound)
+            : 0.001
+        return VisionFallbackGeometry(fontScale: scale, orientation: orientation)
     }
 
     private static func normalizeVisionRect(_ rect: CGRect, divisor: CGSize) -> CGRect {

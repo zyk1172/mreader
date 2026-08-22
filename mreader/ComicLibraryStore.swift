@@ -223,7 +223,6 @@ final class ComicLibraryStore: ObservableObject {
         Task {
             await load()
             purgeNetworkLibraryState()
-            runStartupMaintenance()
         }
     }
 
@@ -247,6 +246,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isOfflineTranslationOverlayEnabled = existing.isOfflineTranslationOverlayEnabled
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
@@ -287,6 +287,12 @@ final class ComicLibraryStore: ObservableObject {
 
     func delete(id: UUID) {
         if let comic = comics.first(where: { $0.id == id }) {
+            if OfflineTranslationCoordinator.shared.job?.comicID == comic.id {
+                OfflineTranslationCoordinator.shared.cancel()
+            }
+            Task {
+                try? await OfflineTranslationStorageManager.shared.deleteComicTranslations(comicID: comic.id)
+            }
             OfflineDownloadManager.shared.remove(comic)
             Task { await OCRSearchIndex.shared.remove(comicID: comic.id) }
             if comic.sourceType == .local {
@@ -990,6 +996,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.isOCREnabled = existing.isOCREnabled
             merged.isAITranslationEnabled = existing.isAITranslationEnabled
             merged.isAutoTranslationEnabled = existing.isAutoTranslationEnabled
+            merged.isOfflineTranslationOverlayEnabled = existing.isOfflineTranslationOverlayEnabled
             merged.isAutoOCRMagnificationEnabled = existing.isAutoOCRMagnificationEnabled
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset

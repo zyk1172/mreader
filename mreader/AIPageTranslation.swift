@@ -92,7 +92,8 @@ nonisolated enum AIPageTranslationPromptBuilder {
         items: [AIPageTranslationItem],
         sourceLanguage: TranslationSourceLanguage?,
         target: TranslationTargetLanguage,
-        styleInstructions: String
+        styleInstructions: String,
+        previousContext: String = ""
     ) throws -> String {
         let wireItems = items.map { item -> [String: Any] in
             ["id": item.id, "sourceText": item.sourceText]
@@ -107,6 +108,8 @@ nonisolated enum AIPageTranslationPromptBuilder {
         }
         let source = sourceLanguage?.rawValue ?? "auto"
         let style = styleInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = previousContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        let contextSection = context.isEmpty ? "（无）" : context
         return """
         任务：翻译已经完成 OCR 的漫画文字。
 
@@ -118,7 +121,7 @@ nonisolated enum AIPageTranslationPromptBuilder {
         2. 只翻译每个 item 的 sourceText。
         3. 每个输入 id 必须且只能返回一次。
         4. id 必须原样复制，禁止修改、合并、拆分、遗漏或新增 id。
-        5. translation 只包含目标语言译文，不要解释、不复述原文。
+        5. translation 只包含目标语言译文，不要解释；专有名词、缩写、产品名或型号在目标语言中通常不变时可以原样保留。
         6. 无法可靠翻译某项时，仍保留该 id，并将 translation 设为空字符串。
         7. translationLines 仅用于建议换行；不确定时使用空数组。
         8. 最终只能输出一个 JSON 对象。禁止 Markdown、代码围栏、说明、前言、结语和思考过程。
@@ -126,6 +129,9 @@ nonisolated enum AIPageTranslationPromptBuilder {
 
         翻译风格要求：
         \(style)
+
+        上一页上下文（仅用于保持人名、称呼、语气和术语一致，不要翻译或复述这段上下文）：
+        \(contextSection)
 
         输入：
         \(json)
@@ -184,9 +190,12 @@ nonisolated enum AIPageTranslationParser {
                   accepted[id] == nil,
                   let translation = stringValue(rawItem, keys: ["translation", "translatedText", "translated_text"])?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !translation.isEmpty,
-                  translation != expectedByID[id]?.sourceText,
-                  TranslationOutputValidator.isCompatible(translation, target: target) else {
+                  let sourceText = expectedByID[id]?.sourceText,
+                  let normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: sourceText,
+                    target: target
+                  ) else {
                 continue
             }
             let lines = (rawItem["translationLines"] as? [String]
@@ -194,9 +203,10 @@ nonisolated enum AIPageTranslationParser {
                 ?? [])
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
+                .map { TranslationOutputValidator.normalize($0, for: target) }
             accepted[id] = AIPageTranslatedItem(
                 id: id,
-                translation: translation,
+                translation: normalizedTranslation,
                 translationLines: lines
             )
         }
@@ -248,6 +258,93 @@ nonisolated enum AIPageTranslationParser {
 }
 
 nonisolated enum TranslationOutputValidator {
+    /// 译文可与原文相同：缩写、产品名、型号等跨语言通常无需改写；但日文/中文整句原样
+    /// 返回到另一目标语言仍应视为漏译。整页与逐气泡必须共用此规则。
+    static func isAcceptableTranslation(
+        _ translation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> Bool {
+        normalizedAcceptableTranslation(
+            translation,
+            sourceText: sourceText,
+            target: target
+        ) != nil
+    }
+
+    /// 所有整页与逐气泡译文都经由同一入口：先规范化目标中文的字形，再判断是否是
+    /// 合法译文。这样模型偶尔返回繁简混排时不会为了一个字重新请求，而明显的日/韩文
+    /// 漏译仍会被拦下。
+    static func normalizedAcceptableTranslation(
+        _ translation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> String? {
+        let value = normalize(
+            translation.trimmingCharacters(in: .whitespacesAndNewlines),
+            for: target
+        )
+        guard !value.isEmpty, !containsExplanatoryGarbage(value) else { return nil }
+
+        let source = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !source.isEmpty, value == source {
+            return isStableUntranslatedToken(value, target: target) ? value : nil
+        }
+        return isCompatible(value, target: target) ? value : nil
+    }
+
+    static func normalize(_ text: String, for target: TranslationTargetLanguage) -> String {
+        switch target {
+        case .simplifiedChinese:
+            return text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
+        case .traditionalChinese:
+            return text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: true) ?? text
+        default:
+            return text
+        }
+    }
+
+    static func containsExplanatoryGarbage(_ text: String) -> Bool {
+        let suspiciousMarkers = [
+            "system prompt", "user prompt", "analysis:", "reasoning:",
+            "_output", "输出要求", "提示词", "作为一个", "我不能",
+            "根据用户", "翻译过程"
+        ]
+        let lowercased = text.lowercased()
+        return suspiciousMarkers.contains { lowercased.contains($0.lowercased()) }
+    }
+
+    /// 只接受不含空白、由 ASCII 字母/数字及常见型号符号构成的短 token。
+    /// 这样 NASA、OK、iPhone、RX-78 可以保留，中文/日文整句则不会借由“相同”绕过目标语言验证。
+    private static func isStableUntranslatedToken(
+        _ text: String,
+        target: TranslationTargetLanguage
+    ) -> Bool {
+        guard (1...40).contains(text.unicodeScalars.count) else { return false }
+        let isASCIIStableToken = text.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return true
+            case 0x2B, 0x2D, 0x2E, 0x2F, 0x3A, 0x5F, 0x23: return true // + - . / : _ #
+            default: return false
+            }
+        }
+        if isASCIIStableToken { return true }
+
+        // 人名、地名等短纯汉字在日→中、繁简互转中通常无需改写；只对中文目标语言
+        // 放行。韩文/日文目标把“大丈夫”“没有”原样返回通常是漏译，不能用此捷径。
+        let counts = scriptCounts(in: text)
+        let mayPreserveShortHan: Bool
+        switch target {
+        case .simplifiedChinese, .traditionalChinese:
+            mayPreserveShortHan = true
+        default:
+            mayPreserveShortHan = false
+        }
+        return mayPreserveShortHan
+            && text.unicodeScalars.count <= 6
+            && counts.han == text.unicodeScalars.count
+    }
+
     static func isCompatible(
         _ text: String,
         target: TranslationTargetLanguage
@@ -255,23 +352,27 @@ nonisolated enum TranslationOutputValidator {
         let counts = scriptCounts(in: text)
         let meaningful = counts.latin + counts.han + counts.kana + counts.hangul
             + counts.cyrillic + counts.thai + counts.arabic
-        guard meaningful >= 3 else { return true }
 
         switch target {
         case .simplifiedChinese, .traditionalChinese:
-            return counts.han > 0 && counts.kana + counts.hangul < max(counts.han, 2)
+            // 脚本冲突与文本长度无关：はい、안녕 不能因为只有两字就被当作中文。
+            return counts.han > 0 && counts.kana == 0 && counts.hangul == 0
         case .japanese:
-            return counts.kana + counts.han > 0 && counts.hangul < max(counts.kana + counts.han, 2)
+            return counts.kana + counts.han > 0 && counts.hangul == 0
         case .korean:
-            return counts.hangul > 0 && counts.kana < max(counts.hangul, 2)
+            return counts.hangul > 0 && counts.kana == 0
         case .russian:
+            guard meaningful >= 3 else { return true }
             return counts.cyrillic >= max(1, meaningful / 3)
         case .thai:
+            guard meaningful >= 3 else { return true }
             return counts.thai >= max(1, meaningful / 3)
         case .arabic:
+            guard meaningful >= 3 else { return true }
             return counts.arabic >= max(1, meaningful / 3)
         case .english, .french, .german, .spanish, .italian, .portuguese,
              .vietnamese, .indonesian:
+            guard meaningful >= 3 else { return true }
             return counts.latin >= max(1, meaningful / 2)
         }
     }

@@ -1,0 +1,594 @@
+import Foundation
+
+/// Application Support 中的离线译文仓库。它不使用 ReaderImageCache/AITranslationPageCoordinator 的缓存目录。
+actor OfflineTranslationStorageManager {
+    static let shared = OfflineTranslationStorageManager()
+
+    let rootURL: URL
+    private let fileManager: FileManager
+    private let encoder: JSONEncoder
+    private let decoder: JSONDecoder
+
+    init(rootURL: URL? = nil, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        self.rootURL = rootURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MReaderTranslations", isDirectory: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        self.encoder = encoder
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
+    }
+
+    func prepareRoot() throws {
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+    }
+
+    func index(for comicID: UUID) -> OfflineTranslationIndex? {
+        guard let data = try? Data(contentsOf: indexURL(for: comicID)) else { return nil }
+        return try? decoder.decode(OfflineTranslationIndex.self, from: data)
+    }
+
+    func ensureIndex(for comicID: UUID) throws -> OfflineTranslationIndex {
+        if let existing = index(for: comicID) { return existing }
+        let value = OfflineTranslationIndex(comicID: comicID)
+        try write(value, to: indexURL(for: comicID))
+        return value
+    }
+
+    func manifest(comicID: UUID, setID: UUID) -> OfflineTranslationSetManifest? {
+        guard let data = try? Data(contentsOf: manifestURL(comicID: comicID, setID: setID)) else { return nil }
+        return try? decoder.decode(OfflineTranslationSetManifest.self, from: data)
+    }
+
+    func activeManifest(
+        for comicID: UUID,
+        targetLanguage: TranslationTargetLanguage? = nil
+    ) -> OfflineTranslationSetManifest? {
+        let indexValue = index(for: comicID)
+        let activeID: UUID?
+        if let targetLanguage {
+            if let mappedID = indexValue?.activeSetIDsByTargetLanguage[targetLanguage.rawValue] {
+                return manifest(comicID: comicID, setID: mappedID)
+            }
+            // 旧版本只有一个 activeSetID。按目标语言验证后再懒迁移，避免把中文集合误当成英文集合。
+            guard let legacyID = indexValue?.activeSetID,
+                  let legacyManifest = manifest(comicID: comicID, setID: legacyID),
+                  legacyManifest.targetLanguage == targetLanguage else {
+                return nil
+            }
+            var migratedIndex = indexValue ?? OfflineTranslationIndex(comicID: comicID)
+            migratedIndex.activeSetIDsByTargetLanguage[targetLanguage.rawValue] = legacyID
+            try? write(migratedIndex, to: indexURL(for: comicID))
+            return legacyManifest
+        } else {
+            activeID = indexValue?.activeSetID
+        }
+        guard let activeID else { return nil }
+        return manifest(comicID: comicID, setID: activeID)
+    }
+
+    /// 返回比 active 更新、且仍有可用页面可供 Reader 预览的最新 Set。
+    /// Job 是否完成与 Set 是否覆盖整本是两件事：范围任务完成后仍应保留可读页面；反过来，
+    /// 早于 active 的暂停/失败旧任务绝不能重新压过新 active Set。
+    func latestRenderableManifest(
+        for comicID: UUID,
+        sourceLanguage: TranslationSourceLanguage,
+        targetLanguage: TranslationTargetLanguage
+    ) -> OfflineTranslationSetManifest? {
+        let active = activeManifest(for: comicID, targetLanguage: targetLanguage)
+        // JSONEncoder 的 ISO8601 日期精度不足以区分同一秒内连续创建的范围任务。
+        // Index 的 setIDs 保留 append 顺序，是可靠的最终 tie-break，不能用随机 UUID 决定新旧。
+        let setOrder = Dictionary(
+            uniqueKeysWithValues: (index(for: comicID)?.setIDs ?? []).enumerated().map { ($1, $0) }
+        )
+        return jobs(comicID: comicID)
+            .compactMap { job -> (manifest: OfflineTranslationSetManifest, updatedAt: Date, order: Int)? in
+                let isReaderCandidate: Bool
+                switch job.state {
+                case .queued, .running, .paused, .interrupted, .needsConfiguration, .completed, .completedWithFailures:
+                    isReaderCandidate = true
+                case .cancelled:
+                    // “停止并保留”不再继续执行任务，但已经落盘的页面仍应能立即在 Reader
+                    // 中预览；没有任何覆盖页面的取消任务则不参与候选，避免空 Set 抢占旧译本。
+                    isReaderCandidate = true
+                }
+                guard isReaderCandidate,
+                      job.sourceLanguage == sourceLanguage,
+                      job.targetLanguage == targetLanguage,
+                      let manifest = manifest(comicID: comicID, setID: job.setID),
+                      (job.state != .cancelled || manifest.coveredPageCount > 0),
+                      manifest.id != active?.id else {
+                    return nil
+                }
+                let updatedAt = max(job.updatedAt, manifest.updatedAt)
+                guard active.map({ updatedAt > $0.updatedAt }) ?? true else {
+                    return nil
+                }
+                return (manifest, updatedAt, setOrder[manifest.id] ?? -1)
+            }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt {
+                    return $0.updatedAt > $1.updatedAt
+                }
+                // 快速连续创建范围任务时，文件写入时间可能落在同一个时间精度内。
+                // 同分时优先使用新 Set，避免前一次范围任务随机盖住后一次。
+                if $0.manifest.createdAt != $1.manifest.createdAt {
+                    return $0.manifest.createdAt > $1.manifest.createdAt
+                }
+                if $0.order != $1.order {
+                    return $0.order > $1.order
+                }
+                return $0.manifest.id.uuidString > $1.manifest.id.uuidString
+            }
+            .first?.manifest
+    }
+
+    func saveManifest(_ manifest: OfflineTranslationSetManifest, activate: Bool = false) throws {
+        guard manifest.totalPages >= 0 else { throw OfflineTranslationStorageError.invalidSet }
+        try write(manifest, to: manifestURL(comicID: manifest.comicID, setID: manifest.id))
+        var indexValue = index(for: manifest.comicID) ?? OfflineTranslationIndex(comicID: manifest.comicID)
+        if !indexValue.setIDs.contains(manifest.id) {
+            indexValue.setIDs.append(manifest.id)
+        }
+        if activate {
+            indexValue.activeSetID = manifest.id
+            indexValue.activeSetIDsByTargetLanguage[manifest.targetLanguage.rawValue] = manifest.id
+        }
+        try write(indexValue, to: indexURL(for: manifest.comicID))
+    }
+
+    func setActive(comicID: UUID, setID: UUID) throws {
+        guard manifest(comicID: comicID, setID: setID) != nil else {
+            throw OfflineTranslationStorageError.invalidSet
+        }
+        var indexValue = index(for: comicID) ?? OfflineTranslationIndex(comicID: comicID)
+        guard indexValue.setIDs.contains(setID) else { throw OfflineTranslationStorageError.invalidSet }
+        indexValue.activeSetID = setID
+        if let selectedManifest = manifest(comicID: comicID, setID: setID) {
+            indexValue.activeSetIDsByTargetLanguage[selectedManifest.targetLanguage.rawValue] = setID
+        }
+        try write(indexValue, to: indexURL(for: comicID))
+    }
+
+    func page(comicID: UUID, setID: UUID, pageIndex: Int) -> OfflineTranslatedPage? {
+        guard pageIndex >= 0,
+              let data = try? Data(contentsOf: pageURL(comicID: comicID, setID: setID, pageIndex: pageIndex)) else {
+            return nil
+        }
+        guard var page = try? decoder.decode(OfflineTranslatedPage.self, from: data) else {
+            return nil
+        }
+        guard page.schemaVersion >= OfflineTranslatedPage.currentSchemaVersion else {
+            // 旧 page 文件缺少可靠的 physical-axis geometry。保留文件供管理页统计，
+            // 但作为 stale 处理，既不会渲染也不会被复制到新 Set。
+            page.state = .stale
+            return page
+        }
+        return page
+    }
+
+    func pageStates(comicID: UUID, setID: UUID) -> [Int: OfflineTranslationPageState] {
+        guard let manifest = manifest(comicID: comicID, setID: setID) else { return [:] }
+        var result: [Int: OfflineTranslationPageState] = [:]
+        for pageIndex in 0..<manifest.totalPages {
+            if let page = page(comicID: comicID, setID: setID, pageIndex: pageIndex) {
+                result[pageIndex] = page.state
+            }
+        }
+        return result
+    }
+
+    /// 页面文件先原子落盘，再刷新 manifest。调用方随后再写 job checkpoint。
+    func savePageAndUpdateManifest(_ page: OfflineTranslatedPage) throws {
+        guard page.pageIndex >= 0 else { throw OfflineTranslationStorageError.invalidPage }
+        guard var manifest = manifest(comicID: page.comicID, setID: page.setID),
+              page.pageIndex < manifest.totalPages else {
+            throw OfflineTranslationStorageError.invalidSet
+        }
+        let previousPage = self.page(comicID: page.comicID, setID: page.setID, pageIndex: page.pageIndex)
+        try write(page, to: pageURL(comicID: page.comicID, setID: page.setID, pageIndex: page.pageIndex))
+        manifest = updateManifest(
+            manifest,
+            pageIndex: page.pageIndex,
+            oldState: previousPage?.state,
+            oldErrorMessage: previousPage?.errorMessage,
+            newState: page.state,
+            newErrorMessage: page.errorMessage
+        )
+        try write(manifest, to: manifestURL(comicID: page.comicID, setID: page.setID))
+    }
+
+    /// 低频修复路径：页面文件是事实来源，修正可能因进程终止而落后的计数和失败信息。
+    @discardableResult
+    func reconcileManifest(comicID: UUID, setID: UUID) throws -> OfflineTranslationSetManifest? {
+        guard let existing = manifest(comicID: comicID, setID: setID) else { return nil }
+        let recalculated = recalculatedManifest(existing)
+        guard recalculated.completedPageCount != existing.completedPageCount
+                || recalculated.noTextPageCount != existing.noTextPageCount
+                || recalculated.partialPageCount != existing.partialPageCount
+                || recalculated.failedPageCount != existing.failedPageCount
+                || recalculated.stalePageCount != existing.stalePageCount
+                || recalculated.coverage != existing.coverage
+                || recalculated.failureMessages != existing.failureMessages else {
+            return existing
+        }
+        try write(recalculated, to: manifestURL(comicID: comicID, setID: setID))
+        return recalculated
+    }
+
+    /// 启动恢复时一次性扫描所有集合；正常逐页 checkpoint 不调用该方法。
+    func reconcileAllManifests() throws -> Int {
+        guard let comicDirectories = try? fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var count = 0
+        for comicDirectory in comicDirectories {
+            guard let comicID = UUID(uuidString: comicDirectory.lastPathComponent),
+                  let indexValue = index(for: comicID) else { continue }
+            for setID in indexValue.setIDs {
+                guard let before = manifest(comicID: comicID, setID: setID),
+                      let after = try reconcileManifest(comicID: comicID, setID: setID),
+                      before != after else { continue }
+                count += 1
+            }
+        }
+        return count
+    }
+
+    func markPageStale(comicID: UUID, setID: UUID, pageIndex: Int) {
+        guard var page = page(comicID: comicID, setID: setID, pageIndex: pageIndex) else { return }
+        page.state = .stale
+        page.errorMessage = "原图指纹已变化"
+        try? savePageAndUpdateManifest(page)
+    }
+
+    func saveJob(_ job: OfflineTranslationJobRecord) throws {
+        try write(job, to: jobURL(comicID: job.comicID, jobID: job.id))
+    }
+
+    func job(comicID: UUID, jobID: UUID) -> OfflineTranslationJobRecord? {
+        guard let data = try? Data(contentsOf: jobURL(comicID: comicID, jobID: jobID)) else { return nil }
+        return try? decoder.decode(OfflineTranslationJobRecord.self, from: data)
+    }
+
+    /// 后台 handler 的单写者 claim：避免冷启动恢复与其它恢复路径同时接管同一个 Job。
+    func claimJobForBackgroundExecution(comicID: UUID, jobID: UUID) throws -> OfflineTranslationJobRecord? {
+        guard var job = job(comicID: comicID, jobID: jobID),
+              job.state.isBackgroundResumable else {
+            return nil
+        }
+        job.state = .running
+        job.lastError = nil
+        job.pauseReason = nil
+        job.updatedAt = Date()
+        try saveJob(job)
+        return job
+    }
+
+    func jobs(comicID: UUID) -> [OfflineTranslationJobRecord] {
+        let directory = comicDirectory(comicID: comicID).appendingPathComponent("jobs", isDirectory: true)
+        guard let urls = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return urls.compactMap { url in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? decoder.decode(OfflineTranslationJobRecord.self, from: data)
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func markRunningJobsInterrupted() throws -> Int {
+        var count = 0
+        guard let comicDirectories = try? fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        for comicDirectory in comicDirectories {
+            guard let comicID = UUID(uuidString: comicDirectory.lastPathComponent) else { continue }
+            for var job in jobs(comicID: comicID)
+            where job.state == .running || job.state == .queued {
+                job.state = .interrupted
+                job.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
+                job.lastError = "应用在任务运行期间退出"
+                job.updatedAt = Date()
+                try write(job, to: jobURL(comicID: comicID, jobID: job.id))
+                count += 1
+            }
+        }
+        return count
+    }
+
+    func deleteJob(comicID: UUID, jobID: UUID) throws {
+        try fileManager.removeItem(at: jobURL(comicID: comicID, jobID: jobID))
+    }
+
+    func copyValidPages(
+        from sourceSetID: UUID,
+        to targetManifest: OfflineTranslationSetManifest,
+        excludingPageIndexes: Set<Int> = [],
+        sourceFingerprints: [Int: String]? = nil
+    ) throws -> Int {
+        guard let sourceManifest = manifest(comicID: targetManifest.comicID, setID: sourceSetID) else { return 0 }
+        try saveManifest(targetManifest)
+        var copied = 0
+        for pageIndex in 0..<min(sourceManifest.totalPages, targetManifest.totalPages) {
+            guard !excludingPageIndexes.contains(pageIndex) else { continue }
+            guard let page = page(comicID: targetManifest.comicID, setID: sourceSetID, pageIndex: pageIndex),
+                  page.state.isUsableOverlay,
+                  sourceFingerprints == nil || sourceFingerprints?[pageIndex] == page.sourceFingerprint else { continue }
+            let copiedPage = OfflineTranslatedPage(
+                comicID: page.comicID,
+                setID: targetManifest.id,
+                pageIndex: page.pageIndex,
+                sourceFingerprint: page.sourceFingerprint,
+                pixelWidth: page.pixelWidth,
+                pixelHeight: page.pixelHeight,
+                blocks: page.blocks,
+                state: page.state,
+                savedAt: Date(),
+                providerID: page.providerID,
+                visionModel: page.visionModel,
+                resolvedSourceLanguage: page.resolvedSourceLanguage,
+                errorMessage: page.errorMessage
+            )
+            try savePageAndUpdateManifest(copiedPage)
+            copied += 1
+        }
+        return copied
+    }
+
+    func summaries(for comicID: UUID) -> [OfflineTranslationSetSummary] {
+        guard let indexValue = index(for: comicID) else { return [] }
+        return indexValue.setIDs.compactMap { setID in
+            guard let manifestValue = manifest(comicID: comicID, setID: setID) else { return nil }
+            return OfflineTranslationSetSummary(
+                manifest: manifestValue,
+                isActive: activeManifest(for: comicID, targetLanguage: manifestValue.targetLanguage)?.id == setID,
+                jobs: jobs(comicID: comicID).filter { $0.setID == setID }
+            )
+        }.sorted { $0.manifest.updatedAt > $1.manifest.updatedAt }
+    }
+
+    func deleteSet(comicID: UUID, setID: UUID) throws {
+        guard var indexValue = index(for: comicID),
+              let deletedManifest = manifest(comicID: comicID, setID: setID) else { return }
+        let deletedTargetLanguage = deletedManifest.targetLanguage
+        let deletedWasGlobalActive = indexValue.activeSetID == setID
+        let deletedWasTargetActive = indexValue.activeSetIDsByTargetLanguage[deletedTargetLanguage.rawValue] == setID
+            || deletedWasGlobalActive
+        try? fileManager.removeItem(at: setDirectory(comicID: comicID, setID: setID))
+        for job in jobs(comicID: comicID) where job.setID == setID {
+            try? fileManager.removeItem(at: jobURL(comicID: comicID, jobID: job.id))
+        }
+        indexValue.setIDs.removeAll { $0 == setID }
+        indexValue.activeSetIDsByTargetLanguage = indexValue.activeSetIDsByTargetLanguage.filter { $0.value != setID }
+        let sameLanguageFallback = newestAvailableManifest(
+            comicID: comicID,
+            setIDs: indexValue.setIDs,
+            targetLanguage: deletedTargetLanguage
+        )
+        if deletedWasTargetActive, let sameLanguageFallback {
+            indexValue.activeSetIDsByTargetLanguage[deletedTargetLanguage.rawValue] = sameLanguageFallback.id
+        }
+        if deletedWasGlobalActive {
+            indexValue.activeSetID = sameLanguageFallback?.id
+                ?? newestAvailableManifest(comicID: comicID, setIDs: indexValue.setIDs)?.id
+        }
+        if indexValue.setIDs.isEmpty {
+            try? fileManager.removeItem(at: comicDirectory(comicID: comicID))
+        } else {
+            try write(indexValue, to: indexURL(for: comicID))
+        }
+    }
+
+    /// 删除当前目标语言的 active Set 后，优先恢复同语言且已有可显示页面的上一套译本；
+    /// 不能让另一种目标语言的 legacy activeSetID 把同语言查询错误地变成 nil。
+    private func newestAvailableManifest(
+        comicID: UUID,
+        setIDs: [UUID],
+        targetLanguage: TranslationTargetLanguage? = nil
+    ) -> OfflineTranslationSetManifest? {
+        setIDs.compactMap { manifest(comicID: comicID, setID: $0) }
+            .filter { manifest in
+                (targetLanguage == nil || manifest.targetLanguage == targetLanguage)
+                    && manifest.coveredPageCount > 0
+            }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                return lhs.id.uuidString > rhs.id.uuidString
+            }
+            .first
+    }
+
+    func deleteComicTranslations(comicID: UUID) throws {
+        try? fileManager.removeItem(at: comicDirectory(comicID: comicID))
+    }
+
+    func sizeInBytes() -> Int64 {
+        size(of: rootURL)
+    }
+
+    /// 离线任务每页至少要有可写余量；容量不足时由协调器暂停并保留已完成页面。
+    func ensureSufficientDiskSpace(minimumBytes: Int64 = 50 * 1024 * 1024) throws {
+        let probeURL = rootURL.deletingLastPathComponent()
+        let values = try probeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let available = values.volumeAvailableCapacityForImportantUsage,
+           available < minimumBytes {
+            throw OfflineTranslationStorageError.lowDiskSpace
+        }
+    }
+
+    func maintenance(validComicIDs: Set<UUID>) throws -> Int {
+        guard let directories = try? fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var removed = 0
+        for directory in directories {
+            guard let comicID = UUID(uuidString: directory.lastPathComponent), !validComicIDs.contains(comicID) else { continue }
+            try? fileManager.removeItem(at: directory)
+            removed += 1
+        }
+        return removed
+    }
+
+    private func recalculatedManifest(_ manifest: OfflineTranslationSetManifest) -> OfflineTranslationSetManifest {
+        var updated = manifest
+        var counts: [OfflineTranslationPageState: Int] = [:]
+        var failures = manifest.failureMessages
+        for pageIndex in 0..<manifest.totalPages {
+            guard let page = page(comicID: manifest.comicID, setID: manifest.id, pageIndex: pageIndex) else { continue }
+            counts[page.state, default: 0] += 1
+            if let error = page.errorMessage, !error.isEmpty {
+                failures[String(pageIndex)] = error
+            } else if page.state != .failed && page.state != .stale {
+                failures[String(pageIndex)] = nil
+            }
+        }
+        updated.completedPageCount = counts[.completed, default: 0]
+        updated.noTextPageCount = counts[.noText, default: 0]
+        updated.partialPageCount = counts[.partial, default: 0]
+        updated.failedPageCount = counts[.failed, default: 0]
+        updated.stalePageCount = counts[.stale, default: 0]
+        updated.coverage = manifest.totalPages == 0
+            ? 0
+            : Double(updated.coveredPageCount) / Double(manifest.totalPages)
+        updated.failureMessages = failures
+        updated.updatedAt = Date()
+        return updated
+    }
+
+    private func updateManifest(
+        _ manifest: OfflineTranslationSetManifest,
+        pageIndex: Int,
+        oldState: OfflineTranslationPageState?,
+        oldErrorMessage: String?,
+        newState: OfflineTranslationPageState,
+        newErrorMessage: String?
+    ) -> OfflineTranslationSetManifest {
+        var updated = manifest
+        if let oldState {
+            applyCountDelta(to: &updated, state: oldState, delta: -1)
+        }
+        applyCountDelta(to: &updated, state: newState, delta: 1)
+
+        let key = String(pageIndex)
+        if let newErrorMessage, !newErrorMessage.isEmpty {
+            updated.failureMessages[key] = newErrorMessage
+        } else if newState != .failed && newState != .stale {
+            updated.failureMessages[key] = nil
+        } else if let oldErrorMessage, !oldErrorMessage.isEmpty {
+            updated.failureMessages[key] = oldErrorMessage
+        }
+        updated.coverage = updated.totalPages == 0
+            ? 0
+            : Double(updated.coveredPageCount) / Double(updated.totalPages)
+        updated.updatedAt = Date()
+        return updated
+    }
+
+    private func applyCountDelta(
+        to manifest: inout OfflineTranslationSetManifest,
+        state: OfflineTranslationPageState,
+        delta: Int
+    ) {
+        switch state {
+        case .completed: manifest.completedPageCount = max(0, manifest.completedPageCount + delta)
+        case .noText: manifest.noTextPageCount = max(0, manifest.noTextPageCount + delta)
+        case .partial: manifest.partialPageCount = max(0, manifest.partialPageCount + delta)
+        case .failed: manifest.failedPageCount = max(0, manifest.failedPageCount + delta)
+        case .stale: manifest.stalePageCount = max(0, manifest.stalePageCount + delta)
+        case .pending, .processing: break
+        }
+    }
+
+    private func write<T: Encodable>(_ value: T, to url: URL) throws {
+        do {
+            try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try encoder.encode(value)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw OfflineTranslationStorageError.writeFailed(error.localizedDescription)
+        }
+    }
+
+    private func comicDirectory(comicID: UUID) -> URL {
+        rootURL.appendingPathComponent(comicID.uuidString, isDirectory: true)
+    }
+
+    private func setDirectory(comicID: UUID, setID: UUID) -> URL {
+        comicDirectory(comicID: comicID).appendingPathComponent("sets", isDirectory: true)
+            .appendingPathComponent(setID.uuidString, isDirectory: true)
+    }
+
+    private func indexURL(for comicID: UUID) -> URL {
+        comicDirectory(comicID: comicID).appendingPathComponent("index.json")
+    }
+
+    private func manifestURL(comicID: UUID, setID: UUID) -> URL {
+        setDirectory(comicID: comicID, setID: setID).appendingPathComponent("manifest.json")
+    }
+
+    private func pageURL(comicID: UUID, setID: UUID, pageIndex: Int) -> URL {
+        setDirectory(comicID: comicID, setID: setID).appendingPathComponent("pages", isDirectory: true)
+            .appendingPathComponent(String(format: "%06d.json", pageIndex))
+    }
+
+    private func jobURL(comicID: UUID, jobID: UUID) -> URL {
+        comicDirectory(comicID: comicID).appendingPathComponent("jobs", isDirectory: true)
+            .appendingPathComponent("\(jobID.uuidString).json")
+    }
+
+    private func size(of url: URL) -> Int64 {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true else { continue }
+            total += Int64(values.fileSize ?? 0)
+        }
+        return total
+    }
+}
+
+/// 对 Job Store 暴露独立接口，实际文件仍由同一个 actor 保证顺序写入。
+actor OfflineTranslationJobStore {
+    static let shared = OfflineTranslationJobStore(storage: .shared)
+
+    private let storage: OfflineTranslationStorageManager
+
+    init(storage: OfflineTranslationStorageManager) {
+        self.storage = storage
+    }
+
+    func save(_ job: OfflineTranslationJobRecord) async throws {
+        try await storage.saveJob(job)
+    }
+
+    func load(comicID: UUID, jobID: UUID) async -> OfflineTranslationJobRecord? {
+        await storage.job(comicID: comicID, jobID: jobID)
+    }
+
+    func claimJobForBackgroundExecution(comicID: UUID, jobID: UUID) async throws -> OfflineTranslationJobRecord? {
+        try await storage.claimJobForBackgroundExecution(comicID: comicID, jobID: jobID)
+    }
+
+    func list(comicID: UUID) async -> [OfflineTranslationJobRecord] {
+        await storage.jobs(comicID: comicID)
+    }
+
+    func markRunningJobsInterrupted() async throws -> Int {
+        try await storage.markRunningJobsInterrupted()
+    }
+}
