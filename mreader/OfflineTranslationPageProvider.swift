@@ -67,7 +67,11 @@ nonisolated enum OfflineTranslationPageProvider {
 
     static func isReliableSourceRevision(_ revision: String?) -> Bool {
         guard let revision else { return false }
+        // `#unavailable#` was emitted by older folder-revision code when the
+        // directory could not be enumerated. Treat it as unverified as well so
+        // persisted values from that implementation fail closed.
         return !revision.contains("-unverified:")
+            && !revision.contains("#unavailable#")
     }
 
     static func shouldPeriodicallyValidateSourceRevision(for comic: ComicBook) -> Bool {
@@ -173,31 +177,34 @@ nonisolated enum OfflineTranslationPageProvider {
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
-            return "local-folder:\(fallbackPath)#unavailable#pages=\(pageCount)"
+            return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
 
         let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "tif", "tiff"]
         let rootPath = rootURL.standardizedFileURL.path
         var descriptors: [String] = []
-        var couldNotHashEveryPage = false
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
-            guard imageExtensions.contains(fileURL.pathExtension.lowercased()),
-                  let values = try? fileURL.resourceValues(forKeys: keys),
-                  values.isRegularFile == true else {
+            guard imageExtensions.contains(fileURL.pathExtension.lowercased()) else {
                 continue
+            }
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else {
+                return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
             }
             let absolutePath = fileURL.standardizedFileURL.path
             let relativePath = absolutePath.hasPrefix(rootPath + "/")
                 ? String(absolutePath.dropFirst(rootPath.count + 1))
                 : absolutePath
             guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                couldNotHashEveryPage = true
-                break
+                return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
             }
             descriptors.append("\(relativePath)#\(OfflineTranslationFingerprint.sha256(for: data))")
         }
-        guard !couldNotHashEveryPage else {
+        // A missing or unreadable source can produce an empty enumerator rather
+        // than nil. Do not turn that absence of page evidence into a reliable
+        // digest when the comic is expected to contain pages.
+        guard !descriptors.isEmpty || pageCount == 0 else {
             return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
         descriptors.sort()

@@ -3409,6 +3409,42 @@ private func makeTestPageRequest(
         ))
     }
 
+    @Test func offlineTranslationFolderRevisionFailsClosedWhenSourceIsUnavailable() {
+        let missingRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-missing-folder-\(UUID().uuidString)", isDirectory: true)
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: missingRoot,
+            fallbackPath: missingRoot.path,
+            pageCount: 1
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(
+            "local-folder:\(missingRoot.path)#unavailable#pages=1"
+        ))
+    }
+
+    @Test func offlineTranslationFolderRevisionFailsClosedForInvalidImageCandidate() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-invalid-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("001.jpg", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+    }
+
     @Test func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-single-file-revision-\(UUID().uuidString).cbz")
