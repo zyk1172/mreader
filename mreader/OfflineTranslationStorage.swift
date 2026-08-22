@@ -332,21 +332,55 @@ actor OfflineTranslationStorageManager {
     }
 
     func deleteSet(comicID: UUID, setID: UUID) throws {
-        guard var indexValue = index(for: comicID) else { return }
+        guard var indexValue = index(for: comicID),
+              let deletedManifest = manifest(comicID: comicID, setID: setID) else { return }
+        let deletedTargetLanguage = deletedManifest.targetLanguage
+        let deletedWasGlobalActive = indexValue.activeSetID == setID
+        let deletedWasTargetActive = indexValue.activeSetIDsByTargetLanguage[deletedTargetLanguage.rawValue] == setID
+            || deletedWasGlobalActive
         try? fileManager.removeItem(at: setDirectory(comicID: comicID, setID: setID))
         for job in jobs(comicID: comicID) where job.setID == setID {
             try? fileManager.removeItem(at: jobURL(comicID: comicID, jobID: job.id))
         }
         indexValue.setIDs.removeAll { $0 == setID }
         indexValue.activeSetIDsByTargetLanguage = indexValue.activeSetIDsByTargetLanguage.filter { $0.value != setID }
-        if indexValue.activeSetID == setID {
-            indexValue.activeSetID = indexValue.setIDs.last
+        let sameLanguageFallback = newestAvailableManifest(
+            comicID: comicID,
+            setIDs: indexValue.setIDs,
+            targetLanguage: deletedTargetLanguage
+        )
+        if deletedWasTargetActive, let sameLanguageFallback {
+            indexValue.activeSetIDsByTargetLanguage[deletedTargetLanguage.rawValue] = sameLanguageFallback.id
+        }
+        if deletedWasGlobalActive {
+            indexValue.activeSetID = sameLanguageFallback?.id
+                ?? newestAvailableManifest(comicID: comicID, setIDs: indexValue.setIDs)?.id
         }
         if indexValue.setIDs.isEmpty {
             try? fileManager.removeItem(at: comicDirectory(comicID: comicID))
         } else {
             try write(indexValue, to: indexURL(for: comicID))
         }
+    }
+
+    /// 删除当前目标语言的 active Set 后，优先恢复同语言且已有可显示页面的上一套译本；
+    /// 不能让另一种目标语言的 legacy activeSetID 把同语言查询错误地变成 nil。
+    private func newestAvailableManifest(
+        comicID: UUID,
+        setIDs: [UUID],
+        targetLanguage: TranslationTargetLanguage? = nil
+    ) -> OfflineTranslationSetManifest? {
+        setIDs.compactMap { manifest(comicID: comicID, setID: $0) }
+            .filter { manifest in
+                (targetLanguage == nil || manifest.targetLanguage == targetLanguage)
+                    && manifest.coveredPageCount > 0
+            }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                return lhs.id.uuidString > rhs.id.uuidString
+            }
+            .first
     }
 
     func deleteComicTranslations(comicID: UUID) throws {

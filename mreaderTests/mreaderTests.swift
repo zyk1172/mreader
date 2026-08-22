@@ -276,6 +276,68 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
+    @Test func mangaSegmenterRetainsSharedVisualBubbleAfterMultiLineMerge() {
+        let bubble = CGRect(x: 0.10, y: 0.15, width: 0.42, height: 0.24)
+        let polygon = [CGPoint(x: 0.10, y: 0.15), CGPoint(x: 0.52, y: 0.15)]
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "我不知道",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: bubble,
+                bubblePolygon: polygon
+            ),
+            TextBlock(
+                text: "你在说什么",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.24, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: bubble,
+                bubblePolygon: polygon
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].bubbleBox == bubble)
+        #expect(result.bubbles[0].bubblePolygon == polygon)
+    }
+
+    @Test func mangaSegmenterDoesNotMergeBlocksWithDistinctVisualBubbles() {
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "第一句",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: CGRect(x: 0.10, y: 0.15, width: 0.34, height: 0.09)
+            ),
+            TextBlock(
+                text: "第二句",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06,
+                bubbleBox: CGRect(x: 0.10, y: 0.25, width: 0.34, height: 0.09)
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 2)
+    }
+
+    @Test func mangaSegmenterKeepsPureOCRMergeBehaviorWithoutVisualBubbles() {
+        let result = MangaTextSegmenter.segment([
+            TextBlock(
+                text: "第一行",
+                boundingBox: CGRect(x: 0.18, y: 0.20, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06
+            ),
+            TextBlock(
+                text: "第二行",
+                boundingBox: CGRect(x: 0.18, y: 0.27, width: 0.20, height: 0.04),
+                estimatedFontScale: 0.06
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].bubbleBox == nil)
+    }
+
     @Test func ocrLanguagePassesSeparateJapaneseFromChineseKorean() {
         let passes = OCRPreprocessor.languagePassesForDiagnostics()
 
@@ -2593,6 +2655,62 @@ private func makeTestPageRequest(
         try await storage.saveManifest(english, activate: true)
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinese.id)
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+    }
+
+    @Test func offlineTranslationDeletingActiveSetRestoresUsableSameTargetFallback() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-delete-active-target-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+
+        func makeSet(_ target: TranslationTargetLanguage) -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: target,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 1
+            )
+        }
+
+        func makeUsable(_ set: OfflineTranslationSetManifest) async throws {
+            try await storage.saveManifest(set, activate: true)
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: set.id,
+                    pageIndex: 0,
+                    sourceFingerprint: set.id.uuidString,
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [],
+                    state: .noText,
+                    providerID: providerID,
+                    visionModel: "vision"
+                )
+            )
+        }
+
+        let chinesePrevious = makeSet(.simplifiedChinese)
+        let english = makeSet(.english)
+        let chineseCurrent = makeSet(.simplifiedChinese)
+        try await makeUsable(chinesePrevious)
+        try await makeUsable(english)
+        try await makeUsable(chineseCurrent)
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chineseCurrent.id)
+        try await storage.deleteSet(comicID: comicID, setID: chineseCurrent.id)
+
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .simplifiedChinese))?.id == chinesePrevious.id)
+        #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
+        #expect((await storage.activeManifest(for: comicID))?.id == chinesePrevious.id)
     }
 
     @Test func offlineTranslationRenderableSetLookupRequiresSourceAndTargetLanguage() async throws {

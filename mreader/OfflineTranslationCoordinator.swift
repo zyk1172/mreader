@@ -115,7 +115,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
         }
     }
 
-    func resume(_ savedJob: OfflineTranslationJobRecord, comic: ComicBook) {
+    /// 用户主动继续时才提交新的后台续行请求。系统已经交付后台任务、或冷启动自动恢复时，
+    /// 只恢复现有 Job，不能在后台 handler 内再次创建 BGContinuedProcessingTaskRequest。
+    func resume(
+        _ savedJob: OfflineTranslationJobRecord,
+        comic: ComicBook,
+        submitBackgroundContinuation: Bool = true
+    ) {
         guard task == nil else { return }
         lastError = nil
         task = Task { [weak self] in
@@ -124,7 +130,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 savedJob,
                 comic: comic,
                 styleInstructions: savedJob.styleInstructions
-                    ?? AITranslator.defaultTranslationStyleInstructions
+                    ?? AITranslator.defaultTranslationStyleInstructions,
+                submitBackgroundContinuation: submitBackgroundContinuation
             )
         }
     }
@@ -338,7 +345,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
     private func resumeJob(
         _ savedJob: OfflineTranslationJobRecord,
         comic: ComicBook,
-        styleInstructions: String
+        styleInstructions: String,
+        submitBackgroundContinuation: Bool
     ) async {
         do {
             let configuration = try frozenConfiguration(
@@ -359,7 +367,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
             record.lastError = nil
             record.updatedAt = Date()
             try await jobStore.save(record)
-            OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
+            if submitBackgroundContinuation {
+                OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
+            }
             job = record
             manifest = try? await storage.reconcileManifest(comicID: record.comicID, setID: record.setID)
             progress = record.pageIndexes.isEmpty
@@ -412,16 +422,24 @@ final class OfflineTranslationCoordinator: ObservableObject {
             stopMode = nil
         }
 
+        // 页文件状态是断点续传的事实来源，但不能在每个 3 页 batch 重复扫描整本 JSON。
+        // 启动/恢复时读一次，随后按 worker 的落盘结果增量更新；结束时再做一次最终 reconcile。
+        var pageStateSnapshot = await storage.pageStates(
+            comicID: initialJob.comicID,
+            setID: initialJob.setID
+        )
         do {
             var attemptedThisRun = Set<Int>()
             while true {
                 try Task.checkCancellation()
                 try await storage.ensureSufficientDiskSpace()
 
-                // 页面文件状态是恢复和断点续传的唯一事实来源；nextPageOffset 只保留为旧 UI 的兼容进度字段。
-                await synchronizeRecordWithPageFacts(&record)
-                let remaining = await remainingPageIndexes(
+                // nextPageOffset 只保留为旧 UI 的兼容字段；当前执行期使用同一份内存快照，
+                // 避免每个 batch 都全量读取所有 page JSON。
+                synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
+                let remaining = remainingPageIndexes(
                     for: record,
+                    states: pageStateSnapshot,
                     excluding: attemptedThisRun
                 )
                 guard !remaining.isEmpty else { break }
@@ -506,12 +524,19 @@ final class OfflineTranslationCoordinator: ObservableObject {
 
                     if let state = result.state {
                         registerSuccess(state, pageIndex: result.pageIndex, in: &record)
+                        pageStateSnapshot[result.pageIndex] = state
                     } else if result.needsConfiguration {
                         needsConfigurationMessage = needsConfigurationMessage ?? result.errorMessage
+                        // worker 在请求前已写入 processing；配置错误会立即退出本轮，保留这一
+                        // 状态供重绑/恢复路径重新计算 remaining pages。
+                        pageStateSnapshot[result.pageIndex] = .processing
                     } else {
                         hasFailure = true
                         registerFailure(result.pageIndex, in: &record)
                         record.lastError = result.errorMessage
+                        // 失败 worker 已尽力将 .failed 落盘；即使失败页写入本身失败，也不能
+                        // 在本轮被重复调度，attemptedThisRun 会和快照共同保证这一点。
+                        pageStateSnapshot[result.pageIndex] = .failed
                     }
 
                     if result.isPolicyRefusal {
@@ -527,7 +552,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
 
                 record.activePageIndexes = []
                 record.currentPageIndex = nil
-                await synchronizeRecordWithPageFacts(&record)
+                synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
                 record.updatedAt = Date()
                 if providerPolicyBlocked {
                     record.state = .paused
@@ -558,7 +583,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 comicID: record.comicID,
                 setID: record.setID
             )
-            await synchronizeRecordWithPageFacts(&record)
+            pageStateSnapshot = await storage.pageStates(
+                comicID: record.comicID,
+                setID: record.setID
+            )
+            synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.state = OfflineTranslationJobState.completionState(
                 failedPageCount: record.failedPageIndexes.count,
                 partialPageCount: finalManifest?.partialPageCount ?? 0
@@ -576,7 +605,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             manifest = finalManifest
         } catch OfflineTranslationStorageError.lowDiskSpace {
-            await synchronizeRecordWithPageFacts(&record)
+            synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.activePageIndexes = []
             record.currentPageIndex = nil
             record.state = .paused
@@ -589,7 +618,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch is CancellationError {
-            await synchronizeRecordWithPageFacts(&record)
+            synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.activePageIndexes = []
             record.currentPageIndex = nil
             switch stopMode {
@@ -615,7 +644,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             }
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch {
-            await synchronizeRecordWithPageFacts(&record)
+            synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.activePageIndexes = []
             record.currentPageIndex = nil
             record.state = .interrupted
@@ -1034,9 +1063,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
 
     private func remainingPageIndexes(
         for record: OfflineTranslationJobRecord,
+        states: [Int: OfflineTranslationPageState],
         excluding attemptedPageIndexes: Set<Int>
-    ) async -> [Int] {
-        let states = await storage.pageStates(comicID: record.comicID, setID: record.setID)
+    ) -> [Int] {
         return OfflineTranslationPageFacts.remainingPageIndexes(
             plannedPageIndexes: record.pageIndexes,
             states: states,
@@ -1062,8 +1091,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
         return contexts
     }
 
-    private func synchronizeRecordWithPageFacts(_ record: inout OfflineTranslationJobRecord) async {
-        let states = await storage.pageStates(comicID: record.comicID, setID: record.setID)
+    private func synchronizeRecordWithPageFacts(
+        _ record: inout OfflineTranslationJobRecord,
+        states: [Int: OfflineTranslationPageState]
+    ) {
         record.completedPageIndexes = record.pageIndexes.filter { states[$0] == .completed }
         record.noTextPageIndexes = record.pageIndexes.filter { states[$0] == .noText }
         record.partialPageIndexes = record.pageIndexes.filter { states[$0] == .partial }

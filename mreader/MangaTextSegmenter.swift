@@ -71,6 +71,9 @@ nonisolated enum MangaTextSegmenter {
 
     private static func canShareBubble(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
         guard stylesAreCompatible(lhs, rhs) else { return false }
+        // 只有视觉链路才携带真实 bubbleBox。两端都有且明确指向不同气泡时，不能再仅凭
+        // 文字距离把相邻对白合并；任一端没有视觉信息则保留纯 OCR 的既有行为。
+        guard visualBubbleBoxesAreCompatible(lhs.bubbleBox, rhs.bubbleBox) else { return false }
         let left = lhs.boundingBox
         let right = rhs.boundingBox
         let union = left.union(right)
@@ -109,6 +112,7 @@ nonisolated enum MangaTextSegmenter {
         let scale = ordered.reduce(0) { $0 + $1.estimatedFontScale } / Double(ordered.count)
         let confidence = ordered.reduce(0) { $0 + $1.confidence } / Double(ordered.count)
         let sources = Array(Set(ordered.map(\.ocrSource))).sorted().joined(separator: "+")
+        let selectedBubble = selectedVisualBubble(from: ordered, containing: bounds)
         return TextBlock(
             id: ordered[0].id,
             text: ordered.map(\.text).reduce("", joinedText),
@@ -117,9 +121,54 @@ nonisolated enum MangaTextSegmenter {
             ocrSource: sources,
             estimatedFontScale: scale,
             textColorHex: ordered.compactMap(\.textColorHex).first,
+            bubbleBox: selectedBubble?.box,
             polygon: ordered.flatMap(\.polygon),
+            bubblePolygon: selectedBubble?.polygon ?? [],
             textOrientation: ordered[0].textOrientation
         )
+    }
+
+    /// 不把多个视觉 bubbleBox 做 union：不同对白一旦被误合并，union 会扩大成遮挡漫画的
+    /// 大框。只有候选本身能在小容差下容纳合并后的 textBox 时才保留，并优先最小真实气泡。
+    private static func selectedVisualBubble(
+        from blocks: [TextBlock],
+        containing textBounds: CGRect
+    ) -> (box: CGRect, polygon: [CGPoint])? {
+        let toleranceX = max(0.004, textBounds.width * 0.10)
+        let toleranceY = max(0.004, textBounds.height * 0.10)
+        return blocks.compactMap { block -> (box: CGRect, polygon: [CGPoint])? in
+            guard let bubbleBox = block.bubbleBox,
+                  bubbleBox.width > 0,
+                  bubbleBox.height > 0,
+                  bubbleBox.minX >= 0,
+                  bubbleBox.minY >= 0,
+                  bubbleBox.maxX <= 1.02,
+                  bubbleBox.maxY <= 1.02,
+                  bubbleBox.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textBounds) else {
+                return nil
+            }
+            return (bubbleBox, block.bubblePolygon)
+        }
+        .min { lhs, rhs in
+            lhs.box.width * lhs.box.height < rhs.box.width * rhs.box.height
+        }
+    }
+
+    /// 两个视觉框没有可观重叠、也不在小容差下相互包含，说明它们已经是不同漫画气泡。
+    /// 这项约束只在两端都有视觉结果时生效，不能改变纯 OCR 的距离分组策略。
+    private static func visualBubbleBoxesAreCompatible(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
+        guard let lhs, let rhs else { return true }
+        let tolerance: CGFloat = 0.006
+        if lhs.insetBy(dx: -tolerance, dy: -tolerance).contains(rhs)
+            || rhs.insetBy(dx: -tolerance, dy: -tolerance).contains(lhs) {
+            return true
+        }
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return false }
+        let unionArea = lhs.width * lhs.height + rhs.width * rhs.height
+            - intersection.width * intersection.height
+        let iou = unionArea > 0 ? intersection.width * intersection.height / unionArea : 0
+        return iou >= 0.18
     }
 
     private static func joinedText(_ lhs: String, _ rhs: String) -> String {

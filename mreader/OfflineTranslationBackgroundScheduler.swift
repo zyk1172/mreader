@@ -69,7 +69,11 @@ final class OfflineTranslationBackgroundScheduler {
               job.state == .interrupted || job.state == .queued || job.state == .running else {
             return
         }
-        OfflineTranslationCoordinator.shared.resume(job, comic: comic)
+        OfflineTranslationCoordinator.shared.resume(
+            job,
+            comic: comic,
+            submitBackgroundContinuation: false
+        )
     }
 
     func submit(job: OfflineTranslationJobRecord, comic: ComicBook) {
@@ -171,10 +175,18 @@ final class OfflineTranslationBackgroundScheduler {
         ) else { return false }
 
         if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
-            OfflineTranslationCoordinator.shared.resume(job, comic: comic)
+            OfflineTranslationCoordinator.shared.resume(
+                job,
+                comic: comic,
+                submitBackgroundContinuation: false
+            )
             await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
         } else {
-            OfflineTranslationCoordinator.shared.resume(job, comic: comic)
+            OfflineTranslationCoordinator.shared.resume(
+                job,
+                comic: comic,
+                submitBackgroundContinuation: false
+            )
             await waitForCoordinator(jobID: jobID)
         }
         let state = OfflineTranslationCoordinator.shared.job?.state
