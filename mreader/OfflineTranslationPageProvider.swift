@@ -55,9 +55,10 @@ nonisolated enum OfflineTranslationPageProvider {
     ) -> Bool {
         switch comic.sourceType {
         case .local:
-            let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
-                ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
-            return resolvedURL?.hasDirectoryPath == true
+            // 文件夹需要汇总所有页面字节，CBZ/PDF/EPUB 需要读取整个归档文件；两者
+            // 都不能放进每个小 batch 的 revision 校验热路径。session 参数保留给
+            // 调用方统一传递源访问上下文，但这里按源类型直接判定成本。
+            return true
         case .komga, .opds:
             // 远程 revision 需要请求 Book 元数据或 HTTP headers，同样不能按每 3 页轮询。
             return true
@@ -90,13 +91,14 @@ nonisolated enum OfflineTranslationPageProvider {
                     pageCount: comic.totalPages
                 )
             }
-            let values = resolvedURL.flatMap {
-                try? $0.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            guard let resolvedURL else {
+                return "local-file-unverified:\(comic.libraryPath ?? "")#pages=\(comic.totalPages)"
             }
-            let path = resolvedURL?.standardizedFileURL.path ?? comic.libraryPath ?? ""
-            let size = values?.fileSize ?? Int(comic.fileSize)
-            let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-            return "local:\(path)#\(size)#\(modified)#pages=\(comic.totalPages)"
+            return localFileSourceRevision(
+                at: resolvedURL,
+                fallbackPath: comic.libraryPath ?? resolvedURL.standardizedFileURL.path,
+                pageCount: comic.totalPages
+            )
         case .komga:
             return await komgaSourceRevision(for: comic)
         case .opds:
@@ -166,6 +168,21 @@ nonisolated enum OfflineTranslationPageProvider {
         let metadata = descriptors.joined(separator: "\n")
         let digest = OfflineTranslationFingerprint.sha256(for: Data(metadata.utf8))
         return "local-folder:\(fallbackPath)#\(digest)#pages=\(pageCount)"
+    }
+
+    /// 单文件漫画（CBZ/PDF/EPUB）的整本身份必须对应实际文件字节；仅使用 path、size 和
+    /// mtime 会被同尺寸原地替换且恢复 mtime 的外部工具绕过。调用方只在建任务、恢复和
+    /// 最终激活前执行，不放进逐页 batch 热路径。
+    static func localFileSourceRevision(
+        at fileURL: URL,
+        fallbackPath: String,
+        pageCount: Int
+    ) -> String {
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
+            return "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
+        }
+        let digest = OfflineTranslationFingerprint.sha256(for: data)
+        return "local-file:\(fallbackPath)#\(digest)#pages=\(pageCount)"
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {
         switch comic.sourceType {

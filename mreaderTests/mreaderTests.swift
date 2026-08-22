@@ -3278,6 +3278,131 @@ private func makeTestPageRequest(
         ))
     }
 
+    @Test func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-single-file-revision-\(UUID().uuidString).cbz")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let originalDate = Date(timeIntervalSince1970: 1_234_567)
+        try Data("AAAAA".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: fileURL.path)
+        let first = OfflineTranslationPageProvider.localFileSourceRevision(
+            at: fileURL,
+            fallbackPath: fileURL.path,
+            pageCount: 1
+        )
+
+        try Data("BBBBB".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: fileURL.path)
+        let second = OfflineTranslationPageProvider.localFileSourceRevision(
+            at: fileURL,
+            fallbackPath: fileURL.path,
+            pageCount: 1
+        )
+
+        #expect(first != second)
+        #expect(OfflineTranslationPageProvider.isReliableSourceRevision(first))
+        #expect(OfflineTranslationPageProvider.isReliableSourceRevision(second))
+    }
+
+    @Test func offlineTranslationTreatsLocalSingleFileAsExpensiveRevision() {
+        let comic = ComicBook(
+            title: "local.cbz",
+            bookmarkData: Data(),
+            totalPages: 1,
+            libraryPath: "/tmp/local.cbz",
+            chapterTypeRaw: "cbz"
+        )
+        #expect(
+            OfflineTranslationPageProvider.usesExpensiveSourceRevision(for: comic)
+        )
+        #expect(
+            !OfflineTranslationPageProvider.shouldPeriodicallyValidateSourceRevision(for: comic)
+        )
+    }
+
+    @Test func offlineTranslationPendingRecoveryDistinguishesLoadingMissingAndResumable() {
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: false,
+                comicExists: false,
+                job: nil
+            ) == .waitForLibrary
+        )
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: false,
+                job: nil
+            ) == .clearPending
+        )
+
+        var job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .entireComic,
+            pageIndexes: [0],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: "test",
+            promptSnapshot: "test",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 1
+        )
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: true,
+                job: job
+            ) == .resume
+        )
+        job.state = .paused
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: true,
+                job: job
+        ) == .clearPending
+        )
+    }
+
+    @Test func offlineTranslationDiscardUncommittedSetRemovesManifestAndIndexEntry() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-orphan-set-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let setID = UUID()
+        let manifest = OfflineTranslationSetManifest(
+            id: setID,
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            promptRevision: "test",
+            promptSnapshot: "test",
+            totalPages: 1,
+            sourceRevision: "local-file:test#pages=1",
+            processingMode: .ocrText,
+            textModel: "text",
+            ocrRecognitionMode: .adaptive,
+            usesVisualOCRVerification: false
+        )
+        try await storage.saveManifest(manifest)
+        #expect((await storage.index(for: comicID))?.setIDs == [setID])
+
+        try await storage.discardUncommittedSet(comicID: comicID, setID: setID)
+
+        #expect(await storage.manifest(comicID: comicID, setID: setID) == nil)
+        #expect(await storage.index(for: comicID) == nil)
+    }
+
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)

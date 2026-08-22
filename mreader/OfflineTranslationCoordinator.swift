@@ -233,6 +233,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
         usesVisualOCRVerification: Bool,
         sourceSetID: UUID?
     ) async {
+        var persistedSetID: UUID?
+        var jobWasSaved = false
         do {
             let configuration = try frozenConfiguration(
                 for: providerID,
@@ -303,6 +305,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 ocrRecognitionMode: ocrRecognitionMode,
                 usesVisualOCRVerification: usesVisualOCRVerification
             )
+            persistedSetID = manifestValue.id
             try await storage.saveManifest(manifestValue, activate: false)
             if let sourceSet, canReuseSourceSet {
                 _ = try await storage.copyValidPages(
@@ -336,6 +339,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             )
             record.state = .running
             try await jobStore.save(record)
+            jobWasSaved = true
             OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             job = record
             manifest = await storage.manifest(comicID: comic.id, setID: manifestValue.id)
@@ -352,6 +356,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 sourceSession: sourceSession
             )
         } catch {
+            if !jobWasSaved, let persistedSetID {
+                try? await storage.discardUncommittedSet(comicID: comic.id, setID: persistedSetID)
+            }
             isRunning = false
             lastError = error.localizedDescription
             task = nil

@@ -205,6 +205,7 @@ final class ComicLibraryStore: ObservableObject {
     @Published private(set) var series: [ComicSeries] = []
     @Published private(set) var mediaSyncErrors: [MediaSourceType: String] = [:]
     @Published private(set) var libraryLoadIssues: [String] = []
+    @Published private(set) var isLoaded = false
 
     private let libraryURL: URL
     private let seriesURL: URL
@@ -819,6 +820,7 @@ final class ComicLibraryStore: ObservableObject {
                 print("书架加载异常: \(issue.userMessage)")
             }
         }
+        isLoaded = true
     }
 
     private func sortAndSave() {

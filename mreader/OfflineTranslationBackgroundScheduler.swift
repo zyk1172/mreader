@@ -1,6 +1,22 @@
 import BackgroundTasks
 import Foundation
 
+nonisolated enum OfflineTranslationPendingRecoveryDecision: Equatable, Sendable {
+    case waitForLibrary
+    case clearPending
+    case resume
+
+    static func resolve(
+        libraryLoaded: Bool,
+        comicExists: Bool,
+        job: OfflineTranslationJobRecord?
+    ) -> Self {
+        guard libraryLoaded else { return .waitForLibrary }
+        guard comicExists, let job else { return .clearPending }
+        return job.state.isBackgroundResumable ? .resume : .clearPending
+    }
+}
+
 /// 后台续行只服务于用户已经显式启动的离线任务，不会在启动时自行创建 AI 请求。
 @MainActor
 final class OfflineTranslationBackgroundScheduler {
@@ -14,6 +30,12 @@ final class OfflineTranslationBackgroundScheduler {
     private var registeredContinuedIdentifiers: Set<String> = []
     private var startupRecoveryTask: Task<Void, Never>?
     private var resumeInFlightJobIDs: Set<UUID> = []
+
+    private enum PendingJobResolution {
+        case waitForLibrary
+        case clearPending
+        case resume(comic: ComicBook, job: OfflineTranslationJobRecord)
+    }
 
     private init() {}
 
@@ -44,36 +66,40 @@ final class OfflineTranslationBackgroundScheduler {
         UserDefaults.standard.string(forKey: pendingJobKey).flatMap(UUID.init(uuidString:))
     }
 
+    private var pendingComicID: UUID? {
+        UserDefaults.standard.string(forKey: pendingComicKey).flatMap(UUID.init(uuidString:))
+    }
+
     /// 应用冷启动后自动接管仍应继续的任务。用户主动暂停/取消、策略暂停、磁盘不足和配置错误
     /// 都会清除 pending 标记，因此不会在这里被重新启动。
     func resumePendingJobIfNeeded() async {
         await startupRecoveryTask?.value
-        guard !OfflineTranslationCoordinator.shared.isRunning,
-              let jobID = pendingJobID,
-              let comicIDString = UserDefaults.standard.string(forKey: pendingComicKey),
-              let comicID = UUID(uuidString: comicIDString),
-              resumeInFlightJobIDs.insert(jobID).inserted else {
+        guard !OfflineTranslationCoordinator.shared.isRunning else { return }
+        guard let jobID = pendingJobID,
+              let comicID = pendingComicID else {
+            if UserDefaults.standard.object(forKey: pendingJobKey) != nil
+                || UserDefaults.standard.object(forKey: pendingComicKey) != nil {
+                clearMalformedPendingMarker()
+            }
             return
         }
+        guard resumeInFlightJobIDs.insert(jobID).inserted else { return }
         defer { resumeInFlightJobIDs.remove(jobID) }
 
         let library = ComicLibraryStore()
-        var comic: ComicBook?
-        for _ in 0..<20 {
-            comic = library.comics.first(where: { $0.id == comicID })
-            if comic != nil { break }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-        }
-        guard let comic,
-              let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
-              job.state == .interrupted || job.state == .queued || job.state == .running else {
+        switch await resolvePendingJob(jobID: jobID, comicID: comicID, library: library) {
+        case .waitForLibrary:
             return
+        case .clearPending:
+            clearPending(jobID: jobID)
+            return
+        case .resume(let comic, let job):
+            OfflineTranslationCoordinator.shared.resume(
+                job,
+                comic: comic,
+                submitBackgroundContinuation: false
+            )
         }
-        OfflineTranslationCoordinator.shared.resume(
-            job,
-            comic: comic,
-            submitBackgroundContinuation: false
-        )
     }
 
     func submit(job: OfflineTranslationJobRecord, comic: ComicBook) {
@@ -138,6 +164,16 @@ final class OfflineTranslationBackgroundScheduler {
         UserDefaults.standard.removeObject(forKey: pendingComicKey)
     }
 
+    private func clearMalformedPendingMarker() {
+        if #unavailable(iOS 26.0) {
+            // 旧系统使用共享 identifier；iOS 26 的 request 必须绑定合法 Job UUID，
+            // 损坏的 marker 无法安全推导对应 request。
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingIdentifier)
+        }
+        UserDefaults.standard.removeObject(forKey: pendingJobKey)
+        UserDefaults.standard.removeObject(forKey: pendingComicKey)
+    }
+
     private func handle(_ task: BGTask) async {
         task.expirationHandler = {
             Task { @MainActor in
@@ -176,46 +212,77 @@ final class OfflineTranslationBackgroundScheduler {
         defer { resumeInFlightJobIDs.remove(jobID) }
 
         let library = ComicLibraryStore()
-        var comic: ComicBook?
-        for _ in 0..<20 {
-            comic = library.comics.first(where: { $0.id == comicID })
-            if comic != nil { break }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-        }
-        guard let comic else {
+        let resolution = await resolvePendingJob(jobID: jobID, comicID: comicID, library: library)
+        switch resolution {
+        case .waitForLibrary:
+            // 书架仍在初始化，不能把暂时的空数组当作“漫画已删除”。保留 marker，
+            // 让系统下一次交付或下一次启动继续尝试。
             return false
-        }
-        guard let job = try? await OfflineTranslationJobStore.shared.claimJobForBackgroundExecution(
-            comicID: comicID,
-            jobID: jobID
-        ) else {
-            if let staleJob = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
-               !staleJob.state.isBackgroundResumable {
+        case .clearPending:
+            clearPending(jobID: jobID)
+            return false
+        case .resume(let comic, _):
+            guard let job = try? await OfflineTranslationJobStore.shared.claimJobForBackgroundExecution(
+                comicID: comicID,
+                jobID: jobID
+            ) else {
+                let storedJob = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID)
+                if storedJob == nil || storedJob?.state.isBackgroundResumable == false {
+                    clearPending(jobID: jobID)
+                }
+                return false
+            }
+
+            if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+                OfflineTranslationCoordinator.shared.resume(
+                    job,
+                    comic: comic,
+                    submitBackgroundContinuation: false
+                )
+                await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
+            } else {
+                OfflineTranslationCoordinator.shared.resume(
+                    job,
+                    comic: comic,
+                    submitBackgroundContinuation: false
+                )
+                await waitForCoordinator(jobID: jobID)
+            }
+            let state = OfflineTranslationCoordinator.shared.job?.state
+            if state?.isTerminal == true {
                 clearPending(jobID: jobID)
             }
-            return false
+            return state == .completed || state == .completedWithFailures
+        }
+    }
+
+    private func resolvePendingJob(
+        jobID: UUID,
+        comicID: UUID,
+        library: ComicLibraryStore
+    ) async -> PendingJobResolution {
+        for _ in 0..<20 where !library.isLoaded {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard library.isLoaded else {
+            return .waitForLibrary
         }
 
-        if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
-            OfflineTranslationCoordinator.shared.resume(
-                job,
-                comic: comic,
-                submitBackgroundContinuation: false
-            )
-            await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
-        } else {
-            OfflineTranslationCoordinator.shared.resume(
-                job,
-                comic: comic,
-                submitBackgroundContinuation: false
-            )
-            await waitForCoordinator(jobID: jobID)
+        let comic = library.comics.first(where: { $0.id == comicID })
+        let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID)
+        switch OfflineTranslationPendingRecoveryDecision.resolve(
+            libraryLoaded: true,
+            comicExists: comic != nil,
+            job: job
+        ) {
+        case .waitForLibrary:
+            return .waitForLibrary
+        case .clearPending:
+            return .clearPending
+        case .resume:
+            guard let comic, let job else { return .clearPending }
+            return .resume(comic: comic, job: job)
         }
-        let state = OfflineTranslationCoordinator.shared.job?.state
-        if state?.isTerminal == true {
-            clearPending(jobID: jobID)
-        }
-        return state == .completed || state == .completedWithFailures
     }
 
     private func waitForCoordinator(jobID: UUID) async {
