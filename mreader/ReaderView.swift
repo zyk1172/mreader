@@ -4084,12 +4084,16 @@ struct LocalImageView: View {
                 forNormalizedPageRect: bubbleBox,
                 using: transform
             ).intersection(imageBounds)
-            // bubbleBox 只有完整包住本地 OCR textBox 时才可信；否则使用有限扩张范围，
-            // 避免长译文借由一个错误的模型框铺满整张页面。
+            // bubbleBox 与 textBox 分别来自 Vision / 本地 OCR 时常有 1~3pt 映射误差；
+            // 允许少量容差，避免一个本来正确的原气泡被过早丢弃。
             allowedBounds = !mappedBubble.isNull
                 && mappedBubble.width > 0
                 && mappedBubble.height > 0
-                && mappedBubble.contains(textRect)
+                && OCRBubbleLayoutEngine.acceptsTranslationTextRect(
+                    textRect,
+                    in: mappedBubble,
+                    tolerance: 3
+                )
                 ? mappedBubble
                 : fallbackBounds
         } else {
@@ -4386,9 +4390,8 @@ struct LocalImageView: View {
 
     private func preferredTranslationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
-        return OCRBubbleLayoutEngine.preferredTranslationFontSize(
-            sourceFontSize: block.sourceFontSize(in: imageRect)
-        )
+        // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
+        return block.sourceFontSize(in: imageRect)
     }
 
     private var ocrTextSizeFactor: CGFloat {

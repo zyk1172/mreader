@@ -418,9 +418,9 @@ struct mreaderTests {
     }
 
     @Test func translatedFontStartsAtSourceScaleWithoutGlobalClamp() {
-        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 15.68) < 0.01)
-        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) - 29.4) < 0.01)
-        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 5.88) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 16) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) - 30) < 0.01)
+        #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
     }
 
     @Test func sourceFontSizeUsesTheMatchingDisplayAxisForTextDirection() {
@@ -456,9 +456,49 @@ struct mreaderTests {
         #expect(abs(layout.rect.midX - source.midX) < 0.01)
         #expect(abs(layout.rect.midY - source.midY) < 0.01)
         #expect(layout.rect.width >= source.width)
-        #expect(layout.fontSize <= 15.68)
+        #expect(layout.fontSize <= 16)
         #expect(layout.fontSize >= 9.6)
         #expect(allowed.contains(layout.rect))
+    }
+
+    @Test @MainActor func translationLayoutMovesMinimallyBeforeShrinkingFont() {
+        let source = CGRect(x: 8, y: 34, width: 30, height: 24)
+        let allowed = CGRect(x: 0, y: 0, width: 220, height: 110)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "这是一段应当优先向右扩展而不是过早缩小字号的译文。",
+            sourceFontSize: 20,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(abs(layout.fontSize - 20) < 0.01)
+        #expect(layout.rect.midX > source.midX)
+        #expect(allowed.contains(layout.rect))
+    }
+
+    @Test @MainActor func translationLayoutContinuesShrinkingUntilTextActuallyFits() {
+        let source = CGRect(x: 24, y: 10, width: 22, height: 20)
+        let allowed = CGRect(x: 0, y: 0, width: 70, height: 45)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: String(repeating: "超长译文", count: 42),
+            sourceFontSize: 20,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(layout.fontSize < 12)
+        #expect(allowed.contains(layout.rect))
+        #expect(layout.rect.height <= allowed.height)
+    }
+
+    @Test func translationBubbleBoxAllowsSmallOCRMappingTolerance() {
+        let bubble = CGRect(x: 40, y: 80, width: 140, height: 90)
+        let text = CGRect(x: 38, y: 82, width: 68, height: 32)
+
+        #expect(!OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, tolerance: 0))
+        #expect(OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, tolerance: 3))
     }
 
     @Test func translationGeometryRefinerUsesLocalOCRTextBoxButRetainsModelBubbleBox() {
@@ -2186,6 +2226,18 @@ private func makeTestPageRequest(
             requiresTextBox: true
         )
         #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
+
+        let unmatchedMultiLine = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"一二三四五六七八九十一二三四五六","translation":"多行译文","textBox":{"x":0.2,"y":0.25,"width":0.16,"height":0.24},"bubbleBox":{"x":0.1,"y":0.2,"width":0.4,"height":0.35},"confidence":0.9,"classification":"dialogue"}]}
+        """
+        let unmatchedBlocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: unmatchedMultiLine,
+            inputPixelSize: CGSize(width: 2_048, height: 1_024),
+            requiresTextBox: true
+        )
+        // 没有本地 OCR line 可校准时，多行 Vision textBox 也不能把整个短边当单行字号。
+        #expect((unmatchedBlocks.first?.estimatedFontScale ?? 1) < 0.07)
+        #expect((unmatchedBlocks.first?.estimatedFontScale ?? 0) > 0.04)
 
         let emptyLines = """
         {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":[],"textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"confidence":0.9,"classification":"dialogue"}]}

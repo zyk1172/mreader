@@ -8,8 +8,8 @@ nonisolated enum OCRBubbleLayoutEngine {
     }
 
     static func preferredTranslationFontSize(sourceFontSize: CGFloat) -> CGFloat {
-        // 译文默认应接近原文字号；只在内容装不下时由 anchoredTranslationLayout 缩小。
-        max(sourceFontSize * 0.98, 1)
+        // 第一轮必须严格沿用原文字号；只有确实装不下时才由 anchoredTranslationLayout 缩小。
+        max(sourceFontSize, 1)
     }
 
     @MainActor
@@ -30,19 +30,16 @@ nonisolated enum OCRBubbleLayoutEngine {
             x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
             y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
         )
-        // 保持原文中心不变时能扩展到的最大范围；只有图片边缘无法容纳时才由 clamped 做最小位移。
-        let maximumWidth = max(1, min(
-            safeBounds.width,
-            2 * min(anchor.x - safeBounds.minX, safeBounds.maxX - anchor.x)
-        ))
-        let maximumHeight = max(1, min(
-            safeBounds.height,
-            2 * min(anchor.y - safeBounds.minY, safeBounds.maxY - anchor.y)
-        ))
         let targetFontSize = preferredTranslationFontSize(sourceFontSize: sourceFontSize)
-        let initialWidth = min(max(sourceRect.width + padding * 2, 1), maximumWidth)
+        let initialWidth = min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
+        // 原 textBox 本身可能几乎占满模型给出的 bubbleBox。此时仍优先让实际文字测量结果决定高度，
+        // 不因为 padding 把本来可显示的译文错误判为无法容纳。
+        let minimumHeight = min(
+            max(sourceRect.height + padding * 2, 1),
+            safeBounds.height
+        )
 
-        func measuredSize(contentWidth: CGFloat) -> CGSize {
+        func measuredHeight(fontSize: CGFloat, contentWidth: CGFloat) -> CGFloat {
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.lineBreakMode = .byWordWrapping
             paragraphStyle.alignment = .center
@@ -51,12 +48,12 @@ nonisolated enum OCRBubbleLayoutEngine {
                 with: CGSize(width: max(contentWidth, 24), height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [
-                    .font: UIFont.systemFont(ofSize: targetFontSize, weight: .bold),
+                    .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
                     .paragraphStyle: paragraphStyle
                 ],
                 context: nil
             ).integral.size
-            return CGSize(width: measured.width + padding * 2, height: measured.height + padding * 2)
+            return max(minimumHeight, measured.height + padding * 2)
         }
 
         func rect(width: CGFloat, height: CGFloat) -> CGRect {
@@ -68,53 +65,72 @@ nonisolated enum OCRBubbleLayoutEngine {
             )
         }
 
-        // 先保持字号，以原 textBox 为起点逐步扩展到 bubbleBox（或图片）允许的范围。
-        let expansionSteps = 8
-        for step in 0...expansionSteps {
-            let progress = CGFloat(step) / CGFloat(expansionSteps)
-            let width = initialWidth + (maximumWidth - initialWidth) * progress
-            let measured = measuredSize(contentWidth: max(width - padding * 2, 1))
-            let height = max(sourceRect.height + padding * 2, measured.height)
-            guard height <= maximumHeight else { continue }
+        func layout(fontSize: CGFloat, width: CGFloat) -> TranslationLayout? {
+            let height = measuredHeight(fontSize: fontSize, contentWidth: max(width - padding * 2, 1))
+            guard height <= safeBounds.height else { return nil }
+            // clamped 只会在气泡超出允许区域时产生最小位移，绝不缩短已测量的宽高。
             return TranslationLayout(
                 rect: clamped(rect(width: width, height: height), to: safeBounds, margin: 0),
-                fontSize: targetFontSize
+                fontSize: fontSize
             )
         }
 
-        // 可用区域已经扩到上限后才缩字号；最低约为原字号 60%，不再使用固定 pt 下限。
-        let width = maximumWidth
-        var lower = max(sourceFontSize * 0.60, 1)
-        var upper = targetFontSize
-        func fittingHeight(fontSize: CGFloat) -> CGFloat {
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.lineBreakMode = .byWordWrapping
-            paragraphStyle.alignment = .center
-            paragraphStyle.lineSpacing = lineSpacing
-            let measured = (text as NSString).boundingRect(
-                with: CGSize(width: max(width - padding * 2, 1), height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
-                    .paragraphStyle: paragraphStyle
-                ],
-                context: nil
-            ).integral.size
-            return max(sourceRect.height + padding * 2, measured.height + padding * 2)
+        // 优先级：原字号 + 原中心；原字号 + 最小必要位移；最后才缩字号。
+        if let anchored = layout(fontSize: targetFontSize, width: initialWidth) {
+            return anchored
         }
-        for _ in 0..<10 {
+        if layout(fontSize: targetFontSize, width: safeBounds.width) != nil {
+            var lowerWidth = initialWidth
+            var upperWidth = safeBounds.width
+            for _ in 0..<12 {
+                let candidateWidth = (lowerWidth + upperWidth) / 2
+                if layout(fontSize: targetFontSize, width: candidateWidth) != nil {
+                    upperWidth = candidateWidth
+                } else {
+                    lowerWidth = candidateWidth
+                }
+            }
+            return layout(fontSize: targetFontSize, width: upperWidth)!
+        }
+
+        // 宽度已扩到允许上限后再找真正能放下文字的最大字号。不能以 60% 为硬下限，
+        // 否则 SwiftUI 的 fixedSize 会让已知放不下的文字顶出气泡。
+        let width = safeBounds.width
+        let smallestFontSize: CGFloat = 0.1
+        guard layout(fontSize: smallestFontSize, width: width) != nil else {
+            // 只有病态超长文本才会到这里；宁可让气泡最后有限外扩，也不能返回被截断的高度。
+            let height = measuredHeight(fontSize: smallestFontSize, contentWidth: max(width - padding * 2, 1))
+            return TranslationLayout(
+                rect: rect(width: width, height: height),
+                fontSize: smallestFontSize
+            )
+        }
+
+        var lower = smallestFontSize
+        var upper = targetFontSize
+        for _ in 0..<14 {
             let candidate = (lower + upper) / 2
-            if fittingHeight(fontSize: candidate) <= maximumHeight {
+            if layout(fontSize: candidate, width: width) != nil {
                 lower = candidate
             } else {
                 upper = candidate
             }
         }
-        let finalHeight = min(fittingHeight(fontSize: lower), maximumHeight)
-        return TranslationLayout(
-            rect: clamped(rect(width: width, height: finalHeight), to: safeBounds, margin: 0),
-            fontSize: lower
-        )
+        return layout(fontSize: lower, width: width)!
+    }
+
+    /// Vision bubbleBox 与本地 OCR textBox 来自不同识别源，允许少量显示坐标误差。
+    static func acceptsTranslationTextRect(
+        _ textRect: CGRect,
+        in bubbleRect: CGRect,
+        tolerance: CGFloat = 3
+    ) -> Bool {
+        guard !textRect.isNull, !bubbleRect.isNull,
+              textRect.width > 0, textRect.height > 0,
+              bubbleRect.width > 0, bubbleRect.height > 0 else {
+            return false
+        }
+        return bubbleRect.insetBy(dx: -max(tolerance, 0), dy: -max(tolerance, 0)).contains(textRect)
     }
 
     /// 兼容旧调用；离线翻译改用 anchoredTranslationLayout，以 textBox 为锚点。

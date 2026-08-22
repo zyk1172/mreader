@@ -1802,6 +1802,10 @@ class AITranslator {
                 translation: item.translation,
                 confidence: item.confidence,
                 ocrSource: "vision-model:\(item.classification)",
+                estimatedFontScale: visionFallbackFontScale(
+                    for: item.text.isEmpty ? item.translation : item.text,
+                    textBox: mappedRect
+                ),
                 bubbleBox: mappedBubbleRect.flatMap { isUsableVisionRect($0) ? $0 : nil },
                 polygon: mappedTextPolygon,
                 bubblePolygon: mappedBubblePolygon,
@@ -1928,10 +1932,10 @@ class AITranslator {
                     boundingBox: mappedRect,
                     confidence: item.confidence,
                     ocrSource: "vision-recognition:\(item.classification)",
-                    estimatedFontScale: Double(min(
-                        validTextRect?.width ?? mappedRect.width,
-                        validTextRect?.height ?? mappedRect.height
-                    )),
+                    estimatedFontScale: visionFallbackFontScale(
+                        for: item.text,
+                        textBox: mappedRect
+                    ),
                     bubbleBox: validBubbleRect,
                     polygon: mappedTextPolygon,
                     bubblePolygon: mappedBubblePolygon
@@ -2195,6 +2199,23 @@ class AITranslator {
             }
         }
         return true
+    }
+
+    /// 当本地 OCR 没有匹配到 Vision item 时，不能把多行 textBox 的短边直接当单行字号。
+    /// 以文字数和 textBox 面积估算单个字符格，可同时覆盖横排多行与竖排多列的保守回退。
+    private static func visionFallbackFontScale(for text: String, textBox: CGRect) -> Double {
+        let visibleCharacterCount = max(
+            text.unicodeScalars.filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar)
+            }.count,
+            1
+        )
+        let width = Double(max(textBox.width, 0))
+        let height = Double(max(textBox.height, 0))
+        let shortAxis = min(width, height)
+        guard shortAxis > 0 else { return 0.001 }
+        let characterCell = sqrt(max(width * height, 0.000_000_1) / Double(visibleCharacterCount))
+        return max(min(characterCell, shortAxis), min(shortAxis * 0.12, 0.001))
     }
 
     private static func normalizeVisionRect(_ rect: CGRect, divisor: CGSize) -> CGRect {
