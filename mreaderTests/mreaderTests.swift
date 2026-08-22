@@ -3304,6 +3304,55 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationPageProvider.isReliableSourceRevision(second))
     }
 
+    @Test func offlineTranslationPendingRecoveryDistinguishesLoadingMissingAndResumable() {
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: false,
+                comicExists: false,
+                job: nil
+            ) == .waitForLibrary
+        )
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: false,
+                job: nil
+            ) == .clearPending
+        )
+
+        var job = OfflineTranslationJobRecord(
+            comicID: UUID(),
+            setID: UUID(),
+            selection: .entireComic,
+            pageIndexes: [0],
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: "test",
+            promptSnapshot: "test",
+            readingDirectionRaw: "leftToRight",
+            totalPages: 1
+        )
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: true,
+                job: job
+            ) == .resume
+        )
+        job.state = .paused
+        #expect(
+            OfflineTranslationPendingRecoveryDecision.resolve(
+                libraryLoaded: true,
+                comicExists: true,
+                job: job
+            ) == .clearPending
+        )
+    }
+
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)

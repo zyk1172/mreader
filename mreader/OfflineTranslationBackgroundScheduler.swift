@@ -1,6 +1,22 @@
 import BackgroundTasks
 import Foundation
 
+nonisolated enum OfflineTranslationPendingRecoveryDecision: Equatable, Sendable {
+    case waitForLibrary
+    case clearPending
+    case resume
+
+    static func resolve(
+        libraryLoaded: Bool,
+        comicExists: Bool,
+        job: OfflineTranslationJobRecord?
+    ) -> Self {
+        guard libraryLoaded else { return .waitForLibrary }
+        guard comicExists, let job else { return .clearPending }
+        return job.state.isBackgroundResumable ? .resume : .clearPending
+    }
+}
+
 /// 后台续行只服务于用户已经显式启动的离线任务，不会在启动时自行创建 AI 请求。
 @MainActor
 final class OfflineTranslationBackgroundScheduler {
@@ -44,29 +60,53 @@ final class OfflineTranslationBackgroundScheduler {
         UserDefaults.standard.string(forKey: pendingJobKey).flatMap(UUID.init(uuidString:))
     }
 
+    private var pendingComicID: UUID? {
+        UserDefaults.standard.string(forKey: pendingComicKey).flatMap(UUID.init(uuidString:))
+    }
+
     /// 应用冷启动后自动接管仍应继续的任务。用户主动暂停/取消、策略暂停、磁盘不足和配置错误
     /// 都会清除 pending 标记，因此不会在这里被重新启动。
     func resumePendingJobIfNeeded() async {
         await startupRecoveryTask?.value
-        guard !OfflineTranslationCoordinator.shared.isRunning,
-              let jobID = pendingJobID,
-              let comicIDString = UserDefaults.standard.string(forKey: pendingComicKey),
-              let comicID = UUID(uuidString: comicIDString),
-              resumeInFlightJobIDs.insert(jobID).inserted else {
+        guard !OfflineTranslationCoordinator.shared.isRunning else { return }
+        guard let jobID = pendingJobID,
+              let comicID = pendingComicID else {
+            if UserDefaults.standard.object(forKey: pendingJobKey) != nil
+                || UserDefaults.standard.object(forKey: pendingComicKey) != nil {
+                clearMalformedPendingMarker()
+            }
             return
         }
+        guard resumeInFlightJobIDs.insert(jobID).inserted else { return }
         defer { resumeInFlightJobIDs.remove(jobID) }
 
         let library = ComicLibraryStore()
         var comic: ComicBook?
-        for _ in 0..<20 {
-            comic = library.comics.first(where: { $0.id == comicID })
-            if comic != nil { break }
+        for _ in 0..<20 where !library.isLoaded {
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        guard let comic,
-              let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
-              job.state == .interrupted || job.state == .queued || job.state == .running else {
+        guard library.isLoaded else {
+            // 书架仍在初始化，不能把暂时的空数组当作“漫画已删除”。保留 marker，
+            // 交给下一次启动或后台唤醒继续尝试。
+            return
+        }
+        comic = library.comics.first(where: { $0.id == comicID })
+        let job = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID)
+        switch OfflineTranslationPendingRecoveryDecision.resolve(
+            libraryLoaded: true,
+            comicExists: comic != nil,
+            job: job
+        ) {
+        case .waitForLibrary:
+            return
+        case .clearPending:
+            clearPending(jobID: jobID)
+            return
+        case .resume:
+            break
+        }
+        guard let comic, let job else {
+            clearPending(jobID: jobID)
             return
         }
         OfflineTranslationCoordinator.shared.resume(
@@ -134,6 +174,16 @@ final class OfflineTranslationBackgroundScheduler {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingIdentifier)
         }
         guard isCurrentPendingJob else { return }
+        UserDefaults.standard.removeObject(forKey: pendingJobKey)
+        UserDefaults.standard.removeObject(forKey: pendingComicKey)
+    }
+
+    private func clearMalformedPendingMarker() {
+        if #unavailable(iOS 26.0) {
+            // 旧系统使用共享 identifier；iOS 26 的 request 必须绑定合法 Job UUID，
+            // 损坏的 marker 无法安全推导对应 request。
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingIdentifier)
+        }
         UserDefaults.standard.removeObject(forKey: pendingJobKey)
         UserDefaults.standard.removeObject(forKey: pendingComicKey)
     }
