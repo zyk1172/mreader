@@ -175,7 +175,7 @@ nonisolated enum OfflineTranslationPageProvider {
         descriptorCount: Int,
         pageCount: Int
     ) -> Bool {
-        !enumerationFailed && descriptorCount == pageCount
+        !enumerationFailed && pageCount > 0 && descriptorCount == pageCount
     }
 
     private static func localFolderSourceRevisionThrowing(

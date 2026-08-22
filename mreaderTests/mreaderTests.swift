@@ -3456,6 +3456,13 @@ private func makeTestPageRequest(
         #expect(
             !OfflineTranslationPageProvider.isCompleteFolderRevision(
                 enumerationFailed: false,
+                descriptorCount: 0,
+                pageCount: 0
+            )
+        )
+        #expect(
+            !OfflineTranslationPageProvider.isCompleteFolderRevision(
+                enumerationFailed: false,
                 descriptorCount: 99,
                 pageCount: 100
             )
@@ -3467,6 +3474,22 @@ private func makeTestPageRequest(
                 pageCount: 100
             )
         )
+    }
+
+    @Test func offlineTranslationEmptyFolderRevisionFailsClosed() throws {
+        let emptyRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-empty-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: emptyRoot) }
+        try FileManager.default.createDirectory(at: emptyRoot, withIntermediateDirectories: true)
+
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: emptyRoot,
+            fallbackPath: emptyRoot.path,
+            pageCount: 0
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
     }
 
     @Test func offlineTranslationFolderRevisionUsesComicManagerPageExtensions() throws {
