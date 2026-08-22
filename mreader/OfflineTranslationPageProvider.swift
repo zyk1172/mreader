@@ -18,6 +18,10 @@ nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
     }
 }
 
+nonisolated private final class OfflineTranslationFolderEnumerationState: @unchecked Sendable {
+    var failed = false
+}
+
 /// 统一处理本地文件、归档、Komga 和 OPDS 页面。它只读取原始页数据，不写入 ReaderImageCache。
 nonisolated enum OfflineTranslationPageProvider {
     final class SourceSession: @unchecked Sendable {
@@ -67,7 +71,11 @@ nonisolated enum OfflineTranslationPageProvider {
 
     static func isReliableSourceRevision(_ revision: String?) -> Bool {
         guard let revision else { return false }
+        // `#unavailable#` was emitted by older folder-revision code when the
+        // directory could not be enumerated. Treat it as unverified as well so
+        // persisted values from that implementation fail closed.
         return !revision.contains("-unverified:")
+            && !revision.contains("#unavailable#")
     }
 
     static func shouldPeriodicallyValidateSourceRevision(for comic: ComicBook) -> Bool {
@@ -162,42 +170,62 @@ nonisolated enum OfflineTranslationPageProvider {
         )) ?? "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
     }
 
+    static func isCompleteFolderRevision(
+        enumerationFailed: Bool,
+        descriptorCount: Int,
+        pageCount: Int
+    ) -> Bool {
+        !enumerationFailed && pageCount > 0 && descriptorCount == pageCount
+    }
+
     private static func localFolderSourceRevisionThrowing(
         at rootURL: URL,
         fallbackPath: String,
         pageCount: Int
     ) throws -> String {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let rootValues = try? rootURL.resourceValues(forKeys: [.isDirectoryKey]),
+              rootValues.isDirectory == true else {
+            return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
+        }
+        let enumerationState = OfflineTranslationFolderEnumerationState()
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, _ in
+                enumerationState.failed = true
+                return false
+            }
         ) else {
-            return "local-folder:\(fallbackPath)#unavailable#pages=\(pageCount)"
+            return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
 
-        let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "tif", "tiff"]
         let rootPath = rootURL.standardizedFileURL.path
         var descriptors: [String] = []
-        var couldNotHashEveryPage = false
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
-            guard imageExtensions.contains(fileURL.pathExtension.lowercased()),
-                  let values = try? fileURL.resourceValues(forKeys: keys),
-                  values.isRegularFile == true else {
+            guard ComicManager.isSupportedImageFile(fileURL) else {
                 continue
+            }
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else {
+                return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
             }
             let absolutePath = fileURL.standardizedFileURL.path
             let relativePath = absolutePath.hasPrefix(rootPath + "/")
                 ? String(absolutePath.dropFirst(rootPath.count + 1))
                 : absolutePath
             guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                couldNotHashEveryPage = true
-                break
+                return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
             }
             descriptors.append("\(relativePath)#\(OfflineTranslationFingerprint.sha256(for: data))")
         }
-        guard !couldNotHashEveryPage else {
+        guard isCompleteFolderRevision(
+            enumerationFailed: enumerationState.failed,
+            descriptorCount: descriptors.count,
+            pageCount: pageCount
+        ) else {
             return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
         descriptors.sort()

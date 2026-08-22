@@ -3409,6 +3409,114 @@ private func makeTestPageRequest(
         ))
     }
 
+    @Test func offlineTranslationFolderRevisionFailsClosedWhenSourceIsUnavailable() {
+        let missingRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-missing-folder-\(UUID().uuidString)", isDirectory: true)
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: missingRoot,
+            fallbackPath: missingRoot.path,
+            pageCount: 1
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(
+            "local-folder:\(missingRoot.path)#unavailable#pages=1"
+        ))
+    }
+
+    @Test func offlineTranslationFolderRevisionFailsClosedForInvalidImageCandidate() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-invalid-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("001.jpg", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+    }
+
+    @Test func offlineTranslationFolderRevisionRequiresCompleteEnumeration() {
+        #expect(
+            !OfflineTranslationPageProvider.isCompleteFolderRevision(
+                enumerationFailed: true,
+                descriptorCount: 100,
+                pageCount: 100
+            )
+        )
+        #expect(
+            !OfflineTranslationPageProvider.isCompleteFolderRevision(
+                enumerationFailed: false,
+                descriptorCount: 0,
+                pageCount: 0
+            )
+        )
+        #expect(
+            !OfflineTranslationPageProvider.isCompleteFolderRevision(
+                enumerationFailed: false,
+                descriptorCount: 99,
+                pageCount: 100
+            )
+        )
+        #expect(
+            OfflineTranslationPageProvider.isCompleteFolderRevision(
+                enumerationFailed: false,
+                descriptorCount: 100,
+                pageCount: 100
+            )
+        )
+    }
+
+    @Test func offlineTranslationEmptyFolderRevisionFailsClosed() throws {
+        let emptyRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-empty-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: emptyRoot) }
+        try FileManager.default.createDirectory(at: emptyRoot, withIntermediateDirectories: true)
+
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: emptyRoot,
+            fallbackPath: emptyRoot.path,
+            pageCount: 0
+        )
+
+        #expect(revision.hasPrefix("local-folder-unverified:"))
+        #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+    }
+
+    @Test func offlineTranslationFolderRevisionUsesComicManagerPageExtensions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-folder-page-extensions-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let supportedPage = root.appendingPathComponent("001.jpg")
+        try Data("page".utf8).write(to: supportedPage)
+        for fileExtension in ["bmp", "tif", "tiff"] {
+            try Data("ignored".utf8).write(to: root.appendingPathComponent("ignored.\(fileExtension)"))
+        }
+
+        #expect(ComicManager.isSupportedImageFile(supportedPage))
+        #expect(!ComicManager.isSupportedImageFile(root.appendingPathComponent("ignored.bmp")))
+        #expect(!ComicManager.isSupportedImageFile(root.appendingPathComponent("ignored.tif")))
+        #expect(!ComicManager.isSupportedImageFile(root.appendingPathComponent("ignored.tiff")))
+
+        let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+        #expect(OfflineTranslationPageProvider.isReliableSourceRevision(revision))
+    }
+
     @Test func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-single-file-revision-\(UUID().uuidString).cbz")
