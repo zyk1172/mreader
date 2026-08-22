@@ -4092,7 +4092,8 @@ struct LocalImageView: View {
                 && OCRBubbleLayoutEngine.acceptsTranslationTextRect(
                     textRect,
                     in: mappedBubble,
-                    tolerance: 3
+                    toleranceX: max(2, imageBounds.width * 0.005),
+                    toleranceY: max(2, imageBounds.height * 0.005)
                 )
                 ? mappedBubble
                 : fallbackBounds
@@ -4934,6 +4935,7 @@ private struct ColorfulTranslatedText: View {
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
+                    .lineSpacing(2)
                     .foregroundStyle(colorGradient(index: index))
                     .shadow(color: .white.opacity(0.78), radius: 0.7)
                     .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)

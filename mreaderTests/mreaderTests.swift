@@ -442,6 +442,17 @@ struct mreaderTests {
         #expect(abs(vertical.sourceFontSize(in: displayedPage) - 15.6) < 0.001)
     }
 
+    @Test func localOCRGeometryUsesPhysicalObservationAxis() {
+        let geometry = OCRPreprocessor.localOCRGeometryForDiagnostics(
+            observationRect: CGRect(x: 0, y: 0, width: 20.0 / 390.0, height: 40.0 / 780.0),
+            observationPixelSize: CGSize(width: 390, height: 780),
+            normalizedPageRect: CGRect(x: 0.2, y: 0.3, width: 20.0 / 390.0, height: 40.0 / 780.0)
+        )
+
+        #expect(geometry.orientation == .vertical)
+        #expect(abs(geometry.fontScale - 20.0 / 390.0) < 0.0001)
+    }
+
     @Test @MainActor func anchoredTranslationLayoutKeepsSourceCenterAndExpandsBeforeShrinking() {
         let source = CGRect(x: 130, y: 210, width: 80, height: 34)
         let allowed = CGRect(x: 70, y: 145, width: 210, height: 170)
@@ -497,8 +508,8 @@ struct mreaderTests {
         let bubble = CGRect(x: 40, y: 80, width: 140, height: 90)
         let text = CGRect(x: 38, y: 82, width: 68, height: 32)
 
-        #expect(!OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, tolerance: 0))
-        #expect(OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, tolerance: 3))
+        #expect(!OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, toleranceX: 0, toleranceY: 0))
+        #expect(OCRBubbleLayoutEngine.acceptsTranslationTextRect(text, in: bubble, toleranceX: 3, toleranceY: 3))
     }
 
     @Test func translationGeometryRefinerUsesLocalOCRTextBoxButRetainsModelBubbleBox() {
@@ -2238,6 +2249,18 @@ private func makeTestPageRequest(
         // 没有本地 OCR line 可校准时，多行 Vision textBox 也不能把整个短边当单行字号。
         #expect((unmatchedBlocks.first?.estimatedFontScale ?? 1) < 0.07)
         #expect((unmatchedBlocks.first?.estimatedFontScale ?? 0) > 0.04)
+
+        let verticalVision = """
+        {"coordinateSpace":"normalized","items":[{"sourceText":"上下","translation":"上下","textBox":{"x":0.2,"y":0.25,"width":20.0/390.0,"height":40.0/780.0},"bubbleBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.2},"confidence":0.9,"classification":"dialogue"}]}
+        """.replacingOccurrences(of: "20.0/390.0", with: "0.05128205")
+            .replacingOccurrences(of: "40.0/780.0", with: "0.05128205")
+        let verticalVisionBlock = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
+            from: verticalVision,
+            inputPixelSize: CGSize(width: 390, height: 780),
+            requiresTextBox: true
+        ).first
+        #expect(verticalVisionBlock?.textOrientation == .vertical)
+        #expect(abs((verticalVisionBlock?.estimatedFontScale ?? 0) - 20.0 / 390.0) < 0.001)
 
         let emptyLines = """
         {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":[],"textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"confidence":0.9,"classification":"dialogue"}]}

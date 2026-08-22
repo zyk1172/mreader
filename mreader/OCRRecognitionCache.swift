@@ -16,7 +16,8 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            "local-ocr-v1",
+            // v2：字号尺度现在按 observation 的物理方向写入，不能复用旧的 normalized min(width,height) 缓存。
+            "local-ocr-v2",
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", options.minimumTextHeight),

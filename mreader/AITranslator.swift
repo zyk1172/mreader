@@ -1780,6 +1780,12 @@ class AITranslator {
             let normalizedRect = normalizeVisionRect(item.rect, divisor: coordinateDivisor)
             let mappedRect = mapVisionRect(normalizedRect, from: sourceRect)
             guard isUsableVisionRect(mappedRect) else { return nil }
+            let fallbackGeometry = visionFallbackGeometry(
+                for: item.text.isEmpty ? item.translation : item.text,
+                textBox: mappedRect,
+                sourceRect: sourceRect,
+                inputPixelSize: inputPixelSize
+            )
             let mappedTextPolygon = item.textPolygon.map { point in
                 let normalizedPoint = CGPoint(
                     x: point.x / coordinateDivisor.width,
@@ -1802,14 +1808,12 @@ class AITranslator {
                 translation: item.translation,
                 confidence: item.confidence,
                 ocrSource: "vision-model:\(item.classification)",
-                estimatedFontScale: visionFallbackFontScale(
-                    for: item.text.isEmpty ? item.translation : item.text,
-                    textBox: mappedRect
-                ),
+                estimatedFontScale: fallbackGeometry.fontScale,
                 bubbleBox: mappedBubbleRect.flatMap { isUsableVisionRect($0) ? $0 : nil },
                 polygon: mappedTextPolygon,
                 bubblePolygon: mappedBubblePolygon,
-                translationLines: item.rawLines
+                translationLines: item.rawLines,
+                textOrientation: fallbackGeometry.orientation
             )
         }
         if requiresTextBox, blocks.count != rawItems.count {
@@ -1913,6 +1917,12 @@ class AITranslator {
             }) else {
                 return nil
             }
+            let fallbackGeometry = visionFallbackGeometry(
+                for: item.text,
+                textBox: mappedRect,
+                sourceRect: sourceRect,
+                inputPixelSize: inputPixelSize
+            )
             let mappedTextPolygon = item.textPolygon.map { point in
                 CGPoint(
                     x: sourceRect.minX + (point.x / coordinateDivisor.width) * sourceRect.width,
@@ -1932,13 +1942,11 @@ class AITranslator {
                     boundingBox: mappedRect,
                     confidence: item.confidence,
                     ocrSource: "vision-recognition:\(item.classification)",
-                    estimatedFontScale: visionFallbackFontScale(
-                        for: item.text,
-                        textBox: mappedRect
-                    ),
+                    estimatedFontScale: fallbackGeometry.fontScale,
                     bubbleBox: validBubbleRect,
                     polygon: mappedTextPolygon,
-                    bubblePolygon: mappedBubblePolygon
+                    bubblePolygon: mappedBubblePolygon,
+                    textOrientation: fallbackGeometry.orientation
                 )
             )
         }
@@ -2201,21 +2209,41 @@ class AITranslator {
         return true
     }
 
-    /// 当本地 OCR 没有匹配到 Vision item 时，不能把多行 textBox 的短边直接当单行字号。
-    /// 以文字数和 textBox 面积估算单个字符格，可同时覆盖横排多行与竖排多列的保守回退。
-    private static func visionFallbackFontScale(for text: String, textBox: CGRect) -> Double {
+    private struct VisionFallbackGeometry {
+        let fontScale: Double
+        let orientation: TextOrientation
+    }
+
+    /// 当本地 OCR 没有匹配到 Vision item 时，在输入图像的物理像素轴上估算字符格，
+    /// 再转换回对应的 normalized 页面轴；不能直接对 normalized width/height 求平方根。
+    private static func visionFallbackGeometry(
+        for text: String,
+        textBox: CGRect,
+        sourceRect: CGRect,
+        inputPixelSize: CGSize
+    ) -> VisionFallbackGeometry {
         let visibleCharacterCount = max(
             text.unicodeScalars.filter { scalar in
                 !CharacterSet.whitespacesAndNewlines.contains(scalar)
             }.count,
             1
         )
-        let width = Double(max(textBox.width, 0))
-        let height = Double(max(textBox.height, 0))
-        let shortAxis = min(width, height)
-        guard shortAxis > 0 else { return 0.001 }
-        let characterCell = sqrt(max(width * height, 0.000_000_1) / Double(visibleCharacterCount))
-        return max(min(characterCell, shortAxis), min(shortAxis * 0.12, 0.001))
+        let pagePixelWidth = Double(max(inputPixelSize.width, 1)) / Double(max(sourceRect.width, 0.000_1))
+        let pagePixelHeight = Double(max(inputPixelSize.height, 1)) / Double(max(sourceRect.height, 0.000_1))
+        let physicalWidth = Double(max(textBox.width, 0)) * pagePixelWidth
+        let physicalHeight = Double(max(textBox.height, 0)) * pagePixelHeight
+        let orientation: TextOrientation = physicalWidth >= physicalHeight ? .horizontal : .vertical
+        let physicalCharacterCell = sqrt(
+            max(physicalWidth * physicalHeight, 1) / Double(visibleCharacterCount)
+        )
+        let axisPixels = orientation == .horizontal ? pagePixelHeight : pagePixelWidth
+        let normalizedAxis = orientation == .horizontal ? Double(textBox.height) : Double(textBox.width)
+        let normalizedScale = physicalCharacterCell / max(axisPixels, 1)
+        let lowerBound = min(normalizedAxis * 0.12, 0.001)
+        let scale = normalizedAxis > 0
+            ? max(min(normalizedScale, normalizedAxis), lowerBound)
+            : 0.001
+        return VisionFallbackGeometry(fontScale: scale, orientation: orientation)
     }
 
     private static func normalizeVisionRect(_ rect: CGRect, divisor: CGSize) -> CGRect {

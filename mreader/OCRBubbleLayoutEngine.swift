@@ -45,7 +45,7 @@ nonisolated enum OCRBubbleLayoutEngine {
             paragraphStyle.alignment = .center
             paragraphStyle.lineSpacing = lineSpacing
             let measured = (text as NSString).boundingRect(
-                with: CGSize(width: max(contentWidth, 24), height: .greatestFiniteMagnitude),
+                with: CGSize(width: max(contentWidth, 1), height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [
                     .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
@@ -123,14 +123,18 @@ nonisolated enum OCRBubbleLayoutEngine {
     static func acceptsTranslationTextRect(
         _ textRect: CGRect,
         in bubbleRect: CGRect,
-        tolerance: CGFloat = 3
+        toleranceX: CGFloat,
+        toleranceY: CGFloat
     ) -> Bool {
         guard !textRect.isNull, !bubbleRect.isNull,
               textRect.width > 0, textRect.height > 0,
               bubbleRect.width > 0, bubbleRect.height > 0 else {
             return false
         }
-        return bubbleRect.insetBy(dx: -max(tolerance, 0), dy: -max(tolerance, 0)).contains(textRect)
+        return bubbleRect.insetBy(
+            dx: -max(toleranceX, 0),
+            dy: -max(toleranceY, 0)
+        ).contains(textRect)
     }
 
     /// 兼容旧调用；离线翻译改用 anchoredTranslationLayout，以 textBox 为锚点。
