@@ -67,6 +67,58 @@ struct mreaderTests {
         #expect(!TranslationOutputValidator.isCompatible("이것은 중국어가 아닙니다", target: .simplifiedChinese))
     }
 
+    @Test func translationValidatorAllowsStableTokensButRejectsUntranslatedSentences() {
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "NASA", sourceText: "NASA", target: .english
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "OK", sourceText: "OK", target: .simplifiedChinese
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "iPhone", sourceText: "iPhone", target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "ありがとう", sourceText: "ありがとう", target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "这是中文", sourceText: "这是中文", target: .english
+        ))
+    }
+
+    @Test func pageTranslationParserAcceptsStableIdenticalTokens() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "NASA", order: 0),
+            AIPageTranslationItem(id: "b1", sourceText: "ありがとう", order: 1)
+        ]
+        let result = try AIPageTranslationParser.parse(
+            "{\"items\":[{\"id\":\"b0\",\"translation\":\"NASA\"},{\"id\":\"b1\",\"translation\":\"ありがとう\"}]}",
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(result.items.map(\.id) == ["b0"])
+        #expect(result.missingIDs == ["b1"])
+    }
+
+    @Test func offlineTranslationLanguageConsensusNeedsMultiplePageVotes() {
+        var consensus = OfflineTranslationSourceLanguageConsensus()
+        consensus.register(languageCode: "en", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == nil)
+        consensus.register(languageCode: "ja", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == nil)
+        consensus.register(languageCode: "ja", confidence: 0.95)
+        #expect(consensus.resolvedLanguageCode == "ja")
+    }
+
+    @Test func offlineTranslationBackgroundStateWhitelistExcludesPausedAndConfiguration() {
+        #expect(OfflineTranslationJobState.queued.isBackgroundResumable)
+        #expect(OfflineTranslationJobState.interrupted.isBackgroundResumable)
+        #expect(OfflineTranslationJobState.running.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.paused.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.needsConfiguration.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.completed.isBackgroundResumable)
+        #expect(!OfflineTranslationJobState.cancelled.isBackgroundResumable)
+    }
+
     @Test func pageTranslationPromptContainsStableIDsAndExplicitTarget() throws {
         let prompt = try AIPageTranslationPromptBuilder.prompt(
             items: [

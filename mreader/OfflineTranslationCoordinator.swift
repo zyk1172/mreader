@@ -35,6 +35,7 @@ nonisolated private struct OfflineTranslationPageWorkerResult: @unchecked Sendab
     let state: OfflineTranslationPageState?
     let retryCount: Int
     let resolvedSourceLanguage: String?
+    let resolvedSourceLanguageConfidence: Double?
     let errorMessage: String?
     let isPolicyRefusal: Bool
     let needsConfiguration: Bool
@@ -349,6 +350,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
         submitBackgroundContinuation: Bool
     ) async {
         do {
+            guard savedJob.promptRevision == OfflineTranslationPromptBuilder.revision else {
+                throw OfflineTranslationRunError.needsConfiguration(
+                    "翻译协议已更新，请基于现有译本创建新的翻译任务"
+                )
+            }
             let configuration = try frozenConfiguration(
                 for: savedJob.providerID,
                 expectedVisionModel: savedJob.visionModel,
@@ -388,9 +394,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
             isRunning = false
             lastError = error.localizedDescription
             var recoveryJob = savedJob
-            recoveryJob.state = error is OfflineTranslationConfigurationError
-                ? .needsConfiguration
-                : .interrupted
+            if error is OfflineTranslationConfigurationError {
+                recoveryJob.state = .needsConfiguration
+            } else if case OfflineTranslationRunError.needsConfiguration = error {
+                recoveryJob.state = .needsConfiguration
+            } else {
+                recoveryJob.state = .interrupted
+            }
             recoveryJob.lastError = error.localizedDescription
             recoveryJob.updatedAt = Date()
             try? await jobStore.save(recoveryJob)
@@ -518,8 +528,19 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     record.retryCounts[String(result.pageIndex), default: 0] += result.retryCount
                     if record.sourceLanguage == .automatic,
                        record.resolvedSourceLanguage == nil,
-                       let resolvedSourceLanguage = result.resolvedSourceLanguage {
-                        record.resolvedSourceLanguage = resolvedSourceLanguage
+                       let resolvedSourceLanguage = result.resolvedSourceLanguage,
+                       let confidence = result.resolvedSourceLanguageConfidence {
+                        var consensus = OfflineTranslationSourceLanguageConsensus(
+                            votes: record.sourceLanguageVotes ?? [:],
+                            sampleCount: record.sourceLanguageSampleCount ?? 0
+                        )
+                        consensus.register(
+                            languageCode: resolvedSourceLanguage,
+                            confidence: confidence
+                        )
+                        record.sourceLanguageVotes = consensus.votes
+                        record.sourceLanguageSampleCount = consensus.sampleCount
+                        record.resolvedSourceLanguage = consensus.resolvedLanguageCode
                     }
 
                     if let state = result.state {
@@ -700,6 +721,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     state: existing.state,
                     retryCount: 0,
                     resolvedSourceLanguage: existing.resolvedSourceLanguage,
+                    resolvedSourceLanguageConfidence: nil,
                     errorMessage: nil,
                     isPolicyRefusal: false,
                     needsConfiguration: false
@@ -808,7 +830,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
 
             let pageState: OfflineTranslationPageState
             let blocks: [OfflineTranslatedBlock]
-            var resolvedSourceLanguage: String?
+            var sourceLanguageDecision: TranslationSourceDecision?
             switch translationResult {
             case .noText:
                 pageState = .noText
@@ -818,13 +840,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 blocks = translatedBlocks.enumerated().map { index, block in
                     block.offlineTranslatedBlock(id: "b\(index)")
                 }
-                resolvedSourceLanguage = Self.resolvedSourceLanguage(from: translatedBlocks)
+                sourceLanguageDecision = Self.sourceLanguageDecision(from: translatedBlocks)
             case .partial(let translatedBlocks, _):
                 pageState = translatedBlocks.isEmpty ? .noText : .partial
                 blocks = translatedBlocks.enumerated().map { index, block in
                     block.offlineTranslatedBlock(id: "b\(index)")
                 }
-                resolvedSourceLanguage = Self.resolvedSourceLanguage(from: translatedBlocks)
+                sourceLanguageDecision = Self.sourceLanguageDecision(from: translatedBlocks)
             }
 
             let savedPage = OfflineTranslatedPage(
@@ -838,14 +860,15 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 state: pageState,
                 providerID: work.configuration.profileID,
                 visionModel: work.configuration.visionModel,
-                resolvedSourceLanguage: resolvedSourceLanguage
+                resolvedSourceLanguage: sourceLanguageDecision?.languageCode
             )
             try await storage.savePageAndUpdateManifest(savedPage)
             return OfflineTranslationPageWorkerResult(
                 pageIndex: work.page.index,
                 state: pageState,
                 retryCount: retryCount,
-                resolvedSourceLanguage: resolvedSourceLanguage,
+                resolvedSourceLanguage: sourceLanguageDecision?.languageCode,
+                resolvedSourceLanguageConfidence: sourceLanguageDecision?.confidence,
                 errorMessage: nil,
                 isPolicyRefusal: false,
                 needsConfiguration: false
@@ -860,6 +883,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 state: nil,
                 retryCount: 0,
                 resolvedSourceLanguage: nil,
+                resolvedSourceLanguageConfidence: nil,
                 errorMessage: message,
                 isPolicyRefusal: false,
                 needsConfiguration: true
@@ -886,6 +910,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 state: nil,
                 retryCount: retryFailure.retryCount,
                 resolvedSourceLanguage: nil,
+                resolvedSourceLanguageConfidence: nil,
                 errorMessage: retryFailure.message,
                 isPolicyRefusal: retryFailure.isPolicyRefusal,
                 needsConfiguration: false
@@ -913,6 +938,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 state: nil,
                 retryCount: 0,
                 resolvedSourceLanguage: nil,
+                resolvedSourceLanguageConfidence: nil,
                 errorMessage: message,
                 isPolicyRefusal: OfflineTranslationPolicyCircuit.isProviderRefusal(error),
                 needsConfiguration: false
@@ -920,12 +946,12 @@ final class OfflineTranslationCoordinator: ObservableObject {
         }
     }
 
-    nonisolated private static func resolvedSourceLanguage(from blocks: [TextBlock]) -> String? {
+    nonisolated private static func sourceLanguageDecision(from blocks: [TextBlock]) -> TranslationSourceDecision? {
         TranslationSourceResolver.resolve(
             preference: .automatic,
             blocks: blocks,
             previousStableLanguage: nil
-        )?.languageCode
+        )
     }
 
     nonisolated private static func translatePageWithRetry(

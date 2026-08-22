@@ -446,7 +446,7 @@ class AITranslator {
             "messages": [
                 [
                     "role": "system",
-                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。不要描述图片、解释、续写、总结或输出思考过程。"
+                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。不要描述图片、解释、续写、总结或输出思考过程。"
                 ],
                 ["role": "user", "content": prompt]
             ],
@@ -518,7 +518,7 @@ class AITranslator {
         let body: [String: Any] = [
             "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
             "messages": [
-                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
+                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.3
@@ -543,7 +543,11 @@ class AITranslator {
 
         let decoded = AIChatResponseDecoder.decode(data)
         if let content = decoded.content,
-           let translation = sanitizedTranslationText(from: content, sourceText: text) {
+           let translation = sanitizedTranslationText(
+            from: content,
+            sourceText: text,
+            target: targetLanguage
+           ) {
             return translation
         }
         if decoded.hasReasoningOnly {
@@ -1362,14 +1366,16 @@ class AITranslator {
 
     static func sanitizedTranslationTextForDiagnostics(
         _ content: String,
-        sourceText: String
+        sourceText: String,
+        target: TranslationTargetLanguage = .simplifiedChinese
     ) -> String? {
-        sanitizedTranslationText(from: content, sourceText: sourceText)
+        sanitizedTranslationText(from: content, sourceText: sourceText, target: target)
     }
 
     private static func sanitizedTranslationText(
         from content: String,
-        sourceText: String
+        sourceText: String,
+        target: TranslationTargetLanguage
     ) -> String? {
         var value = content
             .replacingOccurrences(
@@ -1415,15 +1421,11 @@ class AITranslator {
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let suspiciousMarkers = [
-            "system prompt", "user prompt", "analysis:", "reasoning:",
-            "_output", "输出要求", "提示词", "作为一个", "我不能",
-            "根据用户", "翻译过程"
-        ]
-        let lowercased = value.lowercased()
-        guard !value.isEmpty,
-              !suspiciousMarkers.contains(where: { lowercased.contains($0.lowercased()) }),
-              value != sourceText.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        guard TranslationOutputValidator.isAcceptableTranslation(
+            value,
+            sourceText: sourceText,
+            target: target
+        ) else {
             return nil
         }
         return value

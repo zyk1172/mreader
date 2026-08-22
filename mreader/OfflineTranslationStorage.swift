@@ -238,7 +238,10 @@ actor OfflineTranslationStorageManager {
 
     /// 后台 handler 的单写者 claim：避免冷启动恢复与其它恢复路径同时接管同一个 Job。
     func claimJobForBackgroundExecution(comicID: UUID, jobID: UUID) throws -> OfflineTranslationJobRecord? {
-        guard var job = job(comicID: comicID, jobID: jobID), !job.state.isTerminal else { return nil }
+        guard var job = job(comicID: comicID, jobID: jobID),
+              job.state.isBackgroundResumable else {
+            return nil
+        }
         job.state = .running
         job.lastError = nil
         job.pauseReason = nil

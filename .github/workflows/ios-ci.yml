@@ -1,0 +1,68 @@
+name: iOS CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ios-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.5 and inspect simulator runtimes
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -resolvePackageDependencies
+
+      - name: Build unit-test bundle
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build-for-testing
+
+      - name: Run unit tests
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -only-testing:mreaderTests \
+            -resultBundlePath "$RUNNER_TEMP/MReaderTests.xcresult" \
+            test-without-building
+
+      - name: Upload test result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mreader-test-results
+          path: |
+            ${{ runner.temp }}/MReaderTests.xcresult
+            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
+          if-no-files-found: warn

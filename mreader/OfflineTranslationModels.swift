@@ -85,10 +85,55 @@ nonisolated enum OfflineTranslationJobState: String, Codable, CaseIterable, Send
         }
     }
 
+    /// 系统后台任务只能接管已经排队、被系统中断或仍在运行中的任务；用户主动暂停、配置
+    /// 错误和已结束任务都必须等待明确的用户操作，不能由旧 BG request 擅自重启。
+    var isBackgroundResumable: Bool {
+        switch self {
+        case .queued, .interrupted, .running:
+            return true
+        case .paused, .needsConfiguration, .completed, .completedWithFailures, .cancelled:
+            return false
+        }
+    }
+
     static func completionState(failedPageCount: Int, partialPageCount: Int) -> Self {
         failedPageCount > 0 || partialPageCount > 0
             ? .completedWithFailures
             : .completed
+    }
+}
+
+/// 自动原文语言的整本共识。单页判断仍使用 TranslationSourceResolver；只有多个有效页面
+/// 对同一语言形成稳定多数后，Coordinator 才把 sourceLanguage 从 automatic 锁定。
+nonisolated struct OfflineTranslationSourceLanguageConsensus: Sendable, Equatable {
+    private(set) var votes: [String: Double]
+    private(set) var sampleCount: Int
+
+    init(votes: [String: Double] = [:], sampleCount: Int = 0) {
+        self.votes = votes
+        self.sampleCount = sampleCount
+    }
+
+    mutating func register(languageCode: String, confidence: Double) {
+        guard !languageCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              confidence.isFinite,
+              confidence >= 0.60 else { return }
+        votes[languageCode, default: 0] += confidence
+        sampleCount += 1
+    }
+
+    var resolvedLanguageCode: String? {
+        guard sampleCount >= 3,
+              let winner = votes.max(by: { $0.value < $1.value }) else {
+            return nil
+        }
+        let total = votes.values.reduce(0, +)
+        guard total > 0,
+              winner.value / total >= 0.65,
+              winner.value >= 1.8 else {
+            return nil
+        }
+        return winner.key
     }
 }
 
@@ -677,6 +722,9 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
     let visionModel: String
     let sourceLanguage: TranslationSourceLanguage
     var resolvedSourceLanguage: String?
+    /// automatic 模式下的跨页投票；旧任务缺失字段时按空共识恢复。
+    var sourceLanguageVotes: [String: Double]?
+    var sourceLanguageSampleCount: Int?
     let targetLanguage: TranslationTargetLanguage
     let promptRevision: String
     let promptSnapshot: String
@@ -746,6 +794,8 @@ nonisolated struct OfflineTranslationJobRecord: Codable, Equatable, Sendable, Id
         self.visionModel = visionModel
         self.sourceLanguage = sourceLanguage
         self.resolvedSourceLanguage = nil
+        self.sourceLanguageVotes = [:]
+        self.sourceLanguageSampleCount = 0
         self.targetLanguage = targetLanguage
         self.promptRevision = promptRevision
         self.promptSnapshot = promptSnapshot

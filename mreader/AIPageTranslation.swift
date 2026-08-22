@@ -121,7 +121,7 @@ nonisolated enum AIPageTranslationPromptBuilder {
         2. 只翻译每个 item 的 sourceText。
         3. 每个输入 id 必须且只能返回一次。
         4. id 必须原样复制，禁止修改、合并、拆分、遗漏或新增 id。
-        5. translation 只包含目标语言译文，不要解释、不复述原文。
+        5. translation 只包含目标语言译文，不要解释；专有名词、缩写、产品名或型号在目标语言中通常不变时可以原样保留。
         6. 无法可靠翻译某项时，仍保留该 id，并将 translation 设为空字符串。
         7. translationLines 仅用于建议换行；不确定时使用空数组。
         8. 最终只能输出一个 JSON 对象。禁止 Markdown、代码围栏、说明、前言、结语和思考过程。
@@ -190,9 +190,12 @@ nonisolated enum AIPageTranslationParser {
                   accepted[id] == nil,
                   let translation = stringValue(rawItem, keys: ["translation", "translatedText", "translated_text"])?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !translation.isEmpty,
-                  translation != expectedByID[id]?.sourceText,
-                  TranslationOutputValidator.isCompatible(translation, target: target) else {
+                  let sourceText = expectedByID[id]?.sourceText,
+                  TranslationOutputValidator.isAcceptableTranslation(
+                    translation,
+                    sourceText: sourceText,
+                    target: target
+                  ) else {
                 continue
             }
             let lines = (rawItem["translationLines"] as? [String]
@@ -254,6 +257,46 @@ nonisolated enum AIPageTranslationParser {
 }
 
 nonisolated enum TranslationOutputValidator {
+    /// 译文可与原文相同：缩写、产品名、型号等跨语言通常无需改写；但日文/中文整句原样
+    /// 返回到另一目标语言仍应视为漏译。整页与逐气泡必须共用此规则。
+    static func isAcceptableTranslation(
+        _ translation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> Bool {
+        let value = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !containsExplanatoryGarbage(value) else { return false }
+
+        let source = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !source.isEmpty, value == source {
+            return isStableUntranslatedToken(value)
+        }
+        return isCompatible(value, target: target)
+    }
+
+    static func containsExplanatoryGarbage(_ text: String) -> Bool {
+        let suspiciousMarkers = [
+            "system prompt", "user prompt", "analysis:", "reasoning:",
+            "_output", "输出要求", "提示词", "作为一个", "我不能",
+            "根据用户", "翻译过程"
+        ]
+        let lowercased = text.lowercased()
+        return suspiciousMarkers.contains { lowercased.contains($0.lowercased()) }
+    }
+
+    /// 只接受不含空白、由 ASCII 字母/数字及常见型号符号构成的短 token。
+    /// 这样 NASA、OK、iPhone、RX-78 可以保留，中文/日文整句则不会借由“相同”绕过目标语言验证。
+    private static func isStableUntranslatedToken(_ text: String) -> Bool {
+        guard (1...40).contains(text.unicodeScalars.count) else { return false }
+        return text.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return true
+            case 0x2B, 0x2D, 0x2E, 0x2F, 0x3A, 0x5F, 0x23: return true // + - . / : _ #
+            default: return false
+            }
+        }
+    }
+
     static func isCompatible(
         _ text: String,
         target: TranslationTargetLanguage

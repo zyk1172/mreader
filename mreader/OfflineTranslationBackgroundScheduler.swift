@@ -122,7 +122,18 @@ final class OfflineTranslationBackgroundScheduler {
     }
 
     func clearPending(jobID: UUID) {
-        guard UserDefaults.standard.string(forKey: pendingJobKey) == jobID.uuidString else { return }
+        let isCurrentPendingJob = UserDefaults.standard.string(forKey: pendingJobKey) == jobID.uuidString
+        if #available(iOS 26.0, *) {
+            // 每个 continued request 都绑定单独 Job；即使 pending 指针已指向新 Job，也要撤销
+            // 旧 Job 的系统请求，避免它迟到唤醒后参与任何恢复路径。
+            BGTaskScheduler.shared.cancel(
+                taskRequestWithIdentifier: continuedTaskIdentifier(for: jobID)
+            )
+        } else if isCurrentPendingJob {
+            // 旧系统版本复用 processing identifier，只能在清当前 pending 时取消，不能误伤新任务。
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingIdentifier)
+        }
+        guard isCurrentPendingJob else { return }
         UserDefaults.standard.removeObject(forKey: pendingJobKey)
         UserDefaults.standard.removeObject(forKey: pendingComicKey)
     }
@@ -143,6 +154,11 @@ final class OfflineTranslationBackgroundScheduler {
               let comicIDString = UserDefaults.standard.string(forKey: pendingComicKey),
               let jobID = UUID(uuidString: jobIDString),
               let comicID = UUID(uuidString: comicIDString) else {
+            return false
+        }
+        if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask,
+           continued.identifier != continuedTaskIdentifier(for: jobID) {
+            // 系统迟到交付的 Job A 绝不能读取当前 pending Job B 并错误恢复 B。
             return false
         }
         if OfflineTranslationCoordinator.shared.isRunning {
@@ -172,7 +188,13 @@ final class OfflineTranslationBackgroundScheduler {
         guard let job = try? await OfflineTranslationJobStore.shared.claimJobForBackgroundExecution(
             comicID: comicID,
             jobID: jobID
-        ) else { return false }
+        ) else {
+            if let staleJob = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
+               !staleJob.state.isBackgroundResumable {
+                clearPending(jobID: jobID)
+            }
+            return false
+        }
 
         if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
             OfflineTranslationCoordinator.shared.resume(
