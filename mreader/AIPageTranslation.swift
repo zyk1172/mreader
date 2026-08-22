@@ -191,7 +191,7 @@ nonisolated enum AIPageTranslationParser {
                   let translation = stringValue(rawItem, keys: ["translation", "translatedText", "translated_text"])?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                   let sourceText = expectedByID[id]?.sourceText,
-                  TranslationOutputValidator.isAcceptableTranslation(
+                  let normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(
                     translation,
                     sourceText: sourceText,
                     target: target
@@ -203,9 +203,10 @@ nonisolated enum AIPageTranslationParser {
                 ?? [])
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
+                .map { TranslationOutputValidator.normalize($0, for: target) }
             accepted[id] = AIPageTranslatedItem(
                 id: id,
-                translation: translation,
+                translation: normalizedTranslation,
                 translationLines: lines
             )
         }
@@ -264,14 +265,43 @@ nonisolated enum TranslationOutputValidator {
         sourceText: String?,
         target: TranslationTargetLanguage
     ) -> Bool {
-        let value = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, !containsExplanatoryGarbage(value) else { return false }
+        normalizedAcceptableTranslation(
+            translation,
+            sourceText: sourceText,
+            target: target
+        ) != nil
+    }
+
+    /// 所有整页与逐气泡译文都经由同一入口：先规范化目标中文的字形，再判断是否是
+    /// 合法译文。这样模型偶尔返回繁简混排时不会为了一个字重新请求，而明显的日/韩文
+    /// 漏译仍会被拦下。
+    static func normalizedAcceptableTranslation(
+        _ translation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> String? {
+        let value = normalize(
+            translation.trimmingCharacters(in: .whitespacesAndNewlines),
+            for: target
+        )
+        guard !value.isEmpty, !containsExplanatoryGarbage(value) else { return nil }
 
         let source = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !source.isEmpty, value == source {
-            return isStableUntranslatedToken(value)
+            return isStableUntranslatedToken(value, target: target) ? value : nil
         }
-        return isCompatible(value, target: target)
+        return isCompatible(value, target: target) ? value : nil
+    }
+
+    static func normalize(_ text: String, for target: TranslationTargetLanguage) -> String {
+        switch target {
+        case .simplifiedChinese:
+            return text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
+        case .traditionalChinese:
+            return text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: true) ?? text
+        default:
+            return text
+        }
     }
 
     static func containsExplanatoryGarbage(_ text: String) -> Bool {
@@ -286,15 +316,33 @@ nonisolated enum TranslationOutputValidator {
 
     /// 只接受不含空白、由 ASCII 字母/数字及常见型号符号构成的短 token。
     /// 这样 NASA、OK、iPhone、RX-78 可以保留，中文/日文整句则不会借由“相同”绕过目标语言验证。
-    private static func isStableUntranslatedToken(_ text: String) -> Bool {
+    private static func isStableUntranslatedToken(
+        _ text: String,
+        target: TranslationTargetLanguage
+    ) -> Bool {
         guard (1...40).contains(text.unicodeScalars.count) else { return false }
-        return text.unicodeScalars.allSatisfy { scalar in
+        let isASCIIStableToken = text.unicodeScalars.allSatisfy { scalar in
             switch scalar.value {
             case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return true
             case 0x2B, 0x2D, 0x2E, 0x2F, 0x3A, 0x5F, 0x23: return true // + - . / : _ #
             default: return false
             }
         }
+        if isASCIIStableToken { return true }
+
+        // 人名、地名等短纯汉字在日→中、繁简互转中通常无需改写；仅在 CJK 目标语言下
+        // 放行，且绝不把 kana/hangul 句子借由“原样相同”绕过翻译。
+        let counts = scriptCounts(in: text)
+        let isCJKTarget: Bool
+        switch target {
+        case .simplifiedChinese, .traditionalChinese, .japanese, .korean:
+            isCJKTarget = true
+        default:
+            isCJKTarget = false
+        }
+        return isCJKTarget
+            && text.unicodeScalars.count <= 6
+            && counts.han == text.unicodeScalars.count
     }
 
     static func isCompatible(
@@ -304,23 +352,27 @@ nonisolated enum TranslationOutputValidator {
         let counts = scriptCounts(in: text)
         let meaningful = counts.latin + counts.han + counts.kana + counts.hangul
             + counts.cyrillic + counts.thai + counts.arabic
-        guard meaningful >= 3 else { return true }
 
         switch target {
         case .simplifiedChinese, .traditionalChinese:
-            return counts.han > 0 && counts.kana + counts.hangul < max(counts.han, 2)
+            // 脚本冲突与文本长度无关：はい、안녕 不能因为只有两字就被当作中文。
+            return counts.han > 0 && counts.kana == 0 && counts.hangul == 0
         case .japanese:
-            return counts.kana + counts.han > 0 && counts.hangul < max(counts.kana + counts.han, 2)
+            return counts.kana + counts.han > 0 && counts.hangul == 0
         case .korean:
-            return counts.hangul > 0 && counts.kana < max(counts.hangul, 2)
+            return counts.hangul > 0 && counts.kana == 0
         case .russian:
+            guard meaningful >= 3 else { return true }
             return counts.cyrillic >= max(1, meaningful / 3)
         case .thai:
+            guard meaningful >= 3 else { return true }
             return counts.thai >= max(1, meaningful / 3)
         case .arabic:
+            guard meaningful >= 3 else { return true }
             return counts.arabic >= max(1, meaningful / 3)
         case .english, .french, .german, .spanish, .italian, .portuguese,
              .vietnamese, .indonesian:
+            guard meaningful >= 3 else { return true }
             return counts.latin >= max(1, meaningful / 2)
         }
     }

@@ -1105,7 +1105,8 @@ class AITranslator {
                     from: content,
                     sourceRect: sourceRect,
                     inputPixelSize: inputPixelSize,
-                    requiresTextBox: strictTranslationGeometry
+                    requiresTextBox: strictTranslationGeometry,
+                    target: translationTarget
                 )
             } else {
                 blocks = try parseVisionRecognitionBlocks(
@@ -1421,14 +1422,14 @@ class AITranslator {
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard TranslationOutputValidator.isAcceptableTranslation(
+        guard let normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(
             value,
             sourceText: sourceText,
             target: target
         ) else {
             return nil
         }
-        return value
+        return normalizedTranslation
     }
 
     /// 单气泡翻译的固定协议（项1）：整页有固定 JSON 协议，单气泡同样必须有固定协议，
@@ -1682,7 +1683,8 @@ class AITranslator {
         from content: String,
         sourceRect: CGRect,
         inputPixelSize: CGSize,
-        requiresTextBox: Bool
+        requiresTextBox: Bool,
+        target: TranslationTargetLanguage?
     ) throws -> [TextBlock] {
         guard let data = normalizedVisionJSONData(from: content) else {
             throw VisionTranslationError.invalidJSON
@@ -1733,6 +1735,14 @@ class AITranslator {
                 guard !translation.isEmpty else {
                     throw VisionTranslationError.missingTranslation
                 }
+                if let target,
+                   TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: sourceText,
+                    target: target
+                   ) == nil {
+                    throw VisionTranslationError.missingTranslation
+                }
                 guard rectValue(from: item["textBox"]) != nil else {
                     throw VisionTranslationError.missingTextBox
                 }
@@ -1772,6 +1782,19 @@ class AITranslator {
             let rawTranslation = firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let translation = rawLines.isEmpty ? rawTranslation : rawLines.joined(separator: "\n")
             guard !translation.isEmpty else { return nil }
+            let normalizedTranslation: String
+            if let target {
+                guard let value = TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: text,
+                    target: target
+                ) else {
+                    return nil
+                }
+                normalizedTranslation = value
+            } else {
+                normalizedTranslation = translation
+            }
             let textPolygon = pointsValue(from: item["textPolygon"] ?? item["text_polygon"]) ?? []
             let bubblePolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"]) ?? []
             let textRect = rectValue(from: item["textBox"] ?? item["text_box"])
@@ -1802,8 +1825,10 @@ class AITranslator {
                 : "dialogue"
             return RawVisionItem(
                 text: text,
-                translation: translation,
-                rawLines: rawLines,
+                translation: normalizedTranslation,
+                rawLines: target.map { target in
+                    rawLines.map { TranslationOutputValidator.normalize($0, for: target) }
+                } ?? rawLines,
                 textPolygon: textPolygon,
                 bubblePolygon: bubblePolygon,
                 textRect: textRect,
@@ -2045,13 +2070,15 @@ class AITranslator {
         from content: String,
         sourceRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
         inputPixelSize: CGSize,
-        requiresTextBox: Bool = false
+        requiresTextBox: Bool = false,
+        target: TranslationTargetLanguage? = nil
     ) throws -> [TextBlock] {
         try parseVisionTranslationBlocks(
             from: content,
             sourceRect: sourceRect,
             inputPixelSize: inputPixelSize,
-            requiresTextBox: requiresTextBox
+            requiresTextBox: requiresTextBox,
+            target: target
         )
     }
 

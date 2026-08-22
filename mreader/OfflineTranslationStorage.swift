@@ -91,12 +91,15 @@ actor OfflineTranslationStorageManager {
                 case .queued, .running, .paused, .interrupted, .needsConfiguration, .completed, .completedWithFailures:
                     isReaderCandidate = true
                 case .cancelled:
-                    isReaderCandidate = false
+                    // “停止并保留”不再继续执行任务，但已经落盘的页面仍应能立即在 Reader
+                    // 中预览；没有任何覆盖页面的取消任务则不参与候选，避免空 Set 抢占旧译本。
+                    isReaderCandidate = true
                 }
                 guard isReaderCandidate,
                       job.sourceLanguage == sourceLanguage,
                       job.targetLanguage == targetLanguage,
                       let manifest = manifest(comicID: comicID, setID: job.setID),
+                      (job.state != .cancelled || manifest.coveredPageCount > 0),
                       manifest.id != active?.id else {
                     return nil
                 }

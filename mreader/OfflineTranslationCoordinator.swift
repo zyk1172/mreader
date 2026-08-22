@@ -150,6 +150,18 @@ final class OfflineTranslationCoordinator: ObservableObject {
         isPreparingRebind = true
         Task { [weak self] in
             guard let self else { return }
+            let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
+            do {
+                try await self.validateSourceRevision(
+                    for: savedJob,
+                    comic: comic,
+                    sourceSession: sourceSession
+                )
+            } catch {
+                self.isPreparingRebind = false
+                await self.markNeedsConfiguration(savedJob, message: error.localizedDescription)
+                return
+            }
             let states = await self.storage.pageStates(
                 comicID: savedJob.comicID,
                 setID: savedJob.setID
@@ -368,6 +380,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
             guard pages.count == savedJob.totalPages else {
                 throw OfflineTranslationRunError.failed("漫画页数已变化，无法安全续传")
             }
+            try await validateSourceRevision(
+                for: savedJob,
+                comic: comic,
+                sourceSession: sourceSession
+            )
             var record = savedJob
             record.state = .running
             record.lastError = nil
@@ -410,6 +427,44 @@ final class OfflineTranslationCoordinator: ObservableObject {
         }
     }
 
+    /// 已完成页面是断点续传的事实来源，因此恢复、重绑和运行中的每个批次都必须确认
+    /// 它们仍属于同一版漫画。仅比较页数会让“前半本旧文件 + 后半本新文件”混进同一 Set。
+    private func validateSourceRevision(
+        for record: OfflineTranslationJobRecord,
+        comic: ComicBook,
+        sourceSession: OfflineTranslationPageProvider.SourceSession
+    ) async throws {
+        guard let savedManifest = await storage.manifest(
+            comicID: record.comicID,
+            setID: record.setID
+        ) else {
+            throw OfflineTranslationRunError.failed("找不到离线翻译任务对应的译本")
+        }
+        let currentRevision = OfflineTranslationPageProvider.sourceRevision(
+            for: comic,
+            session: sourceSession
+        )
+        guard savedManifest.sourceRevision == currentRevision else {
+            throw OfflineTranslationRunError.needsConfiguration(
+                "漫画原文件已发生变化，不能继续写入原翻译任务，请重新建立翻译任务"
+            )
+        }
+    }
+
+    private func markNeedsConfiguration(
+        _ savedJob: OfflineTranslationJobRecord,
+        message: String
+    ) async {
+        var record = savedJob
+        record.state = .needsConfiguration
+        record.lastError = message
+        record.updatedAt = Date()
+        try? await jobStore.save(record)
+        job = record
+        lastError = message
+        OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+    }
+
     private func execute(
         _ initialJob: OfflineTranslationJobRecord,
         comic: ComicBook,
@@ -442,6 +497,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
             var attemptedThisRun = Set<Int>()
             while true {
                 try Task.checkCancellation()
+                try await validateSourceRevision(
+                    for: record,
+                    comic: comic,
+                    sourceSession: sourceSession
+                )
                 try await storage.ensureSufficientDiskSpace()
 
                 // nextPageOffset 只保留为旧 UI 的兼容字段；当前执行期使用同一份内存快照，
@@ -600,6 +660,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 progress = progressValue(for: record)
             }
 
+            // 整本任务可能持续数小时；在最终激活前再做一次校验，不能把已经被替换的
+            // 源文件对应的旧页自动设为 active。
+            try await validateSourceRevision(
+                for: record,
+                comic: comic,
+                sourceSession: sourceSession
+            )
             let finalManifest = try? await storage.reconcileManifest(
                 comicID: record.comicID,
                 setID: record.setID
@@ -625,6 +692,19 @@ final class OfflineTranslationCoordinator: ObservableObject {
             }
             OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             manifest = finalManifest
+        } catch OfflineTranslationRunError.needsConfiguration(let message) {
+            synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
+            record.activePageIndexes = []
+            record.currentPageIndex = nil
+            record.state = .needsConfiguration
+            record.pauseReason = nil
+            record.lastError = message
+            record.updatedAt = Date()
+            try? await jobStore.save(record)
+            job = record
+            lastError = message
+            OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
+            manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)
         } catch OfflineTranslationStorageError.lowDiskSpace {
             synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.activePageIndexes = []

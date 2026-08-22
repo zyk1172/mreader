@@ -65,6 +65,9 @@ struct mreaderTests {
         #expect(!TranslationOutputValidator.isCompatible("これは英語ではありません", target: .english))
         #expect(TranslationOutputValidator.isCompatible("这是正确的译文", target: .simplifiedChinese))
         #expect(!TranslationOutputValidator.isCompatible("이것은 중국어가 아닙니다", target: .simplifiedChinese))
+        // 短对白也必须经过脚本冲突检查，不能因为少于 3 字而漏过目标中文校验。
+        #expect(!TranslationOutputValidator.isCompatible("はい", target: .simplifiedChinese))
+        #expect(!TranslationOutputValidator.isCompatible("안녕", target: .simplifiedChinese))
     }
 
     @Test func translationValidatorAllowsStableTokensButRejectsUntranslatedSentences() {
@@ -83,6 +86,18 @@ struct mreaderTests {
         #expect(!TranslationOutputValidator.isAcceptableTranslation(
             "这是中文", sourceText: "这是中文", target: .english
         ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "山田", sourceText: "山田", target: .simplifiedChinese
+        ))
+    }
+
+    @Test func translationValidatorNormalizesChineseTargetGlyphs() {
+        #expect(TranslationOutputValidator.normalizedAcceptableTranslation(
+            "這是測試", sourceText: "これはテストです", target: .simplifiedChinese
+        ) == "这是测试")
+        #expect(TranslationOutputValidator.normalizedAcceptableTranslation(
+            "这是测试", sourceText: "これはテストです", target: .traditionalChinese
+        ) == "這是測試")
     }
 
     @Test func pageTranslationParserAcceptsStableIdenticalTokens() throws {
@@ -2901,6 +2916,97 @@ private func makeTestPageRequest(
         ))?.id == set.id)
     }
 
+    @Test func offlineTranslationStoppedJobKeepsCompletedPagesRenderable() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-stop-keep-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let providerID = UUID()
+        let baseDate = Date()
+
+        func makeSet() -> OfflineTranslationSetManifest {
+            OfflineTranslationSetManifest(
+                comicID: comicID,
+                sourceLanguage: .japanese,
+                targetLanguage: .simplifiedChinese,
+                providerID: providerID,
+                providerName: "test",
+                baseURL: "https://example.com/v1",
+                visionModel: "vision",
+                promptRevision: OfflineTranslationPromptBuilder.revision,
+                promptSnapshot: "fixed",
+                totalPages: 2
+            )
+        }
+        func saveCompletedPage(to set: OfflineTranslationSetManifest) async throws {
+            try await storage.savePageAndUpdateManifest(
+                OfflineTranslatedPage(
+                    comicID: comicID,
+                    setID: set.id,
+                    pageIndex: 0,
+                    sourceFingerprint: "page-0",
+                    pixelWidth: 100,
+                    pixelHeight: 100,
+                    blocks: [OfflineTranslatedBlock(block: TextBlock(
+                        text: "原文",
+                        boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
+                        translation: "译文"
+                    ))],
+                    state: .completed,
+                    providerID: providerID,
+                    visionModel: "vision"
+                )
+            )
+        }
+
+        var active = makeSet()
+        active.updatedAt = baseDate.addingTimeInterval(10)
+        try await storage.saveManifest(active, activate: true)
+
+        let stopped = makeSet()
+        try await storage.saveManifest(stopped)
+        try await saveCompletedPage(to: stopped)
+        let savedStoppedManifest = await storage.manifest(comicID: comicID, setID: stopped.id)
+        var stoppedManifest = try #require(savedStoppedManifest)
+        stoppedManifest.updatedAt = baseDate.addingTimeInterval(20)
+        try await storage.saveManifest(stoppedManifest)
+        var stoppedJob = OfflineTranslationJobRecord(
+            comicID: comicID,
+            setID: stopped.id,
+            selection: .entireComic,
+            pageIndexes: [0, 1],
+            providerID: providerID,
+            providerName: "test",
+            baseURL: stopped.baseURL,
+            visionModel: stopped.visionModel,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            promptRevision: stopped.promptRevision,
+            promptSnapshot: stopped.promptSnapshot,
+            readingDirectionRaw: "leftToRight",
+            totalPages: 2
+        )
+        stoppedJob.state = .cancelled
+        stoppedJob.updatedAt = baseDate.addingTimeInterval(20)
+        try await storage.saveJob(stoppedJob)
+
+        #expect((await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ))?.id == stopped.id)
+
+        var newerActive = makeSet()
+        newerActive.updatedAt = baseDate.addingTimeInterval(30)
+        try await storage.saveManifest(newerActive, activate: true)
+        #expect(await storage.latestRenderableManifest(
+            for: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese
+        ) == nil)
+    }
+
     @Test func offlineTranslationRangeJobsInheritLatestRenderablePages() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-range-inheritance-\(UUID().uuidString)", isDirectory: true)
@@ -3082,6 +3188,27 @@ private func makeTestPageRequest(
         #expect(first == same)
         #expect(first != changed)
         #expect(first.count == 64)
+    }
+
+    @Test func offlineTranslationFolderRevisionTracksIndividualPageMetadata() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let pageURL = root.appendingPathComponent("001.jpg")
+        try Data("first".utf8).write(to: pageURL)
+        let first = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+        try Data("replacement-with-a-different-size".utf8).write(to: pageURL)
+        let second = OfflineTranslationPageProvider.localFolderSourceRevision(
+            at: root,
+            fallbackPath: root.path,
+            pageCount: 1
+        )
+        #expect(first != second)
     }
 
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {

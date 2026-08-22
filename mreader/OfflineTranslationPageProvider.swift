@@ -76,6 +76,13 @@ nonisolated enum OfflineTranslationPageProvider {
         case .local:
             let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
                 ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
+            if let resolvedURL, resolvedURL.hasDirectoryPath {
+                return localFolderSourceRevision(
+                    at: resolvedURL,
+                    fallbackPath: comic.libraryPath ?? resolvedURL.standardizedFileURL.path,
+                    pageCount: comic.totalPages
+                )
+            }
             let values = resolvedURL.flatMap {
                 try? $0.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             }
@@ -88,6 +95,46 @@ nonisolated enum OfflineTranslationPageProvider {
         case .opds:
             return "opds:\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
         }
+    }
+
+    /// 文件夹漫画的父目录 mtime 不会随着内部图片内容替换而稳定更新。这里仅汇总每张
+    /// 图片的相对路径、文件大小和 mtime，不读取图片字节，既能识别替换又不会为续传
+    /// 额外计算整本文件内容哈希。
+    static func localFolderSourceRevision(
+        at rootURL: URL,
+        fallbackPath: String,
+        pageCount: Int
+    ) -> String {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return "local-folder:\(fallbackPath)#unavailable#pages=\(pageCount)"
+        }
+
+        let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "tif", "tiff"]
+        let rootPath = rootURL.standardizedFileURL.path
+        var descriptors: [String] = []
+        for case let fileURL as URL in enumerator {
+            guard imageExtensions.contains(fileURL.pathExtension.lowercased()),
+                  let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else {
+                continue
+            }
+            let absolutePath = fileURL.standardizedFileURL.path
+            let relativePath = absolutePath.hasPrefix(rootPath + "/")
+                ? String(absolutePath.dropFirst(rootPath.count + 1))
+                : absolutePath
+            let size = values.fileSize ?? 0
+            let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+            descriptors.append("\(relativePath)#\(size)#\(modified)")
+        }
+        descriptors.sort()
+        let metadata = descriptors.joined(separator: "\n")
+        let digest = OfflineTranslationFingerprint.sha256(for: Data(metadata.utf8))
+        return "local-folder:\(fallbackPath)#\(digest)#pages=\(pageCount)"
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {
         switch comic.sourceType {
