@@ -233,14 +233,15 @@ final class OfflineTranslationBackgroundScheduler {
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
         guard let comic else {
+            clearPending(jobID: jobID)
             return false
         }
         guard let job = try? await OfflineTranslationJobStore.shared.claimJobForBackgroundExecution(
             comicID: comicID,
             jobID: jobID
         ) else {
-            if let staleJob = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID),
-               !staleJob.state.isBackgroundResumable {
+            let storedJob = await OfflineTranslationJobStore.shared.load(comicID: comicID, jobID: jobID)
+            if storedJob == nil || storedJob?.state.isBackgroundResumable == false {
                 clearPending(jobID: jobID)
             }
             return false
