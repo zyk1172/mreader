@@ -90,13 +90,14 @@ nonisolated enum OfflineTranslationPageProvider {
                     pageCount: comic.totalPages
                 )
             }
-            let values = resolvedURL.flatMap {
-                try? $0.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            guard let resolvedURL else {
+                return "local-file-unverified:\(comic.libraryPath ?? "")#pages=\(comic.totalPages)"
             }
-            let path = resolvedURL?.standardizedFileURL.path ?? comic.libraryPath ?? ""
-            let size = values?.fileSize ?? Int(comic.fileSize)
-            let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-            return "local:\(path)#\(size)#\(modified)#pages=\(comic.totalPages)"
+            return localFileSourceRevision(
+                at: resolvedURL,
+                fallbackPath: comic.libraryPath ?? resolvedURL.standardizedFileURL.path,
+                pageCount: comic.totalPages
+            )
         case .komga:
             return await komgaSourceRevision(for: comic)
         case .opds:
@@ -166,6 +167,21 @@ nonisolated enum OfflineTranslationPageProvider {
         let metadata = descriptors.joined(separator: "\n")
         let digest = OfflineTranslationFingerprint.sha256(for: Data(metadata.utf8))
         return "local-folder:\(fallbackPath)#\(digest)#pages=\(pageCount)"
+    }
+
+    /// 单文件漫画（CBZ/PDF/EPUB）的整本身份必须对应实际文件字节；仅使用 path、size 和
+    /// mtime 会被同尺寸原地替换且恢复 mtime 的外部工具绕过。调用方只在建任务、恢复和
+    /// 最终激活前执行，不放进逐页 batch 热路径。
+    static func localFileSourceRevision(
+        at fileURL: URL,
+        fallbackPath: String,
+        pageCount: Int
+    ) -> String {
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
+            return "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
+        }
+        let digest = OfflineTranslationFingerprint.sha256(for: data)
+        return "local-file:\(fallbackPath)#\(digest)#pages=\(pageCount)"
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {
         switch comic.sourceType {

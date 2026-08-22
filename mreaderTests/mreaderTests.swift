@@ -3278,6 +3278,32 @@ private func makeTestPageRequest(
         ))
     }
 
+    @Test func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-single-file-revision-\(UUID().uuidString).cbz")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let originalDate = Date(timeIntervalSince1970: 1_234_567)
+        try Data("AAAAA".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: fileURL.path)
+        let first = OfflineTranslationPageProvider.localFileSourceRevision(
+            at: fileURL,
+            fallbackPath: fileURL.path,
+            pageCount: 1
+        )
+
+        try Data("BBBBB".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: fileURL.path)
+        let second = OfflineTranslationPageProvider.localFileSourceRevision(
+            at: fileURL,
+            fallbackPath: fileURL.path,
+            pageCount: 1
+        )
+
+        #expect(first != second)
+        #expect(OfflineTranslationPageProvider.isReliableSourceRevision(first))
+        #expect(OfflineTranslationPageProvider.isReliableSourceRevision(second))
+    }
+
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)
