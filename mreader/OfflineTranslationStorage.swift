@@ -140,6 +140,23 @@ actor OfflineTranslationStorageManager {
         try write(indexValue, to: indexURL(for: manifest.comicID))
     }
 
+    /// 回滚尚未绑定 Job 的新 Set。startNewJob 只有在 Job 成功落盘后才把 Set 交给
+    /// 后台/恢复链路；此前任一步失败都不能留下 Reader 或管理页可见的 orphan Set。
+    func discardUncommittedSet(comicID: UUID, setID: UUID) throws {
+        try? fileManager.removeItem(at: setDirectory(comicID: comicID, setID: setID))
+        guard var indexValue = index(for: comicID) else { return }
+        indexValue.setIDs.removeAll { $0 == setID }
+        indexValue.activeSetID = indexValue.activeSetID == setID ? nil : indexValue.activeSetID
+        indexValue.activeSetIDsByTargetLanguage = indexValue.activeSetIDsByTargetLanguage.filter {
+            $0.value != setID
+        }
+        if indexValue.setIDs.isEmpty {
+            try? fileManager.removeItem(at: comicDirectory(comicID: comicID))
+        } else {
+            try write(indexValue, to: indexURL(for: comicID))
+        }
+    }
+
     func setActive(comicID: UUID, setID: UUID) throws {
         guard manifest(comicID: comicID, setID: setID) != nil else {
             throw OfflineTranslationStorageError.invalidSet

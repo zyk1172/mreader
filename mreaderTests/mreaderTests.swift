@@ -3349,8 +3349,42 @@ private func makeTestPageRequest(
                 libraryLoaded: true,
                 comicExists: true,
                 job: job
-            ) == .clearPending
+        ) == .clearPending
         )
+    }
+
+    @Test func offlineTranslationDiscardUncommittedSetRemovesManifestAndIndexEntry() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-offline-orphan-set-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = OfflineTranslationStorageManager(rootURL: root)
+        let comicID = UUID()
+        let setID = UUID()
+        let manifest = OfflineTranslationSetManifest(
+            id: setID,
+            comicID: comicID,
+            sourceLanguage: .japanese,
+            targetLanguage: .simplifiedChinese,
+            providerID: UUID(),
+            providerName: "test",
+            baseURL: "https://example.com/v1",
+            visionModel: "vision",
+            promptRevision: "test",
+            promptSnapshot: "test",
+            totalPages: 1,
+            sourceRevision: "local-file:test#pages=1",
+            processingMode: .ocrText,
+            textModel: "text",
+            ocrRecognitionMode: .adaptive,
+            usesVisualOCRVerification: false
+        )
+        try await storage.saveManifest(manifest)
+        #expect((await storage.index(for: comicID))?.setIDs == [setID])
+
+        try await storage.discardUncommittedSet(comicID: comicID, setID: setID)
+
+        #expect(await storage.manifest(comicID: comicID, setID: setID) == nil)
+        #expect(await storage.index(for: comicID) == nil)
     }
 
     @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
