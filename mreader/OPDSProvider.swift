@@ -85,6 +85,27 @@ nonisolated enum OPDSProvider {
         return results
     }
 
+    /// OPDS 没有统一的 book metadata API；优先以 acquisition 响应的 ETag/Last-Modified/
+    /// Content-Length 建立版本标识。服务端不提供这些 headers 时保留显式 unverified
+    /// 标记，避免伪装成一个可靠的远程 revision。
+    static func sourceRevision(for comic: ComicBook) async -> String {
+        let fallback = "opds-unverified:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.remoteCoverID ?? "")#\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
+        guard let sourceID = comic.mediaSourceID,
+              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let credential = KomgaProvider.apiKey(for: sourceID),
+              let value = comic.sourceURL ?? comic.chapterPath,
+              let acquisitionURL = URL(string: value) else {
+            return fallback
+        }
+        var resolvedSource = source
+        resolvedSource.baseURL = await KomgaProvider.resolveBestURL(source: source)
+        let client = OPDSClient(source: resolvedSource, credential: credential)
+        guard let revision = await client.contentRevision(for: acquisitionURL) else {
+            return fallback
+        }
+        return "opds:\(sourceID.uuidString)#\(comic.remoteCoverID ?? acquisitionURL.absoluteString)#\(revision)"
+    }
+
     static func loadPages(for comic: ComicBook) async -> ComicManager.LoadResult? {
         guard comic.sourceType == .opds,
               let sourceID = comic.mediaSourceID,
@@ -298,6 +319,35 @@ nonisolated private struct OPDSClient: Sendable {
 
     func data(from url: URL) async throws -> Data {
         try await responseData(from: url).0
+    }
+
+    func contentRevision(for url: URL) async -> String? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 20
+        if shouldForwardAuthorization(to: url) {
+            applyAuthorization(to: &request)
+        }
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else {
+                return nil
+            }
+            let headers = httpResponse.allHeaderFields
+            let etag = (headers["Etag"] ?? headers["ETag"]) as? String
+            let lastModified = (headers["Last-Modified"] ?? headers["LastModified"]) as? String
+            let contentLength = (headers["Content-Length"] ?? headers["ContentLength"]).map { String(describing: $0) }
+            let values = [etag, lastModified, contentLength].compactMap { value -> String? in
+                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                    return nil
+                }
+                return value
+            }
+            return values.isEmpty ? nil : values.joined(separator: "#")
+        } catch {
+            return nil
+        }
     }
 
     func download(_ url: URL, publicationID: String) async throws -> URL {

@@ -71,7 +71,31 @@ nonisolated enum OfflineTranslationPageProvider {
         SourceSession(comic: comic)
     }
 
-    static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) -> String {
+    /// 目录漫画的 revision 需要枚举每张图片；与 CBZ/PDF 的单文件 stat 不同，不能在
+    /// 每个并发 batch 都重复调用。Coordinator 对此源类型按页数/时间节流，开始、恢复
+    /// 和最终激活前仍会强制完整核验。
+    static func usesExpensiveSourceRevision(
+        for comic: ComicBook,
+        session: SourceSession? = nil
+    ) -> Bool {
+        switch comic.sourceType {
+        case .local:
+            let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
+                ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
+            return resolvedURL?.hasDirectoryPath == true
+        case .komga, .opds:
+            // 远程 revision 需要请求 Book 元数据或 HTTP headers，同样不能按每 3 页轮询。
+            return true
+        }
+    }
+
+    static func isReliableSourceRevision(_ revision: String?) -> Bool {
+        guard let revision else { return false }
+        return !revision.hasPrefix("komga-unverified:")
+            && !revision.hasPrefix("opds-unverified:")
+    }
+
+    static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) async -> String {
         switch comic.sourceType {
         case .local:
             let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
@@ -91,9 +115,28 @@ nonisolated enum OfflineTranslationPageProvider {
             let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
             return "local:\(path)#\(size)#\(modified)#pages=\(comic.totalPages)"
         case .komga:
-            return "komga:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.komgaBookID ?? "")#\(comic.remotePageCount ?? comic.totalPages)#\(comic.sourceURL ?? "")"
+            return await komgaSourceRevision(for: comic)
         case .opds:
-            return "opds:\(comic.sourceURL ?? comic.chapterPath ?? "")#pages=\(comic.totalPages)"
+            return await OPDSProvider.sourceRevision(for: comic)
+        }
+    }
+
+    private static func komgaSourceRevision(for comic: ComicBook) async -> String {
+        let fallback = "komga-unverified:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.komgaBookID ?? "")#\(comic.remotePageCount ?? comic.totalPages)#\(comic.sourceURL ?? "")"
+        guard let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID,
+              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }),
+              let apiKey = KomgaProvider.apiKey(for: sourceID) else {
+            return fallback
+        }
+        do {
+            let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
+            let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
+            let book = try await client.book(bookID: bookID)
+            guard let revision = book.contentRevision else { return fallback }
+            return "komga:\(sourceID.uuidString)#\(bookID)#\(revision)"
+        } catch {
+            return fallback
         }
     }
 

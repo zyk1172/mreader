@@ -515,7 +515,9 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
 }
 
 nonisolated struct OfflineTranslatedPage: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    /// v2 起字号尺度与文字方向都基于物理显示轴。v1 已保存的 geometry 无法可靠修复，
+    /// 必须重新翻译而不是继续显示旧的错误字号。
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     let comicID: UUID
@@ -565,7 +567,7 @@ nonisolated struct OfflineTranslatedPage: Codable, Equatable, Sendable {
 }
 
 nonisolated struct OfflineTranslationSetManifest: Codable, Equatable, Sendable, Identifiable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     let id: UUID

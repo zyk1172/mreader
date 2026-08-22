@@ -54,6 +54,8 @@ nonisolated private struct OfflineTranslationRetryFailure: LocalizedError {
 final class OfflineTranslationCoordinator: ObservableObject {
     static let shared = OfflineTranslationCoordinator()
     private static let maxConcurrentPages = 3
+    private static let expensiveRevisionValidationPageInterval = 48
+    private static let expensiveRevisionValidationTimeInterval: TimeInterval = 60
 
     @Published private(set) var job: OfflineTranslationJobRecord?
     @Published private(set) var manifest: OfflineTranslationSetManifest?
@@ -241,7 +243,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
             let totalPages = pages.count
-            let sourceRevision = OfflineTranslationPageProvider.sourceRevision(for: comic, session: sourceSession)
+            let sourceRevision = await OfflineTranslationPageProvider.sourceRevision(for: comic, session: sourceSession)
             let promptSnapshot = OfflineTranslationPromptBuilder.make(
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
@@ -265,10 +267,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
             } else {
                 sourceSet = latestRenderable ?? active
             }
+            let canReuseSourceSet = sourceSet.map {
+                $0.targetLanguage == targetLanguage
+                    && $0.sourceLanguage == sourceLanguage
+                    && $0.sourceRevision == sourceRevision
+                    && OfflineTranslationPageProvider.isReliableSourceRevision(sourceRevision)
+            } ?? false
             let existingStates: [Int: OfflineTranslationPageState]
-            if let sourceSet,
-               sourceSet.targetLanguage == targetLanguage,
-               sourceSet.sourceLanguage == sourceLanguage {
+            if let sourceSet, canReuseSourceSet {
                 existingStates = await storage.pageStates(comicID: comic.id, setID: sourceSet.id)
             } else {
                 existingStates = [:]
@@ -298,10 +304,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 usesVisualOCRVerification: usesVisualOCRVerification
             )
             try await storage.saveManifest(manifestValue, activate: false)
-            if let sourceSet,
-               sourceSet.targetLanguage == targetLanguage,
-               sourceSet.sourceLanguage == sourceLanguage,
-               sourceSet.sourceRevision == sourceRevision {
+            if let sourceSet, canReuseSourceSet {
                 _ = try await storage.copyValidPages(
                     from: sourceSet.id,
                     to: manifestValue,
@@ -432,7 +435,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
     private func validateSourceRevision(
         for record: OfflineTranslationJobRecord,
         comic: ComicBook,
-        sourceSession: OfflineTranslationPageProvider.SourceSession
+        sourceSession: OfflineTranslationPageProvider.SourceSession,
+        allowsUnverifiedCurrentRun: Bool = false
     ) async throws {
         guard let savedManifest = await storage.manifest(
             comicID: record.comicID,
@@ -440,10 +444,17 @@ final class OfflineTranslationCoordinator: ObservableObject {
         ) else {
             throw OfflineTranslationRunError.failed("找不到离线翻译任务对应的译本")
         }
-        let currentRevision = OfflineTranslationPageProvider.sourceRevision(
+        let currentRevision = await OfflineTranslationPageProvider.sourceRevision(
             for: comic,
             session: sourceSession
         )
+        guard allowsUnverifiedCurrentRun
+                || (OfflineTranslationPageProvider.isReliableSourceRevision(savedManifest.sourceRevision)
+                    && OfflineTranslationPageProvider.isReliableSourceRevision(currentRevision)) else {
+            throw OfflineTranslationRunError.needsConfiguration(
+                "远程漫画源未提供可验证版本信息，不能安全恢复或继承旧翻译任务，请重新开始翻译"
+            )
+        }
         guard savedManifest.sourceRevision == currentRevision else {
             throw OfflineTranslationRunError.needsConfiguration(
                 "漫画原文件已发生变化，不能继续写入原翻译任务，请重新建立翻译任务"
@@ -495,13 +506,28 @@ final class OfflineTranslationCoordinator: ObservableObject {
         )
         do {
             var attemptedThisRun = Set<Int>()
+            let usesExpensiveRevision = OfflineTranslationPageProvider.usesExpensiveSourceRevision(
+                for: comic,
+                session: sourceSession
+            )
+            // startNewJob 已在建 Set 前生成 revision，resume/rebind 也已经强制校验；目录
+            // 漫画从这里开始节流，避免每 3 页都递归扫描一遍整本图片目录。
+            var lastFullRevisionValidation = Date()
+            var pagesSinceFullRevisionValidation = 0
             while true {
                 try Task.checkCancellation()
-                try await validateSourceRevision(
-                    for: record,
-                    comic: comic,
-                    sourceSession: sourceSession
-                )
+                if !usesExpensiveRevision
+                    || pagesSinceFullRevisionValidation >= Self.expensiveRevisionValidationPageInterval
+                    || Date().timeIntervalSince(lastFullRevisionValidation) >= Self.expensiveRevisionValidationTimeInterval {
+                    try await validateSourceRevision(
+                        for: record,
+                        comic: comic,
+                        sourceSession: sourceSession,
+                        allowsUnverifiedCurrentRun: true
+                    )
+                    lastFullRevisionValidation = Date()
+                    pagesSinceFullRevisionValidation = 0
+                }
                 try await storage.ensureSufficientDiskSpace()
 
                 // nextPageOffset 只保留为旧 UI 的兼容字段；当前执行期使用同一份内存快照，
@@ -658,6 +684,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 }
                 try await checkpoint(record)
                 progress = progressValue(for: record)
+                pagesSinceFullRevisionValidation += results.count
             }
 
             // 整本任务可能持续数小时；在最终激活前再做一次校验，不能把已经被替换的
@@ -665,7 +692,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
             try await validateSourceRevision(
                 for: record,
                 comic: comic,
-                sourceSession: sourceSession
+                sourceSession: sourceSession,
+                allowsUnverifiedCurrentRun: true
             )
             let finalManifest = try? await storage.reconcileManifest(
                 comicID: record.comicID,

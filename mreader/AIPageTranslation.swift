@@ -330,17 +330,17 @@ nonisolated enum TranslationOutputValidator {
         }
         if isASCIIStableToken { return true }
 
-        // 人名、地名等短纯汉字在日→中、繁简互转中通常无需改写；仅在 CJK 目标语言下
-        // 放行，且绝不把 kana/hangul 句子借由“原样相同”绕过翻译。
+        // 人名、地名等短纯汉字在日→中、繁简互转中通常无需改写；只对中文目标语言
+        // 放行。韩文/日文目标把“大丈夫”“没有”原样返回通常是漏译，不能用此捷径。
         let counts = scriptCounts(in: text)
-        let isCJKTarget: Bool
+        let mayPreserveShortHan: Bool
         switch target {
-        case .simplifiedChinese, .traditionalChinese, .japanese, .korean:
-            isCJKTarget = true
+        case .simplifiedChinese, .traditionalChinese:
+            mayPreserveShortHan = true
         default:
-            isCJKTarget = false
+            mayPreserveShortHan = false
         }
-        return isCJKTarget
+        return mayPreserveShortHan
             && text.unicodeScalars.count <= 6
             && counts.han == text.unicodeScalars.count
     }

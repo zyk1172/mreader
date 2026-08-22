@@ -89,6 +89,12 @@ struct mreaderTests {
         #expect(TranslationOutputValidator.isAcceptableTranslation(
             "山田", sourceText: "山田", target: .simplifiedChinese
         ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "大丈夫", sourceText: "大丈夫", target: .korean
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "没有", sourceText: "没有", target: .japanese
+        ))
     }
 
     @Test func translationValidatorNormalizesChineseTargetGlyphs() {
@@ -98,6 +104,21 @@ struct mreaderTests {
         #expect(TranslationOutputValidator.normalizedAcceptableTranslation(
             "这是测试", sourceText: "これはテストです", target: .traditionalChinese
         ) == "這是測試")
+    }
+
+    @Test func komgaBookContentRevisionUsesFileMetadata() throws {
+        let data = Data("""
+        {
+          "id": "book-1",
+          "pageCount": 200,
+          "fileSize": 12345,
+          "fileHash": "sha256:abc",
+          "fileLastModified": "2026-08-22T08:00:00Z"
+        }
+        """.utf8)
+        let book = try JSONDecoder().decode(KomgaBookDTO.self, from: data)
+        #expect(book.contentRevision?.contains("sha256:abc") == true)
+        #expect(book.contentRevision?.contains("pages=200") == true)
     }
 
     @Test func pageTranslationParserAcceptsStableIdenticalTokens() throws {
@@ -1998,7 +2019,7 @@ private actor LibrarySyncProbe {
         #expect(resolution.furthestPageIndex == 320)
     }
 
-    @Test func ocrCoordinateMapperOriginalDoesNotUpscale() {
+    @Test @MainActor func ocrCoordinateMapperOriginalDoesNotUpscale() {
         // “原始尺寸”语义：小图 1:1（1 image pixel = 1 point），不再等同 fitScreen。
         let transform = OCRCoordinateMapper.displayTransform(
             sourcePixelSize: CGSize(width: 400, height: 300),

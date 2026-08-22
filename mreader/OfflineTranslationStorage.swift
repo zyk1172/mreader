@@ -158,7 +158,16 @@ actor OfflineTranslationStorageManager {
               let data = try? Data(contentsOf: pageURL(comicID: comicID, setID: setID, pageIndex: pageIndex)) else {
             return nil
         }
-        return try? decoder.decode(OfflineTranslatedPage.self, from: data)
+        guard var page = try? decoder.decode(OfflineTranslatedPage.self, from: data) else {
+            return nil
+        }
+        guard page.schemaVersion >= OfflineTranslatedPage.currentSchemaVersion else {
+            // 旧 page 文件缺少可靠的 physical-axis geometry。保留文件供管理页统计，
+            // 但作为 stale 处理，既不会渲染也不会被复制到新 Set。
+            page.state = .stale
+            return page
+        }
+        return page
     }
 
     func pageStates(comicID: UUID, setID: UUID) -> [Int: OfflineTranslationPageState] {
