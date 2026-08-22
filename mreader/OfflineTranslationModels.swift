@@ -406,12 +406,18 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             "dialogue", "narration", "soundEffect", "url",
             "advertisement", "watermark", "copyright", "pageNumber"
         ])
+        let sourceClassification = block.ocrSource
+            .split(separator: ":")
+            .last?
+            .split(separator: "+", maxSplits: 1)
+            .first
+            .map(String.init)
         let classification: String
         if allowedClassifications.contains(block.ocrSource) {
             classification = block.ocrSource
-        } else if let suffix = block.ocrSource.split(separator: ":").last,
-                  allowedClassifications.contains(String(suffix)) {
-            classification = String(suffix)
+        } else if let sourceClassification,
+                  allowedClassifications.contains(sourceClassification) {
+            classification = sourceClassification
         } else {
             classification = "dialogue"
         }

@@ -70,29 +70,39 @@ actor OfflineTranslationStorageManager {
         return manifest(comicID: comicID, setID: activeID)
     }
 
-    /// 返回 Reader 应优先预览的最新工作集合。它不改变 active 指针；暂停、系统中断、配置等待
-    /// 和带失败页面的终止任务仍可能包含已经落盘的可用页面，不能在 Reader 中突然消失。
-    func inProgressManifest(
+    /// 返回比 active 更新、且仍有可用页面可供 Reader 预览的最新 Set。
+    /// Job 是否完成与 Set 是否覆盖整本是两件事：范围任务完成后仍应保留可读页面；反过来，
+    /// 早于 active 的暂停/失败旧任务绝不能重新压过新 active Set。
+    func latestRenderableManifest(
         for comicID: UUID,
         sourceLanguage: TranslationSourceLanguage,
         targetLanguage: TranslationTargetLanguage
     ) -> OfflineTranslationSetManifest? {
-        jobs(comicID: comicID)
-            .filter { job in
+        let active = activeManifest(for: comicID, targetLanguage: targetLanguage)
+        return jobs(comicID: comicID)
+            .compactMap { job -> (manifest: OfflineTranslationSetManifest, updatedAt: Date)? in
                 let isReaderCandidate: Bool
                 switch job.state {
-                case .queued, .running, .paused, .interrupted, .needsConfiguration, .completedWithFailures:
+                case .queued, .running, .paused, .interrupted, .needsConfiguration, .completed, .completedWithFailures:
                     isReaderCandidate = true
-                case .completed, .cancelled:
+                case .cancelled:
                     isReaderCandidate = false
                 }
-                return isReaderCandidate
-                    && job.sourceLanguage == sourceLanguage
-                    && job.targetLanguage == targetLanguage
+                guard isReaderCandidate,
+                      job.sourceLanguage == sourceLanguage,
+                      job.targetLanguage == targetLanguage,
+                      let manifest = manifest(comicID: comicID, setID: job.setID),
+                      manifest.id != active?.id else {
+                    return nil
+                }
+                let updatedAt = max(job.updatedAt, manifest.updatedAt)
+                guard active.map({ updatedAt > $0.updatedAt }) ?? true else {
+                    return nil
+                }
+                return (manifest, updatedAt)
             }
             .sorted { $0.updatedAt > $1.updatedAt }
-            .compactMap { manifest(comicID: comicID, setID: $0.setID) }
-            .first
+            .first?.manifest
     }
 
     func saveManifest(_ manifest: OfflineTranslationSetManifest, activate: Bool = false) throws {

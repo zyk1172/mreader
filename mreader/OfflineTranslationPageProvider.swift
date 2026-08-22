@@ -178,7 +178,7 @@ nonisolated enum OfflineTranslationOverlayResult: Sendable {
     case unavailable
 }
 
-/// Reader 优先检查最新工作 Set 的当前页，再沿派生关系回退到旧 Set 和 active Set；关闭开关时完全不触碰 Translation Store。
+/// Reader 优先检查比 active 更新的工作 Set，再沿派生关系回退到旧 Set 和 active Set；关闭开关时完全不触碰 Translation Store。
 enum OfflineTranslationOverlayProvider {
     static func validOverlay(
         comic: ComicBook,
@@ -188,12 +188,12 @@ enum OfflineTranslationOverlayProvider {
     ) async -> OfflineTranslationOverlayResult {
         let storage = OfflineTranslationStorageManager.shared
         var roots: [OfflineTranslationSetManifest] = []
-        if let inProgress = await storage.inProgressManifest(
+        if let latestWork = await storage.latestRenderableManifest(
             for: comic.id,
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage
         ) {
-            roots.append(inProgress)
+            roots.append(latestWork)
         }
         if let active = await storage.activeManifest(for: comic.id, targetLanguage: targetLanguage),
            active.id != roots.first?.id {
@@ -214,7 +214,7 @@ enum OfflineTranslationOverlayProvider {
             }
         }
 
-        for candidate in candidateManifests {
+        for (candidateIndex, candidate) in candidateManifests.enumerated() {
             guard candidate.sourceLanguage == sourceLanguage,
                   candidate.targetLanguage == targetLanguage,
                   let savedPage = await storage.page(
@@ -239,17 +239,50 @@ enum OfflineTranslationOverlayProvider {
                     )
                     continue
                 }
-                let blocks = savedPage.blocks.map { $0.textBlock() }
-                if savedPage.state == .noText {
-                    return .confirmedNoText(setID: candidate.id)
+                var pageToDisplay = savedPage
+                if savedPage.state == .partial {
+                    var fallbackPages: [OfflineTranslatedPage] = []
+                    for fallbackManifest in candidateManifests.dropFirst(candidateIndex + 1)
+                    where fallbackManifest.sourceLanguage == sourceLanguage
+                        && fallbackManifest.targetLanguage == targetLanguage {
+                        if let fallback = await storage.page(
+                            comicID: comic.id,
+                            setID: fallbackManifest.id,
+                            pageIndex: page.index
+                        ) {
+                            fallbackPages.append(fallback)
+                        }
+                    }
+                    pageToDisplay = preferredOverlayPage(
+                        primary: savedPage,
+                        fallbackPages: fallbackPages
+                    )
                 }
-                return .displayed(blocks: blocks, setID: candidate.id)
+
+                let blocks = pageToDisplay.blocks.map { $0.textBlock() }
+                if pageToDisplay.state == .noText {
+                    return .confirmedNoText(setID: pageToDisplay.setID)
+                }
+                return .displayed(blocks: blocks, setID: pageToDisplay.setID)
             } catch {
                 // 原图暂时不可读时不污染旧译文，继续尝试回退 Set。
                 continue
             }
         }
         return .unavailable
+    }
+
+    /// partial 不能让旧译文中已完整翻译的气泡凭空消失。当前选择保守的整页回退：
+    /// 只有存在相同原图版本的完整父页/active 页时才替换 partial；否则仍显示新页已完成部分。
+    static func preferredOverlayPage(
+        primary: OfflineTranslatedPage,
+        fallbackPages: [OfflineTranslatedPage]
+    ) -> OfflineTranslatedPage {
+        guard primary.state == .partial else { return primary }
+        return fallbackPages.first {
+            $0.state == .completed
+                && $0.sourceFingerprint == primary.sourceFingerprint
+        } ?? primary
     }
 
     private static func manifestChain(

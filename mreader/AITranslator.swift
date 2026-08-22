@@ -884,15 +884,22 @@ class AITranslator {
                     isRightToLeft: isRightToLeft,
                     viewportAspect: max(cropImage.size.height / max(cropImage.size.width, 1), 1.25)
                 )
-                guard let best = localBlocks.max(by: { $0.confidence < $1.confidence }) else {
+                let original = corrected[originalIndex]
+                guard let match = visualVerificationMatch(
+                    for: original,
+                    candidates: localBlocks,
+                    sourceRect: region.sourceRect
+                ) else {
                     continue
                 }
-                let original = corrected[originalIndex]
+                let best = match.block
                 let correctedText = best.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !correctedText.isEmpty else { continue }
-                let correctedBox = OCRCoordinateMapper.normalizedPageRect(
-                    forSliceRect: best.boundingBox,
-                    sourceRect: region.sourceRect
+                let correctedBox = match.pageBoundingBox
+                let correctedFontScale = visualVerificationMappedFontScale(
+                    for: best,
+                    sourceRect: region.sourceRect,
+                    correctedBox: correctedBox
                 )
                 corrected[originalIndex] = TextBlock(
                     id: original.id,
@@ -903,9 +910,7 @@ class AITranslator {
                     ocrSource: "visual-review",
                     isFiltered: original.isFiltered,
                     filterReason: original.filterReason,
-                    estimatedFontScale: best.estimatedFontScale > 0
-                        ? best.estimatedFontScale
-                        : Double(min(correctedBox.width, correctedBox.height)),
+                    estimatedFontScale: correctedFontScale,
                     textColorHex: original.textColorHex,
                     polygon: original.polygon,
                     translationLines: original.translationLines,
@@ -919,6 +924,86 @@ class AITranslator {
             }
         }
         return corrected
+    }
+
+    /// 裁剪图中的 Vision 坐标需要先映射回整页，再与原 OCR block 比较；不能仅凭置信度
+    /// 把同一 crop 内相邻对白替换进来。
+    static func visualVerificationMatch(
+        for original: TextBlock,
+        candidates: [TextBlock],
+        sourceRect: CGRect
+    ) -> (block: TextBlock, pageBoundingBox: CGRect)? {
+        candidates.compactMap { candidate -> (block: TextBlock, pageBoundingBox: CGRect, score: CGFloat)? in
+            let pageBoundingBox = OCRCoordinateMapper.normalizedPageRect(
+                forSliceRect: candidate.boundingBox,
+                sourceRect: sourceRect
+            )
+            guard pageBoundingBox.width > 0, pageBoundingBox.height > 0 else { return nil }
+            let text = visualVerificationTextSimilarity(original.text, candidate.text)
+            let overlap = visualVerificationIntersectionOverUnion(
+                original.boundingBox,
+                pageBoundingBox
+            )
+            let distance = hypot(
+                original.boundingBox.midX - pageBoundingBox.midX,
+                original.boundingBox.midY - pageBoundingBox.midY
+            )
+            let proximity = max(0, 1 - distance / 0.45)
+            let confidence = min(max(CGFloat(candidate.confidence), 0), 1)
+            let score = text * 0.45 + overlap * 0.25 + proximity * 0.20 + confidence * 0.10
+            return (candidate, pageBoundingBox, score)
+        }
+        .max { $0.score < $1.score }
+        .map { ($0.block, $0.pageBoundingBox) }
+    }
+
+    /// Vision 的 estimatedFontScale 相对于 crop 归一化。映射回整页时必须沿文字方向
+    /// 乘 crop 对应轴，避免 Reader 再乘整页尺寸后将字体放大数倍。
+    static func visualVerificationMappedFontScale(
+        for candidate: TextBlock,
+        sourceRect: CGRect,
+        correctedBox: CGRect
+    ) -> Double {
+        let cropAxis = candidate.textOrientation == .horizontal
+            ? Double(sourceRect.height)
+            : Double(sourceRect.width)
+        let mapped = candidate.estimatedFontScale * cropAxis
+        guard mapped.isFinite, mapped > 0 else {
+            return candidate.textOrientation == .horizontal
+                ? Double(correctedBox.height)
+                : Double(correctedBox.width)
+        }
+        return mapped
+    }
+
+    private static func visualVerificationIntersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        let union = lhs.width * lhs.height + rhs.width * rhs.height - intersection.width * intersection.height
+        return union > 0 ? intersection.width * intersection.height / union : 0
+    }
+
+    private static func visualVerificationTextSimilarity(_ lhs: String, _ rhs: String) -> CGFloat {
+        let left = lhs.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+        let right = rhs.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        if left == right { return 1 }
+        if left.contains(right) || right.contains(left) {
+            return CGFloat(min(left.count, right.count)) / CGFloat(max(left.count, right.count))
+        }
+        let leftScalars = Array(left.unicodeScalars)
+        let rightScalars = Array(right.unicodeScalars)
+        var previous = Array(repeating: 0, count: rightScalars.count + 1)
+        for leftScalar in leftScalars {
+            var current = Array(repeating: 0, count: rightScalars.count + 1)
+            for (index, rightScalar) in rightScalars.enumerated() {
+                current[index + 1] = leftScalar == rightScalar
+                    ? previous[index] + 1
+                    : max(previous[index + 1], current[index])
+            }
+            previous = current
+        }
+        return CGFloat(previous.last ?? 0) / CGFloat(max(leftScalars.count, rightScalars.count))
     }
 
     private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
@@ -1191,8 +1276,7 @@ class AITranslator {
             "type": "object",
             "additionalProperties": false,
             "required": [
-                "id", "sourceText", "translation", "translationLines", "textBox", "bubbleBox",
-                "textPolygon", "bubblePolygon", "confidence", "classification"
+                "sourceText", "translation", "textBox", "bubbleBox", "confidence", "classification"
             ],
             "properties": [
                 "id": ["type": "string"],
@@ -1588,14 +1672,12 @@ class AITranslator {
                       !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw VisionTranslationError.protocolViolation("缺少必需 sourceText")
                 }
-                let rawLines = (item["translationLines"] as? [String])?
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty } ?? []
                 let translation = (item["translation"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 // 离线协议要求模型直接省略 URL/水印等非内容项；保留了 item 却返回空译文
-                // 说明协议被破坏，不能把整页误记为“没有文字”。空 items 仍是合法的 noText 结果。
-                guard !translation.isEmpty, !rawLines.isEmpty else {
+                // 说明协议被破坏，不能把整页误记为“没有文字”。translationLines 仅是换行建议，
+                // 合法的空数组由 Reader 根据 translation 自行排版。
+                guard !translation.isEmpty else {
                     throw VisionTranslationError.missingTranslation
                 }
                 guard rectValue(from: item["textBox"]) != nil else {
@@ -1603,10 +1685,6 @@ class AITranslator {
                 }
                 guard rectValue(from: item["bubbleBox"]) != nil else {
                     throw VisionTranslationError.protocolViolation("缺少必需 bubbleBox")
-                }
-                guard let textPolygon = pointsValue(from: item["textPolygon"]), textPolygon.count >= 4,
-                      let bubblePolygon = pointsValue(from: item["bubblePolygon"]), bubblePolygon.count >= 4 else {
-                    throw VisionTranslationError.protocolViolation("缺少必需四点 polygon")
                 }
                 guard let confidence = doubleValue(from: item["confidence"]), confidence.isFinite,
                       (0...1).contains(confidence) else {
