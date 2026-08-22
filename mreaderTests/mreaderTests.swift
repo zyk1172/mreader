@@ -3299,30 +3299,12 @@ private func makeTestPageRequest(
 
     @Test func offlineTranslationBackgroundPreparationSurvivesStartupDeadline() {
         let jobID = UUID()
+        let otherJobID = UUID()
         #expect(
             OfflineTranslationCoordinatorWaitDecision.resolve(
                 targetJobID: jobID,
                 preparingJobID: jobID,
-                currentJobID: nil,
-                isRunning: false,
-                canStart: false,
-                didTimeout: true
-            ) == .wait
-        )
-        #expect(
-            OfflineTranslationCoordinatorWaitDecision.resolve(
-                targetJobID: jobID,
-                preparingJobID: nil,
-                currentJobID: nil,
-                isRunning: false,
-                canStart: true,
-                didTimeout: false
-            ) == .startupFailed
-        )
-        #expect(
-            OfflineTranslationCoordinatorWaitDecision.resolve(
-                targetJobID: jobID,
-                preparingJobID: nil,
+                activeTaskJobID: jobID,
                 currentJobID: jobID,
                 isRunning: false,
                 canStart: false,
@@ -3333,6 +3315,29 @@ private func makeTestPageRequest(
             OfflineTranslationCoordinatorWaitDecision.resolve(
                 targetJobID: jobID,
                 preparingJobID: nil,
+                activeTaskJobID: nil,
+                currentJobID: nil,
+                isRunning: false,
+                canStart: true,
+                didTimeout: false
+            ) == .startupFailed
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: otherJobID,
+                activeTaskJobID: otherJobID,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: false,
+                didTimeout: true
+            ) == .finished
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                activeTaskJobID: nil,
                 currentJobID: jobID,
                 isRunning: false,
                 canStart: true,
@@ -3353,6 +3358,23 @@ private func makeTestPageRequest(
         #expect(
             OfflineTranslationCancellationDisposition.resolve(stopMode: .pause)
                 == .paused
+        )
+    }
+
+    @Test func offlineTranslationExpirationCannotInterruptAnotherJob() {
+        let jobA = UUID()
+        let jobB = UUID()
+        #expect(
+            OfflineTranslationExpirationDecision.resolve(
+                expiredJobID: jobA,
+                activeTaskJobID: jobB
+            ) == .ignore
+        )
+        #expect(
+            OfflineTranslationExpirationDecision.resolve(
+                expiredJobID: jobB,
+                activeTaskJobID: jobB
+            ) == .interrupt
         )
     }
 

@@ -72,6 +72,19 @@ nonisolated enum OfflineTranslationCancellationDisposition: Equatable, Sendable 
     }
 }
 
+nonisolated enum OfflineTranslationExpirationDecision: Equatable, Sendable {
+    case ignore
+    case interrupt
+
+    static func resolve(expiredJobID: UUID?, activeTaskJobID: UUID?) -> Self {
+        guard let expiredJobID, let activeTaskJobID,
+              expiredJobID == activeTaskJobID else {
+            return .ignore
+        }
+        return .interrupt
+    }
+}
+
 /// 整本任务的唯一执行协调器：全局单任务、固定批次并发，checkpoint 顺序为 page -> manifest -> job。
 @MainActor
 final class OfflineTranslationCoordinator: ObservableObject {
@@ -85,6 +98,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var isRunning = false
     @Published private(set) var preparingJobID: UUID?
+    @Published private(set) var activeTaskJobID: UUID?
     @Published private(set) var lastError: String?
 
     private let storage = OfflineTranslationStorageManager.shared
@@ -116,9 +130,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
         guard task == nil else { return }
         lastError = nil
         stopMode = nil
+        let taskJobID = UUID()
+        preparingJobID = taskJobID
+        activeTaskJobID = taskJobID
         task = Task { [weak self] in
             guard let self else { return }
             await self.startNewJob(
+                jobID: taskJobID,
                 comic: comic,
                 selection: selection,
                 sourceLanguage: sourceLanguage,
@@ -147,6 +165,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
         guard task == nil else { return }
         lastError = nil
         preparingJobID = savedJob.id
+        activeTaskJobID = savedJob.id
         task = Task { [weak self] in
             guard let self else { return }
             await self.resumeJob(
@@ -221,8 +240,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
     }
 
     /// BGTask 到期属于系统中断：保存为 interrupted 并保留 pending 标记，供下次启动自动续传。
-    func suspendForSystemExpiration() {
-        guard task != nil else { return }
+    func suspendForSystemExpiration(for expiredJobID: UUID) {
+        guard task != nil,
+              OfflineTranslationExpirationDecision.resolve(
+                  expiredJobID: expiredJobID,
+                  activeTaskJobID: activeTaskJobID
+              ) == .interrupt else {
+            return
+        }
         stopMode = .systemInterruption
         task?.cancel()
     }
@@ -238,6 +263,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
     }
 
     private func startNewJob(
+        jobID: UUID,
         comic: ComicBook,
         selection: OfflineTranslationSelection,
         sourceLanguage: TranslationSourceLanguage,
@@ -253,6 +279,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
         usesVisualOCRVerification: Bool,
         sourceSetID: UUID?
     ) async {
+        defer {
+            if preparingJobID == jobID {
+                preparingJobID = nil
+            }
+            if activeTaskJobID == jobID {
+                activeTaskJobID = nil
+            }
+        }
         var persistedSetID: UUID?
         var jobWasSaved = false
         do {
@@ -336,6 +370,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             }
 
             var record = OfflineTranslationJobRecord(
+                id: jobID,
                 comicID: comic.id,
                 setID: manifestValue.id,
                 selection: selection,
@@ -367,6 +402,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 ? 1
                 : Double(record.nextPageOffset) / Double(record.pageIndexes.count)
             isRunning = true
+            preparingJobID = nil
             await execute(
                 record,
                 comic: comic,
@@ -391,7 +427,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
         styleInstructions: String,
         submitBackgroundContinuation: Bool
     ) async {
-        defer { preparingJobID = nil }
+        defer {
+            if preparingJobID == savedJob.id {
+                preparingJobID = nil
+            }
+            if activeTaskJobID == savedJob.id {
+                activeTaskJobID = nil
+            }
+        }
         do {
             guard savedJob.promptRevision == OfflineTranslationPromptBuilder.revision else {
                 throw OfflineTranslationRunError.needsConfiguration(
@@ -552,6 +595,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
             isRunning = false
             task = nil
             stopMode = nil
+            if activeTaskJobID == initialJob.id {
+                activeTaskJobID = nil
+            }
         }
 
         // 页文件状态是断点续传的事实来源，但不能在每个 3 页 batch 重复扫描整本 JSON。

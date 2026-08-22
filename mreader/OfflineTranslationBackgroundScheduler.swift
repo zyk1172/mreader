@@ -25,6 +25,7 @@ nonisolated enum OfflineTranslationCoordinatorWaitDecision: Equatable, Sendable 
     static func resolve(
         targetJobID: UUID,
         preparingJobID: UUID?,
+        activeTaskJobID: UUID?,
         currentJobID: UUID?,
         isRunning: Bool,
         canStart: Bool,
@@ -35,14 +36,11 @@ nonisolated enum OfflineTranslationCoordinatorWaitDecision: Equatable, Sendable 
             // fallback window for a multi-gigabyte local archive.
             return .wait
         }
+        if activeTaskJobID == targetJobID {
+            return .wait
+        }
         if currentJobID == targetJobID {
-            // The coordinator publishes the Job before reconciling its manifest and
-            // setting isRunning. A live task with canStart == false is still in the
-            // hand-off/preparation transition and must not be reported as finished.
-            if isRunning || !canStart {
-                return .wait
-            }
-            return .finished
+            return isRunning ? .wait : .finished
         }
         if canStart || didTimeout {
             return .startupFailed
@@ -209,9 +207,11 @@ final class OfflineTranslationBackgroundScheduler {
     }
 
     private func handle(_ task: BGTask) async {
+        let deliveredJobID = jobID(for: task)
         task.expirationHandler = {
             Task { @MainActor in
-                OfflineTranslationCoordinator.shared.suspendForSystemExpiration()
+                guard let deliveredJobID else { return }
+                OfflineTranslationCoordinator.shared.suspendForSystemExpiration(for: deliveredJobID)
             }
         }
         await startupRecoveryTask?.value
@@ -231,14 +231,25 @@ final class OfflineTranslationBackgroundScheduler {
             // 系统迟到交付的 Job A 绝不能读取当前 pending Job B 并错误恢复 B。
             return false
         }
-        if OfflineTranslationCoordinator.shared.isRunning {
-            guard OfflineTranslationCoordinator.shared.job?.id == jobID else { return false }
+        let coordinator = OfflineTranslationCoordinator.shared
+        if let activeTaskJobID = coordinator.activeTaskJobID {
+            guard activeTaskJobID == jobID else { return false }
             if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
                 await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
             } else {
                 await waitForCoordinator(jobID: jobID)
             }
-            let state = OfflineTranslationCoordinator.shared.job?.state
+            let state = coordinator.job?.state
+            return state == .completed || state == .completedWithFailures
+        }
+        if coordinator.isRunning {
+            guard coordinator.job?.id == jobID else { return false }
+            if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+                await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
+            } else {
+                await waitForCoordinator(jobID: jobID)
+            }
+            let state = coordinator.job?.state
             return state == .completed || state == .completedWithFailures
         }
 
@@ -326,6 +337,7 @@ final class OfflineTranslationBackgroundScheduler {
             switch OfflineTranslationCoordinatorWaitDecision.resolve(
                 targetJobID: jobID,
                 preparingJobID: coordinator.preparingJobID,
+                activeTaskJobID: coordinator.activeTaskJobID,
                 currentJobID: coordinator.job?.id,
                 isRunning: coordinator.isRunning,
                 canStart: coordinator.canStart,
@@ -352,6 +364,7 @@ final class OfflineTranslationBackgroundScheduler {
             switch OfflineTranslationCoordinatorWaitDecision.resolve(
                 targetJobID: jobID,
                 preparingJobID: coordinator.preparingJobID,
+                activeTaskJobID: coordinator.activeTaskJobID,
                 currentJobID: coordinator.job?.id,
                 isRunning: coordinator.isRunning,
                 canStart: coordinator.canStart,
@@ -367,5 +380,14 @@ final class OfflineTranslationBackgroundScheduler {
             continuedTask.progress.completedUnitCount = Int64(coordinator.progress * 100)
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
+    }
+
+    private func jobID(for task: BGTask) -> UUID? {
+        if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+            let prefix = continuedIdentifier + "."
+            guard continued.identifier.hasPrefix(prefix) else { return nil }
+            return UUID(uuidString: String(continued.identifier.dropFirst(prefix.count)))
+        }
+        return pendingJobID
     }
 }
