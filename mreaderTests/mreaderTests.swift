@@ -1391,7 +1391,8 @@ struct mreaderTests {
         #expect(
             AITranslator.sanitizedTranslationTextForDiagnostics(
                 "译文：こんにちは",
-                sourceText: "你好"
+                sourceText: "你好",
+                target: .japanese
             ) == "こんにちは"
         )
     }

@@ -79,8 +79,13 @@ actor OfflineTranslationStorageManager {
         targetLanguage: TranslationTargetLanguage
     ) -> OfflineTranslationSetManifest? {
         let active = activeManifest(for: comicID, targetLanguage: targetLanguage)
+        // JSONEncoder 的 ISO8601 日期精度不足以区分同一秒内连续创建的范围任务。
+        // Index 的 setIDs 保留 append 顺序，是可靠的最终 tie-break，不能用随机 UUID 决定新旧。
+        let setOrder = Dictionary(
+            uniqueKeysWithValues: (index(for: comicID)?.setIDs ?? []).enumerated().map { ($1, $0) }
+        )
         return jobs(comicID: comicID)
-            .compactMap { job -> (manifest: OfflineTranslationSetManifest, updatedAt: Date)? in
+            .compactMap { job -> (manifest: OfflineTranslationSetManifest, updatedAt: Date, order: Int)? in
                 let isReaderCandidate: Bool
                 switch job.state {
                 case .queued, .running, .paused, .interrupted, .needsConfiguration, .completed, .completedWithFailures:
@@ -99,7 +104,7 @@ actor OfflineTranslationStorageManager {
                 guard active.map({ updatedAt > $0.updatedAt }) ?? true else {
                     return nil
                 }
-                return (manifest, updatedAt)
+                return (manifest, updatedAt, setOrder[manifest.id] ?? -1)
             }
             .sorted {
                 if $0.updatedAt != $1.updatedAt {
@@ -109,6 +114,9 @@ actor OfflineTranslationStorageManager {
                 // 同分时优先使用新 Set，避免前一次范围任务随机盖住后一次。
                 if $0.manifest.createdAt != $1.manifest.createdAt {
                     return $0.manifest.createdAt > $1.manifest.createdAt
+                }
+                if $0.order != $1.order {
+                    return $0.order > $1.order
                 }
                 return $0.manifest.id.uuidString > $1.manifest.id.uuidString
             }
