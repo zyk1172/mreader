@@ -55,9 +55,10 @@ nonisolated enum OfflineTranslationPageProvider {
     ) -> Bool {
         switch comic.sourceType {
         case .local:
-            let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
-                ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
-            return resolvedURL?.hasDirectoryPath == true
+            // 文件夹需要汇总所有页面字节，CBZ/PDF/EPUB 需要读取整个归档文件；两者
+            // 都不能放进每个小 batch 的 revision 校验热路径。session 参数保留给
+            // 调用方统一传递源访问上下文，但这里按源类型直接判定成本。
+            return true
         case .komga, .opds:
             // 远程 revision 需要请求 Book 元数据或 HTTP headers，同样不能按每 3 页轮询。
             return true

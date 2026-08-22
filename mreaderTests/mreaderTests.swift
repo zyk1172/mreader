@@ -3304,6 +3304,22 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationPageProvider.isReliableSourceRevision(second))
     }
 
+    @Test func offlineTranslationTreatsLocalSingleFileAsExpensiveRevision() {
+        let comic = ComicBook(
+            title: "local.cbz",
+            bookmarkData: Data(),
+            totalPages: 1,
+            libraryPath: "/tmp/local.cbz",
+            chapterTypeRaw: "cbz"
+        )
+        #expect(
+            OfflineTranslationPageProvider.usesExpensiveSourceRevision(for: comic)
+        )
+        #expect(
+            !OfflineTranslationPageProvider.shouldPeriodicallyValidateSourceRevision(for: comic)
+        )
+    }
+
     @Test func offlineTranslationPendingRecoveryDistinguishesLoadingMissingAndResumable() {
         #expect(
             OfflineTranslationPendingRecoveryDecision.resolve(
