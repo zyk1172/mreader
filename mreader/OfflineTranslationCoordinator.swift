@@ -49,6 +49,29 @@ nonisolated private struct OfflineTranslationRetryFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+nonisolated enum OfflineTranslationStopMode: Equatable, Sendable {
+    case pause
+    case cancel
+    case systemInterruption
+}
+
+nonisolated enum OfflineTranslationCancellationDisposition: Equatable, Sendable {
+    case paused
+    case cancelled
+    case interrupted
+
+    static func resolve(stopMode: OfflineTranslationStopMode?) -> Self {
+        switch stopMode {
+        case .cancel:
+            return .cancelled
+        case .systemInterruption:
+            return .interrupted
+        default:
+            return .paused
+        }
+    }
+}
+
 /// 整本任务的唯一执行协调器：全局单任务、固定批次并发，checkpoint 顺序为 page -> manifest -> job。
 @MainActor
 final class OfflineTranslationCoordinator: ObservableObject {
@@ -61,19 +84,14 @@ final class OfflineTranslationCoordinator: ObservableObject {
     @Published private(set) var manifest: OfflineTranslationSetManifest?
     @Published private(set) var progress: Double = 0
     @Published private(set) var isRunning = false
+    @Published private(set) var preparingJobID: UUID?
     @Published private(set) var lastError: String?
 
     private let storage = OfflineTranslationStorageManager.shared
     private let jobStore = OfflineTranslationJobStore.shared
     private var task: Task<Void, Never>?
-    private var stopMode: StopMode?
+    private var stopMode: OfflineTranslationStopMode?
     private var isPreparingRebind = false
-
-    private enum StopMode: Equatable {
-        case pause
-        case cancel
-        case systemInterruption
-    }
 
     private init() {}
 
@@ -127,6 +145,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
     ) {
         guard task == nil else { return }
         lastError = nil
+        preparingJobID = savedJob.id
         task = Task { [weak self] in
             guard let self else { return }
             await self.resumeJob(
@@ -245,7 +264,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             let sourceSession = OfflineTranslationPageProvider.sourceSession(for: comic)
             let pages = try await loadPages(for: comic)
             let totalPages = pages.count
-            let sourceRevision = await OfflineTranslationPageProvider.sourceRevision(for: comic, session: sourceSession)
+            let sourceRevision = try await OfflineTranslationPageProvider.sourceRevision(for: comic, session: sourceSession)
             let promptSnapshot = OfflineTranslationPromptBuilder.make(
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
@@ -371,6 +390,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
         styleInstructions: String,
         submitBackgroundContinuation: Bool
     ) async {
+        defer { preparingJobID = nil }
         do {
             guard savedJob.promptRevision == OfflineTranslationPromptBuilder.revision else {
                 throw OfflineTranslationRunError.needsConfiguration(
@@ -403,6 +423,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             if submitBackgroundContinuation {
                 OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             }
+            preparingJobID = nil
             job = record
             manifest = try? await storage.reconcileManifest(comicID: record.comicID, setID: record.setID)
             progress = record.pageIndexes.isEmpty
@@ -417,6 +438,33 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 styleInstructions: styleInstructions,
                 sourceSession: sourceSession
             )
+        } catch is CancellationError {
+            isRunning = false
+            var recoveryJob = savedJob
+            switch OfflineTranslationCancellationDisposition.resolve(stopMode: stopMode) {
+            case .cancelled:
+                recoveryJob.state = .cancelled
+                recoveryJob.pauseReason = nil
+                recoveryJob.lastError = "用户取消了任务"
+            case .interrupted:
+                recoveryJob.state = .interrupted
+                recoveryJob.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
+                recoveryJob.lastError = "系统中断，应用下次启动后自动继续"
+            case .paused:
+                recoveryJob.state = .paused
+                recoveryJob.pauseReason = OfflineTranslationPauseReason.userRequested.rawValue
+                recoveryJob.lastError = "任务已暂停，可继续处理"
+            }
+            recoveryJob.updatedAt = Date()
+            try? await jobStore.save(recoveryJob)
+            job = recoveryJob
+            lastError = recoveryJob.lastError
+            if OfflineTranslationCancellationDisposition.resolve(stopMode: stopMode) != .interrupted {
+                OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: savedJob.id)
+            }
+            manifest = await storage.manifest(comicID: recoveryJob.comicID, setID: recoveryJob.setID)
+            stopMode = nil
+            task = nil
         } catch {
             isRunning = false
             lastError = error.localizedDescription
@@ -451,7 +499,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
         ) else {
             throw OfflineTranslationRunError.failed("找不到离线翻译任务对应的译本")
         }
-        let currentRevision = await OfflineTranslationPageProvider.sourceRevision(
+        let currentRevision = try await OfflineTranslationPageProvider.sourceRevision(
             for: comic,
             session: sourceSession
         )
@@ -760,16 +808,16 @@ final class OfflineTranslationCoordinator: ObservableObject {
             synchronizeRecordWithPageFacts(&record, states: pageStateSnapshot)
             record.activePageIndexes = []
             record.currentPageIndex = nil
-            switch stopMode {
-            case .cancel:
+            switch OfflineTranslationCancellationDisposition.resolve(stopMode: stopMode) {
+            case .cancelled:
                 record.state = .cancelled
                 record.pauseReason = nil
                 record.lastError = "用户取消了任务"
-            case .systemInterruption:
+            case .interrupted:
                 record.state = .interrupted
                 record.pauseReason = OfflineTranslationPauseReason.interrupted.rawValue
                 record.lastError = "系统中断，应用下次启动后自动继续"
-            default:
+            case .paused:
                 record.state = .paused
                 record.pauseReason = OfflineTranslationPauseReason.userRequested.rawValue
                 record.lastError = "任务已暂停，可继续处理"
@@ -778,7 +826,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             try? await jobStore.save(record)
             job = record
             lastError = record.lastError
-            if stopMode != .systemInterruption {
+            if OfflineTranslationCancellationDisposition.resolve(stopMode: stopMode) != .interrupted {
                 OfflineTranslationBackgroundScheduler.shared.clearPending(jobID: record.id)
             }
             manifest = await storage.manifest(comicID: record.comicID, setID: record.setID)

@@ -79,7 +79,8 @@ nonisolated enum OfflineTranslationPageProvider {
         }
     }
 
-    static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) async -> String {
+    static func sourceRevision(for comic: ComicBook, session: SourceSession? = nil) async throws -> String {
+        try Task.checkCancellation()
         switch comic.sourceType {
         case .local:
             let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
@@ -89,23 +90,38 @@ nonisolated enum OfflineTranslationPageProvider {
             }
             let fallbackPath = comic.libraryPath ?? resolvedURL.standardizedFileURL.path
             let pageCount = comic.totalPages
-            return await Task.detached(priority: .utility) { [resolvedURL, fallbackPath, pageCount, session] in
+            let fallbackRevision = resolvedURL.hasDirectoryPath
+                ? "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
+                : "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
+            let worker = Task.detached(priority: .utility) { [resolvedURL, fallbackPath, pageCount, session] () throws -> String in
                 // 保持 SourceSession 存活，确保整个 detached worker 生命周期内 security-scoped
                 // resource 仍然有效。具体 hash 工作在非 MainActor 上执行。
                 _ = session
                 if resolvedURL.hasDirectoryPath {
-                    return localFolderSourceRevision(
+                    return try localFolderSourceRevisionThrowing(
                         at: resolvedURL,
                         fallbackPath: fallbackPath,
                         pageCount: pageCount
                     )
                 }
-                return localFileSourceRevision(
+                return try localFileSourceRevisionThrowing(
                     at: resolvedURL,
                     fallbackPath: fallbackPath,
                     pageCount: pageCount
                 )
-            }.value
+            }
+            do {
+                let revision = try await withTaskCancellationHandler(
+                    operation: { try await worker.value },
+                    onCancel: { worker.cancel() }
+                )
+                try Task.checkCancellation()
+                return revision
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return fallbackRevision
+            }
         case .komga:
             return await komgaSourceRevision(for: comic)
         case .opds:
@@ -139,6 +155,18 @@ nonisolated enum OfflineTranslationPageProvider {
         fallbackPath: String,
         pageCount: Int
     ) -> String {
+        (try? localFolderSourceRevisionThrowing(
+            at: rootURL,
+            fallbackPath: fallbackPath,
+            pageCount: pageCount
+        )) ?? "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
+    }
+
+    private static func localFolderSourceRevisionThrowing(
+        at rootURL: URL,
+        fallbackPath: String,
+        pageCount: Int
+    ) throws -> String {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
@@ -153,6 +181,7 @@ nonisolated enum OfflineTranslationPageProvider {
         var descriptors: [String] = []
         var couldNotHashEveryPage = false
         for case let fileURL as URL in enumerator {
+            try Task.checkCancellation()
             guard imageExtensions.contains(fileURL.pathExtension.lowercased()),
                   let values = try? fileURL.resourceValues(forKeys: keys),
                   values.isRegularFile == true else {
@@ -185,9 +214,19 @@ nonisolated enum OfflineTranslationPageProvider {
         fallbackPath: String,
         pageCount: Int
     ) -> String {
-        guard let digest = try? OfflineTranslationFingerprint.sha256(fileAt: fileURL) else {
-            return "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
-        }
+        (try? localFileSourceRevisionThrowing(
+            at: fileURL,
+            fallbackPath: fallbackPath,
+            pageCount: pageCount
+        )) ?? "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
+    }
+
+    private static func localFileSourceRevisionThrowing(
+        at fileURL: URL,
+        fallbackPath: String,
+        pageCount: Int
+    ) throws -> String {
+        let digest = try OfflineTranslationFingerprint.sha256(fileAt: fileURL)
         return "local-file:\(fallbackPath)#\(digest)#pages=\(pageCount)"
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {

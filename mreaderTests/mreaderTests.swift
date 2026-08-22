@@ -3277,6 +3277,65 @@ private func makeTestPageRequest(
         )
     }
 
+    @Test func offlineTranslationStreamingSHA256CooperatesWithCancellation() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-cancel-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try Data(repeating: 0x5A, count: 4 * 1024 * 1024).write(to: fileURL)
+        let worker = Task.detached(priority: .utility) { () throws -> String in
+            await Task.yield()
+            return try OfflineTranslationFingerprint.sha256(fileAt: fileURL, chunkSize: 1)
+        }
+        worker.cancel()
+
+        do {
+            _ = try await worker.value
+            Issue.record("已取消的 streaming SHA256 不应继续完成")
+        } catch is CancellationError {
+            // expected
+        }
+    }
+
+    @Test func offlineTranslationBackgroundPreparationSurvivesStartupDeadline() {
+        let jobID = UUID()
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: jobID,
+                currentJobID: nil,
+                isRunning: false,
+                canStart: false,
+                didTimeout: true
+            ) == .wait
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                currentJobID: nil,
+                isRunning: false,
+                canStart: true,
+                didTimeout: false
+            ) == .startupFailed
+        )
+    }
+
+    @Test func offlineTranslationCancellationKeepsSystemInterruptionResumable() {
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .systemInterruption)
+                == .interrupted
+        )
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .cancel)
+                == .cancelled
+        )
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .pause)
+                == .paused
+        )
+    }
+
     @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)

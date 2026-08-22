@@ -17,6 +17,34 @@ nonisolated enum OfflineTranslationPendingRecoveryDecision: Equatable, Sendable 
     }
 }
 
+nonisolated enum OfflineTranslationCoordinatorWaitDecision: Equatable, Sendable {
+    case wait
+    case finished
+    case startupFailed
+
+    static func resolve(
+        targetJobID: UUID,
+        preparingJobID: UUID?,
+        currentJobID: UUID?,
+        isRunning: Bool,
+        canStart: Bool,
+        didTimeout: Bool
+    ) -> Self {
+        if preparingJobID == targetJobID {
+            // Source revision validation may legitimately take longer than the startup
+            // fallback window for a multi-gigabyte local archive.
+            return .wait
+        }
+        if currentJobID == targetJobID {
+            return isRunning ? .wait : .finished
+        }
+        if canStart || didTimeout {
+            return .startupFailed
+        }
+        return .wait
+    }
+}
+
 /// 后台续行只服务于用户已经显式启动的离线任务，不会在启动时自行创建 AI 请求。
 @MainActor
 final class OfflineTranslationBackgroundScheduler {
@@ -289,15 +317,18 @@ final class OfflineTranslationBackgroundScheduler {
         let startupDeadline = Date().addingTimeInterval(30)
         while true {
             let coordinator = OfflineTranslationCoordinator.shared
-            if let currentJob = coordinator.job, currentJob.id == jobID {
-                if !coordinator.isRunning {
-                    return
-                }
-            } else if coordinator.canStart {
-                // 恢复阶段在创建有效运行状态前失败，避免后台任务无限等待。
+            switch OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: coordinator.preparingJobID,
+                currentJobID: coordinator.job?.id,
+                isRunning: coordinator.isRunning,
+                canStart: coordinator.canStart,
+                didTimeout: Date() >= startupDeadline
+            ) {
+            case .finished, .startupFailed:
                 return
-            } else if Date() >= startupDeadline {
-                return
+            case .wait:
+                break
             }
 
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -312,14 +343,18 @@ final class OfflineTranslationBackgroundScheduler {
         let startupDeadline = Date().addingTimeInterval(30)
         while true {
             let coordinator = OfflineTranslationCoordinator.shared
-            if let currentJob = coordinator.job, currentJob.id == jobID {
-                if !coordinator.isRunning {
-                    return
-                }
-            } else if coordinator.canStart {
+            switch OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: coordinator.preparingJobID,
+                currentJobID: coordinator.job?.id,
+                isRunning: coordinator.isRunning,
+                canStart: coordinator.canStart,
+                didTimeout: Date() >= startupDeadline
+            ) {
+            case .finished, .startupFailed:
                 return
-            } else if Date() >= startupDeadline {
-                return
+            case .wait:
+                break
             }
 
             continuedTask.progress.totalUnitCount = 100

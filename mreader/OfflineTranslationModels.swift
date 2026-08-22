@@ -976,6 +976,7 @@ nonisolated enum OfflineTranslationFingerprint {
 
         var hasher = SHA256()
         while true {
+            try Task.checkCancellation()
             guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else {
                 break
             }
