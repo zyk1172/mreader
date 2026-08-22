@@ -361,12 +361,13 @@ actor OfflineTranslationStorageManager {
 
     func summaries(for comicID: UUID) -> [OfflineTranslationSetSummary] {
         guard let indexValue = index(for: comicID) else { return [] }
+        let allJobs = jobs(comicID: comicID)
         return indexValue.setIDs.compactMap { setID in
             guard let manifestValue = manifest(comicID: comicID, setID: setID) else { return nil }
             return OfflineTranslationSetSummary(
                 manifest: manifestValue,
                 isActive: activeManifest(for: comicID, targetLanguage: manifestValue.targetLanguage)?.id == setID,
-                jobs: jobs(comicID: comicID).filter { $0.setID == setID }
+                jobs: allJobs.filter { $0.setID == setID }
             )
         }.sorted { $0.manifest.updatedAt > $1.manifest.updatedAt }
     }
