@@ -18,6 +18,10 @@ nonisolated enum OfflineTranslationPageProviderError: LocalizedError, Sendable {
     }
 }
 
+nonisolated private final class OfflineTranslationFolderEnumerationState: @unchecked Sendable {
+    var failed = false
+}
+
 /// 统一处理本地文件、归档、Komga 和 OPDS 页面。它只读取原始页数据，不写入 ReaderImageCache。
 nonisolated enum OfflineTranslationPageProvider {
     final class SourceSession: @unchecked Sendable {
@@ -166,26 +170,42 @@ nonisolated enum OfflineTranslationPageProvider {
         )) ?? "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
     }
 
+    static func isCompleteFolderRevision(
+        enumerationFailed: Bool,
+        descriptorCount: Int,
+        pageCount: Int
+    ) -> Bool {
+        !enumerationFailed && descriptorCount == pageCount
+    }
+
     private static func localFolderSourceRevisionThrowing(
         at rootURL: URL,
         fallbackPath: String,
         pageCount: Int
     ) throws -> String {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let rootValues = try? rootURL.resourceValues(forKeys: [.isDirectoryKey]),
+              rootValues.isDirectory == true else {
+            return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
+        }
+        let enumerationState = OfflineTranslationFolderEnumerationState()
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, _ in
+                enumerationState.failed = true
+                return false
+            }
         ) else {
             return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
 
-        let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "tif", "tiff"]
         let rootPath = rootURL.standardizedFileURL.path
         var descriptors: [String] = []
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
-            guard imageExtensions.contains(fileURL.pathExtension.lowercased()) else {
+            guard ComicManager.isSupportedImageFile(fileURL) else {
                 continue
             }
             guard let values = try? fileURL.resourceValues(forKeys: keys),
@@ -201,10 +221,11 @@ nonisolated enum OfflineTranslationPageProvider {
             }
             descriptors.append("\(relativePath)#\(OfflineTranslationFingerprint.sha256(for: data))")
         }
-        // A missing or unreadable source can produce an empty enumerator rather
-        // than nil. Do not turn that absence of page evidence into a reliable
-        // digest when the comic is expected to contain pages.
-        guard !descriptors.isEmpty || pageCount == 0 else {
+        guard isCompleteFolderRevision(
+            enumerationFailed: enumerationState.failed,
+            descriptorCount: descriptors.count,
+            pageCount: pageCount
+        ) else {
             return "local-folder-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
         descriptors.sort()

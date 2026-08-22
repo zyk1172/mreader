@@ -1082,6 +1082,13 @@ class ComicManager {
         temporaryImportRoot().appendingPathComponent("WebUploads", isDirectory: true)
     }
 
+    /// Returns the same page-extension decision used by local folder scanning.
+    /// Offline translation source identity must hash exactly the files the
+    /// reader can treat as comic pages.
+    nonisolated static func isSupportedImageFile(_ url: URL) -> Bool {
+        supportedImageExtensions.contains(url.pathExtension.lowercased())
+    }
+
     nonisolated private static let supportedImageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
     nonisolated private static let supportedArchiveExtensions: Set<String> = ["zip", "cbz", "epub"]
     nonisolated private static let unsupportedArchiveExtensions: Set<String> = ["7z", "rar", "cbr"]
