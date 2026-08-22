@@ -962,7 +962,32 @@ nonisolated enum OfflineTranslationPolicyCircuit {
 
 nonisolated enum OfflineTranslationFingerprint {
     static func sha256(for data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        hex(SHA256.hash(data: data))
+    }
+
+    static func sha256(
+        fileAt fileURL: URL,
+        chunkSize: Int = 8 * 1024 * 1024
+    ) throws -> String {
+        precondition(chunkSize > 0)
+
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            try Task.checkCancellation()
+            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else {
+                break
+            }
+            hasher.update(data: chunk)
+        }
+
+        return hex(hasher.finalize())
+    }
+
+    private static func hex<S: Sequence>(_ digest: S) -> String where S.Element == UInt8 {
+        digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 

@@ -3247,6 +3247,137 @@ private func makeTestPageRequest(
         #expect(first.count == 64)
     }
 
+    @Test func offlineTranslationStreamingSHA256MatchesInMemorySHA256() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let data = Data("abcdefghijklmnopqrstuvwxyz0123456789".utf8)
+        try data.write(to: fileURL)
+
+        let memoryDigest = OfflineTranslationFingerprint.sha256(for: data)
+        let streamingDigest = try OfflineTranslationFingerprint.sha256(
+            fileAt: fileURL,
+            chunkSize: 7
+        )
+
+        #expect(streamingDigest == memoryDigest)
+    }
+
+    @Test func offlineTranslationStreamingSHA256HandlesEmptyFile() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-empty-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try Data().write(to: fileURL)
+
+        #expect(
+            try OfflineTranslationFingerprint.sha256(fileAt: fileURL)
+                == OfflineTranslationFingerprint.sha256(for: Data())
+        )
+    }
+
+    @Test func offlineTranslationStreamingSHA256CooperatesWithCancellation() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-cancel-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try Data(repeating: 0x5A, count: 4 * 1024 * 1024).write(to: fileURL)
+        let worker = Task.detached(priority: .utility) { () throws -> String in
+            await Task.yield()
+            return try OfflineTranslationFingerprint.sha256(fileAt: fileURL, chunkSize: 1)
+        }
+        worker.cancel()
+
+        do {
+            _ = try await worker.value
+            Issue.record("已取消的 streaming SHA256 不应继续完成")
+        } catch is CancellationError {
+            // expected
+        }
+    }
+
+    @Test func offlineTranslationBackgroundPreparationSurvivesStartupDeadline() {
+        let jobID = UUID()
+        let otherJobID = UUID()
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: jobID,
+                activeTaskJobID: jobID,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: false,
+                didTimeout: true
+            ) == .wait
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                activeTaskJobID: nil,
+                currentJobID: nil,
+                isRunning: false,
+                canStart: true,
+                didTimeout: false
+            ) == .startupFailed
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: otherJobID,
+                activeTaskJobID: otherJobID,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: false,
+                didTimeout: true
+            ) == .finished
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                activeTaskJobID: nil,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: true,
+                didTimeout: true
+            ) == .finished
+        )
+    }
+
+    @Test func offlineTranslationCancellationKeepsSystemInterruptionResumable() {
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .systemInterruption)
+                == .interrupted
+        )
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .cancel)
+                == .cancelled
+        )
+        #expect(
+            OfflineTranslationCancellationDisposition.resolve(stopMode: .pause)
+                == .paused
+        )
+    }
+
+    @Test func offlineTranslationExpirationCannotInterruptAnotherJob() {
+        let jobA = UUID()
+        let jobB = UUID()
+        #expect(
+            OfflineTranslationExpirationDecision.resolve(
+                expiredJobID: jobA,
+                activeTaskJobID: jobB
+            ) == .ignore
+        )
+        #expect(
+            OfflineTranslationExpirationDecision.resolve(
+                expiredJobID: jobB,
+                activeTaskJobID: jobB
+            ) == .interrupt
+        )
+    }
+
     @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)

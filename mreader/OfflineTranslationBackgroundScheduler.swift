@@ -17,6 +17,38 @@ nonisolated enum OfflineTranslationPendingRecoveryDecision: Equatable, Sendable 
     }
 }
 
+nonisolated enum OfflineTranslationCoordinatorWaitDecision: Equatable, Sendable {
+    case wait
+    case finished
+    case startupFailed
+
+    static func resolve(
+        targetJobID: UUID,
+        preparingJobID: UUID?,
+        activeTaskJobID: UUID?,
+        currentJobID: UUID?,
+        isRunning: Bool,
+        canStart: Bool,
+        didTimeout: Bool
+    ) -> Self {
+        if preparingJobID == targetJobID {
+            // Source revision validation may legitimately take longer than the startup
+            // fallback window for a multi-gigabyte local archive.
+            return .wait
+        }
+        if activeTaskJobID == targetJobID {
+            return .wait
+        }
+        if currentJobID == targetJobID {
+            return isRunning ? .wait : .finished
+        }
+        if canStart || didTimeout {
+            return .startupFailed
+        }
+        return .wait
+    }
+}
+
 /// 后台续行只服务于用户已经显式启动的离线任务，不会在启动时自行创建 AI 请求。
 @MainActor
 final class OfflineTranslationBackgroundScheduler {
@@ -175,9 +207,11 @@ final class OfflineTranslationBackgroundScheduler {
     }
 
     private func handle(_ task: BGTask) async {
+        let deliveredJobID = jobID(for: task)
         task.expirationHandler = {
             Task { @MainActor in
-                OfflineTranslationCoordinator.shared.suspendForSystemExpiration()
+                guard let deliveredJobID else { return }
+                OfflineTranslationCoordinator.shared.suspendForSystemExpiration(for: deliveredJobID)
             }
         }
         await startupRecoveryTask?.value
@@ -197,14 +231,25 @@ final class OfflineTranslationBackgroundScheduler {
             // 系统迟到交付的 Job A 绝不能读取当前 pending Job B 并错误恢复 B。
             return false
         }
-        if OfflineTranslationCoordinator.shared.isRunning {
-            guard OfflineTranslationCoordinator.shared.job?.id == jobID else { return false }
+        let coordinator = OfflineTranslationCoordinator.shared
+        if let activeTaskJobID = coordinator.activeTaskJobID {
+            guard activeTaskJobID == jobID else { return false }
             if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
                 await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
             } else {
                 await waitForCoordinator(jobID: jobID)
             }
-            let state = OfflineTranslationCoordinator.shared.job?.state
+            let state = coordinator.job?.state
+            return state == .completed || state == .completedWithFailures
+        }
+        if coordinator.isRunning {
+            guard coordinator.job?.id == jobID else { return false }
+            if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+                await waitForContinuedCoordinator(jobID: jobID, continuedTask: continued)
+            } else {
+                await waitForCoordinator(jobID: jobID)
+            }
+            let state = coordinator.job?.state
             return state == .completed || state == .completedWithFailures
         }
 
@@ -289,15 +334,19 @@ final class OfflineTranslationBackgroundScheduler {
         let startupDeadline = Date().addingTimeInterval(30)
         while true {
             let coordinator = OfflineTranslationCoordinator.shared
-            if let currentJob = coordinator.job, currentJob.id == jobID {
-                if !coordinator.isRunning {
-                    return
-                }
-            } else if coordinator.canStart {
-                // 恢复阶段在创建有效运行状态前失败，避免后台任务无限等待。
+            switch OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: coordinator.preparingJobID,
+                activeTaskJobID: coordinator.activeTaskJobID,
+                currentJobID: coordinator.job?.id,
+                isRunning: coordinator.isRunning,
+                canStart: coordinator.canStart,
+                didTimeout: Date() >= startupDeadline
+            ) {
+            case .finished, .startupFailed:
                 return
-            } else if Date() >= startupDeadline {
-                return
+            case .wait:
+                break
             }
 
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -312,19 +361,33 @@ final class OfflineTranslationBackgroundScheduler {
         let startupDeadline = Date().addingTimeInterval(30)
         while true {
             let coordinator = OfflineTranslationCoordinator.shared
-            if let currentJob = coordinator.job, currentJob.id == jobID {
-                if !coordinator.isRunning {
-                    return
-                }
-            } else if coordinator.canStart {
+            switch OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: coordinator.preparingJobID,
+                activeTaskJobID: coordinator.activeTaskJobID,
+                currentJobID: coordinator.job?.id,
+                isRunning: coordinator.isRunning,
+                canStart: coordinator.canStart,
+                didTimeout: Date() >= startupDeadline
+            ) {
+            case .finished, .startupFailed:
                 return
-            } else if Date() >= startupDeadline {
-                return
+            case .wait:
+                break
             }
 
             continuedTask.progress.totalUnitCount = 100
             continuedTask.progress.completedUnitCount = Int64(coordinator.progress * 100)
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
+    }
+
+    private func jobID(for task: BGTask) -> UUID? {
+        if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
+            let prefix = continuedIdentifier + "."
+            guard continued.identifier.hasPrefix(prefix) else { return nil }
+            return UUID(uuidString: String(continued.identifier.dropFirst(prefix.count)))
+        }
+        return pendingJobID
     }
 }
