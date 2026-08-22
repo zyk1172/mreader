@@ -84,21 +84,28 @@ nonisolated enum OfflineTranslationPageProvider {
         case .local:
             let resolvedURL = session.flatMap({ $0.hasActiveSecurityScope ? $0.resolvedURL : nil })
                 ?? (try? ComicManager.resolveBookmark(comic.bookmarkData))
-            if let resolvedURL, resolvedURL.hasDirectoryPath {
-                return localFolderSourceRevision(
-                    at: resolvedURL,
-                    fallbackPath: comic.libraryPath ?? resolvedURL.standardizedFileURL.path,
-                    pageCount: comic.totalPages
-                )
-            }
             guard let resolvedURL else {
                 return "local-file-unverified:\(comic.libraryPath ?? "")#pages=\(comic.totalPages)"
             }
-            return localFileSourceRevision(
-                at: resolvedURL,
-                fallbackPath: comic.libraryPath ?? resolvedURL.standardizedFileURL.path,
-                pageCount: comic.totalPages
-            )
+            let fallbackPath = comic.libraryPath ?? resolvedURL.standardizedFileURL.path
+            let pageCount = comic.totalPages
+            return await Task.detached(priority: .utility) { [resolvedURL, fallbackPath, pageCount, session] in
+                // 保持 SourceSession 存活，确保整个 detached worker 生命周期内 security-scoped
+                // resource 仍然有效。具体 hash 工作在非 MainActor 上执行。
+                _ = session
+                if resolvedURL.hasDirectoryPath {
+                    return localFolderSourceRevision(
+                        at: resolvedURL,
+                        fallbackPath: fallbackPath,
+                        pageCount: pageCount
+                    )
+                }
+                return localFileSourceRevision(
+                    at: resolvedURL,
+                    fallbackPath: fallbackPath,
+                    pageCount: pageCount
+                )
+            }.value
         case .komga:
             return await komgaSourceRevision(for: comic)
         case .opds:
@@ -178,10 +185,9 @@ nonisolated enum OfflineTranslationPageProvider {
         fallbackPath: String,
         pageCount: Int
     ) -> String {
-        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
+        guard let digest = try? OfflineTranslationFingerprint.sha256(fileAt: fileURL) else {
             return "local-file-unverified:\(fallbackPath)#pages=\(pageCount)"
         }
-        let digest = OfflineTranslationFingerprint.sha256(for: data)
         return "local-file:\(fallbackPath)#\(digest)#pages=\(pageCount)"
     }
     static func loadPages(for comic: ComicBook) async -> [ComicPage]? {

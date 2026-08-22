@@ -3247,6 +3247,36 @@ private func makeTestPageRequest(
         #expect(first.count == 64)
     }
 
+    @Test func offlineTranslationStreamingSHA256MatchesInMemorySHA256() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let data = Data("abcdefghijklmnopqrstuvwxyz0123456789".utf8)
+        try data.write(to: fileURL)
+
+        let memoryDigest = OfflineTranslationFingerprint.sha256(for: data)
+        let streamingDigest = try OfflineTranslationFingerprint.sha256(
+            fileAt: fileURL,
+            chunkSize: 7
+        )
+
+        #expect(streamingDigest == memoryDigest)
+    }
+
+    @Test func offlineTranslationStreamingSHA256HandlesEmptyFile() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-streaming-sha256-empty-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try Data().write(to: fileURL)
+
+        #expect(
+            try OfflineTranslationFingerprint.sha256(fileAt: fileURL)
+                == OfflineTranslationFingerprint.sha256(for: Data())
+        )
+    }
+
     @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)
