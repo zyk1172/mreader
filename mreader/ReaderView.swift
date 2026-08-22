@@ -3918,7 +3918,7 @@ struct LocalImageView: View {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
                 ColorfulTranslatedText(
-                    segments: item.blocks.compactMap {
+                    segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
                         let value = displayTranslation(for: $0)
                         return value.isEmpty ? nil : value
                     },
@@ -4100,15 +4100,21 @@ struct LocalImageView: View {
         } else {
             allowedBounds = fallbackBounds
         }
-        let translatedText = displayTranslation(for: block)
-        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: translatedText.isEmpty ? block.text : translatedText,
+        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
+            translation: translation.isEmpty ? block.text : translation,
+            translationLines: translation.isEmpty ? [] : block.translationLines,
             sourceFontSize: preferredTranslationFontSize(for: block, in: size),
             sourceRect: textRect,
             allowedBounds: allowedBounds,
             lineSpacing: 2
         )
-        return TranslationLayoutItem(blocks: [block], rect: layout.rect, fontSize: layout.fontSize)
+        return TranslationLayoutItem(
+            blocks: [block],
+            rect: choice.layout.rect,
+            fontSize: choice.layout.fontSize,
+            displayText: translation.isEmpty ? nil : choice.text
+        )
     }
 
     private func limitedTranslationFallbackBounds(around textRect: CGRect, within imageBounds: CGRect) -> CGRect {
@@ -4153,7 +4159,12 @@ struct LocalImageView: View {
                 margin: 0
             )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
-            items.append(TranslationLayoutItem(blocks: item.blocks, rect: rect, fontSize: item.fontSize))
+            items.append(TranslationLayoutItem(
+                blocks: item.blocks,
+                rect: rect,
+                fontSize: item.fontSize,
+                displayText: item.displayText
+            ))
         }
         return items
     }
@@ -4201,7 +4212,12 @@ struct LocalImageView: View {
                 bounds: transform.imageRect
             )
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
-            items.append(TranslationLayoutItem(blocks: [block], rect: rect, fontSize: uniformOCRFontSize))
+            items.append(TranslationLayoutItem(
+                blocks: [block],
+                rect: rect,
+                fontSize: uniformOCRFontSize,
+                displayText: nil
+            ))
         }
         return items
     }
@@ -4880,6 +4896,8 @@ private struct TranslationLayoutItem: Identifiable {
     let blocks: [TextBlock]
     let rect: CGRect
     let fontSize: CGFloat
+    /// 译文布局阶段选出的实际排版文本；OCR 放大气泡保持 nil。
+    let displayText: String?
 
     var id: UUID { blocks.first?.id ?? UUID() }
 }

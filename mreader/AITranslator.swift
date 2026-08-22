@@ -901,6 +901,11 @@ class AITranslator {
                     sourceRect: region.sourceRect,
                     correctedBox: correctedBox
                 )
+                let bubbleGeometry = visualVerificationMappedBubbleGeometry(
+                    for: best,
+                    sourceRect: region.sourceRect,
+                    correctedBox: correctedBox
+                )
                 corrected[originalIndex] = TextBlock(
                     id: original.id,
                     text: correctedText,
@@ -912,7 +917,9 @@ class AITranslator {
                     filterReason: original.filterReason,
                     estimatedFontScale: correctedFontScale,
                     textColorHex: original.textColorHex,
+                    bubbleBox: bubbleGeometry.bubbleBox,
                     polygon: original.polygon,
+                    bubblePolygon: bubbleGeometry.bubblePolygon,
                     translationLines: original.translationLines,
                     textOrientation: best.textOrientation
                 )
@@ -933,7 +940,7 @@ class AITranslator {
         candidates: [TextBlock],
         sourceRect: CGRect
     ) -> (block: TextBlock, pageBoundingBox: CGRect)? {
-        candidates.compactMap { candidate -> (block: TextBlock, pageBoundingBox: CGRect, score: CGFloat)? in
+        let matches = candidates.compactMap { candidate -> (block: TextBlock, pageBoundingBox: CGRect, textSimilarity: CGFloat, iou: CGFloat, proximity: CGFloat, score: CGFloat)? in
             let pageBoundingBox = OCRCoordinateMapper.normalizedPageRect(
                 forSliceRect: candidate.boundingBox,
                 sourceRect: sourceRect
@@ -951,10 +958,18 @@ class AITranslator {
             let proximity = max(0, 1 - distance / 0.45)
             let confidence = min(max(CGFloat(candidate.confidence), 0), 1)
             let score = text * 0.45 + overlap * 0.25 + proximity * 0.20 + confidence * 0.10
-            return (candidate, pageBoundingBox, score)
+            return (candidate, pageBoundingBox, text, overlap, proximity, score)
         }
-        .max { $0.score < $1.score }
-        .map { ($0.block, $0.pageBoundingBox) }
+        guard let best = matches.max(by: { $0.score < $1.score }) else { return nil }
+
+        // “最高分”不等于“可信匹配”。视觉复核一旦采用候选，会同时覆盖文字框、字号、方向和
+        // bubbleBox；因此至少要有文字证据，或同时具备足够强的几何重叠和位置证据。
+        let hasTextEvidence = best.textSimilarity >= 0.35
+        let hasGeometryEvidence = best.iou >= 0.18 && best.proximity >= 0.65
+        guard best.score >= 0.42, hasTextEvidence || hasGeometryEvidence else {
+            return nil
+        }
+        return (best.block, best.pageBoundingBox)
     }
 
     /// Vision 的 estimatedFontScale 相对于 crop 归一化。映射回整页时必须沿文字方向
@@ -974,6 +989,42 @@ class AITranslator {
                 : Double(correctedBox.width)
         }
         return mapped
+    }
+
+    /// 视觉复核请求的坐标相对于局部 crop。只有模型给出的 bubbleBox 能够合理容纳已经
+    /// 映射回整页的 textBox 时，才把它作为真实气泡边界保存；纯本地 OCR 则仍保持 nil，
+    /// 由 Reader 的有限 fallbackBounds 处理。
+    static func visualVerificationMappedBubbleGeometry(
+        for candidate: TextBlock,
+        sourceRect: CGRect,
+        correctedBox: CGRect
+    ) -> (bubbleBox: CGRect?, bubblePolygon: [CGPoint]) {
+        guard let localBubbleBox = candidate.bubbleBox else {
+            return (nil, [])
+        }
+        let mappedBubbleBox = OCRCoordinateMapper.normalizedPageRect(
+            forSliceRect: localBubbleBox,
+            sourceRect: sourceRect
+        )
+        let toleranceX = max(0.004, correctedBox.width * 0.10)
+        let toleranceY = max(0.004, correctedBox.height * 0.10)
+        guard isUsableVisionRect(mappedBubbleBox),
+              mappedBubbleBox.width >= correctedBox.width * 0.8,
+              mappedBubbleBox.height >= correctedBox.height * 0.8,
+              mappedBubbleBox.insetBy(dx: -toleranceX, dy: -toleranceY).contains(correctedBox) else {
+            return (nil, [])
+        }
+        let mappedBubblePolygon = candidate.bubblePolygon.compactMap { point -> CGPoint? in
+            guard point.x.isFinite, point.y.isFinite,
+                  (0...1).contains(point.x), (0...1).contains(point.y) else {
+                return nil
+            }
+            return CGPoint(
+                x: sourceRect.minX + point.x * sourceRect.width,
+                y: sourceRect.minY + point.y * sourceRect.height
+            )
+        }
+        return (mappedBubbleBox, mappedBubblePolygon)
     }
 
     private static func visualVerificationIntersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {

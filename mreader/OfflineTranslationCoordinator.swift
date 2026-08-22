@@ -230,13 +230,20 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 previousContext: ""
             )
             let active = await storage.activeManifest(for: comic.id, targetLanguage: targetLanguage)
+            // 范围任务通常不会成为 active Set；下一次范围翻译仍应从最新可渲染的 Set
+            // 派生，才能累积此前已经完成的页面，而不是只保留本次选中的范围。
+            let latestRenderable = await storage.latestRenderableManifest(
+                for: comic.id,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage
+            )
             let sourceSet: OfflineTranslationSetManifest?
             if let sourceSetID {
                 // A retry/missing-pages request must inherit from the explicitly selected set,
                 // even when that set is not currently active.
                 sourceSet = await storage.manifest(comicID: comic.id, setID: sourceSetID)
             } else {
-                sourceSet = active
+                sourceSet = latestRenderable ?? active
             }
             let existingStates: [Int: OfflineTranslationPageState]
             if let sourceSet,

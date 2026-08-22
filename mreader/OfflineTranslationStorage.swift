@@ -101,7 +101,17 @@ actor OfflineTranslationStorageManager {
                 }
                 return (manifest, updatedAt)
             }
-            .sorted { $0.updatedAt > $1.updatedAt }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt {
+                    return $0.updatedAt > $1.updatedAt
+                }
+                // 快速连续创建范围任务时，文件写入时间可能落在同一个时间精度内。
+                // 同分时优先使用新 Set，避免前一次范围任务随机盖住后一次。
+                if $0.manifest.createdAt != $1.manifest.createdAt {
+                    return $0.manifest.createdAt > $1.manifest.createdAt
+                }
+                return $0.manifest.id.uuidString > $1.manifest.id.uuidString
+            }
             .first?.manifest
     }
 

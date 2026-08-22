@@ -7,8 +7,14 @@ nonisolated enum OCRBubbleLayoutEngine {
         let fontSize: CGFloat
     }
 
+    struct TranslationLayoutChoice: Sendable {
+        let text: String
+        let layout: TranslationLayout
+        let usesSuggestedLineBreaks: Bool
+    }
+
     static func preferredTranslationFontSize(sourceFontSize: CGFloat) -> CGFloat {
-        // 第一轮必须严格沿用原文字号；只有确实装不下时才由 anchoredTranslationLayout 缩小。
+        // 先尝试原文字号；气泡边界是硬约束，装不下时由 anchoredTranslationLayout 缩小文字。
         max(sourceFontSize, 1)
     }
 
@@ -117,6 +123,59 @@ nonisolated enum OCRBubbleLayoutEngine {
             }
         }
         return layout(fontSize: lower, width: width)!
+    }
+
+    /// translationLines 是模型的建议换行而不是硬排版。在同一个 allowedBounds 内分别测量
+    /// 自然换行和建议换行，优先保留能使用更大字号的版本，避免不必要的人工断行缩小文字。
+    @MainActor
+    static func preferredTranslationLayout(
+        translation: String,
+        translationLines: [String],
+        sourceFontSize: CGFloat,
+        sourceRect: CGRect,
+        allowedBounds: CGRect,
+        lineSpacing: CGFloat,
+        padding: CGFloat = 5
+    ) -> TranslationLayoutChoice {
+        let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suggestedText = translationLines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        var candidates: [(text: String, usesSuggestedLineBreaks: Bool)] = [
+            (naturalText.isEmpty ? " " : naturalText, false)
+        ]
+        if !suggestedText.isEmpty, suggestedText != naturalText {
+            candidates.append((suggestedText, true))
+        }
+
+        func makeChoice(_ candidate: (text: String, usesSuggestedLineBreaks: Bool)) -> TranslationLayoutChoice {
+            TranslationLayoutChoice(
+                text: candidate.text,
+                layout: anchoredTranslationLayout(
+                    text: candidate.text,
+                    sourceFontSize: sourceFontSize,
+                    sourceRect: sourceRect,
+                    allowedBounds: allowedBounds,
+                    lineSpacing: lineSpacing,
+                    padding: padding
+                ),
+                usesSuggestedLineBreaks: candidate.usesSuggestedLineBreaks
+            )
+        }
+
+        return candidates.dropFirst().reduce(makeChoice(candidates[0])) { best, candidate in
+            let contender = makeChoice(candidate)
+            if abs(best.layout.fontSize - contender.layout.fontSize) > 0.5 {
+                return contender.layout.fontSize > best.layout.fontSize ? contender : best
+            }
+            let bestArea = best.layout.rect.width * best.layout.rect.height
+            let contenderArea = contender.layout.rect.width * contender.layout.rect.height
+            if abs(bestArea - contenderArea) > 1 {
+                return contenderArea < bestArea ? contender : best
+            }
+            return contender.usesSuggestedLineBreaks ? contender : best
+        }
     }
 
     /// Vision bubbleBox 与本地 OCR textBox 来自不同识别源，允许少量显示坐标误差。
