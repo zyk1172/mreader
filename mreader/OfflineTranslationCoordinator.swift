@@ -115,6 +115,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
     ) {
         guard task == nil else { return }
         lastError = nil
+        stopMode = nil
         task = Task { [weak self] in
             guard let self else { return }
             await self.startNewJob(
@@ -423,13 +424,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
             if submitBackgroundContinuation {
                 OfflineTranslationBackgroundScheduler.shared.submit(job: record, comic: comic)
             }
-            preparingJobID = nil
             job = record
             manifest = try? await storage.reconcileManifest(comicID: record.comicID, setID: record.setID)
             progress = record.pageIndexes.isEmpty
                 ? 1
                 : Double(min(record.nextPageOffset, record.pageIndexes.count)) / Double(record.pageIndexes.count)
             isRunning = true
+            preparingJobID = nil
             await execute(
                 record,
                 comic: comic,

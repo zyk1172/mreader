@@ -36,7 +36,13 @@ nonisolated enum OfflineTranslationCoordinatorWaitDecision: Equatable, Sendable 
             return .wait
         }
         if currentJobID == targetJobID {
-            return isRunning ? .wait : .finished
+            // The coordinator publishes the Job before reconciling its manifest and
+            // setting isRunning. A live task with canStart == false is still in the
+            // hand-off/preparation transition and must not be reported as finished.
+            if isRunning || !canStart {
+                return .wait
+            }
+            return .finished
         }
         if canStart || didTimeout {
             return .startupFailed

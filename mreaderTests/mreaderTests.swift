@@ -3319,6 +3319,26 @@ private func makeTestPageRequest(
                 didTimeout: false
             ) == .startupFailed
         )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: false,
+                didTimeout: true
+            ) == .wait
+        )
+        #expect(
+            OfflineTranslationCoordinatorWaitDecision.resolve(
+                targetJobID: jobID,
+                preparingJobID: nil,
+                currentJobID: jobID,
+                isRunning: false,
+                canStart: true,
+                didTimeout: true
+            ) == .finished
+        )
     }
 
     @Test func offlineTranslationCancellationKeepsSystemInterruptionResumable() {
