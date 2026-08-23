@@ -161,11 +161,14 @@ nonisolated struct KomgaAPIClient: Sendable {
 
     private func send(_ request: URLRequest, maximumBytes: Int) async throws -> Data {
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await BoundedHTTPResponseReader.data(
+                for: request,
+                maximumBytes: maximumBytes
+            )
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MediaSourceError.invalidResponse
             }
-            if httpResponse.expectedContentLength > Int64(maximumBytes) || data.count > maximumBytes {
+            if data.count > maximumBytes {
                 throw MediaSourceError.serverError(413, "Komga 响应超过安全上限")
             }
             #if DEBUG
@@ -183,6 +186,8 @@ nonisolated struct KomgaAPIClient: Sendable {
                 let body = String(data: data.prefix(400), encoding: .utf8)
                 throw MediaSourceError.serverError(httpResponse.statusCode, body)
             }
+        } catch BoundedHTTPResponseError.tooLarge {
+            throw MediaSourceError.serverError(413, "Komga 响应超过安全上限")
         } catch let error as MediaSourceError {
             throw error
         } catch let error as URLError {

@@ -364,7 +364,10 @@ nonisolated private struct OPDSClient: Sendable {
             applyAuthorization(to: &request)
         }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await BoundedHTTPResponseReader.data(
+                for: request,
+                maximumBytes: OPDSResponseLimits.feedBytes
+            )
             guard let httpResponse = response as? HTTPURLResponse,
                   (200..<300).contains(httpResponse.statusCode),
                   data.count <= OPDSResponseLimits.feedBytes else {
@@ -450,7 +453,15 @@ nonisolated private struct OPDSClient: Sendable {
         if shouldForwardAuthorization(to: request.url!) {
             applyAuthorization(to: &request)
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await BoundedHTTPResponseReader.data(
+                for: request,
+                maximumBytes: OPDSResponseLimits.feedBytes
+            )
+        } catch BoundedHTTPResponseError.tooLarge {
+            throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
+        }
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MediaSourceError.invalidResponse
         }

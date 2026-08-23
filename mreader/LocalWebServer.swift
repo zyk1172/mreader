@@ -20,7 +20,7 @@ private enum LocalWebServerFileError: LocalizedError {
     }
 }
 
-private final class HTTPRequestReceiveState {
+final class HTTPRequestReceiveState {
     private static let maxHeaderBytes = 64 * 1024
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
@@ -28,13 +28,17 @@ private final class HTTPRequestReceiveState {
     private var idleWorkItem: DispatchWorkItem?
     private var didFinish = false
     private(set) var header: String?
+    private(set) var method: String?
     private(set) var contentLength = 0
     private(set) var hasContentLengthHeader = false
     private(set) var receivedBodyBytes = 0
     private(set) var bodyFileURL: URL?
 
     var isComplete: Bool {
-        header != nil && contentLength >= 0 && receivedBodyBytes == contentLength
+        guard header != nil else { return false }
+        guard method == "POST" else { return true }
+        guard hasContentLengthHeader, contentLength >= 0 else { return true }
+        return receivedBodyBytes == contentLength
     }
 
     func append(_ data: Data) throws {
@@ -46,8 +50,15 @@ private final class HTTPRequestReceiveState {
             guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
             let headerData = headerBuffer[..<headerEnd.lowerBound]
             header = String(data: headerData, encoding: .utf8) ?? ""
+            method = HTTPRequestReceiveState.method(from: header ?? "")
             hasContentLengthHeader = HTTPRequestReceiveState.hasContentLengthHeader(in: header ?? "")
-            contentLength = HTTPRequestReceiveState.contentLength(from: header ?? "") ?? -1
+            // Only the upload endpoint accepts a request body. GET/HEAD and other
+            // non-POST requests are complete as soon as their headers arrive;
+            // a POST without Content-Length is rejected by respond() instead of
+            // waiting for the client to close a keep-alive connection.
+            contentLength = method == "POST"
+                ? HTTPRequestReceiveState.contentLength(from: header ?? "") ?? -1
+                : 0
             if contentLength > 0 {
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MReaderWebUpload-\(UUID().uuidString).body")
@@ -128,6 +139,11 @@ private final class HTTPRequestReceiveState {
             .components(separatedBy: "\r\n")
             .first { $0.lowercased().hasPrefix("content-length:") }
             .flatMap { Int($0.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "") }
+    }
+
+    private static func method(from header: String) -> String? {
+        guard let firstLine = header.components(separatedBy: "\r\n").first else { return nil }
+        return firstLine.split(separator: " ", omittingEmptySubsequences: true).first.map(String.init)?.uppercased()
     }
 
     private static func hasContentLengthHeader(in header: String) -> Bool {
@@ -278,8 +294,10 @@ final class LocalWebServer: ObservableObject {
            let request = Self.requestLine(from: requestText) {
             let uploadPath = "/\(token)/upload"
             if request.method == "POST", request.path == uploadPath {
-                if !state.hasContentLengthHeader || state.contentLength < 0 || state.receivedBodyBytes != state.contentLength {
-                    response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传请求缺少有效的 Content-Length。")
+                if !state.hasContentLengthHeader {
+                    response = httpResponse(status: "411 Length Required", contentType: "text/plain; charset=utf-8", body: "上传请求必须提供 Content-Length。")
+                } else if state.contentLength < 0 || state.receivedBodyBytes != state.contentLength {
+                    response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传请求的 Content-Length 无效。")
                 } else if state.contentLength > maxUploadSize {
                     response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
                 } else {
