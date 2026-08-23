@@ -151,6 +151,7 @@ nonisolated struct MediaSourceBackup: Codable {
     var createdAt: Date
     var lastSyncAt: Date?
     var isEnabled: Bool
+    var stableSyncSourceIdentity: String?
     var apiKey: String?
 
     init(source: MediaSource, apiKey: String?) {
@@ -163,6 +164,7 @@ nonisolated struct MediaSourceBackup: Codable {
         createdAt = source.createdAt
         lastSyncAt = source.lastSyncAt
         isEnabled = source.isEnabled
+        stableSyncSourceIdentity = source.stableSyncSourceIdentity
         self.apiKey = apiKey
     }
 
@@ -176,7 +178,8 @@ nonisolated struct MediaSourceBackup: Codable {
             username: username,
             createdAt: createdAt,
             lastSyncAt: lastSyncAt,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            stableSyncSourceIdentity: stableSyncSourceIdentity
         )
     }
 }
@@ -411,12 +414,20 @@ struct ContentView: View {
             .task {
                 await reloadMediaSourceState()
                 iCloudSync.start { payload in
-                    library.applySyncedMetadata(payload)
-                    readingActivity.mergeSyncedDays(payload.activityDays)
+                    library.applySyncedMetadata(payload, mediaSources: mediaSources)
+                    readingActivity.mergeSyncedDays(
+                        payload.activityDays,
+                        comics: library.comics,
+                        sources: mediaSources
+                    )
                 }
                 if let payload = await iCloudSync.pull() {
-                    library.applySyncedMetadata(payload)
-                    readingActivity.mergeSyncedDays(payload.activityDays)
+                    library.applySyncedMetadata(payload, mediaSources: mediaSources)
+                    readingActivity.mergeSyncedDays(
+                        payload.activityDays,
+                        comics: library.comics,
+                        sources: mediaSources
+                    )
                 }
             }
             .task(id: library.isLoaded) {
@@ -1513,8 +1524,12 @@ struct ContentView: View {
                     if enabled {
                         Task {
                             if let payload = await iCloudSync.pull() {
-                                library.applySyncedMetadata(payload)
-                                readingActivity.mergeSyncedDays(payload.activityDays)
+                                library.applySyncedMetadata(payload, mediaSources: mediaSources)
+                                readingActivity.mergeSyncedDays(
+                                    payload.activityDays,
+                                    comics: library.comics,
+                                    sources: mediaSources
+                                )
                             }
                             iCloudSync.push(comics: library.comics, activityDays: readingActivity.days)
                         }

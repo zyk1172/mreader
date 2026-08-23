@@ -29,6 +29,13 @@ nonisolated struct ReadingActivityDay: Codable, Identifiable, Equatable, Sendabl
     var completedComicIDs: Set<UUID>
     var comicSeconds: [UUID: Int]
     var comicPages: [UUID: Int]
+    /// Per-device stable identities retained for iCloud merge. Local UI totals continue
+    /// using UUID dictionaries, while sync avoids double-counting a merged snapshot.
+    var syncedCompletedComicKeys: Set<String>
+    var syncedComicSeconds: [String: Int]
+    var syncedComicPages: [String: Int]
+    var syncedDeviceSeconds: [String: Int]
+    var syncedDevicePages: [String: Int]
 
     var id: String { dateKey }
 
@@ -38,7 +45,12 @@ nonisolated struct ReadingActivityDay: Codable, Identifiable, Equatable, Sendabl
         pages: Int = 0,
         completedComicIDs: Set<UUID> = [],
         comicSeconds: [UUID: Int] = [:],
-        comicPages: [UUID: Int] = [:]
+        comicPages: [UUID: Int] = [:],
+        syncedCompletedComicKeys: Set<String> = [],
+        syncedComicSeconds: [String: Int] = [:],
+        syncedComicPages: [String: Int] = [:],
+        syncedDeviceSeconds: [String: Int] = [:],
+        syncedDevicePages: [String: Int] = [:]
     ) {
         self.dateKey = dateKey
         self.seconds = seconds
@@ -46,6 +58,32 @@ nonisolated struct ReadingActivityDay: Codable, Identifiable, Equatable, Sendabl
         self.completedComicIDs = completedComicIDs
         self.comicSeconds = comicSeconds
         self.comicPages = comicPages
+        self.syncedCompletedComicKeys = syncedCompletedComicKeys
+        self.syncedComicSeconds = syncedComicSeconds
+        self.syncedComicPages = syncedComicPages
+        self.syncedDeviceSeconds = syncedDeviceSeconds
+        self.syncedDevicePages = syncedDevicePages
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case dateKey, seconds, pages, completedComicIDs, comicSeconds, comicPages
+        case syncedCompletedComicKeys, syncedComicSeconds, syncedComicPages
+        case syncedDeviceSeconds, syncedDevicePages
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        dateKey = try container.decode(String.self, forKey: .dateKey)
+        seconds = try container.decodeIfPresent(Int.self, forKey: .seconds) ?? 0
+        pages = try container.decodeIfPresent(Int.self, forKey: .pages) ?? 0
+        completedComicIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .completedComicIDs) ?? []
+        comicSeconds = try container.decodeIfPresent([UUID: Int].self, forKey: .comicSeconds) ?? [:]
+        comicPages = try container.decodeIfPresent([UUID: Int].self, forKey: .comicPages) ?? [:]
+        syncedCompletedComicKeys = try container.decodeIfPresent(Set<String>.self, forKey: .syncedCompletedComicKeys) ?? []
+        syncedComicSeconds = try container.decodeIfPresent([String: Int].self, forKey: .syncedComicSeconds) ?? [:]
+        syncedComicPages = try container.decodeIfPresent([String: Int].self, forKey: .syncedComicPages) ?? [:]
+        syncedDeviceSeconds = try container.decodeIfPresent([String: Int].self, forKey: .syncedDeviceSeconds) ?? [:]
+        syncedDevicePages = try container.decodeIfPresent([String: Int].self, forKey: .syncedDevicePages) ?? [:]
     }
 }
 
@@ -133,8 +171,80 @@ final class ReadingActivityStore: ObservableObject {
             for (comicID, pages) in incoming.comicPages {
                 existing.comicPages[comicID] = max(existing.comicPages[comicID] ?? 0, pages)
             }
+            existing.syncedCompletedComicKeys.formUnion(incoming.syncedCompletedComicKeys)
+            for (key, seconds) in incoming.syncedComicSeconds {
+                existing.syncedComicSeconds[key] = max(existing.syncedComicSeconds[key] ?? 0, seconds)
+            }
+            for (key, pages) in incoming.syncedComicPages {
+                existing.syncedComicPages[key] = max(existing.syncedComicPages[key] ?? 0, pages)
+            }
+            for (deviceID, seconds) in incoming.syncedDeviceSeconds {
+                existing.syncedDeviceSeconds[deviceID] = max(existing.syncedDeviceSeconds[deviceID] ?? 0, seconds)
+            }
+            for (deviceID, pages) in incoming.syncedDevicePages {
+                existing.syncedDevicePages[deviceID] = max(existing.syncedDevicePages[deviceID] ?? 0, pages)
+            }
             merged[incoming.dateKey] = existing
         }
+        let updated = merged.values.sorted { $0.dateKey < $1.dateKey }
+        guard updated != days else { return }
+        days = updated
+        save()
+    }
+
+    func mergeSyncedDays(
+        _ incomingDays: [ICloudReadingActivityDay],
+        comics: [ComicBook],
+        sources: [MediaSource] = []
+    ) {
+        var merged = Dictionary(uniqueKeysWithValues: days.map { ($0.dateKey, $0) })
+        let sourcesByID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+        let identityByComicID: [UUID: String] = Dictionary(uniqueKeysWithValues: comics.compactMap { comic in
+            guard let identity = ComicSyncIdentity.v2Value(for: comic, sourcesByID: sourcesByID) else { return nil }
+            return (comic.id, identity)
+        })
+
+        for incoming in incomingDays {
+            var existing = merged[incoming.dateKey] ?? ReadingActivityDay(dateKey: incoming.dateKey)
+            existing.seconds = max(existing.seconds, incoming.seconds)
+            existing.pages = max(existing.pages, incoming.pages)
+            existing.syncedCompletedComicKeys.formUnion(incoming.completedComicKeys)
+            for (key, seconds) in incoming.comicSeconds {
+                existing.syncedComicSeconds[key] = max(existing.syncedComicSeconds[key] ?? 0, seconds)
+            }
+            for (key, pages) in incoming.comicPages {
+                existing.syncedComicPages[key] = max(existing.syncedComicPages[key] ?? 0, pages)
+            }
+            for (deviceID, seconds) in incoming.deviceSeconds {
+                existing.syncedDeviceSeconds[deviceID] = max(existing.syncedDeviceSeconds[deviceID] ?? 0, seconds)
+            }
+            for (deviceID, pages) in incoming.devicePages {
+                existing.syncedDevicePages[deviceID] = max(existing.syncedDevicePages[deviceID] ?? 0, pages)
+            }
+            existing.seconds = max(existing.seconds, existing.syncedDeviceSeconds.values.reduce(0, +))
+            existing.pages = max(existing.pages, existing.syncedDevicePages.values.reduce(0, +))
+
+            for comic in comics {
+                guard let identity = identityByComicID[comic.id] else { continue }
+                let matchingSeconds = existing.syncedComicSeconds
+                    .filter { ICloudActivityIdentity.comicIdentity(from: $0.key) == identity }
+                    .values
+                    .reduce(0, +)
+                let matchingPages = existing.syncedComicPages
+                    .filter { ICloudActivityIdentity.comicIdentity(from: $0.key) == identity }
+                    .values
+                    .reduce(0, +)
+                existing.comicSeconds[comic.id] = max(existing.comicSeconds[comic.id] ?? 0, matchingSeconds)
+                existing.comicPages[comic.id] = max(existing.comicPages[comic.id] ?? 0, matchingPages)
+                if existing.syncedCompletedComicKeys.contains(where: {
+                    ICloudActivityIdentity.comicIdentity(from: $0) == identity
+                }) {
+                    existing.completedComicIDs.insert(comic.id)
+                }
+            }
+            merged[incoming.dateKey] = existing
+        }
+
         let updated = merged.values.sorted { $0.dateKey < $1.dateKey }
         guard updated != days else { return }
         days = updated

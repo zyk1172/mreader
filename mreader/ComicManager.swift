@@ -832,6 +832,19 @@ class ComicManager {
         }
     }
 
+    /// Returns a portable path relative to the selected library root. The absolute
+    /// sandbox/security-scoped path is deliberately not used for cross-device identity.
+    nonisolated static func libraryRelativePath(for url: URL) -> String? {
+        guard let root = selectedLibraryRootURL() else { return nil }
+        let rootPath = root.standardizedFileURL.path
+        let filePath = url.standardizedFileURL.path
+        guard filePath == rootPath || filePath.hasPrefix(rootPath + "/") else { return nil }
+        guard filePath.count > rootPath.count else { return nil }
+        return String(filePath.dropFirst(rootPath.count + 1))
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .joined(separator: "/")
+    }
+
     nonisolated static func withSelectedLibraryRoot<T>(_ body: (URL) throws -> T) rethrows -> T? {
         guard let url = selectedLibraryRootURL() else { return nil }
         let didStart = url.startAccessingSecurityScopedResource()

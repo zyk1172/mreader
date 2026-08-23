@@ -38,6 +38,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var coverImagePath: String?
     var fileSize: Int64
     var libraryPath: String?
+    var libraryRelativePath: String?
     var sourceTypeRaw: String
     var sourceURL: String?
     var mediaSourceID: UUID?
@@ -53,6 +54,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var currentPageIndex: Int
     var furthestPageIndex: Int
     var progressUpdatedAt: Date
+    var metadataUpdatedAt: Date
     var hasBeenOpened: Bool
     var scrollProgress: Double
     var scrollPageProgress: Double
@@ -89,7 +91,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
-    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -97,6 +99,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.coverImagePath = coverImagePath
         self.fileSize = fileSize
         self.libraryPath = libraryPath
+        self.libraryRelativePath = libraryRelativePath
         self.sourceTypeRaw = sourceTypeRaw
         self.sourceURL = sourceURL
         self.mediaSourceID = mediaSourceID
@@ -112,6 +115,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.currentPageIndex = currentPageIndex
         self.furthestPageIndex = max(currentPageIndex, furthestPageIndex ?? currentPageIndex)
         self.progressUpdatedAt = progressUpdatedAt
+        self.metadataUpdatedAt = metadataUpdatedAt
         self.hasBeenOpened = hasBeenOpened
         self.scrollProgress = scrollProgress
         self.scrollPageProgress = scrollPageProgress
@@ -145,6 +149,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         coverImagePath = try container.decodeIfPresent(String.self, forKey: .coverImagePath)
         fileSize = try container.decodeIfPresent(Int64.self, forKey: .fileSize) ?? 0
         libraryPath = try container.decodeIfPresent(String.self, forKey: .libraryPath)
+        libraryRelativePath = try container.decodeIfPresent(String.self, forKey: .libraryRelativePath)
         sourceTypeRaw = try container.decodeIfPresent(String.self, forKey: .sourceTypeRaw) ?? ComicSourceType.local.rawValue
         sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
         mediaSourceID = try container.decodeIfPresent(UUID.self, forKey: .mediaSourceID)
@@ -160,6 +165,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         currentPageIndex = try container.decodeIfPresent(Int.self, forKey: .currentPageIndex) ?? 0
         furthestPageIndex = max(currentPageIndex, try container.decodeIfPresent(Int.self, forKey: .furthestPageIndex) ?? currentPageIndex)
         progressUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .progressUpdatedAt) ?? .distantPast
+        metadataUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .metadataUpdatedAt) ?? .distantPast
         hasBeenOpened = try container.decodeIfPresent(Bool.self, forKey: .hasBeenOpened) ?? (currentPageIndex > 0)
         scrollProgress = try container.decodeIfPresent(Double.self, forKey: .scrollProgress) ?? 0
         scrollPageProgress = try container.decodeIfPresent(Double.self, forKey: .scrollPageProgress) ?? 0

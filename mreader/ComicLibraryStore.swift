@@ -225,6 +225,15 @@ final class ComicLibraryStore: ObservableObject {
         merged != existing || coverWasRefreshed
     }
 
+    private static func syncMetadataChanged(existing: ComicBook, incoming: ComicBook) -> Bool {
+        existing.readingDirectionRaw != incoming.readingDirectionRaw
+            || existing.readingModeRaw != incoming.readingModeRaw
+            || existing.pageTurnAnimationRaw != incoming.pageTurnAnimationRaw
+            || existing.imageFitModeRaw != incoming.imageFitModeRaw
+            || existing.scrollSpeedRaw != incoming.scrollSpeedRaw
+            || existing.bookmarks != incoming.bookmarks
+    }
+
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         libraryURL = applicationSupportURL.appendingPathComponent("library.json")
@@ -250,6 +259,7 @@ final class ComicLibraryStore: ObservableObject {
                 max(0, comic.totalPages - 1)
             )
             merged.progressUpdatedAt = existing.progressUpdatedAt
+            merged.metadataUpdatedAt = existing.metadataUpdatedAt
             merged.hasBeenOpened = existing.hasBeenOpened
             merged.scrollProgress = existing.scrollProgress
             merged.scrollPageProgress = existing.scrollPageProgress
@@ -271,6 +281,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.imageFitModeRaw = existing.imageFitModeRaw
             merged.scrollSpeedRaw = existing.scrollSpeedRaw
             merged.bookmarks = existing.bookmarks
+            merged.libraryRelativePath = existing.libraryRelativePath ?? comic.libraryRelativePath
             // 本地系列归属优先，避免扫描或远端同步把用户手动移动结果覆盖掉。
             merged.seriesID = existing.seriesID ?? comic.seriesID
             comics[index] = merged
@@ -288,6 +299,7 @@ final class ComicLibraryStore: ObservableObject {
             coverImagePath: result.coverImagePath,
             fileSize: result.fileSize,
             libraryPath: result.libraryPath,
+            libraryRelativePath: ComicManager.libraryRelativePath(for: URL(fileURLWithPath: result.libraryPath)),
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
             chapterTypeRaw: result.chapterTypeRaw,
@@ -330,6 +342,11 @@ final class ComicLibraryStore: ObservableObject {
             max(0, comic.totalPages - 1)
         )
         merged.progressUpdatedAt = max(existing.progressUpdatedAt, comic.progressUpdatedAt)
+        merged.metadataUpdatedAt = max(existing.metadataUpdatedAt, comic.metadataUpdatedAt)
+        if Self.syncMetadataChanged(existing: existing, incoming: comic),
+           comic.metadataUpdatedAt <= existing.metadataUpdatedAt {
+            merged.metadataUpdatedAt = Date()
+        }
         merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened
         comics[index] = merged
         sortAndSave()
@@ -338,29 +355,47 @@ final class ComicLibraryStore: ObservableObject {
         }
     }
 
-    func applySyncedMetadata(_ payload: ICloudMetadataPayload) {
-        let incoming = Dictionary(uniqueKeysWithValues: payload.comics.map { ($0.identity, $0) })
+    func applySyncedMetadata(_ payload: ICloudMetadataPayload, mediaSources: [MediaSource] = []) {
+        let sourcesByID = Dictionary(uniqueKeysWithValues: mediaSources.map { ($0.id, $0) })
+        let migratedPayload = ICloudMetadataMergePolicy.migrateLegacyV1(
+            payload,
+            comics: comics,
+            sourcesByID: sourcesByID
+        )
+        var incoming: [String: SyncedComicMetadata] = [:]
+        for item in migratedPayload.comics where !item.identity.isEmpty {
+            guard incoming[item.identity] == nil else { continue }
+            incoming[item.identity] = item
+        }
         var changed = false
         for index in comics.indices {
-            guard let remote = incoming[ComicSyncIdentity.value(for: comics[index])],
-                  remote.progressUpdatedAt > comics[index].progressUpdatedAt else { continue }
-            comics[index].currentPageIndex = min(max(remote.currentPageIndex, 0), max(0, comics[index].totalPages - 1))
-            comics[index].furthestPageIndex = min(
-                max(remote.furthestPageIndex, comics[index].currentPageIndex),
-                max(0, comics[index].totalPages - 1)
-            )
-            comics[index].progressUpdatedAt = remote.progressUpdatedAt
-            comics[index].lastReadAt = max(comics[index].lastReadAt, remote.lastReadAt)
-            comics[index].hasBeenOpened = comics[index].hasBeenOpened || remote.hasBeenOpened
-            comics[index].scrollProgress = remote.scrollProgress
-            comics[index].scrollPageProgress = remote.scrollPageProgress
-            comics[index].readingDirectionRaw = remote.readingDirectionRaw
-            comics[index].readingModeRaw = remote.readingModeRaw
-            comics[index].pageTurnAnimationRaw = remote.pageTurnAnimationRaw
-            comics[index].imageFitModeRaw = remote.imageFitModeRaw
-            comics[index].scrollSpeedRaw = remote.scrollSpeedRaw
-            comics[index].bookmarks = remote.bookmarks
-            changed = true
+            guard let identity = ComicSyncIdentity.v2Value(for: comics[index], sourcesByID: sourcesByID),
+                  let remote = incoming[identity] else { continue }
+
+            if remote.progressUpdatedAt > comics[index].progressUpdatedAt {
+                comics[index].currentPageIndex = min(max(remote.currentPageIndex, 0), max(0, comics[index].totalPages - 1))
+                comics[index].furthestPageIndex = min(
+                    max(remote.furthestPageIndex, comics[index].currentPageIndex),
+                    max(0, comics[index].totalPages - 1)
+                )
+                comics[index].progressUpdatedAt = remote.progressUpdatedAt
+                comics[index].lastReadAt = max(comics[index].lastReadAt, remote.lastReadAt)
+                comics[index].hasBeenOpened = comics[index].hasBeenOpened || remote.hasBeenOpened
+                comics[index].scrollProgress = remote.scrollProgress
+                comics[index].scrollPageProgress = remote.scrollPageProgress
+                changed = true
+            }
+
+            if remote.metadataUpdatedAt > comics[index].metadataUpdatedAt {
+                comics[index].metadataUpdatedAt = remote.metadataUpdatedAt
+                comics[index].readingDirectionRaw = remote.readingDirectionRaw
+                comics[index].readingModeRaw = remote.readingModeRaw
+                comics[index].pageTurnAnimationRaw = remote.pageTurnAnimationRaw
+                comics[index].imageFitModeRaw = remote.imageFitModeRaw
+                comics[index].scrollSpeedRaw = remote.scrollSpeedRaw
+                comics[index].bookmarks = remote.bookmarks
+                changed = true
+            }
         }
         if changed { sortAndSave() }
     }
@@ -417,6 +452,7 @@ final class ComicLibraryStore: ObservableObject {
         comics[index].bookmarkData = newBookmark
         if let newLibraryPath = ComicManager.libraryPathOfMovedFile(oldBookmark: comic.bookmarkData, newBookmark: newBookmark) {
             comics[index].libraryPath = newLibraryPath
+            comics[index].libraryRelativePath = ComicManager.libraryRelativePath(for: URL(fileURLWithPath: newLibraryPath))
         }
         save()
         return true
@@ -839,6 +875,7 @@ final class ComicLibraryStore: ObservableObject {
         comics = snapshot.comics
         series = snapshot.series
         normalizeLegacyReadingDefaults()
+        normalizeLegacyLibraryRelativePaths()
         if !snapshot.loadIssues.isEmpty {
             libraryLoadIssues = snapshot.loadIssues.map(\.userMessage)
             for issue in snapshot.loadIssues {
@@ -933,6 +970,20 @@ final class ComicLibraryStore: ObservableObject {
             }
             if AITranslationMode(rawValue: comics[index].aiTranslationModeRaw) == nil {
                 comics[index].aiTranslationModeRaw = AITranslationMode.ocr.rawValue
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        }
+    }
+
+    private func normalizeLegacyLibraryRelativePaths() {
+        var changed = false
+        for index in comics.indices where comics[index].sourceType == .local && comics[index].libraryRelativePath == nil {
+            guard let path = comics[index].libraryPath else { continue }
+            if let relativePath = ComicManager.libraryRelativePath(for: URL(fileURLWithPath: path)) {
+                comics[index].libraryRelativePath = relativePath
                 changed = true
             }
         }
@@ -1061,6 +1112,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.currentPageIndex = progressResolution.currentPageIndex
             merged.furthestPageIndex = progressResolution.furthestPageIndex
             merged.progressUpdatedAt = progressResolution.progressUpdatedAt
+            merged.metadataUpdatedAt = existing.metadataUpdatedAt
             if progressResolution.usesIncomingLocation {
                 merged.scrollProgress = comic.scrollProgress
                 merged.scrollPageProgress = comic.scrollPageProgress
@@ -1147,6 +1199,7 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func upsertScannedComic(_ result: ComicManager.ImportResult, seriesID: UUID?) -> Bool {
+        let relativePath = ComicManager.libraryRelativePath(for: URL(fileURLWithPath: result.libraryPath))
         if let index = comics.firstIndex(where: { $0.libraryPath == result.libraryPath }) {
             var changed = false
             if comics[index].bookmarkData != result.bookmarkData {
@@ -1186,6 +1239,10 @@ final class ComicLibraryStore: ObservableObject {
                 comics[index].chapterPath = result.chapterPath
                 changed = true
             }
+            if comics[index].libraryRelativePath != relativePath {
+                comics[index].libraryRelativePath = relativePath
+                changed = true
+            }
             return changed
         }
 
@@ -1196,6 +1253,7 @@ final class ComicLibraryStore: ObservableObject {
             coverImagePath: result.coverImagePath,
             fileSize: result.fileSize,
             libraryPath: result.libraryPath,
+            libraryRelativePath: relativePath,
             sourceTypeRaw: result.sourceTypeRaw,
             sourceURL: result.sourceURL,
             chapterTypeRaw: result.chapterTypeRaw,

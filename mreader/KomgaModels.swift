@@ -16,10 +16,13 @@ nonisolated struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     var createdAt: Date
     var lastSyncAt: Date?
     var isEnabled: Bool
+    /// Stable across devices when a user configures the same source again. URL edits
+    /// intentionally do not rewrite this value.
+    var stableSyncSourceIdentity: String
 
     nonisolated var resolvedBaseURL: String { baseURL }
 
-    init(id: UUID = UUID(), name: String, type: MediaSourceType, baseURL: String, lanURL: String? = nil, username: String? = nil, createdAt: Date = Date(), lastSyncAt: Date? = nil, isEnabled: Bool = true) {
+    init(id: UUID = UUID(), name: String, type: MediaSourceType, baseURL: String, lanURL: String? = nil, username: String? = nil, createdAt: Date = Date(), lastSyncAt: Date? = nil, isEnabled: Bool = true, stableSyncSourceIdentity: String? = nil) {
         self.id = id
         self.name = name
         self.type = type
@@ -29,6 +32,9 @@ nonisolated struct MediaSource: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.lastSyncAt = lastSyncAt
         self.isEnabled = isEnabled
+        self.stableSyncSourceIdentity = stableSyncSourceIdentity?.isEmpty == false
+            ? stableSyncSourceIdentity!
+            : Self.derivedStableSyncSourceIdentity(type: type, baseURL: baseURL)
     }
 
     init(from decoder: Decoder) throws {
@@ -42,6 +48,39 @@ nonisolated struct MediaSource: Identifiable, Codable, Hashable, Sendable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastSyncAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncAt)
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        let storedIdentity = try container.decodeIfPresent(String.self, forKey: .stableSyncSourceIdentity)
+        stableSyncSourceIdentity = storedIdentity?.isEmpty == false
+            ? storedIdentity!
+            : Self.derivedStableSyncSourceIdentity(type: type, baseURL: baseURL)
+    }
+
+    nonisolated static func derivedStableSyncSourceIdentity(type: MediaSourceType, baseURL: String) -> String {
+        "\(type.rawValue):\(normalizedBaseURL(baseURL))"
+    }
+
+    nonisolated private static func normalizedBaseURL(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased() else {
+            return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        }
+
+        components.scheme = scheme
+        components.host = host
+        if (scheme == "http" && components.port == 80) ||
+            (scheme == "https" && components.port == 443) {
+            components.port = nil
+        }
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        let normalizedPath = components.percentEncodedPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .joined(separator: "/")
+        components.percentEncodedPath = normalizedPath.isEmpty ? "/" : "/\(normalizedPath)"
+        return components.string ?? trimmed
     }
 }
 
