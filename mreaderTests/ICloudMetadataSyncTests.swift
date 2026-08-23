@@ -140,4 +140,57 @@ struct ICloudMetadataSyncTests {
         #expect(result.comicSeconds["device-b#local:Book.cbz"] == 5)
         #expect(result.completedComicKeys.count == 2)
     }
+
+    @Test
+    func activityRoundTripKeepsEachDeviceCounterIndependentFromAggregate() throws {
+        let deviceADay = ICloudReadingActivityDay(
+            dateKey: "2026-08-24",
+            seconds: 30,
+            pages: 3,
+            deviceSeconds: ["device-a": 30],
+            devicePages: ["device-a": 3]
+        )
+        let deviceBDay = ICloudReadingActivityDay(
+            dateKey: "2026-08-24",
+            seconds: 20,
+            pages: 2,
+            deviceSeconds: ["device-b": 20],
+            devicePages: ["device-b": 2]
+        )
+
+        let afterBPull = ICloudMetadataMergePolicy.merge(
+            local: ICloudMetadataPayload(deviceID: "device-b", comics: [], activityDays: [deviceBDay]),
+            remote: ICloudMetadataPayload(deviceID: "device-a", comics: [], activityDays: [deviceADay])
+        )
+        let mergedDay = try #require(afterBPull.activityDays.first)
+        #expect(mergedDay.seconds == 50)
+        #expect(mergedDay.deviceSeconds == ["device-a": 30, "device-b": 20])
+
+        var bAfterReading = ReadingActivityDay(
+            dateKey: mergedDay.dateKey,
+            seconds: 51,
+            pages: 6,
+            syncedDeviceSeconds: mergedDay.deviceSeconds,
+            syncedDevicePages: ["device-a": 3, "device-b": 3]
+        )
+        bAfterReading.syncedDeviceSeconds["device-b"] = 21
+        let bPushDay = ICloudReadingActivityDay(
+            local: bAfterReading,
+            deviceID: "device-b",
+            comicIdentities: [:]
+        )
+
+        #expect(bPushDay.seconds == 51)
+        #expect(bPushDay.deviceSeconds == ["device-a": 30, "device-b": 21])
+
+        let afterARoundTrip = ICloudMetadataMergePolicy.merge(
+            local: ICloudMetadataPayload(deviceID: "device-a", comics: [], activityDays: [deviceADay]),
+            remote: ICloudMetadataPayload(deviceID: "device-b", comics: [], activityDays: [bPushDay])
+        )
+        let finalDay = try #require(afterARoundTrip.activityDays.first)
+        #expect(finalDay.seconds == 51)
+        #expect(finalDay.pages == 6)
+        #expect(finalDay.deviceSeconds == ["device-a": 30, "device-b": 21])
+        #expect(finalDay.devicePages == ["device-a": 3, "device-b": 3])
+    }
 }
