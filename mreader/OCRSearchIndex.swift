@@ -21,10 +21,14 @@ nonisolated struct OCRSearchResult: Identifiable, Sendable {
 
 actor OCRSearchIndex {
     static let shared = OCRSearchIndex()
+    static let checkpointRecordLimit = 50
+    static let checkpointIntervalNanoseconds: UInt64 = 2_000_000_000
 
     private let fileURL: URL
     private var records: [String: OCRSearchRecord] = [:]
     private var didLoad = false
+    private var pendingChanges = 0
+    private var checkpointTask: Task<Void, Never>?
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -38,10 +42,18 @@ actor OCRSearchIndex {
             .map(\.text)
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let record = OCRSearchRecord(comicID: comicID, pageIndex: pageIndex, text: text, updatedAt: Date())
-        records[key(comicID: comicID, pageIndex: pageIndex)] = record
-        persist()
+        let recordKey = key(comicID: comicID, pageIndex: pageIndex)
+        if text.isEmpty {
+            guard records.removeValue(forKey: recordKey) != nil else { return }
+        } else {
+            records[recordKey] = OCRSearchRecord(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                text: text,
+                updatedAt: Date()
+            )
+        }
+        markDirty()
     }
 
     func search(_ query: String, comics: [ComicBook]) -> [OCRSearchResult] {
@@ -78,8 +90,19 @@ actor OCRSearchIndex {
 
     func remove(comicID: UUID) {
         loadIfNeeded()
+        let originalCount = records.count
         records = records.filter { $0.value.comicID != comicID }
+        guard records.count != originalCount else { return }
+        markDirty()
+    }
+
+    /// 将内存中的增量立即写入现有 JSON 文件；用于进入后台、索引任务结束或测试清理。
+    func flush() {
+        checkpointTask?.cancel()
+        checkpointTask = nil
+        guard pendingChanges > 0 else { return }
         persist()
+        pendingChanges = 0
     }
 
     private func key(comicID: UUID, pageIndex: Int) -> String {
@@ -92,6 +115,20 @@ actor OCRSearchIndex {
         guard let data = try? Data(contentsOf: fileURL),
               let decoded = try? JSONDecoder().decode([OCRSearchRecord].self, from: data) else { return }
         records = Dictionary(uniqueKeysWithValues: decoded.map { (key(comicID: $0.comicID, pageIndex: $0.pageIndex), $0) })
+    }
+
+    private func markDirty() {
+        pendingChanges += 1
+        if pendingChanges >= Self.checkpointRecordLimit {
+            flush()
+            return
+        }
+        guard checkpointTask == nil else { return }
+        checkpointTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.checkpointIntervalNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            await self.flush()
+        }
     }
 
     private func persist() {
@@ -142,9 +179,12 @@ final class OCRLibraryIndexer: ObservableObject {
                     await OCRSearchIndex.shared.index(comicID: comic.id, pageIndex: page.index, blocks: ocrResult.bubbleBlocks)
                     progress = Double(page.index + 1) / Double(pageCount)
                 }
+                await OCRSearchIndex.shared.flush()
                 HapticManager.shared.play(.success)
             } catch is CancellationError {
+                await OCRSearchIndex.shared.flush()
             } catch {
+                await OCRSearchIndex.shared.flush()
                 lastError = error.localizedDescription
                 HapticManager.shared.play(.error)
             }
