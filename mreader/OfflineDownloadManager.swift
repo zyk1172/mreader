@@ -73,7 +73,12 @@ nonisolated enum OfflinePageStore {
     }
 
     static func data(for key: PageCacheKey) -> Data? {
-        try? Data(contentsOf: pageURL(for: key))
+        for url in [pageURL(for: key), legacyPageURL(for: key)] {
+            if let data = try? Data(contentsOf: url), !data.isEmpty {
+                return data
+            }
+        }
+        return nil
     }
 
     static func store(_ data: Data, for key: PageCacheKey) throws {
@@ -95,21 +100,29 @@ nonisolated enum OfflinePageStore {
     }
 
     static func opdsFile(sourceID: UUID, publicationID: String) -> URL? {
-        let directory = storageURL
-            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent(RemoteImageLoader.safeFileName(publicationID), isDirectory: true)
-        return try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ).first(where: { $0.deletingPathExtension().lastPathComponent == "book" })
+        let directories = [
+            offlineBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.safeFileName(publicationID)),
+            offlineBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.legacySafeFileName(publicationID))
+        ]
+        for directory in directories {
+            if let file = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ).first(where: { $0.deletingPathExtension().lastPathComponent == "book" }) {
+                return file
+            }
+        }
+        return nil
     }
 
     static func remove(sourceID: UUID, remoteID: String) {
-        let directory = storageURL
-            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent(RemoteImageLoader.safeFileName(remoteID), isDirectory: true)
-        try? FileManager.default.removeItem(at: directory)
+        for directory in [
+            offlineBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.safeFileName(remoteID)),
+            offlineBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.legacySafeFileName(remoteID))
+        ] {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     private static func hasMaterializedContent(_ record: OfflineComicRecord) -> Bool {
@@ -117,17 +130,26 @@ nonisolated enum OfflinePageStore {
         case ComicSourceType.komga.rawValue:
             guard record.pageCount > 0 else { return false }
             return (0..<record.pageCount).allSatisfy { pageIndex in
-                let url = pageURL(
+                let urls = [pageURL(
                     for: PageCacheKey(
                         sourceID: record.sourceID,
                         bookID: record.remoteID,
                         pageIndex: pageIndex
                     )
-                )
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else {
+                ), legacyPageURL(for: PageCacheKey(
+                    sourceID: record.sourceID,
+                    bookID: record.remoteID,
+                    pageIndex: pageIndex
+                ))]
+                guard urls.contains(where: { url in
+                    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else {
+                        return false
+                    }
+                    return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+                }) else {
                     return false
                 }
-                return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+                return true
             }
         case ComicSourceType.opds.rawValue:
             guard let url = opdsFile(sourceID: record.sourceID, publicationID: record.remoteID),
@@ -141,12 +163,24 @@ nonisolated enum OfflinePageStore {
     }
 
     private static func pageURL(for key: PageCacheKey) -> URL {
-        storageURL
-            .appendingPathComponent(key.sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent(RemoteImageLoader.safeFileName(key.bookID), isDirectory: true)
+        pageURL(for: key, fileName: RemoteImageLoader.safeFileName(key.bookID))
+    }
+
+    private static func legacyPageURL(for key: PageCacheKey) -> URL {
+        pageURL(for: key, fileName: RemoteImageLoader.legacySafeFileName(key.bookID))
+    }
+
+    private static func pageURL(for key: PageCacheKey, fileName: String) -> URL {
+        offlineBookDirectory(sourceID: key.sourceID, fileName: fileName)
             .appendingPathComponent("pages", isDirectory: true)
             .appendingPathComponent("\(key.pageIndex)")
             .appendingPathExtension("img")
+    }
+
+    private static func offlineBookDirectory(sourceID: UUID, fileName: String) -> URL {
+        storageURL
+            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
+            .appendingPathComponent(fileName, isDirectory: true)
     }
 
     private static func migrateLegacyStorage(fileManager: FileManager) {

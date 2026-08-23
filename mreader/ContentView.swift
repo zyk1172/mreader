@@ -2019,11 +2019,11 @@ struct ContentView: View {
     }
 
     /// 导出设置备份：始终包含密钥，且必须用密码加密（不允许明文携带密钥）。
-    private func exportSettingsBackup(password: String? = nil) {
+    private func exportSettingsBackup(password: String? = nil) async {
         do {
             let backup = makeSettingsBackup()
             guard let password else { throw SettingsBackupCodecError.invalidPassword }
-            let data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
+            let data = try await SettingsBackupCodec.encodeEncryptedInBackground(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
             showSettings = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -2130,9 +2130,9 @@ struct ContentView: View {
             switch request.purpose {
             case .export:
                 backupPasswordRequest = nil
-                exportSettingsBackup(password: password)
+                await exportSettingsBackup(password: password)
             case .restore(let data):
-                let backup = try SettingsBackupCodec.decode(data, password: password)
+                let backup = try await SettingsBackupCodec.decodeInBackground(data, password: password)
                 try await applySettingsBackup(backup)
                 backupPasswordRequest = nil
             }

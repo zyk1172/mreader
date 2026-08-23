@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import ImageIO
 import UIKit
 
@@ -31,8 +32,12 @@ nonisolated enum RemoteImageLoader {
     }
 
     static func cachedCoverPath(sourceID: UUID, bookID: String) -> String? {
-        let url = coverURL(sourceID: sourceID, bookID: bookID)
-        return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
+        let candidates = [
+            coverURL(sourceID: sourceID, bookID: bookID),
+            legacyCoverURL(sourceID: sourceID, bookID: bookID, root: cacheRoot),
+            legacyCoverURL(sourceID: sourceID, bookID: bookID, root: legacyCacheRoot)
+        ]
+        return candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })?.path
     }
 
     /// 优先使用当前容器中按稳定远程身份计算出的缓存路径，避免依赖 library.json
@@ -71,29 +76,45 @@ nonisolated enum RemoteImageLoader {
     }
 
     static func removeCachedImages(sourceID: UUID) {
-        let url = cacheRoot.appendingPathComponent(sourceID.uuidString, isDirectory: true)
-        try? FileManager.default.removeItem(at: url)
+        for root in [cacheRoot, legacyCacheRoot] {
+            let url = root.appendingPathComponent(sourceID.uuidString, isDirectory: true)
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     static func removeCachedImages(sourceID: UUID, bookID: String) {
-        let safeBookID = safeFileName(bookID)
-        let coverURL = cacheRoot
-            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent("covers", isDirectory: true)
-            .appendingPathComponent(safeBookID)
-            .appendingPathExtension("img")
-        try? FileManager.default.removeItem(at: coverURL)
+        for root in [cacheRoot, legacyCacheRoot] {
+            for url in [
+                coverURL(sourceID: sourceID, bookID: bookID, root: root),
+                legacyCoverURL(sourceID: sourceID, bookID: bookID, root: root)
+            ] {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 
     private static func coverURL(sourceID: UUID, bookID: String) -> URL {
-        cacheRoot
+        coverURL(sourceID: sourceID, bookID: safeFileName(bookID), root: cacheRoot)
+    }
+
+    private static func coverURL(sourceID: UUID, bookID: String, root: URL) -> URL {
+        root
             .appendingPathComponent(sourceID.uuidString, isDirectory: true)
             .appendingPathComponent("covers", isDirectory: true)
-            .appendingPathComponent(safeFileName(bookID))
+            .appendingPathComponent(bookID)
             .appendingPathExtension("img")
     }
 
+    private static func legacyCoverURL(sourceID: UUID, bookID: String, root: URL) -> URL {
+        coverURL(sourceID: sourceID, bookID: legacySafeFileName(bookID), root: root)
+    }
+
     static func safeFileName(_ rawValue: String) -> String {
+        let digest = SHA256.hash(data: Data(rawValue.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func legacySafeFileName(_ rawValue: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
         let scalars = rawValue.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
         let sanitized = String(scalars)
@@ -155,10 +176,12 @@ nonisolated enum RemotePageLoader {
     }
 
     static func removeCachedPages(sourceID: UUID, bookID: String) {
-        let url = cacheRoot
-            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent(RemoteImageLoader.safeFileName(bookID), isDirectory: true)
-        try? FileManager.default.removeItem(at: url)
+        for url in [
+            pageBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.safeFileName(bookID)),
+            pageBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.legacySafeFileName(bookID))
+        ] {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     static func removeCachedPages(sourceID: UUID) {
@@ -178,11 +201,21 @@ nonisolated enum RemotePageLoader {
     }
 
     nonisolated static func pageCacheURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
-        cacheRoot
-            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
-            .appendingPathComponent(RemoteImageLoader.safeFileName(bookID), isDirectory: true)
+        pageBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.safeFileName(bookID))
             .appendingPathComponent("\(pageIndex)")
             .appendingPathExtension("img")
+    }
+
+    nonisolated static func legacyPageCacheURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
+        pageBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.legacySafeFileName(bookID))
+            .appendingPathComponent("\(pageIndex)")
+            .appendingPathExtension("img")
+    }
+
+    private static func pageBookDirectory(sourceID: UUID, fileName: String) -> URL {
+        cacheRoot
+            .appendingPathComponent(sourceID.uuidString, isDirectory: true)
+            .appendingPathComponent(fileName, isDirectory: true)
     }
 
     struct RemotePageRequest: Sendable {
@@ -272,12 +305,15 @@ actor RemotePageCache {
         }
 
         let diskURL = RemotePageLoader.pageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
-        if let data = try? Data(contentsOf: diskURL), !data.isEmpty {
-            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: diskURL.path)
-            memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
-            cachedKeys.insert(cacheKey)
-            print("MReader remote cache disk hit page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
-            return data
+        let legacyDiskURL = RemotePageLoader.legacyPageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
+        for candidate in [diskURL, legacyDiskURL] {
+            if let data = try? Data(contentsOf: candidate), !data.isEmpty {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: candidate.path)
+                memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+                cachedKeys.insert(cacheKey)
+                print("MReader remote cache disk hit page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
+                return data
+            }
         }
 
         if let task = activeDownloads[key] {

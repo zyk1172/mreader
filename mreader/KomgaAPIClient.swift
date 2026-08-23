@@ -14,6 +14,12 @@ nonisolated enum KomgaAPIEndpoint {
     }
 }
 
+nonisolated enum KomgaResponseLimits {
+    static let jsonBytes = 16 * 1024 * 1024
+    static let thumbnailBytes = 20 * 1024 * 1024
+    static let pageBytes = 64 * 1024 * 1024
+}
+
 nonisolated struct KomgaAPIClient: Sendable {
     let baseURL: URL
     let apiKey: String
@@ -140,7 +146,7 @@ nonisolated struct KomgaAPIClient: Sendable {
 
     private func sendData(path: String, queryItems: [URLQueryItem] = [], acceptsImage: Bool = true, timeout: TimeInterval? = nil) async throws -> Data {
         let request = try makeRequest(path: path, queryItems: queryItems, acceptsImage: acceptsImage, timeout: timeout)
-        return try await send(request)
+        return try await send(request, maximumBytes: maximumResponseBytes(path: path, acceptsImage: acceptsImage))
     }
 
     private func sendNoContent(path: String, method: String, body: Data? = nil) async throws {
@@ -150,14 +156,17 @@ nonisolated struct KomgaAPIClient: Sendable {
         if body != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        _ = try await send(request)
+        _ = try await send(request, maximumBytes: KomgaResponseLimits.jsonBytes)
     }
 
-    private func send(_ request: URLRequest) async throws -> Data {
+    private func send(_ request: URLRequest, maximumBytes: Int) async throws -> Data {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MediaSourceError.invalidResponse
+            }
+            if httpResponse.expectedContentLength > Int64(maximumBytes) || data.count > maximumBytes {
+                throw MediaSourceError.serverError(413, "Komga 响应超过安全上限")
             }
             #if DEBUG
             let preview = String(data: data.prefix(500), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
@@ -190,6 +199,11 @@ nonisolated struct KomgaAPIClient: Sendable {
         } catch {
             throw MediaSourceError.invalidResponse
         }
+    }
+
+    private func maximumResponseBytes(path: String, acceptsImage: Bool) -> Int {
+        guard acceptsImage else { return KomgaResponseLimits.jsonBytes }
+        return path.contains("/thumbnail") ? KomgaResponseLimits.thumbnailBytes : KomgaResponseLimits.pageBytes
     }
 
     private func makeRequest(path: String, queryItems: [URLQueryItem], acceptsImage: Bool, timeout: TimeInterval? = nil) throws -> URLRequest {

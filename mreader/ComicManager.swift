@@ -1287,8 +1287,11 @@ class ComicManager {
             let source = CGImageSourceCreateIncremental(nil)
             var accumulated = Data()
             var result: CGSize?
-            _ = try archive.extract(entry, skipCRC32: true) { chunk in
+            _ = try archive.extract(entry, skipCRC32: false) { chunk in
                 guard result == nil else { return }
+                guard UInt64(accumulated.count) + UInt64(chunk.count) <= maxArchiveImageBytes else {
+                    throw ArchiveReadError.memoryLimit
+                }
                 accumulated.append(chunk)
                 CGImageSourceUpdateData(source, accumulated as CFData, false)
                 if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -1461,10 +1464,15 @@ class ComicManager {
         var data = Data()
         data.reserveCapacity(Int(min(entry.uncompressedSize, UInt64(Int.max))))
         do {
-            _ = try archive.extract(entry, skipCRC32: true) { chunk in
+            _ = try archive.extract(entry, skipCRC32: false) { chunk in
+                guard UInt64(data.count) + UInt64(chunk.count) <= maximumBytes else {
+                    throw ArchiveReadError.memoryLimit
+                }
                 data.append(chunk)
             }
             return data
+        } catch let error as ArchiveReadError {
+            throw error
         } catch {
             throw ArchiveReadError.damagedArchive
         }

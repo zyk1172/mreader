@@ -31,6 +31,11 @@ nonisolated enum OPDSRemoteRevision {
     }
 }
 
+nonisolated enum OPDSResponseLimits {
+    static let feedBytes = 16 * 1024 * 1024
+    static let downloadBytes = 512 * 1024 * 1024
+}
+
 nonisolated struct OPDSSourceSyncResult: Sendable {
     let source: MediaSource
     let comics: [ComicBook]
@@ -359,9 +364,10 @@ nonisolated private struct OPDSClient: Sendable {
             applyAuthorization(to: &request)
         }
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode) else {
+                  (200..<300).contains(httpResponse.statusCode),
+                  data.count <= OPDSResponseLimits.feedBytes else {
                 return nil
             }
             return OPDSRemoteRevision.value(
@@ -381,11 +387,15 @@ nonisolated private struct OPDSClient: Sendable {
             .appendingPathComponent("MReaderOPDSCache", isDirectory: true)
             .appendingPathComponent(source.id.uuidString, isDirectory: true)
         let safeID = RemoteImageLoader.safeFileName(publicationID)
+        let legacyID = RemoteImageLoader.legacySafeFileName(publicationID)
         if let cached = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ).first(where: { $0.deletingPathExtension().lastPathComponent == safeID }) {
+        ).first(where: {
+            let identifier = $0.deletingPathExtension().lastPathComponent
+            return identifier == safeID || identifier == legacyID
+        }) {
             return cached
         }
 
@@ -395,7 +405,14 @@ nonisolated private struct OPDSClient: Sendable {
         }
         request.timeoutInterval = 120
         let (temporaryURL, response) = try await URLSession.shared.download(for: request)
-        try validate(response)
+        try validate(response, maximumBytes: OPDSResponseLimits.downloadBytes)
+        guard let values = try? temporaryURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize <= OPDSResponseLimits.downloadBytes else {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
+        }
         let extensionValue = resolvedFileExtension(url: url, response: response)
         let destination = root
             .appendingPathComponent(safeID)
@@ -437,7 +454,10 @@ nonisolated private struct OPDSClient: Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MediaSourceError.invalidResponse
         }
-        try validate(httpResponse)
+        try validate(httpResponse, maximumBytes: OPDSResponseLimits.feedBytes)
+        guard data.count <= OPDSResponseLimits.feedBytes else {
+            throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
+        }
         return (data, httpResponse)
     }
 
@@ -463,9 +483,13 @@ nonisolated private struct OPDSClient: Sendable {
         }
     }
 
-    private func validate(_ response: URLResponse) throws {
+    private func validate(_ response: URLResponse, maximumBytes: Int? = nil) throws {
         guard let response = response as? HTTPURLResponse else {
             throw MediaSourceError.invalidResponse
+        }
+        if let maximumBytes = maximumBytes,
+           response.expectedContentLength > Int64(maximumBytes) {
+            throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
         }
         switch response.statusCode {
         case 200..<300:

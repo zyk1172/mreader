@@ -6,17 +6,35 @@ private enum HTTPRequestReceiveError: Error {
     case headerTooLarge
 }
 
+private enum LocalWebServerFileError: LocalizedError {
+    case invalidRange
+    case incompleteCopy
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidRange:
+            return "上传文件范围无效"
+        case .incompleteCopy:
+            return "上传文件复制不完整"
+        }
+    }
+}
+
 private final class HTTPRequestReceiveState {
     private static let maxHeaderBytes = 64 * 1024
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
+    private let lock = NSLock()
+    private var idleWorkItem: DispatchWorkItem?
+    private var didFinish = false
     private(set) var header: String?
     private(set) var contentLength = 0
+    private(set) var hasContentLengthHeader = false
     private(set) var receivedBodyBytes = 0
     private(set) var bodyFileURL: URL?
 
     var isComplete: Bool {
-        header != nil && receivedBodyBytes >= contentLength
+        header != nil && contentLength >= 0 && receivedBodyBytes == contentLength
     }
 
     func append(_ data: Data) throws {
@@ -28,7 +46,8 @@ private final class HTTPRequestReceiveState {
             guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
             let headerData = headerBuffer[..<headerEnd.lowerBound]
             header = String(data: headerData, encoding: .utf8) ?? ""
-            contentLength = HTTPRequestReceiveState.contentLength(from: header ?? "") ?? 0
+            hasContentLengthHeader = HTTPRequestReceiveState.hasContentLengthHeader(in: header ?? "")
+            contentLength = HTTPRequestReceiveState.contentLength(from: header ?? "") ?? -1
             if contentLength > 0 {
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MReaderWebUpload-\(UUID().uuidString).body")
@@ -47,11 +66,44 @@ private final class HTTPRequestReceiveState {
     }
 
     func cleanup() {
+        lock.lock()
+        idleWorkItem?.cancel()
+        idleWorkItem = nil
+        lock.unlock()
         try? bodyHandle?.close()
         bodyHandle = nil
         if let bodyFileURL {
             try? FileManager.default.removeItem(at: bodyFileURL)
         }
+    }
+
+    func markFinished() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didFinish else { return false }
+        didFinish = true
+        idleWorkItem?.cancel()
+        idleWorkItem = nil
+        return true
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didFinish
+    }
+
+    func armIdleTimeout(after interval: TimeInterval, handler: @escaping () -> Void) {
+        lock.lock()
+        idleWorkItem?.cancel()
+        guard !didFinish else {
+            lock.unlock()
+            return
+        }
+        let workItem = DispatchWorkItem(block: handler)
+        idleWorkItem = workItem
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + interval, execute: workItem)
     }
 
     private func appendBody(_ body: Data.SubSequence) throws {
@@ -77,6 +129,12 @@ private final class HTTPRequestReceiveState {
             .first { $0.lowercased().hasPrefix("content-length:") }
             .flatMap { Int($0.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "") }
     }
+
+    private static func hasContentLengthHeader(in header: String) -> Bool {
+        header.components(separatedBy: "\r\n").contains {
+            $0.lowercased().hasPrefix("content-length:")
+        }
+    }
 }
 
 final class LocalWebServer: ObservableObject {
@@ -89,6 +147,10 @@ final class LocalWebServer: ObservableObject {
     private var token = ""
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
+    private let maximumConnections = 4
+    private let idleTimeout: TimeInterval = 30
+    private let connectionLock = NSLock()
+    private var activeConnectionCount = 0
     private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
 
     nonisolated static func clearStaleBodyFiles() {
@@ -144,42 +206,53 @@ final class LocalWebServer: ObservableObject {
     }
 
     private func handle(_ connection: NWConnection) {
+        guard acquireConnection() else {
+            connection.start(queue: .global(qos: .utility))
+            sendResponse(
+                httpResponse(status: "503 Service Unavailable", contentType: "text/plain; charset=utf-8", body: "连接数已达到上限"),
+                on: connection
+            )
+            return
+        }
         connection.start(queue: .global(qos: .userInitiated))
-        receive(on: connection, state: HTTPRequestReceiveState())
+        let state = HTTPRequestReceiveState()
+        armIdleTimeout(for: connection, state: state)
+        receive(on: connection, state: state)
     }
 
     private func receive(on connection: NWConnection, state: HTTPRequestReceiveState) {
+        guard !state.isFinished else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            guard !state.isFinished else { return }
             if let data, !data.isEmpty {
                 do {
                     try state.append(data)
                 } catch let receiveError {
-                    state.cleanup()
                     let response: Data
                     if case HTTPRequestReceiveError.headerTooLarge = receiveError {
                         response = self.httpResponse(status: "431 Request Header Fields Too Large", contentType: "text/plain; charset=utf-8", body: "请求头过大")
                     } else {
                         response = self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(receiveError.localizedDescription)")
                     }
-                    self.sendResponse(response, on: connection)
+                    self.finish(state: state, response: response, on: connection)
                     return
                 }
             }
 
             if state.contentLength > self.maxUploadSize {
-                state.cleanup()
-                self.sendResponse(
-                    self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
+                self.finish(
+                    state: state,
+                    response: self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
                     on: connection
                 )
                 return
             }
 
             if error != nil {
-                state.cleanup()
-                self.sendResponse(
-                    self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
+                self.finish(
+                    state: state,
+                    response: self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
                     on: connection
                 )
                 return
@@ -188,18 +261,26 @@ final class LocalWebServer: ObservableObject {
             if state.isComplete || isComplete {
                 self.respond(to: state, on: connection)
             } else {
+                self.armIdleTimeout(for: connection, state: state)
                 self.receive(on: connection, state: state)
             }
         }
     }
 
     private func respond(to state: HTTPRequestReceiveState, on connection: NWConnection) {
+        guard state.markFinished() else {
+            connection.cancel()
+            return
+        }
+
         let response: Data
         if let requestText = state.header,
            let request = Self.requestLine(from: requestText) {
             let uploadPath = "/\(token)/upload"
             if request.method == "POST", request.path == uploadPath {
-                if state.contentLength > maxUploadSize {
+                if !state.hasContentLengthHeader || state.contentLength < 0 || state.receivedBodyBytes != state.contentLength {
+                    response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传请求缺少有效的 Content-Length。")
+                } else if state.contentLength > maxUploadSize {
                     response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
                 } else {
                     response = handleUpload(header: requestText, bodyURL: state.bodyFileURL)
@@ -215,6 +296,42 @@ final class LocalWebServer: ObservableObject {
         }
 
         state.cleanup()
+        releaseConnection()
+        sendResponse(response, on: connection)
+    }
+
+    private func acquireConnection() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        guard activeConnectionCount < maximumConnections else { return false }
+        activeConnectionCount += 1
+        return true
+    }
+
+    private func releaseConnection() {
+        connectionLock.lock()
+        activeConnectionCount = max(activeConnectionCount - 1, 0)
+        connectionLock.unlock()
+    }
+
+    private func armIdleTimeout(for connection: NWConnection, state: HTTPRequestReceiveState) {
+        state.armIdleTimeout(after: idleTimeout) { [weak self, weak connection] in
+            guard let self,
+                  let connection,
+                  state.markFinished() else { return }
+            state.cleanup()
+            self.releaseConnection()
+            connection.cancel()
+        }
+    }
+
+    private func finish(state: HTTPRequestReceiveState, response: Data, on connection: NWConnection) {
+        guard state.markFinished() else {
+            connection.cancel()
+            return
+        }
+        state.cleanup()
+        releaseConnection()
         sendResponse(response, on: connection)
     }
 
@@ -311,6 +428,12 @@ final class LocalWebServer: ObservableObject {
     }
 
     private func copyFileRange(from sourceURL: URL, range: Range<UInt64>, to destinationURL: URL) throws {
+        guard range.lowerBound <= range.upperBound,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
+              let sourceSize = (attributes[.size] as? NSNumber)?.uint64Value,
+              range.upperBound <= sourceSize else {
+            throw LocalWebServerFileError.invalidRange
+        }
         FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
         let source = try FileHandle(forReadingFrom: sourceURL)
         let destination = try FileHandle(forWritingTo: destinationURL)
@@ -325,6 +448,9 @@ final class LocalWebServer: ObservableObject {
             guard let chunk = try source.read(upToCount: readSize), !chunk.isEmpty else { break }
             try destination.write(contentsOf: chunk)
             remaining -= UInt64(chunk.count)
+        }
+        guard remaining == 0 else {
+            throw LocalWebServerFileError.incompleteCopy
         }
     }
 
