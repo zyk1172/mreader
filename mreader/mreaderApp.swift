@@ -12,7 +12,9 @@ struct mreaderApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        OfflineDownloadManager.shared.reconcileStorage()
+        Task { @MainActor in
+            OfflineDownloadManager.shared.reconcileStorage()
+        }
         OfflineTranslationBackgroundScheduler.shared.register()
         Task { @MainActor in
             await OfflineTranslationBackgroundScheduler.shared.resumePendingJobIfNeeded()

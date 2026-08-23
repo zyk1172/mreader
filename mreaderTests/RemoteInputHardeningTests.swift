@@ -4,6 +4,41 @@ import Testing
 
 struct RemoteInputHardeningTests {
     @Test
+    func boundedResponseReaderCollectsMegabyteChunks() async throws {
+        let chunks = AsyncStream<Data> { continuation in
+            continuation.yield(Data(repeating: 0x5A, count: 1_048_576))
+            continuation.yield(Data([0x01, 0x02, 0x03]))
+            continuation.finish()
+        }
+
+        let data = try await BoundedHTTPResponseReader.collectChunks(
+            chunks,
+            maximumBytes: 1_048_579
+        )
+        #expect(data.count == 1_048_579)
+        #expect(data.last == 0x03)
+    }
+
+    @Test
+    func boundedResponseReaderRejectsAnOversizedDataChunk() async throws {
+        let chunks = AsyncStream<Data> { continuation in
+            continuation.yield(Data(repeating: 0x5A, count: 1_048_577))
+            continuation.finish()
+        }
+
+        var didReject = false
+        do {
+            _ = try await BoundedHTTPResponseReader.collectChunks(
+                chunks,
+                maximumBytes: 1_048_576
+            )
+        } catch {
+            didReject = error is BoundedHTTPResponseError
+        }
+        #expect(didReject)
+    }
+
+    @Test
     func boundedResponseReaderRejectsTheByteAfterTheConfiguredLimit() async throws {
         let bytes = AsyncStream<UInt8> { continuation in
             for byte in [UInt8(1), 2, 3, 4, 5] {
