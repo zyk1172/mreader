@@ -4,6 +4,52 @@ import Testing
 
 struct RemoteInputHardeningTests {
     @Test
+    func boundedResponseReaderRejectsTheByteAfterTheConfiguredLimit() async throws {
+        let bytes = AsyncStream<UInt8> { continuation in
+            for byte in [UInt8(1), 2, 3, 4, 5] {
+                continuation.yield(byte)
+            }
+            continuation.finish()
+        }
+
+        var didReject = false
+        do {
+            _ = try await BoundedHTTPResponseReader.collect(bytes, maximumBytes: 4)
+        } catch {
+            didReject = error is BoundedHTTPResponseError
+        }
+        #expect(didReject)
+    }
+
+    @Test
+    func getWithoutContentLengthCompletesAfterHeaders() throws {
+        let state = HTTPRequestReceiveState()
+        defer { state.cleanup() }
+
+        try state.append(Data(
+            "GET /token/ HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n".utf8
+        ))
+
+        #expect(state.isComplete)
+        #expect(state.contentLength == 0)
+        #expect(state.receivedBodyBytes == 0)
+    }
+
+    @Test
+    func postWithoutContentLengthCompletesForImmediateRejection() throws {
+        let state = HTTPRequestReceiveState()
+        defer { state.cleanup() }
+
+        try state.append(Data(
+            "POST /token/upload HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n".utf8
+        ))
+
+        #expect(state.isComplete)
+        #expect(!state.hasContentLengthHeader)
+        #expect(state.contentLength == -1)
+    }
+
+    @Test
     func remoteCacheIDsUseDigestAndReadLegacySanitizedPath() throws {
         let sourceID = UUID()
         let bookID = "series/../book?with spaces"
