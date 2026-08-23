@@ -1781,6 +1781,16 @@ struct mreaderTests {
                     }
                 }
             }
+
+            // Wait until every concurrent request has reached the actor before
+            // the deliberately slow first refresh is allowed to finish.
+            while true {
+                let pendingScope = await coordinator.pendingScopeForDiagnostics()
+                if pendingScope.contains(.komga) && pendingScope.contains(.opds) {
+                    break
+                }
+                await Task.yield()
+            }
         }
         await firstRefresh.value
 

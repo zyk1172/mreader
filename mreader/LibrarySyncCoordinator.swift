@@ -37,6 +37,10 @@ actor LibrarySyncCoordinator {
         runner != nil
     }
 
+    func pendingScopeForDiagnostics() -> LibrarySyncScope {
+        pendingScope
+    }
+
     private func drain(operation: @escaping @Sendable (LibrarySyncScope) async -> Void) async {
         while !pendingScope.isEmpty {
             let scope = pendingScope
