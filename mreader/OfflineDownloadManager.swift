@@ -29,8 +29,13 @@ nonisolated struct OfflineDownloadOwnerRegistry: Sendable {
         }
     }
 
+    func isCurrentOwner(comicID: UUID, ownerToken: UUID) -> Bool {
+        owners[comicID] == ownerToken
+    }
+
     func canCommit(comicID: UUID, ownerToken: UUID) -> Bool {
-        owners[comicID] == ownerToken && !cancelledOwners.contains(ownerToken)
+        isCurrentOwner(comicID: comicID, ownerToken: ownerToken)
+            && !cancelledOwners.contains(ownerToken)
     }
 
     mutating func finish(comicID: UUID, ownerToken: UUID) {
@@ -349,8 +354,7 @@ final class OfflineDownloadManager: ObservableObject {
             HapticManager.shared.play(.error)
         }
 
-        guard ownerRegistry.canCommit(comicID: comic.id, ownerToken: ownerToken)
-                || tasks[comic.id] != nil else { return }
+        guard ownerRegistry.isCurrentOwner(comicID: comic.id, ownerToken: ownerToken) else { return }
         if pendingRemovals.remove(comic.id) != nil {
             records[comic.id] = nil
             persistRecords()
