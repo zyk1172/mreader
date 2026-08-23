@@ -1762,14 +1762,15 @@ struct mreaderTests {
     @Test func librarySyncCoordinatorCoalescesConcurrentRefreshes() async {
         let coordinator = LibrarySyncCoordinator()
         let probe = LibrarySyncProbe()
+        let gate = LibrarySyncGate()
 
         let firstRefresh = Task {
             await coordinator.perform(scope: .local) { scope in
                 await probe.record(scope)
-                try? await Task.sleep(for: .milliseconds(80))
+                await gate.wait()
             }
         }
-        while await probe.invocationCount == 0 {
+        while await coordinator.activeRequestCountForDiagnostics() < 1 {
             await Task.yield()
         }
 
@@ -1782,15 +1783,12 @@ struct mreaderTests {
                 }
             }
 
-            // Wait until every concurrent request has reached the actor before
-            // the deliberately slow first refresh is allowed to finish.
-            while true {
-                let pendingScope = await coordinator.pendingScopeForDiagnostics()
-                if pendingScope.contains(.komga) && pendingScope.contains(.opds) {
-                    break
-                }
+            // Hold the first refresh until every concurrent caller has reached
+            // the actor, so the test does not depend on task scheduling.
+            while await coordinator.activeRequestCountForDiagnostics() < 4 {
                 await Task.yield()
             }
+            await gate.open()
         }
         await firstRefresh.value
 
@@ -2278,6 +2276,28 @@ private actor LibrarySyncProbe {
         #expect(visionA.cacheKey != visionB.cacheKey)
         let visionC = makeTestPageRequest(mode: .vision, textModel: "text-b", visionModel: "vision-a", visualVerify: false)
         #expect(visionA.cacheKey != visionC.cacheKey)
+    }
+}
+
+private actor LibrarySyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let continuations = waiters
+        waiters.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 }
 

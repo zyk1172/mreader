@@ -37,8 +37,8 @@ actor LibrarySyncCoordinator {
         runner != nil
     }
 
-    func pendingScopeForDiagnostics() -> LibrarySyncScope {
-        pendingScope
+    func activeRequestCountForDiagnostics() -> Int {
+        waiters.count
     }
 
     private func drain(operation: @escaping @Sendable (LibrarySyncScope) async -> Void) async {
