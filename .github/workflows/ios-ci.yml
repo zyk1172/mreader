@@ -16,7 +16,6 @@ concurrency:
 env:
   XCODE_PATH: /Applications/Xcode_26.5.app/Contents/Developer
   DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.5
-  DERIVED_DATA: ${{ runner.temp }}/MReaderDerivedData
 
 jobs:
   build-and-test:
@@ -46,7 +45,7 @@ jobs:
             -scheme mreader \
             -configuration Debug \
             -destination "$DESTINATION" \
-            -derivedDataPath "$DERIVED_DATA" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
@@ -59,7 +58,7 @@ jobs:
             -scheme mreader \
             -configuration Debug \
             -destination "$DESTINATION" \
-            -derivedDataPath "$DERIVED_DATA" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
@@ -101,7 +100,7 @@ jobs:
             -scheme mreader \
             -configuration Debug \
             -destination "$DESTINATION" \
-            -derivedDataPath "$DERIVED_DATA" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
@@ -114,7 +113,7 @@ jobs:
             -scheme mreader \
             -configuration Debug \
             -destination "$DESTINATION" \
-            -derivedDataPath "$DERIVED_DATA" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
