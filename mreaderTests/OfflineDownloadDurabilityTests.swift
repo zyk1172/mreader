@@ -12,6 +12,7 @@ struct OfflineDownloadDurabilityTests {
         #expect(registry.canCommit(comicID: comicID, ownerToken: ownerToken))
         registry.cancel(for: comicID)
         #expect(!registry.canCommit(comicID: comicID, ownerToken: ownerToken))
+        #expect(registry.isCurrentOwner(comicID: comicID, ownerToken: ownerToken))
 
         registry.finish(comicID: comicID, ownerToken: ownerToken)
         let nextOwnerToken = registry.begin(for: comicID)

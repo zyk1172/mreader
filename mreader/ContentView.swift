@@ -1498,7 +1498,12 @@ struct ContentView: View {
     private var mediaSourceSettingsSection: some View {
         Section(header: Text("import.comicMediaLibrary".localized)) {
             NavigationLink {
-                MediaSourceSettingsView(library: library)
+                MediaSourceSettingsView(
+                    library: library,
+                    onSourcesChanged: {
+                        Task { await reloadMediaSourceState() }
+                    }
+                )
             } label: {
                 Label("Komga / OPDS", systemImage: "server.rack")
             }
@@ -1977,8 +1982,12 @@ struct ContentView: View {
     }
 
     /// 备份现在必须携带密钥（API Key / 媒体源 Key），并始终以密码加密导出。
-    private func makeSettingsBackup() -> MReaderSettingsBackup {
-        let mediaSourceBackups = mediaSources.map { source in
+    private func makeSettingsBackup() async -> MReaderSettingsBackup {
+        // The settings screen owns its editing lifecycle. Fetch the repository
+        // snapshot at export time instead of trusting ContentView's UI snapshot,
+        // which may predate a source added or edited in the nested screen.
+        let currentMediaSources = await KomgaProvider.loadSources()
+        let mediaSourceBackups = currentMediaSources.map { source in
             MediaSourceBackup(
                 source: source,
                 apiKey: KomgaProvider.apiKey(for: source.id)
@@ -2021,7 +2030,7 @@ struct ContentView: View {
     /// 导出设置备份：始终包含密钥，且必须用密码加密（不允许明文携带密钥）。
     private func exportSettingsBackup(password: String? = nil) async {
         do {
-            let backup = makeSettingsBackup()
+            let backup = await makeSettingsBackup()
             guard let password else { throw SettingsBackupCodecError.invalidPassword }
             let data = try await SettingsBackupCodec.encodeEncryptedInBackground(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
