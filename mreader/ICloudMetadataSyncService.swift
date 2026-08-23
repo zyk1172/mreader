@@ -102,6 +102,11 @@ nonisolated enum ICloudActivityIdentity {
         guard let separator = key.firstIndex(of: "#") else { return nil }
         return String(key[key.index(after: separator)...])
     }
+
+    static func deviceID(from key: String) -> String? {
+        guard let separator = key.firstIndex(of: "#") else { return nil }
+        return String(key[..<separator])
+    }
 }
 
 nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
@@ -153,14 +158,38 @@ nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
         var syncedComicSeconds = day.syncedComicSeconds
         var syncedComicPages = day.syncedComicPages
         var syncedCompleted = day.syncedCompletedComicKeys
-        for (comicID, seconds) in day.comicSeconds {
-            guard let identity = comicIdentities[comicID] else { continue }
+        for (comicID, seconds) in day.localDeviceComicSeconds {
+            let identity = comicIdentities[comicID] ?? "local-id:\(comicID.uuidString)"
             let key = ICloudActivityIdentity.key(deviceID: deviceID, comicIdentity: identity)
             syncedComicSeconds[key] = max(syncedComicSeconds[key] ?? 0, seconds)
         }
-        for (comicID, pages) in day.comicPages {
-            guard let identity = comicIdentities[comicID] else { continue }
+        for (comicID, pages) in day.localDeviceComicPages {
+            let identity = comicIdentities[comicID] ?? "local-id:\(comicID.uuidString)"
             let key = ICloudActivityIdentity.key(deviceID: deviceID, comicIdentity: identity)
+            syncedComicPages[key] = max(syncedComicPages[key] ?? 0, pages)
+        }
+        for (comicID, seconds) in day.comicSeconds {
+            guard !Self.hasPerDeviceCounter(
+                for: comicID,
+                in: syncedComicSeconds,
+                stableIdentity: comicIdentities[comicID]
+            ) else { continue }
+            let key = ICloudActivityIdentity.key(
+                deviceID: ICloudSyncDeviceIdentity.legacyDeviceID,
+                comicIdentity: "legacy-comic:\(comicID.uuidString)"
+            )
+            syncedComicSeconds[key] = max(syncedComicSeconds[key] ?? 0, seconds)
+        }
+        for (comicID, pages) in day.comicPages {
+            guard !Self.hasPerDeviceCounter(
+                for: comicID,
+                in: syncedComicPages,
+                stableIdentity: comicIdentities[comicID]
+            ) else { continue }
+            let key = ICloudActivityIdentity.key(
+                deviceID: ICloudSyncDeviceIdentity.legacyDeviceID,
+                comicIdentity: "legacy-comic:\(comicID.uuidString)"
+            )
             syncedComicPages[key] = max(syncedComicPages[key] ?? 0, pages)
         }
         for comicID in day.completedComicIDs {
@@ -171,10 +200,10 @@ nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
         var syncedDeviceSeconds = day.syncedDeviceSeconds
         var syncedDevicePages = day.syncedDevicePages
         if syncedDeviceSeconds.isEmpty, day.seconds > 0 {
-            syncedDeviceSeconds[deviceID] = day.seconds
+            syncedDeviceSeconds[ICloudSyncDeviceIdentity.legacyDeviceID] = day.seconds
         }
         if syncedDevicePages.isEmpty, day.pages > 0 {
-            syncedDevicePages[deviceID] = day.pages
+            syncedDevicePages[ICloudSyncDeviceIdentity.legacyDeviceID] = day.pages
         }
         self.init(
             dateKey: day.dateKey,
@@ -186,6 +215,19 @@ nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
             deviceSeconds: syncedDeviceSeconds,
             devicePages: syncedDevicePages
         )
+    }
+
+    private static func hasPerDeviceCounter(
+        for comicID: UUID,
+        in counters: [String: Int],
+        stableIdentity: String?
+    ) -> Bool {
+        let legacyIdentity = "legacy-comic:\(comicID.uuidString)"
+        let localIdentity = "local-id:\(comicID.uuidString)"
+        return counters.keys.contains { key in
+            guard let identity = ICloudActivityIdentity.comicIdentity(from: key) else { return false }
+            return identity == stableIdentity || identity == legacyIdentity || identity == localIdentity
+        }
     }
 
     init(from decoder: Decoder) throws {
@@ -200,7 +242,7 @@ nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
             ?? []
         let rawSeconds = try container.decodeIfPresent([String: Int].self, forKey: .comicSeconds) ?? [:]
         let rawPages = try container.decodeIfPresent([String: Int].self, forKey: .comicPages) ?? [:]
-        let legacyDeviceID = "legacy-v1"
+        let legacyDeviceID = ICloudSyncDeviceIdentity.legacyDeviceID
         completedComicKeys = Set(rawCompleted.map { key in
             UUID(uuidString: key).map { ICloudActivityIdentity.key(deviceID: legacyDeviceID, comicIdentity: "legacy-comic:\($0.uuidString)") } ?? key
         })
@@ -255,6 +297,7 @@ nonisolated struct ICloudMetadataPayload: Codable, Sendable {
 }
 
 nonisolated enum ICloudSyncDeviceIdentity {
+    static let legacyDeviceID = "legacy-v1"
     private static let defaultsKey = "mreader.icloudSync.deviceID"
 
     static var current: String {
