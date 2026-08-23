@@ -300,7 +300,7 @@ nonisolated enum AITranslationPagePipeline {
         case .ocr:
             return try await translateOCRPageWithStatus(request).blocks
         case .vision:
-            return try await AITranslator.translateVisionPage(
+            return try await TranslationRuntimeService.translateVisionPage(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
@@ -370,14 +370,14 @@ nonisolated enum AITranslationPagePipeline {
             fallbackImage: request.image,
             options: options
         )
-        let localResult = try await OCRRecognitionCache.shared.result(for: cacheRequest)
+        let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
         let resolvedBlocks: [TextBlock]
         if request.usesVisualOCRVerification {
             let ocrImage = await OCRPreprocessor.highResolutionImage(
                 from: request.pageURL,
                 fallback: request.image
             ) ?? request.image
-            resolvedBlocks = try await AITranslator.visualVerifyOCRRegions(
+            resolvedBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: localResult.resolvedBlocks,
                 apiKey: request.configuration.apiKey,
@@ -480,7 +480,7 @@ nonisolated enum AITranslationPagePipeline {
                     .joined(separator: "\n")
                 group.addTask {
                     do {
-                        let text = try await AITranslator.translate(
+                let text = try await TranslationRuntimeService.translate(
                             text: block.text,
                             ocrMetadata: AITranslator.ocrMetadata(for: block),
                             pageContext: pageContext,
@@ -540,7 +540,7 @@ nonisolated enum AITranslationPagePipeline {
     ) async throws {
         guard !indexes.isEmpty else { return }
         let requestedBlocks = indexes.map { blocks[$0] }
-        let result = try await AITranslator.translatePage(
+        let result = try await TranslationRuntimeService.translatePage(
             blocks: requestedBlocks,
             apiKey: request.configuration.apiKey,
             baseURL: request.configuration.baseURL,

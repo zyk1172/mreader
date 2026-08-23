@@ -386,13 +386,13 @@ struct MediaSourceSettingsView: View {
 
     private func reloadSources() {
         Task {
-            sources = await KomgaProvider.loadSources()
+            sources = await RemoteSourceRuntimeService.shelfState().sources
         }
     }
 
     private func reloadHiddenComics() {
         Task {
-            hiddenComics = await KomgaProvider.hiddenKomgaComics()
+            hiddenComics = await RemoteSourceRuntimeService.shelfState().hiddenComics
         }
     }
 

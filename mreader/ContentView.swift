@@ -444,8 +444,9 @@ struct ContentView: View {
     }
 
     private func reloadMediaSourceState() async {
-        mediaSources = await KomgaProvider.loadSources()
-        hiddenKomgaComics = await KomgaProvider.hiddenKomgaComics()
+        let state = await RemoteSourceRuntimeService.shelfState()
+        mediaSources = state.sources
+        hiddenKomgaComics = state.hiddenComics
     }
 
     private struct AlertModifiers: ViewModifier {
@@ -1887,7 +1888,7 @@ struct ContentView: View {
                                     progress: Double(childIndex) / Double(max(folderInspection.importableChildren.count, 1))
                                 )
                             }
-                            if let info = await ComicManager.importFileOrFolder(url: childURL, destinationRoot: targetRoot) {
+                            if let info = await LibraryImportService.importFileOrFolder(url: childURL, destinationRoot: targetRoot) {
                                 await MainActor.run {
                                     library.addImported(info, seriesID: targetSeriesID)
                                 }
@@ -1907,7 +1908,7 @@ struct ContentView: View {
                     }
                 }
 
-                if let info = await ComicManager.importFileOrFolder(url: url, destinationRoot: seriesDestinationRoot) {
+                if let info = await LibraryImportService.importFileOrFolder(url: url, destinationRoot: seriesDestinationRoot) {
                     await MainActor.run {
                         library.addImported(info, seriesID: seriesID)
                     }
@@ -2023,7 +2024,7 @@ struct ContentView: View {
         do {
             let backup = makeSettingsBackup()
             guard let password else { throw SettingsBackupCodecError.invalidPassword }
-            let data = try await SettingsBackupCodec.encodeEncryptedInBackground(backup, password: password)
+            let data = try await SettingsBackupService.encodeEncrypted(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
             showSettings = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -2045,13 +2046,13 @@ struct ContentView: View {
                 }
             }
             let data = try Data(contentsOf: url)
-            if SettingsBackupCodec.isEncrypted(data) {
+            if SettingsBackupService.isEncrypted(data) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     backupPasswordRequest = BackupPasswordRequest(purpose: .restore(data))
                 }
                 return
             }
-            let backup = try SettingsBackupCodec.decode(data)
+            let backup = try SettingsBackupService.decodePlain(data)
             Task { @MainActor in
                 do {
                     try await applySettingsBackup(backup)
@@ -2132,7 +2133,7 @@ struct ContentView: View {
                 backupPasswordRequest = nil
                 await exportSettingsBackup(password: password)
             case .restore(let data):
-                let backup = try await SettingsBackupCodec.decodeInBackground(data, password: password)
+                let backup = try await SettingsBackupService.decode(data, password: password)
                 try await applySettingsBackup(backup)
                 backupPasswordRequest = nil
             }
@@ -3549,7 +3550,7 @@ struct CoverImageView: View {
     private static func makeThumbnail(path: String, maxPixelSize: CGFloat) async -> UIImage? {
         let source: CGImageSource?
         if let remoteURL = URL(string: path), OPDSProvider.isCoverReference(remoteURL) {
-            guard let data = await OPDSProvider.coverData(for: remoteURL) else { return nil }
+            guard let data = await RemoteSourceRuntimeService.coverData(for: remoteURL) else { return nil }
             source = CGImageSourceCreateWithData(data as CFData, nil)
         } else if let archiveURL = URL(string: path), ComicManager.isArchivePageURL(archiveURL) {
             guard let data = ComicManager.imageData(forArchivePageURL: archiveURL) else { return nil }

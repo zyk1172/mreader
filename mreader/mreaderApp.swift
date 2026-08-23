@@ -76,7 +76,7 @@ struct mreaderApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background else { return }
             Task {
-                await OCRSearchIndex.shared.flush()
+                await OCRRuntimeService.flush()
             }
         }
     }
