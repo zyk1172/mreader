@@ -39,6 +39,16 @@
                ReferencedContainer="container:mreader.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped="NO">
+            <BuildableReference
+               BuildableIdentifier="primary"
+               BlueprintIdentifier="788190AF2FE2DAA8007BDA15"
+               BuildableName="mreaderUITests.xctest"
+               BlueprintName="mreaderUITests"
+               ReferencedContainer="container:mreader.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

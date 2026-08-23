@@ -1,43 +1,91 @@
-//
-//  mreaderUITests.swift
-//  mreaderUITests
-//
-//  Created by 郑云凯 on 2026/6/17.
-//
-
 import XCTest
 
 final class mreaderUITests: XCTestCase {
+    private let timeout: TimeInterval = 12
 
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
-
-    @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    private func launchApp() -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchArguments += ["-mreader-ui-testing"]
         app.launch()
-
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        return app
     }
 
     @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+    func testColdStartShowsStableShelfSurface() throws {
+        let app = launchApp()
+        XCTAssertTrue(element("mreader.shelf.root", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.shelf.menu", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.tab.library", in: app).exists)
+    }
+
+    @MainActor
+    func testSettingsAndNoServerRemoteSourceEntry() throws {
+        let app = launchApp()
+        let menu = element("mreader.shelf.menu", in: app)
+        XCTAssertTrue(menu.waitForExistence(timeout: timeout))
+        menu.tap()
+
+        let settings = element("mreader.shelf.settings", in: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: timeout))
+        settings.tap()
+        XCTAssertTrue(element("mreader.settings.root", in: app).waitForExistence(timeout: timeout))
+
+        let remoteSources = element("mreader.settings.remoteSources", in: app)
+        XCTAssertTrue(remoteSources.waitForExistence(timeout: timeout))
+        remoteSources.tap()
+        XCTAssertTrue(element("mreader.remote.settings", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.remote.noServers", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.remote.baseURL", in: app).exists)
+    }
+
+    @MainActor
+    func testOCRSearchEntryAndDismiss() throws {
+        let app = launchApp()
+        let menu = element("mreader.shelf.menu", in: app)
+        XCTAssertTrue(menu.waitForExistence(timeout: timeout))
+        menu.tap()
+
+        let search = element("mreader.shelf.ocrSearch", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: timeout))
+        search.tap()
+        XCTAssertTrue(element("mreader.ocr.search", in: app).waitForExistence(timeout: timeout))
+        let done = element("mreader.ocr.search.done", in: app)
+        XCTAssertTrue(done.waitForExistence(timeout: timeout))
+        done.tap()
+        XCTAssertTrue(element("mreader.shelf.root", in: app).waitForExistence(timeout: timeout))
+    }
+
+    @MainActor
+    func testReaderProgressModeAndOfflineTranslationEntryWhenBookIsAvailable() throws {
+        let app = launchApp()
+        let openReader = element("mreader.shelf.openReader", in: app)
+        guard openReader.waitForExistence(timeout: 3) else {
+            throw XCTSkip("CI fixture has no local or remote book; reader path is covered by device smoke fixtures.")
         }
+        openReader.tap()
+
+        XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.reader.progress", in: app).exists)
+        let settings = element("mreader.reader.settings", in: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: timeout))
+        settings.tap()
+        XCTAssertTrue(element("mreader.reader.settings.sheet", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.reader.modePicker", in: app).exists)
+
+        let done = element("mreader.reader.settings.done", in: app)
+        XCTAssertTrue(done.waitForExistence(timeout: timeout))
+        done.tap()
+        let offlineMenu = element("mreader.reader.offlineTranslationMenu", in: app)
+        XCTAssertTrue(offlineMenu.waitForExistence(timeout: timeout))
+        offlineMenu.tap()
+        XCTAssertTrue(element("mreader.reader.offlineTranslationStart", in: app).waitForExistence(timeout: timeout))
+    }
+
+    private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
     }
 }

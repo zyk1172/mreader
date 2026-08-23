@@ -240,7 +240,11 @@ struct OCRSearchView: View {
             .onChange(of: query) { _, value in
                 Task { results = await OCRRuntimeService.search(value, comics: comics) }
             }
-            .toolbar { Button("nav.done".localized) { dismiss() } }
+            .toolbar {
+                Button("nav.done".localized) { dismiss() }
+                    .accessibilityIdentifier("mreader.ocr.search.done")
+            }
         }
+        .accessibilityIdentifier("mreader.ocr.search")
     }
 }

@@ -33,6 +33,7 @@ struct MediaSourceSettingsView: View {
                     if sources.filter({ $0.type == .komga || $0.type == .opds }).isEmpty {
                         Text("mediaSources.noServers".localized)
                             .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("mreader.remote.noServers")
                     } else {
                         ForEach(sources.filter { $0.type == .komga || $0.type == .opds }) { source in
                             VStack(alignment: .leading, spacing: 8) {
@@ -99,6 +100,7 @@ struct MediaSourceSettingsView: View {
                         Text("OPDS").tag(MediaSourceType.opds)
                     }
                     .pickerStyle(.segmented)
+                    .accessibilityIdentifier("mreader.remote.sourceType")
                     .onChange(of: sourceType) { _, newValue in
                         name = newValue == .opds ? "OPDS" : "Komga"
                         username = ""
@@ -108,6 +110,7 @@ struct MediaSourceSettingsView: View {
                     }
                     TextField("mediaSources.name".localized, text: $name)
                         .textInputAutocapitalization(.never)
+                        .accessibilityIdentifier("mreader.remote.name")
                     TextField(
                         sourceType == .komga
                             ? "mediaSources.serverUrl".localized
@@ -117,6 +120,7 @@ struct MediaSourceSettingsView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("mreader.remote.baseURL")
                     TextField(
                         "mediaSources.lanUrl".localized,
                         text: $lanURL
@@ -133,6 +137,7 @@ struct MediaSourceSettingsView: View {
                         .textContentType(.password)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("mreader.remote.credential")
 
                     Button {
                         testAndSave()
@@ -148,6 +153,7 @@ struct MediaSourceSettingsView: View {
                             || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             || (sourceType == .komga && apiKey.isEmpty)
                     )
+                    .accessibilityIdentifier("mreader.remote.testAndSave")
 
                     if let statusMessage {
                         Text(statusMessage)
@@ -267,6 +273,7 @@ struct MediaSourceSettingsView: View {
                 }
             }
         }
+        .accessibilityIdentifier("mreader.remote.settings")
     }
 
     private func enabledBinding(for source: MediaSource) -> Binding<Bool> {
