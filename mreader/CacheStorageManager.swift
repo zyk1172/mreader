@@ -21,7 +21,7 @@ nonisolated enum CacheStorageManager {
         CacheStorageSnapshot(
             remotePages: size(of: cacheURL("MReaderRemotePageCache")),
             generatedAssets: generatedCacheURLs.reduce(0) { $0 + size(of: $1) },
-            offlineComics: size(of: cacheURL("MReaderOfflineComics")),
+            offlineComics: size(of: OfflinePageStore.storageURL),
             offlineTranslations: size(of: translationStoreURL),
             temporaryFiles: ComicManager.temporaryImportCacheSize()
         )

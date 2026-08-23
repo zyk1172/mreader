@@ -10,6 +10,7 @@ import SwiftUI
 @main
 struct mreaderApp: App {
     init() {
+        OfflineDownloadManager.shared.reconcileStorage()
         OfflineTranslationBackgroundScheduler.shared.register()
         Task { @MainActor in
             await OfflineTranslationBackgroundScheduler.shared.resumePendingJobIfNeeded()
