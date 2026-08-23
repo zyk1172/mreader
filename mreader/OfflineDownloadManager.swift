@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 
-nonisolated struct OfflineComicRecord: Codable, Sendable {
+nonisolated struct OfflineComicRecord: Codable, Equatable, Sendable {
     let comicID: UUID
     let sourceID: UUID
     let sourceTypeRaw: String
@@ -222,21 +222,16 @@ final class OfflineDownloadManager: ObservableObject {
 
     private let recordsKey = "mreader.offlineComicRecords.v1"
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var reconciliationTask: Task<Void, Never>? = nil
     private var ownerRegistry = OfflineDownloadOwnerRegistry()
     private var pendingRemovals: Set<UUID> = []
     private var queue: [ComicBook] = []
     private let maximumConcurrentDownloads = 1
 
     private init() {
-        OfflinePageStore.prepareStorage()
         if let data = UserDefaults.standard.data(forKey: recordsKey),
            let values = try? JSONDecoder().decode([OfflineComicRecord].self, from: data) {
             records = Dictionary(uniqueKeysWithValues: values.map { ($0.comicID, $0) })
-        }
-        let reconciled = OfflinePageStore.reconcile(records: records)
-        if Set(reconciled.keys) != Set(records.keys) {
-            records = reconciled
-            persistRecords()
         }
     }
 
@@ -314,10 +309,23 @@ final class OfflineDownloadManager: ObservableObject {
     }
 
     func reconcileStorage() {
-        let reconciled = OfflinePageStore.reconcile(records: records)
-        guard Set(reconciled.keys) != Set(records.keys) else { return }
-        records = reconciled
-        persistRecords()
+        guard reconciliationTask == nil else { return }
+        let snapshot = records
+        let scanTask = Task.detached(priority: .utility) {
+            OfflinePageStore.reconcile(records: snapshot)
+        }
+        reconciliationTask = Task { @MainActor [weak self] in
+            let reconciled = await scanTask.value
+            guard let self else { return }
+            for (comicID, snapshotRecord) in snapshot {
+                guard records[comicID] == snapshotRecord, reconciled[comicID] == nil else { continue }
+                records[comicID] = nil
+            }
+            if records != snapshot {
+                persistRecords()
+            }
+            reconciliationTask = nil
+        }
     }
 
     private func runDownload(_ comic: ComicBook, ownerToken: UUID) async {
