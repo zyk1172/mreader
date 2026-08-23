@@ -33,69 +33,26 @@ nonisolated private struct KomgaCoverFetchResult: Sendable {
 }
 
 nonisolated enum KomgaProvider {
-    private static let sourcesLock = NSLock()
-    nonisolated(unsafe) private static var sourcesCache: [MediaSource]?
-    private static let hiddenComicsLock = NSLock()
-    nonisolated(unsafe) private static var hiddenComicsCache: [HiddenKomgaComic]?
+    private static let repository = MediaSourceRepository.shared
 
-    private static var sourcesURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("media_sources.json")
+    static func loadSources() async -> [MediaSource] {
+        await repository.loadSources()
     }
 
-    private static var hiddenComicsURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("hidden_komga_comics.json")
+    static func saveSources(_ sources: [MediaSource]) async throws {
+        try await repository.saveSources(sources)
     }
 
-    static func loadSources() -> [MediaSource] {
-        sourcesLock.lock()
-        if let sourcesCache {
-            sourcesLock.unlock()
-            return sourcesCache
-        }
-        sourcesLock.unlock()
-
-        do {
-            let data = try Data(contentsOf: sourcesURL)
-            let sources = try JSONDecoder().decode([MediaSource].self, from: data)
-                .sorted { lhs, rhs in
-                    let nameCompare = lhs.name.localizedStandardCompare(rhs.name)
-                    if nameCompare != .orderedSame {
-                        return nameCompare == .orderedAscending
-                    }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                }
-            sourcesLock.lock()
-            sourcesCache = sources
-            sourcesLock.unlock()
-            return sources
-        } catch {
-            sourcesLock.lock()
-            sourcesCache = []
-            sourcesLock.unlock()
-            return []
-        }
+    static func addOrReplaceSource(
+        _ source: MediaSource,
+        replacingType type: MediaSourceType,
+        baseURL: String
+    ) async throws {
+        try await repository.addSource(source, replacingType: type, baseURL: baseURL)
     }
 
-    static func saveSources(_ sources: [MediaSource]) throws {
-        let sortedSources = sources.sorted { lhs, rhs in
-            let nameCompare = lhs.name.localizedStandardCompare(rhs.name)
-            if nameCompare != .orderedSame {
-                return nameCompare == .orderedAscending
-            }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-        sourcesLock.lock()
-        sourcesCache = sortedSources
-        sourcesLock.unlock()
-
-        let folderURL = sourcesURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(sortedSources)
-        try data.write(to: sourcesURL, options: .atomic)
+    static func mergeSources(_ sources: [MediaSource]) async throws {
+        try await repository.mergeSources(sources)
     }
 
     static func addKomgaSource(name: String, baseURL: String, apiKey: String, lanURL: String? = nil) async throws -> MediaSource {
@@ -103,78 +60,45 @@ nonisolated enum KomgaProvider {
         let displayName = trimmedName.isEmpty ? "Komga" : trimmedName
         let client = try KomgaAPIClient(baseURLString: baseURL, apiKey: apiKey)
         _ = try await client.testConnection()
-        var sources = loadSources()
         var source = MediaSource(name: displayName, type: .komga, baseURL: client.baseURL.absoluteString, lanURL: lanURL, lastSyncAt: nil, isEnabled: true)
         source.lastSyncAt = Date()
         try saveAPIKey(apiKey, for: source.id)
-        sources.removeAll { $0.type == .komga && $0.baseURL == source.baseURL }
-        sources.append(source)
-        try saveSources(sources)
+        try await repository.addSource(source, replacingType: .komga, baseURL: source.baseURL)
         return source
     }
 
-    static func updateSource(_ source: MediaSource) throws {
-        var sources = loadSources()
-        if let index = sources.firstIndex(where: { $0.id == source.id }) {
-            sources[index] = source
-        } else {
-            sources.append(source)
-        }
-        try saveSources(sources)
+    static func updateSource(_ source: MediaSource) async throws {
+        try await repository.updateSource(source)
     }
 
-    static func removeSource(id: UUID) throws {
-        var sources = loadSources()
-        sources.removeAll { $0.id == id }
-        try saveSources(sources)
+    static func removeSource(id: UUID) async throws {
+        try await repository.removeSource(id: id)
         deleteAPIKey(for: id)
         RemoteImageLoader.removeCachedImages(sourceID: id)
         RemotePageLoader.removeCachedPages(sourceID: id)
     }
 
-    static func hiddenKomgaComics() -> [HiddenKomgaComic] {
-        hiddenComicsLock.lock()
-        if let hiddenComicsCache {
-            hiddenComicsLock.unlock()
-            return hiddenComicsCache
-        }
-        hiddenComicsLock.unlock()
-
-        do {
-            let data = try Data(contentsOf: hiddenComicsURL)
-            let hidden = try JSONDecoder().decode([HiddenKomgaComic].self, from: data)
-                .sorted { lhs, rhs in
-                    let titleCompare = lhs.title.localizedStandardCompare(rhs.title)
-                    if titleCompare != .orderedSame {
-                        return titleCompare == .orderedAscending
-                    }
-                    return lhs.key < rhs.key
-                }
-            hiddenComicsLock.lock()
-            hiddenComicsCache = hidden
-            hiddenComicsLock.unlock()
-            return hidden
-        } catch {
-            hiddenComicsLock.lock()
-            hiddenComicsCache = []
-            hiddenComicsLock.unlock()
-            return []
-        }
+    static func hiddenKomgaComics() async -> [HiddenKomgaComic] {
+        await repository.hiddenKomgaComics()
     }
 
-    static func hiddenKomgaComicKeys() -> Set<String> {
-        Set(hiddenKomgaComics().map(\.key))
+    static func hiddenKomgaComicKeys() async -> Set<String> {
+        await repository.hiddenComicKeys()
     }
 
-    static func hideComic(_ comic: ComicBook, sourceName: String? = nil) {
+    static func hideComic(_ comic: ComicBook, sourceName: String? = nil) async {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID else {
             return
         }
-        var hidden = hiddenKomgaComics()
         let key = hiddenKey(mediaSourceID: sourceID, komgaBookID: bookID)
-        let resolvedSourceName = sourceName ?? loadSources().first(where: { $0.id == sourceID })?.name ?? "Komga"
+        let resolvedSourceName: String
+        if let sourceName {
+            resolvedSourceName = sourceName
+        } else {
+            resolvedSourceName = (await loadSources().first(where: { $0.id == sourceID })?.name) ?? "Komga"
+        }
         let record = HiddenKomgaComic(
             key: key,
             mediaSourceID: sourceID,
@@ -184,23 +108,16 @@ nonisolated enum KomgaProvider {
             sourceName: resolvedSourceName,
             hiddenAt: Date()
         )
-        if let index = hidden.firstIndex(where: { $0.key == key }) {
-            hidden[index] = record
-        } else {
-            hidden.append(record)
-        }
-        saveHiddenKomgaComics(hidden)
+        await repository.upsertHiddenComic(record)
     }
 
-    static func unhideComic(key: String) {
-        var hidden = hiddenKomgaComics()
-        hidden.removeAll { $0.key == key }
-        saveHiddenKomgaComics(hidden)
+    static func unhideComic(key: String) async {
+        await repository.removeHiddenComic(key: key)
     }
 
-    static func isHidden(_ comic: ComicBook) -> Bool {
+    static func isHidden(_ comic: ComicBook) async -> Bool {
         guard let key = hiddenKey(for: comic) else { return false }
-        return hiddenKomgaComics().contains { $0.key == key }
+        return await repository.hiddenComicKeys().contains(key)
     }
 
     static func hiddenKey(for comic: ComicBook) -> String? {
@@ -212,36 +129,13 @@ nonisolated enum KomgaProvider {
         return hiddenKey(mediaSourceID: sourceID, komgaBookID: bookID)
     }
 
-    static func sourceName(for comic: ComicBook) -> String {
+    static func sourceName(for comic: ComicBook) async -> String {
         guard let sourceID = comic.mediaSourceID else { return "Komga" }
-        return loadSources().first(where: { $0.id == sourceID })?.name ?? "Komga"
+        return await loadSources().first(where: { $0.id == sourceID })?.name ?? "Komga"
     }
 
     private static func hiddenKey(mediaSourceID: UUID, komgaBookID: String) -> String {
         "\(mediaSourceID.uuidString):\(komgaBookID)"
-    }
-
-    private static func saveHiddenKomgaComics(_ hidden: [HiddenKomgaComic]) {
-        let sortedHidden = hidden.sorted { lhs, rhs in
-            let titleCompare = lhs.title.localizedStandardCompare(rhs.title)
-            if titleCompare != .orderedSame {
-                return titleCompare == .orderedAscending
-            }
-            return lhs.key < rhs.key
-        }
-        hiddenComicsLock.lock()
-        hiddenComicsCache = sortedHidden
-        hiddenComicsLock.unlock()
-
-        do {
-            try FileManager.default.createDirectory(at: hiddenComicsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(sortedHidden)
-            try data.write(to: hiddenComicsURL, options: .atomic)
-        } catch {
-            print("保存 Komga 隐藏列表失败: \(error.localizedDescription)")
-        }
     }
 
     static func testConnection(baseURL: String, apiKey: String) async throws -> [KomgaLibraryDTO] {
@@ -249,53 +143,56 @@ nonisolated enum KomgaProvider {
         return try await client.testConnection()
     }
 
-    private static var resolvedURLCache: [UUID: (url: String, timestamp: Date)] = [:]
     private static let resolvedURLCacheTTL: TimeInterval = 600
 
     static func resolveBestURL(source: MediaSource, timeout: TimeInterval = 4) async -> String {
-        if let cached = resolvedURLCache[source.id],
-           Date().timeIntervalSince(cached.timestamp) < resolvedURLCacheTTL {
+        if let cached = await repository.resolvedURL(for: source.id, ttl: resolvedURLCacheTTL) {
+            if cached.shouldRefresh {
+                let refreshGeneration = await repository.beginResolvedURLRefresh(for: source.id)
+                Task {
+                    let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
+                    await repository.storeResolvedURL(
+                        resolved,
+                        for: source.id,
+                        refreshGeneration: refreshGeneration
+                    )
+                }
+            }
             return cached.url
         }
-        if let persisted = UserDefaults.standard.string(forKey: "resolvedURL_\(source.id.uuidString)") {
-            resolvedURLCache[source.id] = (url: persisted, timestamp: Date())
-            _ = Task { @MainActor in
-                let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
-                resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
-                UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
-            }
-            return persisted
-        }
+        let refreshGeneration = await repository.beginResolvedURLRefresh(for: source.id)
         let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
-        resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
-        UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+        await repository.storeResolvedURL(
+            resolved,
+            for: source.id,
+            refreshGeneration: refreshGeneration
+        )
         return resolved
     }
 
     /// 忽略内存和 UserDefaults 中的旧 URL，完成一次新的 LAN/WAN 探测后再写入缓存。
     /// 启动 prewarm 使用此入口，确保后续同步不会继续命中已经失效的局域网地址。
     static func refreshResolvedURL(source: MediaSource, timeout: TimeInterval = 4) async -> String {
+        let refreshGeneration = await repository.beginResolvedURLRefresh(for: source.id)
         let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
-        resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
-        UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+        await repository.storeResolvedURL(
+            resolved,
+            for: source.id,
+            refreshGeneration: refreshGeneration
+        )
         return resolved
     }
 
-    static func invalidateResolvedURL(for sourceID: UUID) {
-        resolvedURLCache[sourceID] = nil
-        UserDefaults.standard.removeObject(forKey: "resolvedURL_\(sourceID.uuidString)")
+    static func invalidateResolvedURL(for sourceID: UUID) async {
+        await repository.invalidateResolvedURL(for: sourceID)
     }
 
-    static func forceRefreshAllURLs() {
-        resolvedURLCache.removeAll()
-        let sources = loadSources()
-        for source in sources {
-            UserDefaults.standard.removeObject(forKey: "resolvedURL_\(source.id.uuidString)")
-        }
+    static func forceRefreshAllURLs() async {
+        await repository.forceRefreshAllURLs()
     }
 
     static func prewarmResolvedURLs() async {
-        let sources = loadSources().filter { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
+        let sources = await loadSources().filter { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
         await withTaskGroup(of: Void.self) { group in
             for source in sources {
                 group.addTask {
@@ -352,7 +249,7 @@ nonisolated enum KomgaProvider {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
-              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
             return nil
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
@@ -369,7 +266,7 @@ nonisolated enum KomgaProvider {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
-              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
             return
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
@@ -386,7 +283,7 @@ nonisolated enum KomgaProvider {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
-              let source = loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
             throw MediaSourceError.notFound
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
@@ -397,7 +294,7 @@ nonisolated enum KomgaProvider {
 
     static func syncEnabledSources(sourceIDs: Set<UUID>? = nil) async -> [KomgaSourceSyncResult] {
         var results: [KomgaSourceSyncResult] = []
-        var sources = loadSources().filter { $0.type == .komga && $0.isEnabled }
+        var sources = await loadSources().filter { $0.type == .komga && $0.isEnabled }
         if let sourceIDs {
             sources = sources.filter { sourceIDs.contains($0.id) }
         }
@@ -406,7 +303,7 @@ nonisolated enum KomgaProvider {
                 let payload = try await syncSource(source)
                 var updatedSource = source
                 updatedSource.lastSyncAt = Date()
-                try? updateSource(updatedSource)
+                try? await updateSource(updatedSource)
                 results.append(KomgaSourceSyncResult(
                     source: updatedSource,
                     comics: payload.comics,

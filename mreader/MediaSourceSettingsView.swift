@@ -366,35 +366,43 @@ struct MediaSourceSettingsView: View {
     }
 
     private func remove(_ source: MediaSource) {
-        do {
-            try KomgaProvider.removeSource(id: source.id)
-            if source.type == .opds {
-                library.removeOPDSSource(id: source.id)
-            } else {
-                library.removeKomgaSource(id: source.id)
+        Task {
+            do {
+                try await KomgaProvider.removeSource(id: source.id)
+                if source.type == .opds {
+                    library.removeOPDSSource(id: source.id)
+                } else {
+                    library.removeKomgaSource(id: source.id)
+                }
+                reloadSources()
+                reloadHiddenComics()
+                HapticManager.shared.play(.heavy)
+            } catch {
+                statusIsError = true
+                statusMessage = error.localizedDescription
             }
-            reloadSources()
-            reloadHiddenComics()
-            HapticManager.shared.play(.heavy)
-        } catch {
-            statusIsError = true
-            statusMessage = error.localizedDescription
         }
     }
 
     private func reloadSources() {
-        sources = KomgaProvider.loadSources()
+        Task {
+            sources = await KomgaProvider.loadSources()
+        }
     }
 
     private func reloadHiddenComics() {
-        hiddenComics = KomgaProvider.hiddenKomgaComics()
+        Task {
+            hiddenComics = await KomgaProvider.hiddenKomgaComics()
+        }
     }
 
     private func unhide(_ item: HiddenKomgaComic) {
         HapticManager.shared.play(.medium)
-        KomgaProvider.unhideComic(key: item.key)
-        reloadHiddenComics()
-        library.refreshVisibility()
+        Task {
+            await KomgaProvider.unhideComic(key: item.key)
+            reloadHiddenComics()
+            library.refreshVisibility()
+        }
     }
 
     private func startEditing(_ source: MediaSource) {
@@ -444,7 +452,7 @@ struct MediaSourceSettingsView: View {
                 case .local:
                     break
                 }
-                try KomgaProvider.updateSource(updatedSource)
+                try await KomgaProvider.updateSource(updatedSource)
                 reloadSources()
                 reloadHiddenComics()
                 if source.type == .opds {

@@ -141,7 +141,7 @@ nonisolated enum OfflineTranslationPageProvider {
         let fallback = "komga-unverified:\(comic.mediaSourceID?.uuidString ?? "")#\(comic.komgaBookID ?? "")#\(comic.remotePageCount ?? comic.totalPages)#\(comic.sourceURL ?? "")"
         guard let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
-              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }),
+              let source = await KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }),
               let apiKey = KomgaProvider.apiKey(for: sourceID) else {
             return fallback
         }
