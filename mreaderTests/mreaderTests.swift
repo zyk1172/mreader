@@ -56,6 +56,36 @@ struct mreaderTests {
         )
     }
 
+    @Test func remoteCoverCacheReportsSuccessfulWriteForRefreshPropagation() {
+        let sourceID = UUID()
+        let bookID = "cover-refresh-test-\(UUID().uuidString)"
+        defer { RemoteImageLoader.removeCachedImages(sourceID: sourceID, bookID: bookID) }
+
+        let result = RemoteImageLoader.cacheCoverDataWithResult(
+            Data([0x04, 0x05, 0x06]),
+            sourceID: sourceID,
+            bookID: bookID
+        )
+
+        #expect(result?.didWrite == true)
+        #expect(result?.path == RemoteImageLoader.cachedCoverPath(sourceID: sourceID, bookID: bookID))
+    }
+
+    @Test @MainActor func remoteCoverRefreshPublishesEvenWhenComicFieldsAreUnchanged() {
+        let comic = ComicBook(title: "cover-refresh", bookmarkData: Data(), totalPages: 1)
+
+        #expect(!ComicLibraryStore.shouldPublishRemoteComicUpdate(
+            existing: comic,
+            merged: comic,
+            coverWasRefreshed: false
+        ))
+        #expect(ComicLibraryStore.shouldPublishRemoteComicUpdate(
+            existing: comic,
+            merged: comic,
+            coverWasRefreshed: true
+        ))
+    }
+
     @Test func pageTranslationParserRestoresRequestOrderAndKeepsPartialResults() throws {
         let expected = [
             AIPageTranslationItem(id: "bubble-a", sourceText: "遅かったね", order: 0),

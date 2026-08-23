@@ -217,6 +217,14 @@ final class ComicLibraryStore: ObservableObject {
     private var lastOPDSSyncCount = 0
     private var didStartStartupRemoteMaintenance = false
 
+    static func shouldPublishRemoteComicUpdate(
+        existing: ComicBook,
+        merged: ComicBook,
+        coverWasRefreshed: Bool
+    ) -> Bool {
+        merged != existing || coverWasRefreshed
+    }
+
     init() {
         let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         libraryURL = applicationSupportURL.appendingPathComponent("library.json")
@@ -532,7 +540,12 @@ final class ComicLibraryStore: ObservableObject {
                 continue
             }
             syncedCount += result.comics.count
-            if applyKomgaScan(result.comics, sourceID: result.source.id, isAuthoritative: result.isAuthoritative) {
+            if applyKomgaScan(
+                result.comics,
+                sourceID: result.source.id,
+                isAuthoritative: result.isAuthoritative,
+                coverRefreshKeys: result.coverRefreshKeys
+            ) {
                 changed = true
             }
             if !result.isAuthoritative {
@@ -974,19 +987,34 @@ final class ComicLibraryStore: ObservableObject {
         save()
     }
 
-    private func applyKomgaScan(_ remoteComics: [ComicBook], sourceID: UUID, isAuthoritative: Bool) -> Bool {
-        applyRemoteScan(remoteComics, sourceID: sourceID, sourceType: .komga, isAuthoritative: isAuthoritative)
+    private func applyKomgaScan(
+        _ remoteComics: [ComicBook],
+        sourceID: UUID,
+        isAuthoritative: Bool,
+        coverRefreshKeys: Set<String> = []
+    ) -> Bool {
+        applyRemoteScan(
+            remoteComics,
+            sourceID: sourceID,
+            sourceType: .komga,
+            isAuthoritative: isAuthoritative,
+            coverRefreshKeys: coverRefreshKeys
+        )
     }
 
     private func applyRemoteScan(
         _ remoteComics: [ComicBook],
         sourceID: UUID,
         sourceType: ComicSourceType,
-        isAuthoritative: Bool
+        isAuthoritative: Bool,
+        coverRefreshKeys: Set<String> = []
     ) -> Bool {
         var changed = false
         let remoteKeys = Set(remoteComics.map(remoteIdentityKey))
-        for comic in remoteComics where upsertRemoteComic(comic) {
+        for comic in remoteComics where upsertRemoteComic(
+            comic,
+            coverWasRefreshed: coverRefreshKeys.contains(remoteIdentityKey(comic))
+        ) {
             changed = true
         }
         guard isAuthoritative else { return changed }
@@ -1009,7 +1037,7 @@ final class ComicLibraryStore: ObservableObject {
         }
     }
 
-    private func upsertRemoteComic(_ comic: ComicBook) -> Bool {
+    private func upsertRemoteComic(_ comic: ComicBook, coverWasRefreshed: Bool = false) -> Bool {
         if let index = comics.firstIndex(where: { matchesExistingComic($0, comic) }) {
             let existing = comics[index]
             var merged = comic
@@ -1060,12 +1088,11 @@ final class ComicLibraryStore: ObservableObject {
             merged.scrollSpeedRaw = existing.scrollSpeedRaw
             merged.bookmarks = existing.bookmarks
             merged.seriesID = existing.seriesID
-            let existingCoverWasMissing = comic.sourceType == .komga
-                && !(existing.coverImagePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
-            let mergedCoverIsAvailable = comic.sourceType == .komga
-                && (merged.coverImagePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
-            let didCoverBecomeAvailable = existingCoverWasMissing && mergedCoverIsAvailable
-            let didChange = merged != existing || didCoverBecomeAvailable
+            let didChange = Self.shouldPublishRemoteComicUpdate(
+                existing: existing,
+                merged: merged,
+                coverWasRefreshed: coverWasRefreshed
+            )
             if didChange {
                 comics[index] = merged
             }

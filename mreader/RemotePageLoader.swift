@@ -3,6 +3,11 @@ import ImageIO
 import UIKit
 
 nonisolated enum RemoteImageLoader {
+    nonisolated struct CoverCacheResult: Sendable, Equatable {
+        let path: String
+        let didWrite: Bool
+    }
+
     private static var cacheRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MReaderRemoteCovers", isDirectory: true)
@@ -47,11 +52,19 @@ nonisolated enum RemoteImageLoader {
     }
 
     static func cacheCoverData(_ data: Data, sourceID: UUID, bookID: String) -> String? {
+        cacheCoverDataWithResult(data, sourceID: sourceID, bookID: bookID)?.path
+    }
+
+    static func cacheCoverDataWithResult(
+        _ data: Data,
+        sourceID: UUID,
+        bookID: String
+    ) -> CoverCacheResult? {
         let url = coverURL(sourceID: sourceID, bookID: bookID)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
-            return url.path
+            return CoverCacheResult(path: url.path, didWrite: true)
         } catch {
             return nil
         }
