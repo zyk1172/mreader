@@ -17,12 +17,19 @@ nonisolated struct KomgaSourceSyncResult: Sendable {
     let source: MediaSource
     let comics: [ComicBook]
     let isAuthoritative: Bool
+    let coverRefreshKeys: Set<String>
     let error: Error?
 }
 
 nonisolated private struct KomgaSourceSyncPayload: Sendable {
     let comics: [ComicBook]
     let isAuthoritative: Bool
+    let coverRefreshKeys: Set<String>
+}
+
+nonisolated private struct KomgaCoverFetchResult: Sendable {
+    let path: String?
+    let didWrite: Bool
 }
 
 nonisolated enum KomgaProvider {
@@ -265,6 +272,15 @@ nonisolated enum KomgaProvider {
         return resolved
     }
 
+    /// 忽略内存和 UserDefaults 中的旧 URL，完成一次新的 LAN/WAN 探测后再写入缓存。
+    /// 启动 prewarm 使用此入口，确保后续同步不会继续命中已经失效的局域网地址。
+    static func refreshResolvedURL(source: MediaSource, timeout: TimeInterval = 4) async -> String {
+        let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
+        resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
+        UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+        return resolved
+    }
+
     static func invalidateResolvedURL(for sourceID: UUID) {
         resolvedURLCache[sourceID] = nil
         UserDefaults.standard.removeObject(forKey: "resolvedURL_\(sourceID.uuidString)")
@@ -283,7 +299,7 @@ nonisolated enum KomgaProvider {
         await withTaskGroup(of: Void.self) { group in
             for source in sources {
                 group.addTask {
-                    let url = await resolveBestURL(source: source, timeout: 4)
+                    let url = await refreshResolvedURL(source: source, timeout: 4)
                     let isLan = source.lanURL == url
                     print("MReader URL resolved source=\(source.name) url=\(url) isLAN=\(isLan)")
                 }
@@ -395,6 +411,7 @@ nonisolated enum KomgaProvider {
                     source: updatedSource,
                     comics: payload.comics,
                     isAuthoritative: payload.isAuthoritative,
+                    coverRefreshKeys: payload.coverRefreshKeys,
                     error: nil
                 ))
             } catch {
@@ -402,6 +419,7 @@ nonisolated enum KomgaProvider {
                     source: source,
                     comics: [],
                     isAuthoritative: false,
+                    coverRefreshKeys: [],
                     error: error
                 ))
             }
@@ -411,7 +429,7 @@ nonisolated enum KomgaProvider {
 
     private static func syncSource(_ source: MediaSource) async throws -> KomgaSourceSyncPayload {
         guard source.type == .komga else {
-            return KomgaSourceSyncPayload(comics: [], isAuthoritative: true)
+            return KomgaSourceSyncPayload(comics: [], isAuthoritative: true, coverRefreshKeys: [])
         }
         guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
         let resolvedURL = await resolveBestURL(source: source)
@@ -419,6 +437,7 @@ nonisolated enum KomgaProvider {
         let libraries = try await client.libraries()
         var comics: [ComicBook] = []
         var seenBookIDs = Set<String>()
+        var coverRefreshKeys = Set<String>()
         var hadPartialFailure = false
 
         for library in libraries {
@@ -458,7 +477,11 @@ nonisolated enum KomgaProvider {
                         continue
                     }
                     seenBookIDs.insert(book.id)
-                    let coverPath = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                    let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                    let coverPath = coverResult?.path
+                    if coverResult?.didWrite == true {
+                        coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
+                    }
                     let title = mergedTitle(series: series, book: book)
                     var comic = makeComic(source: source, libraryID: library.id, seriesID: series.id, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
                     applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
@@ -494,7 +517,11 @@ nonisolated enum KomgaProvider {
                         continue
                     }
                     seenBookIDs.insert(book.id)
-                    let coverPath = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                    let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                    let coverPath = coverResult?.path
+                    if coverResult?.didWrite == true {
+                        coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
+                    }
                     let title = directBookTitle(library: library, book: book)
                     var comic = makeComic(source: source, libraryID: library.id, seriesID: book.seriesId, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
                     applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
@@ -504,7 +531,11 @@ nonisolated enum KomgaProvider {
             }
             print("Komga 同步书库 \(library.name): series=\(seriesList.count), books=\(libraryBookCount), comics=\(libraryComicCount)")
         }
-        return KomgaSourceSyncPayload(comics: comics, isAuthoritative: !hadPartialFailure)
+        return KomgaSourceSyncPayload(
+            comics: comics,
+            isAuthoritative: !hadPartialFailure,
+            coverRefreshKeys: coverRefreshKeys
+        )
     }
 
     private static func resolvedPageCount(book: KomgaBookDTO, client: KomgaAPIClient) async throws -> Int {
@@ -528,12 +559,19 @@ nonisolated enum KomgaProvider {
         return min(max(remotePage, 0), max(0, pageCount - 1))
     }
 
-    private static func cachedCoverPath(sourceID: UUID, bookID: String, client: KomgaAPIClient) async throws -> String? {
+    private static func cachedCoverPath(sourceID: UUID, bookID: String, client: KomgaAPIClient) async throws -> KomgaCoverFetchResult? {
         if let cached = RemoteImageLoader.cachedCoverPath(sourceID: sourceID, bookID: bookID) {
-            return cached
+            return KomgaCoverFetchResult(path: cached, didWrite: false)
         }
         let data = try await client.thumbnailData(bookID: bookID)
-        return RemoteImageLoader.cacheCoverData(data, sourceID: sourceID, bookID: bookID)
+        guard let cacheResult = RemoteImageLoader.cacheCoverDataWithResult(data, sourceID: sourceID, bookID: bookID) else {
+            return nil
+        }
+        return KomgaCoverFetchResult(path: cacheResult.path, didWrite: cacheResult.didWrite)
+    }
+
+    private static func coverRefreshKey(sourceID: UUID, bookID: String) -> String {
+        "\(sourceID.uuidString):\(bookID)"
     }
 
     private static func mergedTitle(series: KomgaSeriesDTO, book: KomgaBookDTO) -> String {

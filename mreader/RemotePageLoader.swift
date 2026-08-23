@@ -3,6 +3,11 @@ import ImageIO
 import UIKit
 
 nonisolated enum RemoteImageLoader {
+    nonisolated struct CoverCacheResult: Sendable, Equatable {
+        let path: String
+        let didWrite: Bool
+    }
+
     private static var cacheRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MReaderRemoteCovers", isDirectory: true)
@@ -30,12 +35,36 @@ nonisolated enum RemoteImageLoader {
         return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
     }
 
+    /// 优先使用当前容器中按稳定远程身份计算出的缓存路径，避免依赖 library.json
+    /// 中可能已经过期的绝对沙盒路径。没有缓存时保留传入路径，交给调用方决定是否
+    /// 继续使用远程引用或显示占位图。
+    static func resolvedCoverPath(
+        persistedPath: String?,
+        sourceID: UUID?,
+        bookID: String?
+    ) -> String? {
+        if let sourceID,
+           let bookID,
+           let cachedPath = cachedCoverPath(sourceID: sourceID, bookID: bookID) {
+            return cachedPath
+        }
+        return persistedPath
+    }
+
     static func cacheCoverData(_ data: Data, sourceID: UUID, bookID: String) -> String? {
+        cacheCoverDataWithResult(data, sourceID: sourceID, bookID: bookID)?.path
+    }
+
+    static func cacheCoverDataWithResult(
+        _ data: Data,
+        sourceID: UUID,
+        bookID: String
+    ) -> CoverCacheResult? {
         let url = coverURL(sourceID: sourceID, bookID: bookID)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
-            return url.path
+            return CoverCacheResult(path: url.path, didWrite: true)
         } catch {
             return nil
         }

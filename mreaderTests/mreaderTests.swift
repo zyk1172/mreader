@@ -32,6 +32,60 @@ struct mreaderTests {
         #expect(targets.allSatisfy { $0.modelInstruction.contains($0.rawValue) })
     }
 
+    @Test func startupRemoteSyncDoesNotScanLocalLibrary() {
+        #expect(LibrarySyncScope.startupRemote.contains(.komga))
+        #expect(LibrarySyncScope.startupRemote.contains(.opds))
+        #expect(LibrarySyncScope.startupRemote.contains(.prewarmKomga))
+        #expect(!LibrarySyncScope.startupRemote.contains(.local))
+    }
+
+    @Test func remoteCoverPathPrefersCurrentCacheOverPersistedSandboxPath() {
+        let sourceID = UUID()
+        let bookID = "cover-path-test-\(UUID().uuidString)"
+        let stalePath = "/var/mobile/Containers/Data/Application/old/MReaderRemoteCovers/cover.img"
+        let cachedPath = RemoteImageLoader.cacheCoverData(Data([0x01, 0x02, 0x03]), sourceID: sourceID, bookID: bookID)
+        defer { RemoteImageLoader.removeCachedImages(sourceID: sourceID, bookID: bookID) }
+
+        #expect(cachedPath != nil)
+        #expect(
+            RemoteImageLoader.resolvedCoverPath(
+                persistedPath: stalePath,
+                sourceID: sourceID,
+                bookID: bookID
+            ) == cachedPath
+        )
+    }
+
+    @Test func remoteCoverCacheReportsSuccessfulWriteForRefreshPropagation() {
+        let sourceID = UUID()
+        let bookID = "cover-refresh-test-\(UUID().uuidString)"
+        defer { RemoteImageLoader.removeCachedImages(sourceID: sourceID, bookID: bookID) }
+
+        let result = RemoteImageLoader.cacheCoverDataWithResult(
+            Data([0x04, 0x05, 0x06]),
+            sourceID: sourceID,
+            bookID: bookID
+        )
+
+        #expect(result?.didWrite == true)
+        #expect(result?.path == RemoteImageLoader.cachedCoverPath(sourceID: sourceID, bookID: bookID))
+    }
+
+    @Test @MainActor func remoteCoverRefreshPublishesEvenWhenComicFieldsAreUnchanged() {
+        let comic = ComicBook(title: "cover-refresh", bookmarkData: Data(), totalPages: 1)
+
+        #expect(!ComicLibraryStore.shouldPublishRemoteComicUpdate(
+            existing: comic,
+            merged: comic,
+            coverWasRefreshed: false
+        ))
+        #expect(ComicLibraryStore.shouldPublishRemoteComicUpdate(
+            existing: comic,
+            merged: comic,
+            coverWasRefreshed: true
+        ))
+    }
+
     @Test func pageTranslationParserRestoresRequestOrderAndKeepsPartialResults() throws {
         let expected = [
             AIPageTranslationItem(id: "bubble-a", sourceText: "遅かったね", order: 0),
