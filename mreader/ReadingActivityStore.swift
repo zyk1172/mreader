@@ -29,8 +29,9 @@ nonisolated struct ReadingActivityDay: Codable, Identifiable, Equatable, Sendabl
     var completedComicIDs: Set<UUID>
     var comicSeconds: [UUID: Int]
     var comicPages: [UUID: Int]
-    /// Per-device stable identities retained for iCloud merge. Local UI totals continue
-    /// using UUID dictionaries, while sync avoids double-counting a merged snapshot.
+    /// Per-device stable identities retained for iCloud merge. `seconds` and `pages`
+    /// are derived from these counters after a v2 merge, so a later local record can
+    /// update only the current device rather than re-attributing the aggregate.
     var syncedCompletedComicKeys: Set<String>
     var syncedComicSeconds: [String: Int]
     var syncedComicPages: [String: Int]
@@ -96,10 +97,10 @@ final class ReadingActivityStore: ObservableObject {
     private let storageURL: URL
     private let calendar: Calendar
 
-    init(calendar: Calendar = .current) {
+    init(calendar: Calendar = .current, storageURL: URL? = nil) {
         self.calendar = calendar
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        storageURL = support.appendingPathComponent("reading_activity.json")
+        self.storageURL = storageURL ?? support.appendingPathComponent("reading_activity.json")
         load()
     }
 
@@ -128,8 +129,12 @@ final class ReadingActivityStore: ObservableObject {
             index = days.count - 1
         }
 
-        days[index].seconds = min(86_400, days[index].seconds + increment.seconds)
-        days[index].pages += increment.pages
+        normalizeDeviceCounters(&days[index])
+        let deviceID = ICloudSyncDeviceIdentity.current
+        days[index].syncedDeviceSeconds[deviceID, default: 0] += increment.seconds
+        days[index].syncedDevicePages[deviceID, default: 0] += increment.pages
+        days[index].seconds = days[index].syncedDeviceSeconds.values.reduce(0, +)
+        days[index].pages = days[index].syncedDevicePages.values.reduce(0, +)
         days[index].comicSeconds[comicID, default: 0] += increment.seconds
         days[index].comicPages[comicID, default: 0] += increment.pages
         if completed {
@@ -157,11 +162,14 @@ final class ReadingActivityStore: ObservableObject {
 
     func mergeSyncedDays(_ incomingDays: [ReadingActivityDay]) {
         var merged = Dictionary(uniqueKeysWithValues: days.map { ($0.dateKey, $0) })
-        for incoming in incomingDays {
+        for rawIncoming in incomingDays {
+            var incoming = rawIncoming
+            normalizeDeviceCounters(&incoming)
             guard var existing = merged[incoming.dateKey] else {
                 merged[incoming.dateKey] = incoming
                 continue
             }
+            normalizeDeviceCounters(&existing)
             existing.seconds = max(existing.seconds, incoming.seconds)
             existing.pages = max(existing.pages, incoming.pages)
             existing.completedComicIDs.formUnion(incoming.completedComicIDs)
@@ -184,6 +192,8 @@ final class ReadingActivityStore: ObservableObject {
             for (deviceID, pages) in incoming.syncedDevicePages {
                 existing.syncedDevicePages[deviceID] = max(existing.syncedDevicePages[deviceID] ?? 0, pages)
             }
+            existing.seconds = existing.syncedDeviceSeconds.values.reduce(0, +)
+            existing.pages = existing.syncedDevicePages.values.reduce(0, +)
             merged[incoming.dateKey] = existing
         }
         let updated = merged.values.sorted { $0.dateKey < $1.dateKey }
@@ -206,8 +216,7 @@ final class ReadingActivityStore: ObservableObject {
 
         for incoming in incomingDays {
             var existing = merged[incoming.dateKey] ?? ReadingActivityDay(dateKey: incoming.dateKey)
-            existing.seconds = max(existing.seconds, incoming.seconds)
-            existing.pages = max(existing.pages, incoming.pages)
+            normalizeDeviceCounters(&existing)
             existing.syncedCompletedComicKeys.formUnion(incoming.completedComicKeys)
             for (key, seconds) in incoming.comicSeconds {
                 existing.syncedComicSeconds[key] = max(existing.syncedComicSeconds[key] ?? 0, seconds)
@@ -215,14 +224,20 @@ final class ReadingActivityStore: ObservableObject {
             for (key, pages) in incoming.comicPages {
                 existing.syncedComicPages[key] = max(existing.syncedComicPages[key] ?? 0, pages)
             }
-            for (deviceID, seconds) in incoming.deviceSeconds {
+            let incomingDeviceSeconds = incoming.deviceSeconds.isEmpty && incoming.seconds > 0
+                ? ["legacy-v1": incoming.seconds]
+                : incoming.deviceSeconds
+            let incomingDevicePages = incoming.devicePages.isEmpty && incoming.pages > 0
+                ? ["legacy-v1": incoming.pages]
+                : incoming.devicePages
+            for (deviceID, seconds) in incomingDeviceSeconds {
                 existing.syncedDeviceSeconds[deviceID] = max(existing.syncedDeviceSeconds[deviceID] ?? 0, seconds)
             }
-            for (deviceID, pages) in incoming.devicePages {
+            for (deviceID, pages) in incomingDevicePages {
                 existing.syncedDevicePages[deviceID] = max(existing.syncedDevicePages[deviceID] ?? 0, pages)
             }
-            existing.seconds = max(existing.seconds, existing.syncedDeviceSeconds.values.reduce(0, +))
-            existing.pages = max(existing.pages, existing.syncedDevicePages.values.reduce(0, +))
+            existing.seconds = existing.syncedDeviceSeconds.values.reduce(0, +)
+            existing.pages = existing.syncedDevicePages.values.reduce(0, +)
 
             for comic in comics {
                 guard let identity = identityByComicID[comic.id] else { continue }
@@ -266,7 +281,23 @@ final class ReadingActivityStore: ObservableObject {
               let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
             return
         }
-        days = decoded.sorted { $0.dateKey < $1.dateKey }
+        var normalized = decoded
+        for index in normalized.indices {
+            normalizeDeviceCounters(&normalized[index])
+        }
+        days = normalized.sorted { $0.dateKey < $1.dateKey }
+    }
+
+    private func normalizeDeviceCounters(_ day: inout ReadingActivityDay) {
+        let deviceID = ICloudSyncDeviceIdentity.current
+        if day.syncedDeviceSeconds.isEmpty, day.seconds > 0 {
+            day.syncedDeviceSeconds[deviceID] = day.seconds
+        }
+        if day.syncedDevicePages.isEmpty, day.pages > 0 {
+            day.syncedDevicePages[deviceID] = day.pages
+        }
+        day.seconds = day.syncedDeviceSeconds.values.reduce(0, +)
+        day.pages = day.syncedDevicePages.values.reduce(0, +)
     }
 
     private func save() {

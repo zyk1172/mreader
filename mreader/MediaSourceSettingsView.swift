@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MediaSourceSettingsView: View {
     @ObservedObject var library: ComicLibraryStore
+    var onSourcesChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
 
     @State private var sources: [MediaSource] = []
@@ -191,6 +192,9 @@ struct MediaSourceSettingsView: View {
             .onAppear {
                 reloadSources()
                 reloadHiddenComics()
+            }
+            .onDisappear {
+                onSourcesChanged()
             }
             .alert(item: $sourcePendingRemoval) { source in
                 Alert(

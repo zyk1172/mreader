@@ -30,9 +30,13 @@ actor OCRSearchIndex {
     private var pendingChanges = 0
     private var checkpointTask: Task<Void, Never>?
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        fileURL = support.appendingPathComponent("ocr_search_index.json")
+    init(fileURL: URL? = nil) {
+        if let fileURL {
+            self.fileURL = fileURL
+        } else {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            self.fileURL = support.appendingPathComponent("ocr_search_index.json")
+        }
     }
 
     func index(comicID: UUID, pageIndex: Int, blocks: [TextBlock]) {
@@ -101,8 +105,14 @@ actor OCRSearchIndex {
         checkpointTask?.cancel()
         checkpointTask = nil
         guard pendingChanges > 0 else { return }
-        persist()
-        pendingChanges = 0
+        do {
+            try persist()
+            pendingChanges = 0
+        } catch {
+            // Keep the dirty count so a later foreground/background transition
+            // can retry after a transient disk or filesystem failure.
+            print("MReader OCR search index flush failed: \(error.localizedDescription)")
+        }
     }
 
     private func key(comicID: UUID, pageIndex: Int) -> String {
@@ -131,13 +141,13 @@ actor OCRSearchIndex {
         }
     }
 
-    private func persist() {
+    private func persist() throws {
         let values = records.values.sorted {
             $0.comicID == $1.comicID ? $0.pageIndex < $1.pageIndex : $0.comicID.uuidString < $1.comicID.uuidString
         }
-        guard let data = try? JSONEncoder().encode(values) else { return }
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+        let data = try JSONEncoder().encode(values)
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: .atomic)
     }
 }
 
