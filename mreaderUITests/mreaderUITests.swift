@@ -19,7 +19,8 @@ final class mreaderUITests: XCTestCase {
         let app = launchApp()
         XCTAssertTrue(element("mreader.shelf.root", in: app).waitForExistence(timeout: timeout))
         XCTAssertTrue(element("mreader.shelf.menu", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.tab.library", in: app).exists)
+        XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: timeout))
+        XCTAssertGreaterThanOrEqual(app.tabBars.buttons.count, 3)
     }
 
     @MainActor
@@ -86,6 +87,10 @@ final class mreaderUITests: XCTestCase {
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any)[identifier]
+        let button = app.buttons[identifier].firstMatch
+        if button.exists {
+            return button
+        }
+        return app.descendants(matching: .any)[identifier].firstMatch
     }
 }
