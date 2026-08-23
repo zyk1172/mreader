@@ -170,8 +170,12 @@ nonisolated struct ICloudReadingActivityDay: Codable, Sendable, Equatable {
 
         var syncedDeviceSeconds = day.syncedDeviceSeconds
         var syncedDevicePages = day.syncedDevicePages
-        syncedDeviceSeconds[deviceID] = max(syncedDeviceSeconds[deviceID] ?? 0, day.seconds)
-        syncedDevicePages[deviceID] = max(syncedDevicePages[deviceID] ?? 0, day.pages)
+        if syncedDeviceSeconds.isEmpty, day.seconds > 0 {
+            syncedDeviceSeconds[deviceID] = day.seconds
+        }
+        if syncedDevicePages.isEmpty, day.pages > 0 {
+            syncedDevicePages[deviceID] = day.pages
+        }
         self.init(
             dateKey: day.dateKey,
             seconds: syncedDeviceSeconds.values.reduce(0, +),
