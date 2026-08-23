@@ -3454,7 +3454,21 @@ struct CoverImageView: View {
     }
 
     private var coverTaskID: String {
-        "\(path ?? "")|\(remoteSourceID?.uuidString ?? "")|\(remoteBookID ?? "")"
+        let cachedPath: String?
+        if let remoteSourceID, let remoteBookID {
+            cachedPath = RemoteImageLoader.cachedCoverPath(
+                sourceID: remoteSourceID,
+                bookID: remoteBookID
+            )
+        } else {
+            cachedPath = nil
+        }
+        return [
+            path ?? "",
+            cachedPath ?? "<missing>",
+            remoteSourceID?.uuidString ?? "",
+            remoteBookID ?? ""
+        ].joined(separator: "|")
     }
 
     var body: some View {

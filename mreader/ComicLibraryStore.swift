@@ -1060,7 +1060,12 @@ final class ComicLibraryStore: ObservableObject {
             merged.scrollSpeedRaw = existing.scrollSpeedRaw
             merged.bookmarks = existing.bookmarks
             merged.seriesID = existing.seriesID
-            let didChange = merged != existing
+            let existingCoverWasMissing = comic.sourceType == .komga
+                && !(existing.coverImagePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
+            let mergedCoverIsAvailable = comic.sourceType == .komga
+                && (merged.coverImagePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
+            let didCoverBecomeAvailable = existingCoverWasMissing && mergedCoverIsAvailable
+            let didChange = merged != existing || didCoverBecomeAvailable
             if didChange {
                 comics[index] = merged
             }

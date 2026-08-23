@@ -265,6 +265,15 @@ nonisolated enum KomgaProvider {
         return resolved
     }
 
+    /// 忽略内存和 UserDefaults 中的旧 URL，完成一次新的 LAN/WAN 探测后再写入缓存。
+    /// 启动 prewarm 使用此入口，确保后续同步不会继续命中已经失效的局域网地址。
+    static func refreshResolvedURL(source: MediaSource, timeout: TimeInterval = 4) async -> String {
+        let resolved = await resolveBestURLUncached(source: source, timeout: timeout)
+        resolvedURLCache[source.id] = (url: resolved, timestamp: Date())
+        UserDefaults.standard.set(resolved, forKey: "resolvedURL_\(source.id.uuidString)")
+        return resolved
+    }
+
     static func invalidateResolvedURL(for sourceID: UUID) {
         resolvedURLCache[sourceID] = nil
         UserDefaults.standard.removeObject(forKey: "resolvedURL_\(sourceID.uuidString)")
@@ -283,7 +292,7 @@ nonisolated enum KomgaProvider {
         await withTaskGroup(of: Void.self) { group in
             for source in sources {
                 group.addTask {
-                    let url = await resolveBestURL(source: source, timeout: 4)
+                    let url = await refreshResolvedURL(source: source, timeout: 4)
                     let isLan = source.lanURL == url
                     print("MReader URL resolved source=\(source.name) url=\(url) isLAN=\(isLan)")
                 }
