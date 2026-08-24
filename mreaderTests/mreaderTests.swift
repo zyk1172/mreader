@@ -1102,12 +1102,7 @@ struct mreaderTests {
             Issue.record("Prompt 中找不到输入 JSON 区块")
             return
         }
-        let input = prompt[inputMarker.upperBound...]
-        guard let lineEnd = input.firstIndex(of: "\n") else {
-            Issue.record("Prompt 中输入 JSON 没有结束行")
-            return
-        }
-        let jsonText = String(input[..<lineEnd])
+        let jsonText = String(prompt[inputMarker.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let object = try JSONSerialization.jsonObject(with: Data(jsonText.utf8)) as? [String: Any]
         let items = object?["items"] as? [[String: Any]]
