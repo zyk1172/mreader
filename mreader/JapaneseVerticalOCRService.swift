@@ -18,7 +18,7 @@ nonisolated struct JapaneseVerticalOCRCoverage: Equatable, Sendable {
 /// owns the narrow escape hatch for pages where Vision has evidence of
 /// Japanese vertical writing but its result is incomplete.
 nonisolated enum JapaneseVerticalOCRService {
-    static let revision = "jpn-vert-tesseract-5.5.1-v1"
+    static let revision = "jpn-vert-tesseract-5.5.1-v2"
     static let minimumAverageConfidence = 0.58
     static let minimumUsefulCharacterRatio = 0.42
 
@@ -114,7 +114,23 @@ nonisolated enum JapaneseVerticalOCRService {
         existingBlocks: [TextBlock],
         options: OCRPreprocessor.Options
     ) -> Bool {
-        shouldRequestPageRecovery(
+        guard options.isRightToLeft,
+              isJapanesePage(
+                  existingBlocks: existingBlocks,
+                  preference: options.sourceLanguagePreference
+              ) else {
+            return false
+        }
+
+        // Maximum accuracy is an explicit cost/quality choice.  Do not use
+        // Vision's own confidence as a proxy for page coverage here: a page
+        // with two confidently recognized columns can still be missing eight
+        // other columns entirely.
+        if options.recognitionMode == .maximumAccuracy {
+            return true
+        }
+
+        return shouldRequestPageRecovery(
             in: image,
             existingBlocks: existingBlocks,
             isRightToLeft: options.isRightToLeft,
@@ -136,17 +152,36 @@ nonisolated enum JapaneseVerticalOCRService {
             return false
         }
 
+        let localColumnCenters = verticalColumnCenters(in: existingBlocks)
+        let imageColumnCenters = image.map(verticalColumnEvidenceCenters(in:)) ?? []
+
+        // Run the lightweight page probe even when Vision returned blocks.
+        // The important signal is an image column which has no nearby local
+        // OCR column, not merely a low confidence score on an existing block.
+        if imageColumnCenters.count >= 2 {
+            let coveredColumnTolerance = max(
+                0.04,
+                verticalColumnAverageWidth(in: existingBlocks) * 1.6
+            )
+            let uncoveredColumnCount = imageColumnCenters.filter { imageCenter in
+                !localColumnCenters.contains { localCenter in
+                    abs(imageCenter - localCenter) <= coveredColumnTolerance
+                }
+            }.count
+            if uncoveredColumnCount > 0 {
+                return true
+            }
+        }
+
         let coverage = coverage(for: existingBlocks, isRightToLeft: isRightToLeft)
         guard coverage.isInsufficient else { return false }
 
-        let blockColumns = verticalColumnCount(in: existingBlocks)
-        // Once Vision has produced horizontal observations, trust those
-        // observations for orientation.  Pixel projection is reserved for the
-        // genuinely empty-result case, where it is the only local evidence
-        // available and can still discover two missed vertical columns.
-        if blockColumns >= 2 { return true }
+        // Keep the established low-coverage recovery for pages where local
+        // OCR already supplies vertical evidence but the image probe cannot be
+        // used (for example, a diagnostic call without an image).
+        if localColumnCenters.count >= 2 { return true }
         guard existingBlocks.isEmpty else { return false }
-        return (image.map(verticalColumnEvidence(in:)) ?? 0) >= 2
+        return imageColumnCenters.count >= 2
     }
 
     static func coverage(
@@ -191,16 +226,19 @@ nonisolated enum JapaneseVerticalOCRService {
     /// local OCR observations.  This is intentionally a diagnostic-friendly
     /// pure function so it can be regression-tested without Vision or a model.
     static func verticalColumnCount(in blocks: [TextBlock]) -> Int {
+        verticalColumnCenters(in: blocks).count
+    }
+
+    private static func verticalColumnCenters(in blocks: [TextBlock]) -> [CGFloat] {
         let verticalBlocks = blocks
             .filter { block in
                 block.textOrientation == .vertical
                     || block.boundingBox.height >= block.boundingBox.width * 1.35
             }
             .sorted { $0.boundingBox.midX < $1.boundingBox.midX }
-        guard !verticalBlocks.isEmpty else { return 0 }
+        guard !verticalBlocks.isEmpty else { return [] }
 
-        let averageWidth = verticalBlocks.reduce(0) { $0 + $1.boundingBox.width }
-            / CGFloat(verticalBlocks.count)
+        let averageWidth = verticalColumnAverageWidth(in: verticalBlocks)
         let maximumColumnGap = max(0.035, averageWidth * 1.8)
         var columnCenters: [CGFloat] = []
         for block in verticalBlocks {
@@ -211,7 +249,17 @@ nonisolated enum JapaneseVerticalOCRService {
                 columnCenters.append(center)
             }
         }
-        return columnCenters.count
+        return columnCenters
+    }
+
+    private static func verticalColumnAverageWidth(in blocks: [TextBlock]) -> CGFloat {
+        let verticalBlocks = blocks.filter { block in
+            block.textOrientation == .vertical
+                || block.boundingBox.height >= block.boundingBox.width * 1.35
+        }
+        guard !verticalBlocks.isEmpty else { return 0 }
+        return verticalBlocks.reduce(0) { $0 + $1.boundingBox.width }
+            / CGFloat(verticalBlocks.count)
     }
 
     /// The vertical model is trained on an image rotated counter-clockwise so
@@ -364,11 +412,11 @@ nonisolated enum JapaneseVerticalOCRService {
         }
     }
 
-    /// Lightweight image evidence for the no-observation case.  It counts
-    /// separated narrow ink columns with support across several horizontal
-    /// bands; broad horizontal prose does not normally satisfy both tests.
-    private static func verticalColumnEvidence(in image: UIImage) -> Int {
-        guard let cgImage = image.cgImage else { return 0 }
+    /// Lightweight image evidence for both empty and partial OCR results. It
+    /// returns normalized column centers so the caller can distinguish a
+    /// column already covered by Vision from a column that was missed.
+    private static func verticalColumnEvidenceCenters(in image: UIImage) -> [CGFloat] {
+        guard let cgImage = image.cgImage else { return [] }
         let maxWidth = 160
         let maxHeight = 240
         let scale = min(
@@ -386,7 +434,7 @@ nonisolated enum JapaneseVerticalOCRService {
             bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return 0 }
+        ) else { return [] }
         context.interpolationQuality = .medium
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
@@ -421,7 +469,9 @@ nonisolated enum JapaneseVerticalOCRService {
             groups.append((currentStart, width - 1))
         }
         let maximumGroupWidth = max(Int(CGFloat(width) * 0.28), 4)
-        return groups.filter { $0.end - $0.start + 1 <= maximumGroupWidth }.count
+        return groups
+            .filter { $0.end - $0.start + 1 <= maximumGroupWidth }
+            .map { CGFloat($0.start + $0.end + 1) / (2 * CGFloat(width)) }
     }
 }
 

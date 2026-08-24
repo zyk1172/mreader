@@ -303,6 +303,77 @@ struct mreaderTests {
         ))
     }
 
+    @Test func japaneseVerticalAdaptiveRecoveryDetectsUncoveredColumnsDespiteHighConfidence() throws {
+        let size = CGSize(width: 200, height: 300)
+        var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
+        let context = try #require(CGContext(
+            data: &pixels,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        context.setFillColor(UIColor.black.cgColor)
+        for index in 0..<10 {
+            context.fill(CGRect(
+                x: 8 + CGFloat(index * 18),
+                y: 30,
+                width: 5,
+                height: 230
+            ))
+        }
+        let cgImage = try #require(context.makeImage())
+        let image = UIImage(cgImage: cgImage)
+        let localBlocks = (0..<2).map { index in
+            TextBlock(
+                text: "正",
+                boundingBox: CGRect(
+                    x: (8 + CGFloat(index * 18)) / size.width - 0.0125,
+                    y: 0.1,
+                    width: 0.025,
+                    height: 0.76
+                ),
+                confidence: 0.95,
+                ocrSource: "vision:ja",
+                textOrientation: .vertical
+            )
+        }
+
+        #expect(JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: image,
+            existingBlocks: localBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .japanese
+        ))
+    }
+
+    @Test func japaneseVerticalMaximumAccuracyDoesNotTrustPartialVisionCoverage() {
+        var options = OCRPreprocessor.Options(
+            isRightToLeft: true,
+            minimumTextHeight: 0.01,
+            recognitionMode: .maximumAccuracy,
+            sourceLanguagePreference: .japanese
+        )
+        options.languages = ["ja-JP"]
+        let confidentBlock = TextBlock(
+            text: "正",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.04, height: 0.7),
+            confidence: 0.99,
+            ocrSource: "vision:ja",
+            textOrientation: .vertical
+        )
+
+        #expect(JapaneseVerticalOCRService.shouldRunFallback(
+            in: nil,
+            existingBlocks: [confidentBlock],
+            options: options
+        ))
+    }
+
     @Test func japaneseVerticalCoordinateMappingRoundTrips() {
         let original = CGRect(x: 0.16, y: 0.21, width: 0.08, height: 0.31)
         let rotated = JapaneseVerticalOCRService.originalBoundingBoxToRotatedForDiagnostics(original)
