@@ -4078,10 +4078,18 @@ struct LocalImageView: View {
             using: transform
         )
         let imageBounds = transform.imageRect
-        let fallbackBounds = limitedTranslationFallbackBounds(
-            around: textRect,
-            within: imageBounds
-        )
+        let fallbackBounds: CGRect
+        if block.bubbleBox == nil {
+            fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
+                around: textRect,
+                within: imageBounds
+            )
+        } else {
+            fallbackBounds = limitedTranslationFallbackBounds(
+                around: textRect,
+                within: imageBounds
+            )
+        }
         let allowedBounds: CGRect
         if let bubbleBox = block.bubbleBox {
             let mappedBubble = OCRCoordinateMapper.displayRect(
@@ -4108,7 +4116,11 @@ struct LocalImageView: View {
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: translation.isEmpty ? block.text : translation,
             translationLines: translation.isEmpty ? [] : block.translationLines,
-            sourceFontSize: preferredTranslationFontSize(for: block, in: size),
+            sourceFontSize: preferredTranslationFontSize(
+                for: block,
+                in: size,
+                textRect: textRect
+            ),
             sourceRect: textRect,
             allowedBounds: allowedBounds,
             lineSpacing: 2
@@ -4409,9 +4421,20 @@ struct LocalImageView: View {
         11 + CGFloat(normalizedOCRScale) * 8
     }
 
-    private func preferredTranslationFontSize(for block: TextBlock, in size: CGSize) -> CGFloat {
+    private func preferredTranslationFontSize(
+        for block: TextBlock,
+        in size: CGSize,
+        textRect: CGRect
+    ) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
         // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
+        if block.bubbleBox == nil {
+            return OCRBubbleLayoutEngine.standaloneTextFontSize(
+                for: block,
+                imageRect: imageRect,
+                textRect: textRect
+            )
+        }
         return block.sourceFontSize(in: imageRect)
     }
 
