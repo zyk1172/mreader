@@ -2032,7 +2032,7 @@ struct ContentView: View {
         do {
             let backup = await makeSettingsBackup()
             guard let password else { throw SettingsBackupCodecError.invalidPassword }
-            let data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
+            let data = try await SettingsBackupCodec.encodeEncryptedInBackground(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
             showSettings = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -2141,7 +2141,7 @@ struct ContentView: View {
                 backupPasswordRequest = nil
                 await exportSettingsBackup(password: password)
             case .restore(let data):
-                let backup = try SettingsBackupCodec.decode(data, password: password)
+                let backup = try await SettingsBackupCodec.decodeInBackground(data, password: password)
                 try await applySettingsBackup(backup)
                 backupPasswordRequest = nil
             }
