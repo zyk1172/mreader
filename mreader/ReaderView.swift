@@ -81,6 +81,7 @@ struct ReaderContainerView: View {
                         comic.isAutoOCRMagnificationEnabled = false
                         comic.isAutoTranslationEnabled = false
                         comic.hasInitializedReadingPreset = true
+                        comic.metadataUpdatedAt = Date()
                         onComicUpdate(comic)
                     }
                     await prewarmInitialScrollingPage(in: result)
@@ -1507,6 +1508,7 @@ struct ReaderView: View {
             comic.isAutoOCRMagnificationEnabled = false
             comic.isAutoTranslationEnabled = false
             comic.hasInitializedReadingPreset = true
+            comic.metadataUpdatedAt = Date()
             print("MReader initial preset comic=\(comic.id) mode=\(comic.readingModeRaw) animation=\(comic.pageTurnAnimationRaw) fit=\(comic.imageFitModeRaw) reason=\(preset.reason)")
             onComicUpdate(comic)
         }
@@ -1518,6 +1520,7 @@ struct ReaderView: View {
         comic.pageTurnAnimationRaw = PageTurnAnimation.curl.rawValue
         comic.imageFitModeRaw = ImageFitMode.fitScreen.rawValue
         comic.hasInitializedReadingPreset = true
+        comic.metadataUpdatedAt = Date()
         onComicUpdate(comic)
     }
 
@@ -1639,6 +1642,7 @@ struct ReaderView: View {
     private func updateComic(_ mutate: (inout ComicBook) -> Void) {
         HapticManager.shared.play(.light)
         mutate(&comic)
+        comic.metadataUpdatedAt = Date()
         if !comic.isOCREnabled {
             comic.isAutoOCRMagnificationEnabled = false
             isOCRMagnificationVisible = false
