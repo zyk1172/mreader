@@ -3,6 +3,11 @@ import Foundation
 import UIKit
 
 nonisolated enum OCRBubbleLayoutEngine {
+    nonisolated enum TranslationTextSizingMode: Sendable {
+        case bubble
+        case standaloneGlyph
+    }
+
     struct TranslationLayout: Sendable {
         let rect: CGRect
         let fontSize: CGFloat
@@ -40,7 +45,13 @@ nonisolated enum OCRBubbleLayoutEngine {
         let areaPerGlyph = sqrt(
             max(textRect.width * textRect.height, 1) / CGFloat(glyphCount)
         )
-        var candidates = [sourceFontSize, areaPerGlyph]
+        // The short display axis is a safer estimate than the long axis of a
+        // merged or rotated OCR rectangle. It also keeps a bad crop from
+        // enlarging a standalone translation merely because its text is long.
+        let axisGlyphSize = block.textOrientation == .horizontal
+            ? textRect.height
+            : textRect.width
+        var candidates = [sourceFontSize, areaPerGlyph, axisGlyphSize]
 
         let displayPolygon = block.polygon.map { point in
             CGPoint(
@@ -52,6 +63,20 @@ nonisolated enum OCRBubbleLayoutEngine {
             candidates.append(shortAxis)
         }
         return max(candidates.min() ?? sourceFontSize, 1)
+    }
+
+    static func sourceFontSize(
+        for block: TextBlock,
+        imageRect: CGRect,
+        textRect: CGRect,
+        sizingMode: TranslationTextSizingMode
+    ) -> CGFloat {
+        switch sizingMode {
+        case .bubble:
+            return block.sourceFontSize(in: imageRect)
+        case .standaloneGlyph:
+            return standaloneTextFontSize(for: block, imageRect: imageRect, textRect: textRect)
+        }
     }
 
     /// Standalone translations may grow only by a small, finite padding around
@@ -99,8 +124,19 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceRect: CGRect,
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
-        padding: CGFloat = 5
+        padding: CGFloat = 5,
+        textOrientation: TextOrientation = .horizontal
     ) -> TranslationLayout {
+        if textOrientation == .vertical {
+            return anchoredVerticalTranslationLayout(
+                text: text,
+                sourceFontSize: sourceFontSize,
+                sourceRect: sourceRect,
+                allowedBounds: allowedBounds,
+                padding: padding
+            )
+        }
+
         let safeBounds = allowedBounds.standardized
         guard safeBounds.width > 0, safeBounds.height > 0 else {
             return TranslationLayout(rect: sourceRect, fontSize: max(sourceFontSize, 1))
@@ -209,9 +245,27 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceRect: CGRect,
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
-        padding: CGFloat = 5
+        padding: CGFloat = 5,
+        textOrientation: TextOrientation = .horizontal
     ) -> TranslationLayoutChoice {
         let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        if textOrientation == .vertical {
+            let text = naturalText.isEmpty ? " " : naturalText
+            return TranslationLayoutChoice(
+                text: text,
+                layout: anchoredTranslationLayout(
+                    text: text,
+                    sourceFontSize: sourceFontSize,
+                    sourceRect: sourceRect,
+                    allowedBounds: allowedBounds,
+                    lineSpacing: lineSpacing,
+                    padding: padding,
+                    textOrientation: .vertical
+                ),
+                usesSuggestedLineBreaks: false
+            )
+        }
+
         let suggestedText = translationLines
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -232,7 +286,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                     sourceRect: sourceRect,
                     allowedBounds: allowedBounds,
                     lineSpacing: lineSpacing,
-                    padding: padding
+                    padding: padding,
+                    textOrientation: textOrientation
                 ),
                 usesSuggestedLineBreaks: candidate.usesSuggestedLineBreaks
             )
@@ -358,6 +413,81 @@ nonisolated enum OCRBubbleLayoutEngine {
             }
         }
         return best
+    }
+
+    /// Measures a vertical translation as columns of glyph advances. CoreText
+    /// performs the actual vertical-form shaping in the renderer; this method
+    /// supplies the same bounded geometry without inserting a newline between
+    /// every character or rotating a horizontal text view.
+    @MainActor
+    private static func anchoredVerticalTranslationLayout(
+        text: String,
+        sourceFontSize: CGFloat,
+        sourceRect: CGRect,
+        allowedBounds: CGRect,
+        padding: CGFloat
+    ) -> TranslationLayout {
+        let safeBounds = allowedBounds.standardized
+        guard safeBounds.width > 0, safeBounds.height > 0 else {
+            return TranslationLayout(rect: sourceRect, fontSize: max(sourceFontSize, 1))
+        }
+
+        let anchor = CGPoint(
+            x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
+            y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
+        )
+        let glyphCount = max(text.filter { !$0.isWhitespace && $0 != "\n" }.count, 1)
+        let targetFontSize = max(sourceFontSize, 1)
+
+        func layout(fontSize: CGFloat) -> TranslationLayout? {
+            let advance = max(fontSize * 1.08, 1)
+            let columnWidth = max(fontSize * 1.10, 1)
+            let availableHeight = max(safeBounds.height - padding * 2, advance)
+            let rows = max(Int(floor(availableHeight / advance)), 1)
+            let columns = max(Int(ceil(Double(glyphCount) / Double(rows))), 1)
+            let width = min(
+                safeBounds.width,
+                max(sourceRect.width + padding * 2, CGFloat(columns) * columnWidth + padding * 2)
+            )
+            let usedRows = min(rows, Int(ceil(Double(glyphCount) / Double(columns))))
+            let height = min(
+                safeBounds.height,
+                max(sourceRect.height + padding * 2, CGFloat(usedRows) * advance + padding * 2)
+            )
+            guard width >= CGFloat(columns) * columnWidth + padding * 2 - 0.5,
+                  height >= CGFloat(usedRows) * advance + padding * 2 - 0.5 else {
+                return nil
+            }
+            let rect = CGRect(
+                x: anchor.x - width / 2,
+                y: anchor.y - height / 2,
+                width: width,
+                height: height
+            )
+            return TranslationLayout(
+                rect: clamped(rect, to: safeBounds, margin: 0),
+                fontSize: fontSize
+            )
+        }
+
+        if let result = layout(fontSize: targetFontSize) {
+            return result
+        }
+
+        var lower: CGFloat = 0.1
+        var upper = targetFontSize
+        if layout(fontSize: lower) == nil {
+            return TranslationLayout(rect: safeBounds, fontSize: lower)
+        }
+        for _ in 0..<16 {
+            let candidate = (lower + upper) / 2
+            if layout(fontSize: candidate) != nil {
+                lower = candidate
+            } else {
+                upper = candidate
+            }
+        }
+        return layout(fontSize: lower) ?? TranslationLayout(rect: safeBounds, fontSize: lower)
     }
 
     static func nonOverlappingRect(

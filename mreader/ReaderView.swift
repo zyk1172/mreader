@@ -888,7 +888,7 @@ struct ReaderView: View {
                     lineWidth: 18,
                     blurRadius: 0,
                     animationDuration: 2.0,
-                    colors: ColorfulTranslatedText.palette
+                    colors: TranslationTextRenderer.palette
                 )
                 .ignoresSafeArea()
                     .allowsHitTesting(false)
@@ -3921,14 +3921,15 @@ struct LocalImageView: View {
         if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
-                ColorfulTranslatedText(
+                TranslationTextRenderer(
                     segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
                         let value = displayTranslation(for: $0)
                         return value.isEmpty ? nil : value
                     },
                     fontSize: item.fontSize,
                     layoutSize: item.rect.size,
-                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast
+                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
+                    textOrientation: item.textOrientation
                 )
                 .position(x: item.rect.midX, y: item.rect.midY)
             }
@@ -3943,6 +3944,12 @@ struct LocalImageView: View {
     }
 
     private func displayTranslation(for block: TextBlock) -> String {
+        // translationLines are a horizontal layout suggestion. Vertical
+        // CoreText layout must receive the natural string so it can create
+        // real vertical columns and apply vertical punctuation forms.
+        if block.textOrientation == .vertical {
+            return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let lines = block.translationLines
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -4123,13 +4130,19 @@ struct LocalImageView: View {
             ),
             sourceRect: textRect,
             allowedBounds: allowedBounds,
-            lineSpacing: 2
+            lineSpacing: 2,
+            textOrientation: block.textOrientation
         )
+        #if DEBUG
+        print("MReader translation-layout orientation=\(block.textOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", preferredTranslationFontSize(for: block, in: size, textRect: textRect))) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) bubble=\(block.bubbleBox != nil)")
+        #endif
         return TranslationLayoutItem(
             blocks: [block],
             rect: choice.layout.rect,
             fontSize: choice.layout.fontSize,
-            displayText: translation.isEmpty ? nil : choice.text
+            displayText: translation.isEmpty ? nil : choice.text,
+            textOrientation: block.textOrientation,
+            layoutRole: block.layoutRole
         )
     }
 
@@ -4179,7 +4192,9 @@ struct LocalImageView: View {
                 blocks: item.blocks,
                 rect: rect,
                 fontSize: item.fontSize,
-                displayText: item.displayText
+                displayText: item.displayText,
+                textOrientation: item.textOrientation,
+                layoutRole: item.layoutRole
             ))
         }
         return items
@@ -4232,7 +4247,9 @@ struct LocalImageView: View {
                 blocks: [block],
                 rect: rect,
                 fontSize: uniformOCRFontSize,
-                displayText: nil
+                displayText: nil,
+                textOrientation: block.textOrientation,
+                layoutRole: block.layoutRole
             ))
         }
         return items
@@ -4428,14 +4445,16 @@ struct LocalImageView: View {
     ) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
         // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
-        if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
-            return OCRBubbleLayoutEngine.standaloneTextFontSize(
-                for: block,
-                imageRect: imageRect,
-                textRect: textRect
-            )
-        }
-        return block.sourceFontSize(in: imageRect)
+        let mode: OCRBubbleLayoutEngine.TranslationTextSizingMode =
+            OCRBubbleLayoutEngine.usesStandaloneLayout(for: block)
+            ? .standaloneGlyph
+            : .bubble
+        return OCRBubbleLayoutEngine.sourceFontSize(
+            for: block,
+            imageRect: imageRect,
+            textRect: textRect,
+            sizingMode: mode
+        )
     }
 
     private var ocrTextSizeFactor: CGFloat {
@@ -4935,6 +4954,8 @@ private struct TranslationLayoutItem: Identifiable {
     let fontSize: CGFloat
     /// 译文布局阶段选出的实际排版文本；OCR 放大气泡保持 nil。
     let displayText: String?
+    let textOrientation: TextOrientation
+    let layoutRole: TranslationLayoutRole
 
     var id: UUID { blocks.first?.id ?? UUID() }
 }
@@ -4974,26 +4995,49 @@ private enum TranslationColorStyle: String, CaseIterable {
             ]
         }
     }
+
+    var coreTextColor: UIColor {
+        switch self {
+        case .contrast:
+            return UIColor(red: 0.02, green: 0.22, blue: 0.72, alpha: 1)
+        case .coolWarm:
+            return UIColor(red: 0.0, green: 0.32, blue: 0.82, alpha: 1)
+        case .jewel:
+            return UIColor(red: 0.05, green: 0.30, blue: 0.66, alpha: 1)
+        }
+    }
 }
 
-private struct ColorfulTranslatedText: View {
+private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
     let layoutSize: CGSize
     let style: TranslationColorStyle
+    let textOrientation: TextOrientation
 
     var body: some View {
-        VStack(spacing: segments.count > 1 ? 7 : 0) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                Text(segment)
-                    .font(.system(size: fontSize, weight: .bold))
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(2)
-                    .foregroundStyle(colorGradient(index: index))
-                    .shadow(color: .white.opacity(0.78), radius: 0.7)
-                    .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+        Group {
+            if textOrientation == .vertical {
+                CoreTextVerticalTranslationView(
+                    text: segments.joined(separator: "\n"),
+                    fontSize: fontSize,
+                    color: style.coreTextColor
+                )
+                .padding(5)
+            } else {
+                VStack(spacing: segments.count > 1 ? 7 : 0) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                        Text(segment)
+                            .font(.system(size: fontSize, weight: .bold))
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(2)
+                            .foregroundStyle(colorGradient(index: index))
+                            .shadow(color: .white.opacity(0.78), radius: 0.7)
+                            .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+                    }
+                }
             }
         }
             .padding(5)
@@ -5032,6 +5076,86 @@ private struct ColorfulTranslatedText: View {
         Color(red: 0.18, green: 0.50, blue: 0.78),
         Color(red: 0.72, green: 0.38, blue: 0.18).opacity(0.7)
     ]
+}
+
+/// CoreText is used for vertical source text so glyphs are shaped using the
+/// platform's vertical forms and the frame progresses right-to-left by column.
+/// It receives the natural string; no per-character newline or whole-view
+/// rotation is used.
+private struct CoreTextVerticalTranslationView: UIViewRepresentable {
+    let text: String
+    let fontSize: CGFloat
+    let color: UIColor
+
+    func makeUIView(context: Context) -> VerticalTranslationUIView {
+        VerticalTranslationUIView()
+    }
+
+    func updateUIView(_ uiView: VerticalTranslationUIView, context: Context) {
+        uiView.text = text
+        uiView.fontSize = fontSize
+        uiView.color = color
+        uiView.setNeedsDisplay()
+    }
+}
+
+private final class VerticalTranslationUIView: UIView {
+    var text = ""
+    var fontSize: CGFloat = 16
+    var color = UIColor.label
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard !text.isEmpty, rect.width > 2, rect.height > 2,
+              let context = UIGraphicsGetCurrentContext() else { return }
+
+        let font = CTFontCreateWithName(
+            UIFont.systemFont(ofSize: max(fontSize, 0.1), weight: .bold).fontName as CFString,
+            max(fontSize, 0.1),
+            nil
+        )
+        let attributed = NSMutableAttributedString(string: text)
+        let range = NSRange(location: 0, length: attributed.length)
+        attributed.addAttributes([
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
+            NSAttributedString.Key(kCTVerticalFormsAttributeName as String): true
+        ], range: range)
+
+        let path = CGPath(
+            rect: bounds.insetBy(dx: 2, dy: 2),
+            transform: nil
+        )
+        let frameAttributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFrameProgressionAttributeName as String): NSNumber(value: 1)
+        ]
+        let framesetter = CTFramesetterCreateWithAttributedString(attributed)
+        let frame = CTFramesetterCreateFrame(
+            framesetter,
+            CFRange(location: 0, length: attributed.length),
+            path,
+            frameAttributes as CFDictionary
+        )
+
+        context.saveGState()
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        CTFrameDraw(frame, context)
+        context.restoreGState()
+    }
 }
 
 private struct AppleIntelligenceGlowBorder: View {
@@ -5087,7 +5211,7 @@ private struct AppleIntelligenceGlowBorder: View {
     }
 
     private func flowingGradient(phase: Double) -> AngularGradient {
-        let palette = colors.isEmpty ? ColorfulTranslatedText.palette : colors
+        let palette = colors.isEmpty ? TranslationTextRenderer.palette : colors
         let normalizedPhase = phase.truncatingRemainder(dividingBy: 1)
         let gradientColors = palette + palette.prefix(2)
         return AngularGradient(

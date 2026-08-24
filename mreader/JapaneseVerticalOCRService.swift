@@ -24,6 +24,32 @@ nonisolated struct JapaneseVerticalOCRDiagnosticWord: Equatable, Sendable {
     let wordNumber: Int
 }
 
+nonisolated struct JapaneseVerticalOCRFragmentationQuality: Equatable, Sendable {
+    let rawWordCount: Int
+    let groupedRunCount: Int
+    let totalCharacterCount: Int
+    let averageCharactersPerRun: Double
+    let medianGlyphSize: Double
+
+    func isSeverelyFragmented(
+        referenceCharacterCount: Int? = nil,
+        visionBlockCount: Int = 0
+    ) -> Bool {
+        guard groupedRunCount >= 48,
+              averageCharactersPerRun < 2.2 else { return false }
+        let referenceMismatch = referenceCharacterCount.map {
+            $0 >= max(totalCharacterCount + 12, totalCharacterCount * 2)
+                || $0 >= groupedRunCount * 2
+        } ?? false
+        let visionMismatch = visionBlockCount > 0
+            && groupedRunCount >= max(48, visionBlockCount * 5)
+        // A page which still contains dozens of one-character runs after the
+        // geometry pass is not safe to inject into the translation pipeline,
+        // even when a reference transcript is unavailable.
+        return groupedRunCount >= 80 || referenceMismatch || visionMismatch
+    }
+}
+
 /// Tesseract is not the primary OCR engine in MReader.  This service only
 /// owns the narrow escape hatch for pages where Vision has evidence of
 /// Japanese vertical writing but its result is incomplete. Automatic mode
@@ -49,13 +75,6 @@ nonisolated enum JapaneseVerticalOCRService {
         let confidence: Double
     }
 
-    private struct LineKey: Hashable {
-        let pageNumber: Int
-        let blockNumber: Int
-        let paragraphNumber: Int
-        let lineNumber: Int
-    }
-
     private struct RawWord: Sendable {
         let text: String
         let rotatedBoundingBox: CGRect
@@ -64,6 +83,12 @@ nonisolated enum JapaneseVerticalOCRService {
         let paragraphNumber: Int
         let lineNumber: Int
         let wordNumber: Int
+        let glyphThickness: CGFloat
+    }
+
+    private struct TSVGroupingResult: Sendable {
+        let words: [RawWord]
+        let quality: JapaneseVerticalOCRFragmentationQuality
     }
 
     private final class ResourceToken {}
@@ -101,6 +126,15 @@ nonisolated enum JapaneseVerticalOCRService {
                 return try recognizeWords(data: imageData, dataPath: dataPath)
             }.value
 
+            let fragmentation = rawWords.quality
+            guard !fragmentation.isSeverelyFragmented(
+                referenceCharacterCount: visionKitReference?.characterCount,
+                visionBlockCount: existingBlocks.count
+            ) else {
+                print("MReader Japanese vertical OCR rejected fragmented output raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun)) referenceChars=\(visionKitReference?.characterCount ?? 0) visionBlocks=\(existingBlocks.count)")
+                return []
+            }
+
             let originalPixelSize = CGSize(
                 width: normalized.cgImage?.width ?? 0,
                 height: normalized.cgImage?.height ?? 0
@@ -113,7 +147,7 @@ nonisolated enum JapaneseVerticalOCRService {
                 height: originalPixelSize.width
             )
 
-            let blocks = rawWords.compactMap { word -> TextBlock? in
+            let blocks = rawWords.words.compactMap { word -> TextBlock? in
                 let text = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
                 let rotatedBox = CGRect(
@@ -129,11 +163,14 @@ nonisolated enum JapaneseVerticalOCRService {
                     boundingBox: box,
                     confidence: max(0, min(word.confidence, 1)),
                     ocrSource: sourceName,
-                    estimatedFontScale: Double(box.width),
+                    // In vertical mode the normalized original width is the
+                    // glyph thickness. Use the robust run estimate instead of
+                    // the merged column's long axis.
+                    estimatedFontScale: Double(word.glyphThickness / max(rotatedPixelSize.height, 1)),
                     textOrientation: .vertical
                 )
             }
-            print("MReader Japanese vertical OCR fallback blocks=\(blocks.count)")
+            print("MReader Japanese vertical OCR fallback blocks=\(blocks.count) raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun))")
             return blocks
         } catch is CancellationError {
             return []
@@ -287,7 +324,8 @@ nonisolated enum JapaneseVerticalOCRService {
                     isRightToLeft: isRightToLeft,
                     minimumTextHeight: 0.006,
                     sourceLanguagePreference: sourceLanguagePreference
-                )
+                ),
+                image: image
            ) {
             return true
         }
@@ -310,7 +348,8 @@ nonisolated enum JapaneseVerticalOCRService {
         // Automatic mode cannot use kana as its only Japanese signal: a
         // poorly recognized page may contain only Kanji. Treat Kanji-only
         // text as a Japanese recovery candidate when there is vertical-page
-        // evidence, a Japanese OCR pass hint, or the RTL direction hint.
+        // evidence or a Japanese OCR pass hint. Reader paging direction is
+        // deliberately excluded from this language decision.
         let hasCJK = existingBlocks
             .map(\.text)
             .joined()
@@ -333,7 +372,10 @@ nonisolated enum JapaneseVerticalOCRService {
         if let image, verticalColumnEvidenceCenters(in: image).count >= 2 {
             return true
         }
-        return isRightToLeft
+        // RTL reading can affect sorting/layout, but must not be promoted to
+        // Japanese OCR evidence. Without kana, Japanese OCR source hints, or
+        // vertical page geometry, an automatic CJK page remains ambiguous.
+        return false
     }
 
     private static func hasVerticalPageEvidence(
@@ -498,7 +540,7 @@ nonisolated enum JapaneseVerticalOCRService {
         }
     }
 
-    private static func recognizeWords(data: Data, dataPath: String) throws -> [RawWord] {
+    private static func recognizeWords(data: Data, dataPath: String) throws -> TSVGroupingResult {
         guard let pix = PixImage(data: data) else {
             throw JapaneseVerticalOCRError.invalidImage
         }
@@ -512,18 +554,37 @@ nonisolated enum JapaneseVerticalOCRService {
         _ = try? api.setVariable(name: "tessedit_write_line_separators", bool: false)
         try api.setImage(pix)
         try api.recognize()
-        return parseTSV(try api.getTSVText() ?? "")
+        return parseTSVResult(try api.getTSVText() ?? "")
     }
 
     private static func parseTSV(_ tsv: String) -> [RawWord] {
-        groupTSVRecords(parseTSVRecords(tsv))
+        parseTSVResult(tsv).words
+    }
+
+    private static func parseTSVResult(_ tsv: String) -> TSVGroupingResult {
+        let records = parseTSVRecords(tsv)
+        let words = groupTSVRecords(records)
+        let totalCharacters = words.reduce(0) { $0 + $1.text.unicodeScalars.count }
+        let averageCharactersPerRun = words.isEmpty
+            ? 0
+            : Double(totalCharacters) / Double(words.count)
+        return TSVGroupingResult(
+            words: words,
+            quality: JapaneseVerticalOCRFragmentationQuality(
+                rawWordCount: records.count,
+                groupedRunCount: words.count,
+                totalCharacterCount: totalCharacters,
+                averageCharactersPerRun: averageCharactersPerRun,
+                medianGlyphSize: Double(median(records.map { max($0.rotatedBoundingBox.width, $0.rotatedBoundingBox.height) }))
+            )
+        )
     }
 
     /// Diagnostic parser used by regression tests. It exercises the same
     /// hierarchy-aware grouping as the production Tesseract path without
     /// requiring a bundled image or a live OCR engine.
     static func parseTSVForDiagnostics(_ tsv: String) -> [JapaneseVerticalOCRDiagnosticWord] {
-        groupTSVRecords(parseTSVRecords(tsv)).map {
+        parseTSVResult(tsv).words.map {
             JapaneseVerticalOCRDiagnosticWord(
                 text: $0.text,
                 rotatedBoundingBox: $0.rotatedBoundingBox,
@@ -534,6 +595,12 @@ nonisolated enum JapaneseVerticalOCRService {
                 wordNumber: $0.wordNumber
             )
         }
+    }
+
+    static func fragmentationQualityForDiagnostics(
+        _ tsv: String
+    ) -> JapaneseVerticalOCRFragmentationQuality {
+        parseTSVResult(tsv).quality
     }
 
     private static func parseTSVRecords(_ tsv: String) -> [RawTSVRecord] {
@@ -574,80 +641,110 @@ nonisolated enum JapaneseVerticalOCRService {
     }
 
     private static func groupTSVRecords(_ records: [RawTSVRecord]) -> [RawWord] {
-        let grouped = Dictionary(grouping: records) {
-            LineKey(
-                pageNumber: $0.pageNumber,
-                blockNumber: $0.blockNumber,
-                paragraphNumber: $0.paragraphNumber,
-                lineNumber: $0.lineNumber
-            )
-        }
+        guard !records.isEmpty else { return [] }
+
+        // Tesseract's page/block/paragraph/line fields are only affinity hints.
+        // In Japanese vertical pages a single column is frequently emitted as
+        // one TSV hierarchy per glyph, so geometry is the actual reconstruction
+        // boundary. Rotation makes an original vertical column a horizontal row:
+        // rotated Y identifies the column, rotated X is top-to-bottom order.
         var output: [RawWord] = []
-        for key in grouped.keys.sorted(by: lineKeySort) {
-            guard let records = grouped[key] else { continue }
-            let sorted = records.sorted {
-                if abs($0.rotatedBoundingBox.midY - $1.rotatedBoundingBox.midY) > 0.5 {
-                    return $0.rotatedBoundingBox.midY < $1.rotatedBoundingBox.midY
-                }
-                if $0.rotatedBoundingBox.minX != $1.rotatedBoundingBox.minX {
-                    return $0.rotatedBoundingBox.minX < $1.rotatedBoundingBox.minX
-                }
-                return $0.wordNumber < $1.wordNumber
-            }
-            let medianHeight = median(sorted.map { $0.rotatedBoundingBox.height })
-            let maximumGap = max(medianHeight * 3.0, 16)
-            var runs: [[RawTSVRecord]] = []
-            for record in sorted {
-                guard let lastRun = runs.last,
-                      let previous = lastRun.last else {
-                    runs.append([record])
-                    continue
-                }
-                let gap = record.rotatedBoundingBox.minX - previous.rotatedBoundingBox.maxX
-                let yTolerance = max(medianHeight * 1.2, record.rotatedBoundingBox.height * 0.8)
-                let minimumHeight = min(
-                    previous.rotatedBoundingBox.height,
-                    record.rotatedBoundingBox.height
-                )
-                let maximumHeight = max(
-                    previous.rotatedBoundingBox.height,
-                    record.rotatedBoundingBox.height
-                )
-                let similarHeight = minimumHeight > 0
-                    && maximumHeight / minimumHeight <= 1.8
-                if gap >= -maximumGap,
-                   gap <= maximumGap,
-                   abs(record.rotatedBoundingBox.midY - previous.rotatedBoundingBox.midY) <= yTolerance,
-                   similarHeight {
-                    runs[runs.count - 1].append(record)
+        let pages = Dictionary(grouping: records, by: \.pageNumber)
+        for pageNumber in pages.keys.sorted() {
+            guard let pageRecords = pages[pageNumber] else { continue }
+            let typicalThickness = median(pageRecords.map { $0.rotatedBoundingBox.height })
+            var columns: [[RawTSVRecord]] = []
+
+            for record in pageRecords.sorted(by: spatialRecordOrder) {
+                let candidateIndex = columns.indices
+                    .compactMap { index -> (index: Int, distance: CGFloat)? in
+                        let column = columns[index]
+                        let center = median(column.map { $0.rotatedBoundingBox.midY })
+                        let thickness = median(column.map { $0.rotatedBoundingBox.height })
+                        let minimumThickness = min(thickness, record.rotatedBoundingBox.height)
+                        let maximumThickness = max(thickness, record.rotatedBoundingBox.height)
+                        let similarSize = minimumThickness > 0
+                            && maximumThickness / minimumThickness <= 1.8
+                        let tolerance = max(
+                            typicalThickness * 1.20,
+                            minimumThickness * 0.75,
+                            4
+                        )
+                        guard similarSize,
+                              abs(record.rotatedBoundingBox.midY - center) <= tolerance else {
+                            return nil
+                        }
+                        return (index, abs(record.rotatedBoundingBox.midY - center))
+                    }
+                    .min { $0.distance < $1.distance }
+
+                if let candidateIndex {
+                    columns[candidateIndex.index].append(record)
                 } else {
-                    runs.append([record])
+                    columns.append([record])
                 }
             }
-            for run in runs {
-                guard let first = run.first else { continue }
-                let union = run.dropFirst().reduce(first.rotatedBoundingBox) { $0.union($1.rotatedBoundingBox) }
-                output.append(RawWord(
-                    // Japanese vertical model output is character/word based;
-                    // spaces would create false OCR fragments for the model.
-                    text: run.map(\.text).joined(),
-                    rotatedBoundingBox: union,
-                    confidence: run.reduce(0) { $0 + $1.confidence } / Double(run.count),
-                    blockNumber: key.blockNumber,
-                    paragraphNumber: key.paragraphNumber,
-                    lineNumber: key.lineNumber,
-                    wordNumber: first.wordNumber
-                ))
+
+            for column in columns.sorted(by: { lhs, rhs in
+                median(lhs.map { $0.rotatedBoundingBox.midY })
+                    < median(rhs.map { $0.rotatedBoundingBox.midY })
+            }) {
+                let sorted = column.sorted(by: spatialRecordXOrder)
+                let typicalAdvance = median(sorted.map { $0.rotatedBoundingBox.width })
+                let typicalSize = median(sorted.map { $0.rotatedBoundingBox.height })
+                let maximumGap = max(typicalAdvance * 2.0, 8)
+                var runs: [[RawTSVRecord]] = []
+
+                for record in sorted {
+                    guard let previous = runs.last?.last else {
+                        runs.append([record])
+                        continue
+                    }
+                    let gap = record.rotatedBoundingBox.minX - previous.rotatedBoundingBox.maxX
+                    let minimumSize = min(typicalSize, record.rotatedBoundingBox.height)
+                    let maximumSize = max(typicalSize, record.rotatedBoundingBox.height)
+                    let similarSize = minimumSize > 0 && maximumSize / minimumSize <= 1.8
+                    if gap <= maximumGap && similarSize {
+                        runs[runs.count - 1].append(record)
+                    } else {
+                        runs.append([record])
+                    }
+                }
+
+                for run in runs {
+                    guard let first = run.first else { continue }
+                    let union = run.dropFirst().reduce(first.rotatedBoundingBox) { $0.union($1.rotatedBoundingBox) }
+                    output.append(RawWord(
+                        text: run.map(\.text).joined(),
+                        rotatedBoundingBox: union,
+                        confidence: run.reduce(0) { $0 + $1.confidence } / Double(run.count),
+                        blockNumber: first.blockNumber,
+                        paragraphNumber: first.paragraphNumber,
+                        lineNumber: first.lineNumber,
+                        wordNumber: first.wordNumber,
+                        glyphThickness: median(run.map { $0.rotatedBoundingBox.height })
+                    ))
+                }
             }
         }
         return output
     }
 
-    private static func lineKeySort(_ lhs: LineKey, _ rhs: LineKey) -> Bool {
+    private static func spatialRecordOrder(_ lhs: RawTSVRecord, _ rhs: RawTSVRecord) -> Bool {
         if lhs.pageNumber != rhs.pageNumber { return lhs.pageNumber < rhs.pageNumber }
+        if lhs.rotatedBoundingBox.midY != rhs.rotatedBoundingBox.midY {
+            return lhs.rotatedBoundingBox.midY < rhs.rotatedBoundingBox.midY
+        }
+        return spatialRecordXOrder(lhs, rhs)
+    }
+
+    private static func spatialRecordXOrder(_ lhs: RawTSVRecord, _ rhs: RawTSVRecord) -> Bool {
+        if lhs.rotatedBoundingBox.minX != rhs.rotatedBoundingBox.minX {
+            return lhs.rotatedBoundingBox.minX < rhs.rotatedBoundingBox.minX
+        }
         if lhs.blockNumber != rhs.blockNumber { return lhs.blockNumber < rhs.blockNumber }
-        if lhs.paragraphNumber != rhs.paragraphNumber { return lhs.paragraphNumber < rhs.paragraphNumber }
-        return lhs.lineNumber < rhs.lineNumber
+        if lhs.lineNumber != rhs.lineNumber { return lhs.lineNumber < rhs.lineNumber }
+        return lhs.wordNumber < rhs.wordNumber
     }
 
     private static func median(_ values: [CGFloat]) -> CGFloat {

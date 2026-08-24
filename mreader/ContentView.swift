@@ -11,7 +11,7 @@ fileprivate final class SecurityScopeBox: @unchecked Sendable {
 
     func hold(_ url: URL) -> Bool {
         guard !released else { return false }
-        let granted = url.startAccessingSecurityScopedResource()
+        let granted = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         self.url = url
         return granted
     }
@@ -2064,7 +2064,7 @@ struct ContentView: View {
     private func restoreSettingsBackup(from result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
-            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
             defer {
                 if didStartAccessing {
                     url.stopAccessingSecurityScopedResource()
@@ -2245,7 +2245,7 @@ final class FileOpenPresenter: NSObject, UIDocumentInteractionControllerDelegate
     func open(_ url: URL) {
         cleanupSecurityScope()
         activeURL = url
-        didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        didStartSecurityScope = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
 
         UIApplication.shared.open(url) { [weak self] success in
             guard !success else {

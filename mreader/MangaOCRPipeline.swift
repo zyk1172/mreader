@@ -39,10 +39,14 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
 
     static func make(
         blocks: [TextBlock],
-        isRightToLeft: Bool,
+        isRightToLeft: Bool = false,
         sourceLanguagePreference: TranslationSourceLanguage? = nil,
         visionKitReference: AppleOCRReference? = nil
     ) -> Self {
+        // Retain the diagnostic API's historical argument for callers and
+        // cached test fixtures, but never use paging direction as a language
+        // or completeness signal.
+        _ = isRightToLeft
         let text = blocks.map(\.text).joined()
         var kana = 0
         var han = 0
@@ -62,7 +66,6 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
             || visionKitReference?.detectedLanguage == "ja"
             || ((visionKitReference?.hanCount ?? 0) >= 4 && verticalColumnCount >= 1)
             || (verticalColumnCount >= 1 && han >= 4)
-            || (isRightToLeft && han >= 4 && kana > 0)
         let expectedScript = expectedJapanese
             ? Double(kana + han) / Double(count)
             : 1 - Double(kana) / Double(count)
@@ -182,13 +185,11 @@ nonisolated enum MangaOCRPipeline {
             rejectedBlocks: resolution.rejectedBlocks,
             detectedLanguage: detectedLanguage(
                 in: rawBlocks,
-                isRightToLeft: isRightToLeft,
                 sourceLanguagePreference: sourceLanguagePreference,
                 visionKitReference: visionKitReference
             ),
             quality: OCRPageQuality.make(
                 blocks: resolution.resolvedBlocks,
-                isRightToLeft: isRightToLeft,
                 sourceLanguagePreference: sourceLanguagePreference,
                 visionKitReference: visionKitReference
             )
@@ -199,10 +200,9 @@ nonisolated enum MangaOCRPipeline {
     }
 
     /// 与 OCRPreprocessor.recognitionPlan 一致的脚本启发：kana→ja、hangul→ko、
-    /// CJK→(RTL?ja:zh)、latin→en。只作为语言线索，不作为最终结论。
+    /// 竖排 CJK→ja、无竖排 CJK→zh、latin→en。只作为语言线索，不作为最终结论。
     private static func detectedLanguage(
         in blocks: [TextBlock],
-        isRightToLeft: Bool,
         sourceLanguagePreference: TranslationSourceLanguage?,
         visionKitReference: AppleOCRReference?
     ) -> String? {
@@ -232,7 +232,7 @@ nonisolated enum MangaOCRPipeline {
             if JapaneseVerticalOCRService.verticalColumnCount(in: blocks) >= 1 {
                 return "ja"
             }
-            return isRightToLeft ? "ja" : "zh"
+            return "zh"
         }
         if latin > 0 { return "en" }
         return nil

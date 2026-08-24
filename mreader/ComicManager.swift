@@ -12,6 +12,54 @@ struct ComicPage: Identifiable, Hashable, Sendable {
     let url: URL
 }
 
+nonisolated enum LocalResourceAccessPolicy {
+    enum Location: String, Sendable {
+        case appOwned
+        case external
+    }
+
+    private static let logLock = NSLock()
+    private static var loggedDecisions: Set<String> = []
+
+    static func location(for url: URL) -> Location {
+        let standardized = url.standardizedFileURL.resolvingSymlinksInPath()
+        let fileManager = FileManager.default
+        let appOwnedRoots = [
+            fileManager.urls(for: .documentDirectory, in: .userDomainMask).first,
+            fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+            fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first,
+            fileManager.temporaryDirectory,
+            Bundle.main.bundleURL
+        ].compactMap { $0?.standardizedFileURL.resolvingSymlinksInPath() }
+        let path = standardized.path
+        let isAppOwned = appOwnedRoots.contains { root in
+            let rootPath = root.path
+            return path == rootPath || path.hasPrefix(rootPath + "/")
+        }
+        return isAppOwned ? .appOwned : .external
+    }
+
+    static func requiresSecurityScope(for url: URL) -> Bool {
+        location(for: url) == .external
+    }
+
+    @discardableResult
+    static func startAccessingIfNeeded(_ url: URL) -> Bool {
+        let location = location(for: url)
+        let shouldStart = location == .external
+        #if DEBUG
+        logLock.lock()
+        let logKey = "\(location.rawValue)|\(url.standardizedFileURL.path)"
+        let shouldLog = loggedDecisions.insert(logKey).inserted
+        logLock.unlock()
+        if shouldLog {
+            print("MReader resource-access location=\(location.rawValue) securityScope=\(shouldStart) path=\(url.standardizedFileURL.path)")
+        }
+        #endif
+        return shouldStart && url.startAccessingSecurityScopedResource()
+    }
+}
+
 nonisolated final class SecurityScopedResource: @unchecked Sendable {
     let url: URL
     private let didStart: Bool
@@ -20,7 +68,7 @@ nonisolated final class SecurityScopedResource: @unchecked Sendable {
 
     init(url: URL) {
         self.url = url
-        didStart = url.startAccessingSecurityScopedResource()
+        didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
     }
 
     func stop() {
@@ -274,7 +322,7 @@ class ComicManager {
     
     // 统一导入入口
     nonisolated static func importFileOrFolder(url: URL, destinationRoot: URL? = nil) async -> ImportResult? {
-        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
 
         let ext = url.pathExtension.lowercased()
@@ -733,7 +781,7 @@ class ComicManager {
 
     nonisolated static func createSeriesFolder(title: String) -> URL? {
         guard let libraryRoot = selectedLibraryRootURL() else { return nil }
-        let didStartLibraryAccess = libraryRoot.startAccessingSecurityScopedResource()
+        let didStartLibraryAccess = LocalResourceAccessPolicy.startAccessingIfNeeded(libraryRoot)
         defer {
             if didStartLibraryAccess {
                 libraryRoot.stopAccessingSecurityScopedResource()
@@ -755,7 +803,7 @@ class ComicManager {
     /// 移动本地漫画文件到目标文件夹，返回新位置的 bookmarkData
     nonisolated static func moveComicFile(bookmarkData: Data, to destinationFolder: URL) -> Data? {
         guard let sourceURL = try? resolveBookmark(bookmarkData) else { return nil }
-        let isSecurityScoped = sourceURL.startAccessingSecurityScopedResource()
+        let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(sourceURL)
         defer { if isSecurityScoped { sourceURL.stopAccessingSecurityScopedResource() } }
 
         return withSelectedLibraryRoot { libraryRoot -> Data? in
@@ -807,7 +855,7 @@ class ComicManager {
     }
 
     nonisolated static func setLibraryRoot(_ url: URL) -> Bool {
-        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         defer {
             if didStartAccessing {
                 url.stopAccessingSecurityScopedResource()
@@ -847,7 +895,7 @@ class ComicManager {
 
     nonisolated static func withSelectedLibraryRoot<T>(_ body: (URL) throws -> T) rethrows -> T? {
         guard let url = selectedLibraryRootURL() else { return nil }
-        let didStart = url.startAccessingSecurityScopedResource()
+        let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         defer {
             if didStart {
                 url.stopAccessingSecurityScopedResource()
@@ -867,7 +915,7 @@ class ComicManager {
         guard targetPath == selectedPath || targetPath.hasPrefix(selectedPath + "/") else {
             return nil
         }
-        let didStart = selectedRoot.startAccessingSecurityScopedResource()
+        let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(selectedRoot)
         defer {
             if didStart {
                 selectedRoot.stopAccessingSecurityScopedResource()
@@ -919,7 +967,7 @@ class ComicManager {
     nonisolated static func rebuildCoverImage(bookmarkData: Data) -> String? {
         do {
             let url = try resolveBookmark(bookmarkData)
-            let didStart = url.startAccessingSecurityScopedResource()
+            let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
             defer {
                 if didStart {
                     url.stopAccessingSecurityScopedResource()
@@ -958,7 +1006,7 @@ class ComicManager {
     }
 
     nonisolated static func inspectImportFolder(_ url: URL) -> ImportFolderInspection {
-        let didStart = url.startAccessingSecurityScopedResource()
+        let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         defer {
             if didStart {
                 url.stopAccessingSecurityScopedResource()
@@ -1314,7 +1362,7 @@ class ComicManager {
     }
 
     nonisolated static func zipImportFailureReason(for url: URL) -> String {
-        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
 
         let ext = url.pathExtension.lowercased()

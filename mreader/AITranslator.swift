@@ -608,9 +608,13 @@ class AITranslator {
 
         let client = AITranslationClient(apiKey: apiKey, baseURL: baseURL, session: session)
         let cacheKey = "\(baseURL)|\(modelDescriptor.apiProtocol.rawValue)|\(model)"
-        var mode = PageResponseFormatCache.shared.mode(for: cacheKey, default: .jsonSchema)
-        let data: Data
+        var mode = modelDescriptor.apiProtocol == .anthropicMessages
+            ? PageResponseFormatMode.promptOnly
+            : PageResponseFormatCache.shared.mode(for: cacheKey, default: .jsonSchema)
+        var semanticDowngradeUsed = false
         while true {
+            try Task.checkCancellation()
+            let data: Data
             do {
                 data = try await client.send(
                     AITransportRequest(
@@ -627,8 +631,6 @@ class AITranslator {
                         kind: .page
                     )
                 )
-                PageResponseFormatCache.shared.set(mode, for: cacheKey)
-                break
             } catch {
                 guard let fallback = mode.fallback,
                       isUnsupportedResponseFormat(error) else {
@@ -637,56 +639,108 @@ class AITranslator {
                 print("MReader AI page response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
                 mode = fallback
                 PageResponseFormatCache.shared.set(mode, for: cacheKey)
+                continue
             }
-        }
 
-        let decoded = AIChatResponseDecoder.decode(data)
-        let content = decoded.content?.trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            guard let content, !content.isEmpty else {
-                throw AIPageTranslationParserError.invalidJSON
-            }
-            return try AIPageTranslationParser.parseStrict(content, expectedItems: items, target: target)
-        } catch {
+            let decoded = AIChatResponseDecoder.decode(data)
+            let content = decoded.content?.trimmingCharacters(in: .whitespacesAndNewlines)
             let malformed = content
                 ?? (String(data: data.prefix(12_000), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>")
-            let excerpt = malformed.replacingOccurrences(of: "\n", with: " ").prefix(300)
-            print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page excerpt=\(excerpt)")
-            do {
-                let repairPrompt = try AIPageTranslationRepairPromptBuilder.prompt(
-                    items: items,
-                    malformedResponse: malformed,
-                    target: target
-                )
-                let repairedData = try await client.send(
-                    AITransportRequest(
-                        model: modelDescriptor,
-                        systemPrompt: AIPageTranslationRepairPromptBuilder.systemPrompt,
-                        userPrompt: repairPrompt,
-                        responseFormat: pageResponseFormat(
-                            mode: mode,
-                            items: items,
-                            apiProtocol: modelDescriptor.apiProtocol
-                        ),
-                        temperature: 0,
-                        timeout: AITranslationRequestPolicy.jsonRepairRequestTimeout,
-                        kind: .jsonRepair
-                    )
-                )
-                guard let repairedContent = AIChatResponseDecoder.decode(repairedData).content else {
-                    throw AIPageTranslationParserError.invalidJSON
+            guard let content, !content.isEmpty else {
+                print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page classification=pureProse mode=\(mode.rawValue) excerpt=\(malformed.replacingOccurrences(of: "\n", with: " ").prefix(300))")
+                if let fallback = mode.fallback, !semanticDowngradeUsed {
+                    let previousMode = mode
+                    semanticDowngradeUsed = true
+                    mode = fallback
+                    PageResponseFormatCache.shared.set(mode, for: cacheKey)
+                    print("MReader AI page semantic response_format downgrade model=\(model) from=\(previousMode.rawValue) to=\(mode.rawValue)")
+                    continue
                 }
-                return try AIPageTranslationParser.parseStrict(
-                    repairedContent,
+                throw AITranslationRequestError.invalidTranslationJSON(
+                    model: model,
+                    excerpt: String(malformed.prefix(300))
+                )
+            }
+
+            do {
+                let result = try AIPageTranslationParser.parseStrict(
+                    content,
                     expectedItems: items,
                     target: target
                 )
+                PageResponseFormatCache.shared.set(mode, for: cacheKey)
+                return result
             } catch {
-                print("MReader AI page translation JSON repair failed model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=jsonRepair reason=\(error.localizedDescription)")
-                throw AITranslationRequestError.invalidTranslationJSON(
-                    model: model,
-                    excerpt: String(excerpt)
+                let classification = AIPageTranslationParser.classifyResponse(
+                    content,
+                    expectedItems: items
                 )
+                let excerpt = malformed.replacingOccurrences(of: "\n", with: " ").prefix(300)
+                print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page mode=\(mode.rawValue) classification=\(classification.rawValue) excerpt=\(excerpt)")
+
+                // A prose/reasoning response with HTTP 200 means the server
+                // ignored the requested structured-output capability. Downgrade
+                // once and cache the result for this baseURL/protocol/model;
+                // it is not a reason to ask a repair model to translate prose.
+                if classification == .pureProse,
+                   let fallback = mode.fallback,
+                   !semanticDowngradeUsed {
+                    let previousMode = mode
+                    semanticDowngradeUsed = true
+                    mode = fallback
+                    PageResponseFormatCache.shared.set(mode, for: cacheKey)
+                    print("MReader AI page semantic response_format downgrade model=\(model) from=\(previousMode.rawValue) to=\(mode.rawValue)")
+                    continue
+                }
+
+                // Only JSON-shaped content is eligible for the single repair
+                // request. Pure reasoning falls through to the bounded
+                // per-bubble fallback at the coordinator.
+                guard classification == .jsonLike else {
+                    throw AITranslationRequestError.invalidTranslationJSON(
+                        model: model,
+                        excerpt: String(excerpt)
+                    )
+                }
+
+                do {
+                    let repairPrompt = try AIPageTranslationRepairPromptBuilder.prompt(
+                        items: items,
+                        malformedResponse: malformed,
+                        target: target
+                    )
+                    let repairedData = try await client.send(
+                        AITransportRequest(
+                            model: modelDescriptor,
+                            systemPrompt: AIPageTranslationRepairPromptBuilder.systemPrompt,
+                            userPrompt: repairPrompt,
+                            responseFormat: pageResponseFormat(
+                                mode: mode,
+                                items: items,
+                                apiProtocol: modelDescriptor.apiProtocol
+                            ),
+                            temperature: 0,
+                            timeout: AITranslationRequestPolicy.jsonRepairRequestTimeout,
+                            kind: .jsonRepair
+                        )
+                    )
+                    guard let repairedContent = AIChatResponseDecoder.decode(repairedData).content else {
+                        throw AIPageTranslationParserError.invalidJSON
+                    }
+                    return try AIPageTranslationParser.parseStrict(
+                        repairedContent,
+                        expectedItems: items,
+                        target: target
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    print("MReader AI page translation JSON repair failed model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=jsonRepair reason=\(error.localizedDescription)")
+                    throw AITranslationRequestError.invalidTranslationJSON(
+                        model: model,
+                        excerpt: String(excerpt)
+                    )
+                }
             }
         }
     }

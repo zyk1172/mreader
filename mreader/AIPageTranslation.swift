@@ -295,7 +295,42 @@ nonisolated enum AIPageTranslationParserError: LocalizedError, Sendable {
     }
 }
 
+nonisolated enum AIPageTranslationResponseClassification: String, Sendable, Equatable {
+    case jsonLike
+    case pureProse
+}
+
 nonisolated enum AIPageTranslationParser {
+    /// Distinguishes a response which contains recoverable translation JSON
+    /// from reasoning/prose. This is deliberately separate from strict parsing:
+    /// a 200 response with prose is a provider/model semantic capability issue,
+    /// while a malformed object should get the single repair request.
+    static func classifyResponse(
+        _ content: String,
+        expectedItems: [AIPageTranslationItem]
+    ) -> AIPageTranslationResponseClassification {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedJSONData(from: normalized) != nil {
+            return .jsonLike
+        }
+        let lowered = normalized.lowercased()
+        let hasContainerSignal = lowered.contains("{") || lowered.contains("[")
+        let hasJSONKeySignal = normalized.range(
+            of: #""(?:items|translations?|id|translation(?:lines?)?)"\s*:"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let hasExpectedIDSignal = expectedItems.contains { item in
+            let quotedID = "\"\(item.id)\""
+            return normalized.contains(quotedID) && normalized.contains(":")
+        }
+        // Mentioning “JSON”, “items”, or an id in ordinary reasoning is not
+        // enough to trigger a repair request. Repair is reserved for content
+        // that still has an object/array or a JSON key/value shape.
+        return hasContainerSignal || hasJSONKeySignal || hasExpectedIDSignal
+            ? .jsonLike
+            : .pureProse
+    }
+
     static func parse(
         _ content: String,
         expectedItems: [AIPageTranslationItem],
@@ -454,10 +489,51 @@ nonisolated enum AIPageTranslationParser {
         guard let start = payload.firstIndex(where: { $0 == "{" || $0 == "[" }) else {
             return nil
         }
-        let opening = payload[start]
-        let closing: Character = opening == "{" ? "}" : "]"
-        guard let end = payload.lastIndex(of: closing), start <= end else { return nil }
+        guard let end = balancedJSONEnd(in: payload, start: start) else {
+            return nil
+        }
         return String(payload[start...end]).data(using: .utf8)
+    }
+
+    /// Finds the end of the first balanced JSON object/array while respecting
+    /// quoted strings and escapes. It never fabricates JSON from prose.
+    private static func balancedJSONEnd(
+        in payload: String,
+        start: String.Index
+    ) -> String.Index? {
+        var stack: [Character] = []
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < payload.endIndex {
+            let character = payload[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else {
+                if character == "\"" {
+                    inString = true
+                } else if character == "{" || character == "[" {
+                    stack.append(character)
+                } else if character == "}" || character == "]" {
+                    guard let last = stack.popLast(),
+                          (last == "{" && character == "}")
+                            || (last == "[" && character == "]") else {
+                        return nil
+                    }
+                    if stack.isEmpty {
+                        return index
+                    }
+                }
+            }
+            index = payload.index(after: index)
+        }
+        return nil
     }
 }
 

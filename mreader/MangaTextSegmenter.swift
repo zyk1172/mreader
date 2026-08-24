@@ -110,7 +110,11 @@ nonisolated enum MangaTextSegmenter {
         guard blocks.count > 1 else { return blocks[0] }
         let ordered = AITranslator.sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
         let bounds = ordered.dropFirst().reduce(ordered[0].boundingBox) { $0.union($1.boundingBox) }
-        let scale = ordered.reduce(0) { $0 + $1.estimatedFontScale } / Double(ordered.count)
+        // The merged rectangle's long axis is line length, not glyph size. A
+        // median of the source glyph estimates remains stable when one OCR
+        // observation has an over-sized crop or a rotated axis-aligned box.
+        let sortedScales = ordered.map(\.estimatedFontScale).sorted()
+        let scale = sortedScales[sortedScales.count / 2]
         let confidence = ordered.reduce(0) { $0 + $1.confidence } / Double(ordered.count)
         let sources = Array(Set(ordered.map(\.ocrSource))).sorted().joined(separator: "+")
         let selectedBubble = selectedVisualBubble(from: ordered, containing: bounds)

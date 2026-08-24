@@ -61,6 +61,16 @@ nonisolated enum OCRCandidateResolver {
             } ? .standalone : representative.layoutRole
             let inheritedColor = winningGroup.compactMap(\.textColorHex).first
                 ?? group.compactMap(\.textColorHex).first
+            let winningScales = winningGroup.map(\.estimatedFontScale).sorted()
+            let inheritedScale = winningScales[winningScales.count / 2]
+            let inheritedOrientation = winningGroup.filter { $0.textOrientation == .vertical }.count
+                > winningGroup.count / 2
+                ? TextOrientation.vertical
+                : TextOrientation.horizontal
+            let inheritedBubble = winningGroup.compactMap(\.bubbleBox).first
+                ?? group.compactMap(\.bubbleBox).first
+            let inheritedBubblePolygon = winningGroup.first(where: { !$0.bubblePolygon.isEmpty })?.bubblePolygon
+                ?? group.first(where: { !$0.bubblePolygon.isEmpty })?.bubblePolygon
             resolved.append(TextBlock(
                 id: representative.id,
                 text: representative.text,
@@ -70,11 +80,13 @@ nonisolated enum OCRCandidateResolver {
                 ocrSource: Array(Set(winningGroup.map(\.ocrSource))).sorted().joined(separator: "+"),
                 isFiltered: representative.isFiltered,
                 filterReason: representative.filterReason,
-                estimatedFontScale: representative.estimatedFontScale,
+                estimatedFontScale: inheritedScale,
                 textColorHex: inheritedColor,
+                bubbleBox: inheritedBubble,
                 polygon: representative.polygon,
+                bubblePolygon: inheritedBubblePolygon ?? [],
                 translationLines: representative.translationLines,
-                textOrientation: representative.textOrientation,
+                textOrientation: inheritedOrientation,
                 layoutRole: inheritedLayoutRole
             ))
             rejected.append(contentsOf: group.filter { $0.id != representative.id })

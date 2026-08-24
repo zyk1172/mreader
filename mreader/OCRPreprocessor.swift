@@ -124,6 +124,7 @@ struct OCRPreprocessor {
                 plan = recognitionPlan(
                     detectedTexts: locatorBlocks.map(\.text),
                     options: options,
+                    locatorConfidence: averageConfidence(locatorBlocks),
                     verticalEvidence: JapaneseVerticalOCRService.verticalColumnCount(in: locatorBlocks) >= 2
                         || JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: locatorImage) >= 2
                 )
@@ -142,7 +143,10 @@ struct OCRPreprocessor {
                 }
             case .maximumAccuracy:
                 let passes = maximumAccuracyPasses(for: options)
-                plan = RecognitionPlan(primary: passes[0], fallback: passes[1])
+                plan = RecognitionPlan(
+                    primary: passes[0],
+                    fallback: passes.count > 1 ? passes[1] : nil
+                )
                 sliceBlocks = await recognize(
                     original,
                     options: options,
@@ -202,7 +206,8 @@ struct OCRPreprocessor {
         if shouldRunJapaneseReferencePass(
             reference: visionKitReference,
             blocks: allBlocks,
-            options: options
+            options: options,
+            image: normalizedImage
         ) {
             print("MReader OCR ImageAnalyzer indicates Japanese coverage gap; running ja-JP accurate pass")
             for slice in slices {
@@ -561,7 +566,8 @@ struct OCRPreprocessor {
         detectedTexts: [String],
         isRightToLeft: Bool = false,
         sourceLanguagePreference: TranslationSourceLanguage? = nil,
-        verticalEvidence: Bool = false
+        verticalEvidence: Bool = false,
+        locatorConfidence: Double? = nil
     ) -> [[String]] {
         recognitionPlan(
             detectedTexts: detectedTexts,
@@ -570,6 +576,7 @@ struct OCRPreprocessor {
                 minimumTextHeight: 0.006,
                 sourceLanguagePreference: sourceLanguagePreference
             ),
+            locatorConfidence: locatorConfidence,
             verticalEvidence: verticalEvidence
         ).orderedPasses.map(\.languages)
     }
@@ -605,6 +612,13 @@ struct OCRPreprocessor {
                 source.recognitionLanguageIdentifiers,
                 allowed: effective
             )
+            // A manual Japanese selection must not let a high-confidence
+            // accidental English fallback win during candidate resolution.
+            // Other manual languages retain their historical fallback for
+            // compatibility; Japanese is the manga-specific safety boundary.
+            if source == .japanese {
+                return [("manual", primaryIDs)]
+            }
             let defaultIDs = languagePasses().flatMap(\.languages)
             let fallbackIDs = defaultIDs.filter { !primaryIDs.contains($0) }
             return [
@@ -662,6 +676,7 @@ struct OCRPreprocessor {
     nonisolated private static func recognitionPlan(
         detectedTexts: [String],
         options: Options,
+        locatorConfidence: Double? = nil,
         verticalEvidence: Bool = false
     ) -> RecognitionPlan {
         let scalars = detectedTexts.joined().unicodeScalars
@@ -741,9 +756,10 @@ struct OCRPreprocessor {
             case .simplifiedChinese, .traditionalChinese:
                 return RecognitionPlan(primary: chinese, fallback: japanese)
             default:
-                return options.isRightToLeft
-                    ? RecognitionPlan(primary: japanese, fallback: chinese)
-                    : RecognitionPlan(primary: chinese, fallback: japanese)
+                // Reading/paging direction is not an OCR language signal.
+                // Kanji-only automatic pages remain conservative Chinese until
+                // vertical geometry or another Japanese-specific signal wins.
+                return RecognitionPlan(primary: chinese, fallback: japanese)
             }
         }
         if latinCount > 0 {
@@ -761,11 +777,19 @@ struct OCRPreprocessor {
             }
             // A locator that only saw Latin glyphs is weak evidence. A
             // vertical column layout is stronger manga/Japanese evidence and
-            // must win over the accidental English candidate.
-            if verticalEvidence {
+            // must win over the accidental English candidate. A low-confidence
+            // or very short Latin locator is also weak evidence; run Japanese
+            // accurate OCR first so one fast misread cannot lock the whole page
+            // to English.
+            let weakLatinEvidence = (locatorConfidence.map { $0 < 0.72 } ?? false)
+                || scalars.count < 16
+            if verticalEvidence || weakLatinEvidence {
                 return RecognitionPlan(primary: japanese, fallback: primary)
             }
-            return RecognitionPlan(primary: primary, fallback: options.isRightToLeft ? japanese : chinese)
+            // No Japanese-specific evidence remains here. Do not use the
+            // reader's paging direction to invent an OCR fallback; a clear
+            // Latin page should stay a single English/Latin pass.
+            return RecognitionPlan(primary: primary, fallback: nil)
         }
 
         let defaults = languagePasses()
@@ -793,13 +817,15 @@ struct OCRPreprocessor {
     nonisolated private static func shouldRunJapaneseReferencePass(
         reference: AppleOCRReference?,
         blocks: [TextBlock],
-        options: Options
+        options: Options,
+        image: UIImage? = nil
     ) -> Bool {
         guard let reference,
               AppleOCRReferenceService.suggestsJapanese(
                 reference,
                 blocks: blocks,
-                options: options
+                options: options,
+                image: image
               ) else { return false }
         guard options.sourceLanguagePreference == nil
                 || options.sourceLanguagePreference == .automatic

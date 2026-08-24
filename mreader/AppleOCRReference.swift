@@ -18,6 +18,15 @@ nonisolated struct AppleOCRReference: Equatable, Sendable {
 }
 
 nonisolated enum AppleOCRReferenceService {
+    private static let capabilityLock = NSLock()
+    private static var processCapability: ProcessCapability = .unknown
+
+    private enum ProcessCapability {
+        case unknown
+        case available
+        case unavailable
+    }
+
     static func isSupportedForDiagnostics() -> Bool {
         guard #available(iOS 16.0, *) else { return false }
         return ImageAnalyzer.isSupported
@@ -25,28 +34,78 @@ nonisolated enum AppleOCRReferenceService {
 
     static func shouldAnalyze(
         options: OCRPreprocessor.Options,
-        preliminaryBlocks: [TextBlock]
+        preliminaryBlocks: [TextBlock],
+        image: UIImage? = nil
     ) -> Bool {
+        let text = preliminaryBlocks.map(\.text).joined()
+        let counts = scriptCounts(in: text)
+        let total = max(text.unicodeScalars.count, 1)
+        let japaneseCharacters = counts.kana + counts.han
+        let japaneseRatio = Double(japaneseCharacters) / Double(total)
+        let averageConfidence = preliminaryBlocks.isEmpty
+            ? 0
+            : preliminaryBlocks.reduce(0) { $0 + $1.confidence } / Double(preliminaryBlocks.count)
+        let usefulCharacters = text.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }.count
+        let usefulRatio = Double(usefulCharacters) / Double(total)
+        let verticalColumns = JapaneseVerticalOCRService.verticalColumnCount(in: preliminaryBlocks)
+        let imageVerticalColumns = image.map {
+            JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: $0)
+        } ?? 0
+        let hasVerticalEvidence = verticalColumns >= 2 || imageVerticalColumns >= 2
+        let hasJapaneseScript = counts.kana > 0 || counts.han >= 4
+        let weakCoverage = preliminaryBlocks.isEmpty
+            || averageConfidence < 0.58
+            || usefulRatio < 0.42
+            || text.unicodeScalars.count < 8
+        let implausibleJapanese = japaneseRatio < 0.55
+            || (counts.latin > max(japaneseCharacters, 2) && verticalColumns >= 1)
+        let clearlyLatin = counts.latin >= 8
+            && counts.latin >= max(japaneseCharacters * 2, counts.hangul * 2)
+            && averageConfidence >= 0.78
+            && usefulRatio >= 0.75
+        let clearlyKorean = counts.hangul >= 6
+            && counts.hangul > japaneseCharacters
+            && averageConfidence >= 0.78
+            && usefulRatio >= 0.75
+
+        // Explicit Japanese and maximum accuracy are quality hints, not a
+        // reason to pay for Live Text on every good page. Only suspicious
+        // local results request the page-level reference.
         if options.sourceLanguagePreference == .japanese {
-            return true
+            return weakCoverage || implausibleJapanese
         }
         if options.recognitionMode == .maximumAccuracy {
-            return true
+            return weakCoverage
+                || (hasVerticalEvidence && hasJapaneseScript)
+                || (hasJapaneseScript && counts.latin > japaneseCharacters)
         }
         guard options.sourceLanguagePreference == nil
                 || options.sourceLanguagePreference == .automatic else {
             return false
         }
 
-        // Auto mode needs a second page-level signal when the locator/formal
-        // pass has no Japanese script or has returned a suspiciously small or
-        // Latin-dominant result. This is local Apple analysis, not network IO.
-        let text = preliminaryBlocks.map(\.text).joined()
-        let counts = scriptCounts(in: text)
-        return preliminaryBlocks.isEmpty
-            || counts.kana == 0
-            || counts.latin > counts.kana + counts.han
-            || preliminaryBlocks.count <= 12
+        // Auto mode must not send every healthy English or Korean page through
+        // Live Text. It is reserved for empty/weak results, ambiguous CJK, or
+        // a page whose geometry strongly suggests Japanese vertical writing.
+        // This is local Apple analysis, not network IO.
+        if weakCoverage { return true }
+        if clearlyLatin || clearlyKorean { return false }
+        if hasVerticalEvidence && (hasJapaneseScript || counts.latin > 0) {
+            return true
+        }
+        if counts.kana > 0 && counts.latin > japaneseCharacters {
+            return true
+        }
+        if counts.han > 0 {
+            // Han-only horizontal text is not enough to distinguish Chinese
+            // from Japanese. Without vertical evidence, keep the fast local
+            // result and avoid paying for a page reference on every Chinese
+            // page.
+            return false
+        }
+        return false
     }
 
     static func analyzeIfNeeded(
@@ -54,11 +113,19 @@ nonisolated enum AppleOCRReferenceService {
         options: OCRPreprocessor.Options,
         preliminaryBlocks: [TextBlock]
     ) async -> AppleOCRReference? {
-        guard shouldAnalyze(options: options, preliminaryBlocks: preliminaryBlocks) else {
+        guard shouldAnalyze(
+            options: options,
+            preliminaryBlocks: preliminaryBlocks,
+            image: image
+        ) else {
             return nil
         }
         guard #available(iOS 16.0, *), ImageAnalyzer.isSupported else {
             print("MReader OCR ImageAnalyzer unavailable")
+            return nil
+        }
+        guard !isProcessUnavailable() else {
+            print("MReader OCR ImageAnalyzer skipped after explicit unavailable error")
             return nil
         }
 
@@ -70,15 +137,47 @@ nonisolated enum AppleOCRReferenceService {
             let supported = Set(ImageAnalyzer.supportedTextRecognitionLanguages)
             configuration.locales = requestedLanguages.filter(supported.contains)
             let analysis = try await ImageAnalyzer().analyze(image, configuration: configuration)
+            markProcessAvailable()
             let reference = makeReference(from: analysis.transcript)
             print("MReader OCR ImageAnalyzer chars=\(reference.characterCount) language=\(reference.detectedLanguage ?? "unknown") kana=\(reference.kanaCount) han=\(reference.hanCount)")
             return reference
         } catch is CancellationError {
             return nil
         } catch {
+            if isExplicitUnavailableError(error) {
+                markProcessUnavailable()
+            }
             print("MReader OCR ImageAnalyzer failed: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    private static func isProcessUnavailable() -> Bool {
+        capabilityLock.lock()
+        defer { capabilityLock.unlock() }
+        return processCapability == .unavailable
+    }
+
+    private static func markProcessAvailable() {
+        capabilityLock.lock()
+        processCapability = .available
+        capabilityLock.unlock()
+    }
+
+    private static func markProcessUnavailable() {
+        capabilityLock.lock()
+        processCapability = .unavailable
+        capabilityLock.unlock()
+    }
+
+    private static func isExplicitUnavailableError(_ error: Error) -> Bool {
+        let description = error.localizedDescription.lowercased()
+        return description.contains("not supported")
+            || description.contains("unsupported")
+            || description.contains("unavailable")
+            || description.contains("sandbox")
+            || description.contains("permission denied")
+            || description.contains("access denied")
     }
 
     static func makeReference(from transcript: String) -> AppleOCRReference {
@@ -109,7 +208,8 @@ nonisolated enum AppleOCRReferenceService {
     static func suggestsJapanese(
         _ reference: AppleOCRReference,
         blocks: [TextBlock],
-        options: OCRPreprocessor.Options
+        options: OCRPreprocessor.Options,
+        image: UIImage? = nil
     ) -> Bool {
         if reference.kanaCount > 0 { return true }
         guard reference.hanCount >= 4,
@@ -119,11 +219,14 @@ nonisolated enum AppleOCRReferenceService {
             return false
         }
         // ImageAnalyzer transcript has no geometry. Existing vertical blocks
-        // or the reader direction are only weak automatic-mode hints for a
-        // Kanji-only page; explicit Japanese remains unconditional elsewhere.
+        // or a lightweight image column probe are the only automatic-mode
+        // hints for a Kanji-only page. Reader paging direction is deliberately
+        // not used as an OCR language signal.
         return options.sourceLanguagePreference == .japanese
             || JapaneseVerticalOCRService.verticalColumnCount(in: blocks) >= 1
-            || options.isRightToLeft
+            || (image.map {
+                JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: $0) >= 2
+            } ?? false)
     }
 
     private static func scriptCounts(in text: String) -> (kana: Int, han: Int, hangul: Int, latin: Int) {
