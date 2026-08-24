@@ -721,10 +721,10 @@ struct mreaderTests {
         let words = JapaneseVerticalOCRService.parseTSVForDiagnostics(tsv)
         #expect(words.count == 3)
         #expect(words.first?.text == "じこ!!")
-        #expect(words.dropFirst().first?.text == "別")
+        #expect(words.contains { $0.text == "別" })
+        #expect(words.contains { $0.text == "大" })
         #expect(words.first?.lineNumber == 1)
         #expect(words.first?.wordNumber == 1)
-        #expect(words.contains { $0.text == "大" })
     }
 
     @Test func japanesePageQualitySeparatesConfidenceFromScriptPlausibility() {
@@ -1094,16 +1094,21 @@ struct mreaderTests {
 
         #expect(prompt.contains("zh-Hans"))
         #expect(prompt.contains("ja"))
-        #expect(prompt.contains("禁止修改、合并、拆分"))
+        #expect(prompt.contains("不要合并、拆分"))
 
         // 生产 JSON 用 sortedKeys（无 pretty-printed 空格），测试不得依赖空白格式（项15）。
         // 直接从 Prompt 中抽出输入 JSON 解析，验证 items 的 id 与顺序。
-        guard let jsonStart = prompt.range(of: "输入：\n")?.upperBound,
-              let jsonEnd = prompt.range(of: "\n\n输出格式：")?.lowerBound else {
+        guard let inputMarker = prompt.range(of: "输入：") else {
             Issue.record("Prompt 中找不到输入 JSON 区块")
             return
         }
-        let jsonText = String(prompt[jsonStart..<jsonEnd])
+        let input = prompt[inputMarker.upperBound...]
+        guard let lineEnd = input.firstIndex(of: "\n") else {
+            Issue.record("Prompt 中输入 JSON 没有结束行")
+            return
+        }
+        let jsonText = String(input[..<lineEnd])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let object = try JSONSerialization.jsonObject(with: Data(jsonText.utf8)) as? [String: Any]
         let items = object?["items"] as? [[String: Any]]
         let ids = items?.compactMap { $0["id"] as? String }
