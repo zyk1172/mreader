@@ -20,8 +20,8 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
     /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
-    static let translationCacheRevision = "translation-v8-ai-transports"
-    static let ocrGeometryRevision = "physical-axis-v2"
+    static let translationCacheRevision = "translation-v9-japanese-vertical-ocr"
+    static let ocrGeometryRevision = "physical-axis-v3-jpn-vert"
 
     let pageURL: URL
     let image: UIImage
@@ -386,7 +386,10 @@ nonisolated enum AITranslationPagePipeline {
                 baseURL: request.configuration.baseURL,
                 model: request.configuration.visionModel,
                 isRightToLeft: request.isRightToLeft,
-                modelDescriptor: request.configuration.visionModelDescriptor
+                modelDescriptor: request.configuration.visionModelDescriptor,
+                sourceLanguagePreference: request.sourceLanguagePreference,
+                detectedLanguage: localResult.detectedLanguage,
+                visualVerificationEnabled: request.usesVisualOCRVerification
             )
         } else {
             resolvedBlocks = localResult.resolvedBlocks

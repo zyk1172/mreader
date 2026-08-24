@@ -4842,7 +4842,7 @@ struct LocalImageView: View {
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
         let activeConfiguration = AIProviderStore.shared.activeConfiguration()
         let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|text-protocol=\(activeConfiguration?.textModelDescriptor.apiProtocol.rawValue ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")|vision-protocol=\(activeConfiguration?.visionModelDescriptor.apiProtocol.rawValue ?? "none")"
-        let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
+        let key = "\(url.absoluteString)#ocr-revision=\(JapaneseVerticalOCRService.revision)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
         if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
             return recognizedPipelineCache
         }
@@ -4875,7 +4875,10 @@ struct LocalImageView: View {
                 baseURL: activeConfiguration.baseURL,
                 model: activeConfiguration.visionModel,
                 isRightToLeft: isRightToLeftReading,
-                modelDescriptor: activeConfiguration.visionModelDescriptor
+                modelDescriptor: activeConfiguration.visionModelDescriptor,
+                sourceLanguagePreference: comicTranslationSourceLanguage,
+                detectedLanguage: localResult.detectedLanguage,
+                visualVerificationEnabled: ocrVisualVerificationEnabled
             )
             let segmentation = MangaTextSegmenter.segment(
                 corrected,

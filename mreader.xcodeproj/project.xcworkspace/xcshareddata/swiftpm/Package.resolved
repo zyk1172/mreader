@@ -1,6 +1,15 @@
 {
-  "originHash" : "dfe989a631e012ee811f833a9f748b9da070de1e02e3964a7049a4fffbd6740e",
+  "originHash" : "f6491c843f5c4b42ecf7176c4aa5f63d6288b8125815570991482397dd60983b",
   "pins" : [
+    {
+      "identity" : "tesseract-apple",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lexiaoyao20/tesseract-Apple.git",
+      "state" : {
+        "revision" : "0e8c80b16d62264297187645506fe8697b716d76",
+        "version" : "5.5.1"
+      }
+    },
     {
       "identity" : "zipfoundation",
       "kind" : "remoteSourceControl",

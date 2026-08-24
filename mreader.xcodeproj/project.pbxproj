@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		788190C32FE2F100007BDA15 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 788190C42FE2F100007BDA15 /* ZIPFoundation */; };
+		D17E00010000000000000001 /* TesseractSwift in Frameworks */ = {isa = PBXBuildFile; productRef = D17E00010000000000000003 /* TesseractSwift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				788190C32FE2F100007BDA15 /* ZIPFoundation in Frameworks */,
+				D17E00010000000000000001 /* TesseractSwift in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 			name = mreader;
 			packageProductDependencies = (
 				788190C42FE2F100007BDA15 /* ZIPFoundation */,
+				D17E00010000000000000003 /* TesseractSwift */,
 			);
 			productName = mreader;
 			productReference = 788190972FE2DAA6007BDA15 /* mreader.app */;
@@ -206,6 +209,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 788190982FE2DAA6007BDA15 /* Products */;
@@ -622,6 +626,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/lexiaoyao20/tesseract-Apple.git";
+			requirement = {
+				kind = exactVersion;
+				version = 5.5.1;
+			};
+		};
 		788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/weichsel/ZIPFoundation.git";
@@ -633,6 +645,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		D17E00010000000000000003 /* TesseractSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */;
+			productName = TesseractSwift;
+		};
 		788190C42FE2F100007BDA15 /* ZIPFoundation */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;

@@ -16,8 +16,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            // v2：字号尺度现在按 observation 的物理方向写入，不能复用旧的 normalized min(width,height) 缓存。
-            "local-ocr-v2",
+            // OCR geometry and the Japanese vertical fallback changed; do not
+            // reuse pages written before this pipeline revision.
+            "local-ocr-v3-japanese-vertical-ocr",
+            JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
             String(format: "%.5f", options.minimumTextHeight),
