@@ -11,7 +11,7 @@ fileprivate final class SecurityScopeBox: @unchecked Sendable {
 
     func hold(_ url: URL) -> Bool {
         guard !released else { return false }
-        let granted = url.startAccessingSecurityScopedResource()
+        let granted = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
         self.url = url
         return granted
     }
@@ -120,6 +120,7 @@ nonisolated struct MReaderSettingsBackup: Codable {
     var translationColorStyle: String?
     var isAITranslationBorderProgressEnabled: Bool?
     var isOCRDebugBoxesEnabled: Bool?
+    var ocrDebugStage: String? = nil
     var isOCRVisualVerificationEnabled: Bool? = nil
     var ocrLocalRecognitionMode: String? = nil
     var readingDailyPageGoal: Double?
@@ -272,6 +273,7 @@ struct ContentView: View {
     @AppStorage("translation_color_style") private var translationColorStyleRaw = "contrast"
     @AppStorage("ai_translation_border_progress_enabled") private var isAITranslationBorderProgressEnabled = true
     @AppStorage("ocr_show_debug_boxes") private var isOCRDebugBoxesEnabled = false
+    @AppStorage("ocr_debug_stage") private var ocrDebugStageRaw = OCRDebugStage.raw.rawValue
     @AppStorage("ocr_visual_verification_enabled") private var isOCRVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrLocalRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("reading_daily_page_goal") private var readingDailyPageGoal = 40.0
@@ -1456,6 +1458,12 @@ struct ContentView: View {
             }
             Toggle("ocr.visualVerification".localized, isOn: $isOCRVisualVerificationEnabled)
             Toggle("ocr.showDebugBoxes".localized, isOn: $isOCRDebugBoxesEnabled)
+            Picker("ocr.debugStage".localized, selection: $ocrDebugStageRaw) {
+                ForEach(OCRDebugStage.allCases, id: \.rawValue) { stage in
+                    Text(stage.localizationKey.localized).tag(stage.rawValue)
+                }
+            }
+            .disabled(!isOCRDebugBoxesEnabled)
         }
     }
 
@@ -2033,6 +2041,7 @@ struct ContentView: View {
             translationColorStyle: translationColorStyleRaw,
             isAITranslationBorderProgressEnabled: isAITranslationBorderProgressEnabled,
             isOCRDebugBoxesEnabled: isOCRDebugBoxesEnabled,
+            ocrDebugStage: ocrDebugStageRaw,
             isOCRVisualVerificationEnabled: isOCRVisualVerificationEnabled,
             ocrLocalRecognitionMode: ocrLocalRecognitionModeRaw,
             readingDailyPageGoal: readingDailyPageGoal,
@@ -2064,7 +2073,7 @@ struct ContentView: View {
     private func restoreSettingsBackup(from result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
-            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
             defer {
                 if didStartAccessing {
                     url.stopAccessingSecurityScopedResource()
@@ -2137,6 +2146,7 @@ struct ContentView: View {
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw
             isAITranslationBorderProgressEnabled = backup.isAITranslationBorderProgressEnabled ?? isAITranslationBorderProgressEnabled
             isOCRDebugBoxesEnabled = backup.isOCRDebugBoxesEnabled ?? isOCRDebugBoxesEnabled
+            ocrDebugStageRaw = backup.ocrDebugStage ?? ocrDebugStageRaw
             isOCRVisualVerificationEnabled = backup.isOCRVisualVerificationEnabled ?? isOCRVisualVerificationEnabled
             ocrLocalRecognitionModeRaw = backup.ocrLocalRecognitionMode ?? ocrLocalRecognitionModeRaw
             readingDailyPageGoal = min(max(backup.readingDailyPageGoal ?? readingDailyPageGoal, 0), 5_000)
@@ -2245,7 +2255,7 @@ final class FileOpenPresenter: NSObject, UIDocumentInteractionControllerDelegate
     func open(_ url: URL) {
         cleanupSecurityScope()
         activeURL = url
-        didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        didStartSecurityScope = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
 
         UIApplication.shared.open(url) { [weak self] success in
             guard !success else {

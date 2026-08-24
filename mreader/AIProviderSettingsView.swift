@@ -503,7 +503,8 @@ private struct AIProviderEditorView: View {
                         userPrompt: "Return OK.",
                         imageDataURL: imageURL,
                         maxTokens: 8,
-                        timeout: 25
+                        timeout: AITranslationRequestPolicy.connectionTestTimeout,
+                        kind: .connectionTest
                     )
                 } else {
                     let prompt = try AIPageTranslationPromptBuilder.prompt(
@@ -519,7 +520,8 @@ private struct AIProviderEditorView: View {
                         responseFormat: .jsonObject,
                         temperature: 0.15,
                         maxTokens: 200,
-                        timeout: 25
+                        timeout: AITranslationRequestPolicy.connectionTestTimeout,
+                        kind: .connectionTest
                     )
                 }
                 let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(request)

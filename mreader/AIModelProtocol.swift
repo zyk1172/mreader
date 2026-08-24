@@ -89,6 +89,17 @@ nonisolated enum AITransportResponseFormat: Sendable, Equatable {
     case jsonSchema(name: String, schema: Data)
 }
 
+/// Identifies the user-visible operation for timeout/retry policy and
+/// diagnostics.  Keeping this on the transport request prevents settings
+/// probes, page translations and vision calls from sharing one timeout.
+nonisolated enum AIRequestKind: String, Codable, Sendable {
+    case page
+    case bubble
+    case vision
+    case connectionTest
+    case jsonRepair
+}
+
 nonisolated struct AITransportRequest: Sendable {
     let model: AIModelDescriptor
     let systemPrompt: String?
@@ -98,6 +109,7 @@ nonisolated struct AITransportRequest: Sendable {
     let temperature: Double?
     let maxTokens: Int?
     let timeout: TimeInterval
+    let kind: AIRequestKind
 
     init(
         model: AIModelDescriptor,
@@ -107,7 +119,8 @@ nonisolated struct AITransportRequest: Sendable {
         responseFormat: AITransportResponseFormat? = nil,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        timeout: TimeInterval = 60
+        timeout: TimeInterval = 60,
+        kind: AIRequestKind = .bubble
     ) {
         self.model = model
         self.systemPrompt = systemPrompt
@@ -117,6 +130,7 @@ nonisolated struct AITransportRequest: Sendable {
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.timeout = timeout
+        self.kind = kind
     }
 }
 
@@ -169,23 +183,77 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
         urlRequest.httpBody = try makeBody(for: request)
         requestObserver?(urlRequest)
 
-        let (data, response) = try await session.data(for: urlRequest)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AITranslationRequestError.invalidConfiguration("响应无效")
+        let maximumAttempts = AITranslationRequestPolicy.maximumAttempts(for: request.kind)
+        var attempt = 1
+        while true {
+            try Task.checkCancellation()
+            let startedAt = Date()
+            do {
+                let (data, response) = try await session.data(for: urlRequest)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw AITranslationRequestError.invalidConfiguration("响应无效")
+                }
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    throw AITranslationRequestError.serverWithRetryAfter(
+                        model: request.model.id,
+                        statusCode: httpResponse.statusCode,
+                        message: Self.apiErrorMessage(from: data)
+                            ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+                        retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse)
+                    )
+                }
+                if let message = Self.apiErrorMessage(from: data) {
+                    throw AITranslationRequestError.server(
+                        model: request.model.id,
+                        statusCode: httpResponse.statusCode,
+                        message: message
+                    )
+                }
+                Self.log(
+                    request: request,
+                    endpoint: url,
+                    attempt: attempt,
+                    elapsed: Date().timeIntervalSince(startedAt),
+                    statusCode: httpResponse.statusCode,
+                    urlErrorCode: nil
+                )
+                return data
+            } catch {
+                let urlErrorCode = (error as? URLError)?.errorCode
+                let statusCode = (error as? AITranslationRequestError)?.statusCode
+                Self.log(
+                    request: request,
+                    endpoint: url,
+                    attempt: attempt,
+                    elapsed: Date().timeIntervalSince(startedAt),
+                    statusCode: statusCode,
+                    urlErrorCode: urlErrorCode
+                )
+                guard attempt < maximumAttempts,
+                      AITranslationRequestPolicy.shouldRetry(error: error) else {
+                    throw error
+                }
+                let delay = AITranslationRequestPolicy.retryDelay(for: error)
+                print("MReader AI retry model=\(request.model.id) protocol=\(request.model.apiProtocol.rawValue) kind=\(request.kind.rawValue) attempt=\(attempt + 1) delay=\(String(format: "%.1f", delay))s")
+                try await Task.sleep(nanoseconds: UInt64(max(delay, 0) * 1_000_000_000))
+                attempt += 1
+            }
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw AITranslationRequestError.serverWithRetryAfter(
-                model: request.model.id,
-                statusCode: httpResponse.statusCode,
-                message: Self.apiErrorMessage(from: data)
-                    ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
-                retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse)
-            )
-        }
-        if let message = Self.apiErrorMessage(from: data) {
-            throw AITranslationRequestError.server(model: request.model.id, statusCode: nil, message: message)
-        }
-        return data
+    }
+
+    private static func log(
+        request: AITransportRequest,
+        endpoint: URL,
+        attempt: Int,
+        elapsed: TimeInterval,
+        statusCode: Int?,
+        urlErrorCode: Int?
+    ) {
+        let status = statusCode.map(String.init) ?? "-"
+        let errorCode = urlErrorCode.map(String.init) ?? "-"
+        // Only the path is logged.  The full request (including Authorization)
+        // remains available to injected test observers, never to production logs.
+        print("MReader AI request model=\(request.model.id) protocol=\(request.model.apiProtocol.rawValue) kind=\(request.kind.rawValue) timeout=\(String(format: "%.1f", request.timeout))s attempt=\(attempt) elapsed=\(String(format: "%.2f", elapsed))s status=\(status) urlError=\(errorCode) endpoint=\(endpoint.path)")
     }
 
     private func addAuthenticationHeaders(
@@ -378,10 +446,21 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
 
     private static func retryAfterSeconds(from response: HTTPURLResponse) -> UInt64? {
         guard let value = response.value(forHTTPHeaderField: "Retry-After"),
-              let seconds = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
-              seconds >= 0 else {
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        return UInt64(ceil(seconds))
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let seconds = Double(trimmed), seconds >= 0 {
+            return UInt64(ceil(seconds))
+        }
+
+        // RFC 7231 also permits an HTTP-date. DateFormatter is local to this
+        // call, so it is not shared across concurrent requests.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = formatter.date(from: trimmed) else { return nil }
+        return UInt64(max(0, ceil(date.timeIntervalSinceNow)))
     }
 }

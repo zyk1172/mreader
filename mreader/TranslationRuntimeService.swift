@@ -12,7 +12,7 @@ nonisolated enum TranslationRuntimeService {
         model: String,
         targetLanguage: TranslationTargetLanguage = .simplifiedChinese,
         promptTemplate: String = AITranslator.defaultTranslationPromptTemplate,
-        requestTimeout: TimeInterval = 45,
+        requestTimeout: TimeInterval = AITranslationRequestPolicy.bubbleRequestTimeout,
         modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> String {
         try await AITranslator.translate(

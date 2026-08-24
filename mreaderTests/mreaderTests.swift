@@ -233,6 +233,329 @@ struct mreaderTests {
         #expect(body["response_format"] == nil)
     }
 
+    @Test func aiTranslationRequestPolicyScalesPageTimeoutWithoutChangingConnectionTest() {
+        let timeouts = [1, 5, 10, 20, 100].map(AITranslationRequestPolicy.pageRequestTimeout(itemCount:))
+        #expect(timeouts == timeouts.sorted())
+        #expect(timeouts.first ?? 0 >= 90)
+        #expect(timeouts.last ?? 0 <= 180)
+        #expect(AITranslationRequestPolicy.bubbleRequestTimeout < (timeouts.first ?? 0))
+        #expect(AITranslationRequestPolicy.connectionTestTimeout < AITranslationRequestPolicy.bubbleRequestTimeout)
+        #expect(AITranslationRequestPolicy.visionRequestTimeout >= 120)
+    }
+
+    @Test func aiTranslationRequestPolicyRetriesOnlyTransientFailures() {
+        #expect(AITranslationRequestPolicy.shouldRetry(error: URLError(.timedOut)))
+        #expect(AITranslationRequestPolicy.shouldRetry(error: URLError(.networkConnectionLost)))
+        for statusCode in [408, 429, 502, 503, 504] {
+            #expect(AITranslationRequestPolicy.shouldRetry(
+                error: AITranslationRequestError.server(model: "m", statusCode: statusCode, message: "transient")
+            ))
+        }
+        #expect(!AITranslationRequestPolicy.shouldRetry(error: AITranslationRequestError.server(model: "m", statusCode: 400, message: "bad")))
+        #expect(!AITranslationRequestPolicy.shouldRetry(error: AITranslationRequestError.server(model: "m", statusCode: 401, message: "auth")))
+    }
+
+    @Test func aiTranslationRequestPolicyAllowsOnlyOneRetryPerProductionRequestKind() {
+        for kind in [AIRequestKind.page, .bubble, .vision] {
+            #expect(AITranslationRequestPolicy.maximumAttempts(for: kind) == 2)
+        }
+        #expect(AITranslationRequestPolicy.maximumAttempts(for: .connectionTest) == 1)
+        #expect(AITranslationRequestPolicy.maximumAttempts(for: .jsonRepair) == 1)
+        #expect(
+            AITranslationRequestPolicy.retryDelay(
+                for: AITranslationRequestError.serverWithRetryAfter(
+                    model: "m",
+                    statusCode: 429,
+                    message: "busy",
+                    retryAfterSeconds: 7
+                )
+            ) == 7
+        )
+    }
+
+    @Test func aiTranslationClientRetriesTimeoutOnceButDoesNotRetryAuth() async throws {
+        AITransportRecordingURLProtocol.configure(
+            responseData: Data(#"{"error":{"message":"timed out"}}"#.utf8),
+            failure: URLError(.timedOut)
+        )
+        let client = AITranslationClient(
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            session: aiTransportRecordingSession()
+        )
+        do {
+            _ = try await client.send(
+                AITransportRequest(
+                    model: AIModelDescriptor(id: "mimo-v2.5"),
+                    userPrompt: "hello",
+                    timeout: 1,
+                    kind: .bubble
+                )
+            )
+            Issue.record("超时请求不应成功")
+        } catch let error as URLError {
+            #expect(error.code == .timedOut)
+        }
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+
+        AITransportRecordingURLProtocol.configure(
+            responseData: Data(#"{"error":{"message":"unauthorized"}}"#.utf8),
+            statusCode: 401
+        )
+        do {
+            _ = try await client.send(
+                AITransportRequest(
+                    model: AIModelDescriptor(id: "mimo-v2.5"),
+                    userPrompt: "hello",
+                    timeout: 1,
+                    kind: .bubble
+                )
+            )
+            Issue.record("鉴权错误不应成功")
+        } catch let error as AITranslationRequestError {
+            #expect(error.statusCode == 401)
+        }
+        #expect(AITransportRecordingURLProtocol.requestCount() == 1)
+    }
+
+    @Test func aiTranslationPageSchemaRestrictsExpectedIDsAndShape() throws {
+        let items = [
+            AIPageTranslationItem(id: "b0", sourceText: "じこ", order: 0),
+            AIPageTranslationItem(id: "b1", sourceText: "!!", order: 1)
+        ]
+        let format = try #require(AIPageTranslationSchemaBuilder.responseFormat(for: items))
+        guard case let .jsonSchema(_, schema) = format,
+              let object = try JSONSerialization.jsonObject(with: schema) as? [String: Any],
+              let properties = object["properties"] as? [String: Any],
+              let itemsSchema = properties["items"] as? [String: Any],
+              let itemSchema = itemsSchema["items"] as? [String: Any],
+              let itemProperties = itemSchema["properties"] as? [String: Any],
+              let idSchema = itemProperties["id"] as? [String: Any] else {
+            Issue.record("整页 schema 结构不完整")
+            return
+        }
+        #expect(object["additionalProperties"] as? Bool == false)
+        #expect(itemsSchema["minItems"] as? Int == 2)
+        #expect(itemsSchema["maxItems"] as? Int == 2)
+        #expect(idSchema["enum"] as? [String] == ["b0", "b1"])
+        #expect(itemSchema["additionalProperties"] as? Bool == false)
+        #expect(itemProperties.keys.sorted() == ["id", "translation", "translationLines"])
+    }
+
+    @Test func strictPageParserRejectsReasoningUnknownDuplicateAndMissingIDs() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "じ", order: 0),
+            AIPageTranslationItem(id: "b1", sourceText: "こ", order: 1)
+        ]
+        #expect(throws: AIPageTranslationParserError.self) {
+            try AIPageTranslationParser.parseStrict(
+                "我们需要分析后再翻译……",
+                expectedItems: expected,
+                target: .simplifiedChinese
+            )
+        }
+        #expect(throws: AIPageTranslationParserError.self) {
+            try AIPageTranslationParser.parseStrict(
+                #"{"items":[{"id":"b0","translation":"事","translationLines":[]},{"id":"x","translation":"故","translationLines":[]}]}"#,
+                expectedItems: expected,
+                target: .simplifiedChinese
+            )
+        }
+        #expect(throws: AIPageTranslationParserError.self) {
+            try AIPageTranslationParser.parseStrict(
+                #"{"items":[{"id":"b0","translation":"事","translationLines":[]},{"id":"b0","translation":"故","translationLines":[]}]}"#,
+                expectedItems: expected,
+                target: .simplifiedChinese
+            )
+        }
+        #expect(throws: AIPageTranslationParserError.self) {
+            try AIPageTranslationParser.parseStrict(
+                #"{"items":[{"id":"b0","translation":"事","translationLines":[]},{"id":"b1","translation":3,"translationLines":[]}]}"#,
+                expectedItems: expected,
+                target: .simplifiedChinese
+            )
+        }
+    }
+
+    @Test func pageParserUsesCanonicalTranslationWhenLinesAreUnrelated() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "こんにちは", order: 0)
+        ]
+        let canonical = "你好，今天怎么样？"
+
+        let invalidLines = try AIPageTranslationParser.parseStrict(
+            #"{"items":[{"id":"b0","translation":"你好，今天怎么样？","translationLines":["Hello,","how are you today?"]}]}"#,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(invalidLines.items[0].translation == canonical)
+        #expect(invalidLines.items[0].translationLines.isEmpty)
+        #expect(
+            TranslationOutputValidator.validatedDisplayTranslation(
+                canonicalTranslation: invalidLines.items[0].translation,
+                translationLines: invalidLines.items[0].translationLines,
+                sourceText: expected[0].sourceText,
+                target: .simplifiedChinese
+            ) == canonical
+        )
+
+        let validLines = try AIPageTranslationParser.parseStrict(
+            #"{"items":[{"id":"b0","translation":"你好，今天怎么样？","translationLines":["你好，","今天怎么样？"]}]}"#,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(validLines.items[0].translationLines == ["你好，", "今天怎么样？"])
+    }
+
+    @Test func pageResponseClassifierDoesNotTreatJSONDiscussionAsRepairableJSON() {
+        let expected = [AIPageTranslationItem(id: "b0", sourceText: "じこ", order: 0)]
+        #expect(
+            AIPageTranslationParser.classifyResponse(
+                "We need return JSON for b0, but first we should explain the translation.",
+                expectedItems: expected
+            ) == .pureProse
+        )
+        #expect(
+            AIPageTranslationParser.classifyResponse(
+                #"{"items":[{"id":"b0","translation":"事故"}"#,
+                expectedItems: expected
+            ) == .jsonLike
+        )
+    }
+
+    @Test func pageJSONRepairPromptDoesNotAskModelToReTranslate() throws {
+        let prompt = try AIPageTranslationRepairPromptBuilder.prompt(
+            items: [AIPageTranslationItem(id: "b0", sourceText: "じこ", order: 0)],
+            malformedResponse: "我们需要将事故翻译成中文，所以……",
+            target: .simplifiedChinese
+        )
+        #expect(prompt.contains("已有响应") || prompt.contains("已有内容来源"))
+        #expect(prompt.contains("b0"))
+        #expect(AIPageTranslationRepairPromptBuilder.systemPrompt.contains("JSON 修复器"))
+    }
+
+    @Test func pageTranslationRepairsMalformedJSONBeforePerBubbleFallback() async throws {
+        AITransportRecordingURLProtocol.configure(sequence: [
+            (200, Data(#"{"output_text":"We need analyze the OCR and then translate it..."}"#.utf8)),
+            (200, Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\",\"translationLines\":[] }]}"}"#.utf8))
+        ])
+        let result = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: "repair-model",
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(result.translation(for: "b0")?.translation == "事故")
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+    }
+
+    @Test func pageTranslationRepairFailureRemainsFormatFailureForPerBubbleFallback() async throws {
+        let malformed = Data(#"{"output_text":"We need explain the OCR before answering..."}"#.utf8)
+        AITransportRecordingURLProtocol.configure(sequence: [(200, malformed), (200, malformed)])
+        do {
+            _ = try await AITranslator.translatePage(
+                blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+                apiKey: "secret",
+                baseURL: "https://api.example.test/v1",
+                model: "repair-failure-model",
+                target: .simplifiedChinese,
+                session: aiTransportRecordingSession(),
+                requestObserver: AITransportRecordingURLProtocol.captureRequest
+            )
+            Issue.record("repair 失败后不应伪装成整页成功")
+        } catch let error as AITranslationRequestError {
+            #expect(error.isFormatFailure)
+        }
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+    }
+
+    @Test func pageTranslationDowngradesUnsupportedSchemaOnce() async throws {
+        AITransportRecordingURLProtocol.configure(sequence: [
+            (400, Data(#"{"error":{"message":"unsupported response_format json_schema"}}"#.utf8)),
+            (200, Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\",\"translationLines\":[] }]}"}"#.utf8))
+        ])
+        let result = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: "schema-fallback-model",
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(result.translation(for: "b0")?.translation == "事故")
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+    }
+
+    @Test func pageHTTP200ProseDowngradesSchemaAndCachesJSONObjectMode() async throws {
+        let model = "semantic-downgrade-\(UUID().uuidString)"
+        let valid = Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\",\"translationLines\":[] }]}"}"#.utf8)
+        AITransportRecordingURLProtocol.configure(sequence: [
+            (200, Data(#"{"output_text":"We need explain the OCR before answering..."}"#.utf8)),
+            (200, valid)
+        ])
+        let block = TextBlock(
+            text: "じこ",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1)
+        )
+        let first = try await AITranslator.translatePage(
+            blocks: [block],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(first.translation(for: "b0")?.translation == "事故")
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+        let downgradedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let downgradedData = try #require(downgradedRequest.httpBody)
+        let downgradedBody = try #require(
+            JSONSerialization.jsonObject(with: downgradedData) as? [String: Any]
+        )
+        #expect((downgradedBody["response_format"] as? [String: Any])?["type"] as? String == "json_object")
+
+        AITransportRecordingURLProtocol.configure(responseData: valid)
+        _ = try await AITranslator.translatePage(
+            blocks: [block],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(AITransportRecordingURLProtocol.requestCount() == 1)
+        let cachedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let cachedData = try #require(cachedRequest.httpBody)
+        let cachedBody = try #require(
+            JSONSerialization.jsonObject(with: cachedData) as? [String: Any]
+        )
+        #expect((cachedBody["response_format"] as? [String: Any])?["type"] as? String == "json_object")
+    }
+
+    @Test func pageMalformedJSONUsesOneRepairBeforeAnyPerBubbleFallback() async throws {
+        let model = "malformed-json-repair-\(UUID().uuidString)"
+        let malformed = Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\"}"}"#.utf8)
+        let repaired = Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\",\"translationLines\":[] }]}"}"#.utf8)
+        AITransportRecordingURLProtocol.configure(sequence: [(200, malformed), (200, repaired)])
+        let result = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(result.translation(for: "b0")?.translation == "事故")
+        #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+    }
+
     @Test @MainActor func aiProviderStoreRejectsExplicitlyUnsupportedVisionModel() throws {
         let suiteName = "mreader-ai-provider-tests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -441,6 +764,45 @@ struct mreaderTests {
         ))
     }
 
+    @Test func japaneseVerticalAutomaticModeDoesNotTrustImageOnlyColumnsWithoutLocalEvidence() throws {
+        let size = CGSize(width: 160, height: 240)
+        var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
+        let context = try #require(CGContext(
+            data: &pixels,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 28, y: 30, width: 6, height: 180))
+        context.fill(CGRect(x: 122, y: 30, width: 6, height: 180))
+        let image = UIImage(cgImage: try #require(context.makeImage()))
+        let reference = AppleOCRReferenceService.makeReference(from: "今日会社時間")
+        let options = OCRPreprocessor.Options(
+            isRightToLeft: false,
+            minimumTextHeight: 0.01,
+            recognitionMode: .adaptive,
+            sourceLanguagePreference: .automatic
+        )
+
+        #expect(!JapaneseVerticalOCRService.shouldRunFallback(
+            in: image,
+            existingBlocks: [],
+            options: options
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRunFallback(
+            in: image,
+            existingBlocks: [],
+            options: options,
+            visionKitReference: reference
+        ))
+    }
+
     @Test func japaneseVerticalCoordinateMappingRoundTrips() {
         let original = CGRect(x: 0.16, y: 0.21, width: 0.08, height: 0.31)
         let rotated = JapaneseVerticalOCRService.originalBoundingBoxToRotatedForDiagnostics(original)
@@ -449,6 +811,212 @@ struct mreaderTests {
         #expect(abs(roundTrip.minY - original.minY) < 0.0001)
         #expect(abs(roundTrip.width - original.width) < 0.0001)
         #expect(abs(roundTrip.height - original.height) < 0.0001)
+    }
+
+    @Test func japaneseExplicitOCRPassNeverLetsEnglishBecomePrimary() {
+        let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["FIDGET 123"],
+            sourceLanguagePreference: .japanese
+        )
+        #expect(passes.first == ["ja-JP"])
+        #expect(!passes.first!.contains("en-US"))
+    }
+
+    @Test func japaneseMaximumAccuracyDoesNotRunEnglishFallbackAgainstManualChoice() {
+        let passes = OCRPreprocessor.maximumAccuracyPassesForDiagnostics(
+            sourceLanguagePreference: .japanese
+        )
+        #expect(passes == [["ja-JP"]])
+    }
+
+    @Test func automaticLatinLocatorWithVerticalEvidencePrefersJapanese() {
+        let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["FIDGET", "ABC"],
+            sourceLanguagePreference: .automatic,
+            verticalEvidence: true
+        )
+        #expect(passes.first == ["ja-JP"])
+        #expect(passes.dropFirst().first == ["en-US"])
+    }
+
+    @Test func weakLatinLocatorUsesJapaneseAccuratePassBeforeEnglish() {
+        let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["FIDGET"],
+            sourceLanguagePreference: .automatic,
+            locatorConfidence: 0.50
+        )
+        #expect(passes.first == ["ja-JP"])
+        #expect(passes.dropFirst().first == ["en-US"])
+    }
+
+    @Test func automaticKanjiOnlyPlanDoesNotUseReaderDirectionAsJapaneseEvidence() {
+        let leftToRight = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["今日会社時間"],
+            isRightToLeft: false,
+            sourceLanguagePreference: .automatic
+        )
+        let rightToLeft = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
+            detectedTexts: ["今日会社時間"],
+            isRightToLeft: true,
+            sourceLanguagePreference: .automatic
+        )
+        #expect(leftToRight.first == ["zh-Hans", "zh-Hant"])
+        #expect(rightToLeft.first == leftToRight.first)
+    }
+
+    @Test func appleOCRReferenceProvidesLanguageEvidenceWithoutGeometry() {
+        let reference = AppleOCRReferenceService.makeReference(from: "今日はいく。")
+        #expect(reference.detectedLanguage == "ja")
+        #expect(reference.kanaCount > 0)
+        #expect(reference.characterCount == 6)
+        #expect(AppleOCRReferenceService.shouldAnalyze(
+            options: OCRPreprocessor.Options(
+                isRightToLeft: false,
+                minimumTextHeight: 0.006,
+                sourceLanguagePreference: .japanese
+            ),
+            preliminaryBlocks: []
+        ))
+    }
+
+    @Test func appleOCRReferenceSkipsHealthyEnglishAndHorizontalChinesePages() {
+        let english = TextBlock(
+            text: "This is a clear English page with enough text.",
+            boundingBox: CGRect(x: 0.1, y: 0.2, width: 0.7, height: 0.08),
+            confidence: 0.95,
+            ocrSource: "vision:en",
+            textOrientation: .horizontal
+        )
+        let chinese = TextBlock(
+            text: "今天一起看漫画和故事。",
+            boundingBox: CGRect(x: 0.1, y: 0.3, width: 0.7, height: 0.08),
+            confidence: 0.95,
+            ocrSource: "vision:zh",
+            textOrientation: .horizontal
+        )
+        let automatic = OCRPreprocessor.Options(
+            isRightToLeft: false,
+            minimumTextHeight: 0.006,
+            sourceLanguagePreference: .automatic
+        )
+        #expect(!AppleOCRReferenceService.shouldAnalyze(options: automatic, preliminaryBlocks: [english]))
+        #expect(!AppleOCRReferenceService.shouldAnalyze(options: automatic, preliminaryBlocks: [chinese]))
+    }
+
+    @Test func appleOCRReferenceTreatsHanOnlyTranscriptAsJapaneseOnlyWithVerticalEvidence() throws {
+        let size = CGSize(width: 160, height: 240)
+        var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
+        let context = try #require(CGContext(
+            data: &pixels,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 28, y: 30, width: 6, height: 180))
+        context.fill(CGRect(x: 122, y: 30, width: 6, height: 180))
+        let image = UIImage(cgImage: try #require(context.makeImage()))
+        let reference = AppleOCRReferenceService.makeReference(from: "今日会社時間")
+        let options = OCRPreprocessor.Options(
+            isRightToLeft: false,
+            minimumTextHeight: 0.006,
+            sourceLanguagePreference: .automatic
+        )
+        #expect(!AppleOCRReferenceService.suggestsJapanese(reference, blocks: [], options: options))
+        #expect(!AppleOCRReferenceService.suggestsJapanese(reference, blocks: [], options: options, image: image))
+    }
+
+    @Test func japaneseVerticalTSVRebuildsCharactersOnOneLineWithoutSpaces() {
+        let tsv = """
+        level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext
+        5\t1\t1\t1\t1\t1\t10\t20\t18\t20\t95\tじ
+        5\t1\t2\t7\t9\t2\t32\t20\t18\t20\t94\tこ
+        5\t1\t1\t1\t3\t3\t54\t20\t24\t20\t93\t!!
+        5\t1\t1\t1\t1\t4\t300\t100\t18\t20\t91\t別
+        5\t1\t1\t1\t1\t5\t80\t20\t18\t60\t90\t大
+        """
+        let words = JapaneseVerticalOCRService.parseTSVForDiagnostics(tsv)
+        #expect(words.count == 3)
+        #expect(words.first?.text == "じこ!!")
+        #expect(words.contains { $0.text == "別" })
+        #expect(words.contains { $0.text == "大" })
+        #expect(words.first?.lineNumber == 1)
+        #expect(words.first?.wordNumber == 1)
+    }
+
+    @Test func japaneseVerticalTSVKeepsSeparateColumnsAndRunsFragmentationGate() {
+        var rows = ["level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"]
+        rows += [
+            "5\t1\t1\t1\t1\t1\t10\t20\t18\t20\t95\tじ",
+            "5\t1\t2\t2\t2\t4\t32\t20\t18\t20\t94\tこ",
+            "5\t1\t3\t3\t3\t7\t10\t140\t18\t20\t93\t別",
+            "5\t1\t4\t4\t4\t8\t32\t140\t18\t20\t92\t列"
+        ]
+        let words = JapaneseVerticalOCRService.parseTSVForDiagnostics(rows.joined(separator: "\n"))
+        #expect(words.map(\.text) == ["じこ", "別列"])
+
+        rows = ["level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"]
+        for index in 0..<80 {
+            rows.append("5\t1\t\(index + 1)\t1\t1\t1\t\(index * 100)\t20\t18\t20\t90\tじ")
+        }
+        let quality = JapaneseVerticalOCRService.fragmentationQualityForDiagnostics(
+            rows.joined(separator: "\n")
+        )
+        #expect(quality.rawWordCount == 80)
+        #expect(quality.groupedRunCount == 80)
+        #expect(quality.isSeverelyFragmented())
+    }
+
+    @Test func japanesePageQualitySeparatesConfidenceFromScriptPlausibility() {
+        let result = MangaOCRPipeline.resolveForDiagnostics(
+            [
+                TextBlock(text: "THIS IS WRONG", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.05), confidence: 0.95),
+                TextBlock(text: "FIDGET", boundingBox: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.05), confidence: 0.9)
+            ],
+            isRightToLeft: false,
+            sourceLanguagePreference: .japanese
+        )
+        #expect(result.quality?.averageConfidence ?? 0 > 0.9)
+        #expect(result.quality?.expectedScriptRatio ?? 1 < 0.1)
+        #expect(result.quality?.japaneseScriptRatio == 0)
+        #expect(result.quality?.isSuspicious == true)
+        #expect(result.resolvedBlocks.isEmpty)
+        let allRejectedByQuality = result.rejectedBlocks.allSatisfy { $0.isFiltered }
+        #expect(allRejectedByQuality)
+    }
+
+    @Test @MainActor func translationSafeBlocksAlwaysRejectUnsafeRecoveryCandidates() {
+        let valid = TextBlock(
+            text: "正确对白",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.24, height: 0.05),
+            confidence: 0.92,
+            ocrSource: "original"
+        )
+        let lowConfidenceInverted = TextBlock(
+            text: "衣服纹理",
+            boundingBox: CGRect(x: 0.60, y: 0.20, width: 0.18, height: 0.05),
+            confidence: 0.50,
+            ocrSource: "vision:inverted"
+        )
+        let invalidGeometry = TextBlock(
+            text: "假候选",
+            boundingBox: CGRect(x: 1.20, y: 0.20, width: 0.18, height: 0.05),
+            confidence: 0.92,
+            ocrSource: "original"
+        )
+
+        let result = OCRPageQuality.translationSafeBlocks(
+            [valid, lowConfidenceInverted, invalidGeometry]
+        )
+
+        #expect(result.accepted.map(\.text) == ["正确对白"])
+        #expect(result.rejected.count == 2)
+        #expect(result.rejected.allSatisfy { $0.isFiltered })
     }
 
     @Test func japaneseVerticalVisualRecoveryHonorsSettingAndMergesMissingColumn() {
@@ -597,6 +1165,27 @@ struct mreaderTests {
         #expect(LibrarySyncScope.startupRemote.contains(.opds))
         #expect(LibrarySyncScope.startupRemote.contains(.prewarmKomga))
         #expect(!LibrarySyncScope.startupRemote.contains(.local))
+    }
+
+    @Test func localResourceAccessPolicyStartsSecurityScopeOnlyForExternalURLs() {
+        let fileManager = FileManager.default
+        guard let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            Issue.record("无法取得 Application Support 根目录")
+            return
+        }
+        let appOwned = applicationSupport.appendingPathComponent("MReader/test.db")
+        let temporary = fileManager.temporaryDirectory.appendingPathComponent("MReader/test.tmp")
+        let external = URL(fileURLWithPath: "/Volumes/External/MReader/test.cbz")
+
+        #expect(LocalResourceAccessPolicy.location(for: appOwned) == .appOwned)
+        #expect(!LocalResourceAccessPolicy.requiresSecurityScope(for: appOwned))
+        #expect(LocalResourceAccessPolicy.location(for: temporary) == .appOwned)
+        #expect(!LocalResourceAccessPolicy.requiresSecurityScope(for: temporary))
+        #expect(LocalResourceAccessPolicy.location(for: external) == .external)
+        #expect(LocalResourceAccessPolicy.requiresSecurityScope(for: external))
     }
 
     @Test func remoteCoverPathPrefersCurrentCacheOverPersistedSandboxPath() {
@@ -803,16 +1392,16 @@ struct mreaderTests {
 
         #expect(prompt.contains("zh-Hans"))
         #expect(prompt.contains("ja"))
-        #expect(prompt.contains("禁止修改、合并、拆分"))
+        #expect(prompt.contains("不要合并、拆分"))
 
         // 生产 JSON 用 sortedKeys（无 pretty-printed 空格），测试不得依赖空白格式（项15）。
         // 直接从 Prompt 中抽出输入 JSON 解析，验证 items 的 id 与顺序。
-        guard let jsonStart = prompt.range(of: "输入：\n")?.upperBound,
-              let jsonEnd = prompt.range(of: "\n\n输出格式：")?.lowerBound else {
+        guard let inputMarker = prompt.range(of: "输入：") else {
             Issue.record("Prompt 中找不到输入 JSON 区块")
             return
         }
-        let jsonText = String(prompt[jsonStart..<jsonEnd])
+        let jsonText = String(prompt[inputMarker.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let object = try JSONSerialization.jsonObject(with: Data(jsonText.utf8)) as? [String: Any]
         let items = object?["items"] as? [[String: Any]]
         let ids = items?.compactMap { $0["id"] as? String }
@@ -948,6 +1537,95 @@ struct mreaderTests {
         #expect(result.resolvedBlocks.map(\.text).sorted() == ["快走", "等等"])
     }
 
+    @Test func ocrCandidateResolverDoesNotTreatNestedOrRotatedBoxesAsOneObservation() {
+        let large = TextBlock(
+            text: "大对白",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.30, height: 0.12),
+            textOrientation: .horizontal
+        )
+        let nested = TextBlock(
+            text: "小对白",
+            boundingBox: CGRect(x: 0.28, y: 0.23, width: 0.08, height: 0.04),
+            textOrientation: .horizontal
+        )
+        let rotated = TextBlock(
+            text: "竖排",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.12, height: 0.30),
+            textOrientation: .vertical
+        )
+
+        #expect(!OCRCandidateResolver.representsSameObservationForDiagnostics(large, nested))
+        #expect(!OCRCandidateResolver.representsSameObservationForDiagnostics(large, rotated))
+        let result = OCRCandidateResolver.resolve([large, nested, rotated], isRightToLeft: false)
+        #expect(result.resolvedBlocks.count == 3)
+    }
+
+    @Test func ocrCandidateResolverCountsAtMostOneVotePerSourceFamily() {
+        let box = CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.05)
+        let result = OCRCandidateResolver.resolve([
+            TextBlock(text: "正确", boundingBox: box, confidence: 0.82, ocrSource: "original:ja"),
+            TextBlock(text: "正确", boundingBox: box, confidence: 0.81, ocrSource: "original:zh"),
+            TextBlock(text: "错误", boundingBox: box, confidence: 0.99, ocrSource: "inverted:ja")
+        ], isRightToLeft: false)
+
+        #expect(result.resolvedBlocks.count == 1)
+        #expect(result.resolvedBlocks[0].text == "正确")
+    }
+
+    @Test func ocrCandidateResolverClassifiesActualJapaneseReferenceSource() {
+        #expect(
+            OCRCandidateResolver.sourceFamilyForDiagnostics("original:ja-reference")
+                == "ja-reference"
+        )
+        #expect(
+            OCRCandidateResolver.sourceFamilyForDiagnostics("original:ja")
+                == "original"
+        )
+    }
+
+    @Test func ocrCandidateResolverPreservesBubbleGeometryAndUsesMedianGlyphScale() {
+        let bubble = CGRect(x: 0.08, y: 0.12, width: 0.54, height: 0.30)
+        let polygon = [
+            CGPoint(x: 0.08, y: 0.12),
+            CGPoint(x: 0.62, y: 0.12),
+            CGPoint(x: 0.62, y: 0.42),
+            CGPoint(x: 0.08, y: 0.42)
+        ]
+        let box = CGRect(x: 0.20, y: 0.20, width: 0.16, height: 0.06)
+        let result = OCRCandidateResolver.resolve([
+            TextBlock(text: "こんにちは", boundingBox: box, confidence: 0.85, ocrSource: "vision:ja", estimatedFontScale: 0.04, bubbleBox: bubble, bubblePolygon: polygon),
+            TextBlock(text: "こんにちは", boundingBox: box.offsetBy(dx: 0.001, dy: 0), confidence: 0.80, ocrSource: "vision:ja-enhanced", estimatedFontScale: 0.06, bubbleBox: bubble, bubblePolygon: polygon),
+            TextBlock(text: "こんにちは", boundingBox: box, confidence: 0.82, ocrSource: "vision:ja-inverted", estimatedFontScale: 0.50, bubbleBox: bubble, bubblePolygon: polygon)
+        ], isRightToLeft: false)
+
+        let resolved = result.resolvedBlocks[0]
+        #expect(resolved.bubbleBox == bubble)
+        #expect(resolved.bubblePolygon == polygon)
+        #expect(abs(resolved.estimatedFontScale - 0.06) < 0.0001)
+    }
+
+    @Test func ocrCandidateResolverDoesNotInheritAPathologicalBubble() {
+        let textBox = CGRect(x: 0.20, y: 0.20, width: 0.02, height: 0.02)
+        let result = OCRCandidateResolver.resolve([
+            TextBlock(
+                text: "同じ",
+                boundingBox: textBox,
+                confidence: 0.82,
+                ocrSource: "original"
+            ),
+            TextBlock(
+                text: "同じ",
+                boundingBox: textBox,
+                confidence: 0.91,
+                ocrSource: "enhanced",
+                bubbleBox: CGRect(x: 0.10, y: 0.10, width: 0.50, height: 0.50)
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.resolvedBlocks.count == 1)
+        #expect(result.resolvedBlocks[0].bubbleBox == nil)
+    }
+
     @Test func mangaSegmenterDoesNotTransitivelyMergeThreeBubbles() {
         let blocks = [
             TextBlock(text: "第一句", boundingBox: CGRect(x: 0.05, y: 0.10, width: 0.20, height: 0.04), estimatedFontScale: 0.04),
@@ -1064,9 +1742,29 @@ struct mreaderTests {
     @Test func ocrLanguagePassesSeparateJapaneseFromChineseKorean() {
         let passes = OCRPreprocessor.languagePassesForDiagnostics()
 
-        #expect(passes.contains(["zh-Hans", "zh-Hant", "ko-KR", "en-US"]))
-        #expect(passes.contains(["ja-JP", "en-US"]))
+        #expect(passes.contains(["zh-Hans", "zh-Hant"]))
+        #expect(passes.contains(["ja-JP"]))
+        #expect(passes.contains(["ko-KR"]))
         #expect(!passes.contains(["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]))
+    }
+
+    @Test func ocrRecoveryUsesLowerThresholdOnlyAfterPrimaryPass() {
+        #expect(OCRPreprocessor.minimumTextHeightForDiagnostics(base: 0.01) == 0.01)
+        #expect(abs(OCRPreprocessor.minimumTextHeightForDiagnostics(base: 0.01, scale: 0.72) - 0.0072) < 0.000_001)
+    }
+
+    @Test func ocrInvertedRecoveryRequiresDarkPolarityEvidence() {
+        #expect(!OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: false, needsRecovery: true))
+        #expect(!OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: true, needsRecovery: false))
+        #expect(OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: true, needsRecovery: true))
+    }
+
+    @Test func ocrDebugDefaultsToOneSelectableStage() {
+        #expect(OCRDebugStage(rawValue: "raw") == .raw)
+        #expect(OCRDebugStage.allCases.contains(.candidate))
+        #expect(OCRDebugStage.allCases.contains(.filtered))
+        #expect(OCRDebugStage.allCases.contains(.filteredOut))
+        #expect(OCRDebugStage.allCases.contains(.translation))
     }
 
     @Test func ocrAdaptiveLanguagePlanPrioritizesDetectedScript() {
@@ -1083,9 +1781,9 @@ struct mreaderTests {
             detectedTexts: ["Hello world"]
         )
 
-        #expect(japanese.first == ["ja-JP", "en-US"])
-        #expect(chinese.first == ["zh-Hans", "zh-Hant", "en-US"])
-        #expect(korean.first == ["ko-KR", "en-US"])
+        #expect(japanese.first == ["ja-JP"])
+        #expect(chinese.first == ["zh-Hans", "zh-Hant"])
+        #expect(korean.first == ["ko-KR"])
         #expect(english.first == ["en-US"])
     }
 
@@ -1206,6 +1904,120 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 16) - 16) < 0.01)
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 30) - 30) < 0.01)
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
+    }
+
+    @Test @MainActor func borderlessTranslationFontIgnoresPathologicalOCRGeometry() {
+        let requested = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: false,
+            automaticFontSize: 120,
+            borderlessFontSize: 14
+        )
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "In the stationary species",
+            sourceFontSize: requested,
+            sourceRect: CGRect(x: 100, y: 100, width: 40, height: 20),
+            allowedBounds: CGRect(x: 80, y: 80, width: 80, height: 60),
+            lineSpacing: 2
+        )
+        #expect(layout.fontSize <= 14.001)
+
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 14
+            ) == 14
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 3
+            ) == 8
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 40
+            ) == 28
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: true,
+                automaticFontSize: 80,
+                borderlessFontSize: 14
+            ) == TranslationLayoutMetrics.absoluteFontSizeCap
+        )
+    }
+
+    @Test func translationBubbleReliabilityRejectsMissingOutsideAndWholePageBounds() {
+        let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let textRect = CGRect(x: 150, y: 260, width: 70, height: 32)
+        let valid = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: 125, y: 220, width: 120, height: 100),
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(valid != nil)
+
+        let missing = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            nil,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(missing == nil)
+
+        let outside = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: -20, y: 220, width: 120, height: 100),
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(outside == nil)
+
+        let wholePage = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            imageBounds,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(wholePage == nil)
+
+        let oversizedButNotWholePage = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: 50, y: 175, width: 300, height: 450),
+            textRect: CGRect(x: 185, y: 275, width: 30, height: 20),
+            imageBounds: CGRect(x: 0, y: 0, width: 400, height: 800),
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(oversizedButNotWholePage == nil)
+    }
+
+    @Test @MainActor func comicBookBorderlessTranslationFontDefaultsAndClampsAcrossCodable() throws {
+        let clamped = ComicBook(
+            title: "font-setting",
+            bookmarkData: Data(),
+            totalPages: 1,
+            borderlessTranslationFontSize: 99
+        )
+        #expect(clamped.borderlessTranslationFontSize == 28)
+
+        let encoded = try JSONEncoder().encode(clamped)
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "borderlessTranslationFontSize")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decoded = try JSONDecoder().decode(ComicBook.self, from: legacyData)
+
+        #expect(decoded.borderlessTranslationFontSize == ComicBook.defaultBorderlessTranslationFontSize)
     }
 
     @Test @MainActor func standaloneRotatedTextUsesGlyphGeometryInsteadOfAxisAlignedBox() {
@@ -1367,6 +2179,54 @@ struct mreaderTests {
         #expect(abs(vertical.sourceFontSize(in: displayedPage) - 15.6) < 0.001)
     }
 
+    @Test func verticalSourceUsesTargetLanguageForTranslationOrientation() {
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .english,
+                translatedText: "In the station"
+            ) == .horizontal
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .simplifiedChinese,
+                translatedText: "在车站里"
+            ) == .vertical
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .simplifiedChinese,
+                translatedText: "The station"
+            ) == .horizontal
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .horizontal,
+                targetLanguage: .japanese,
+                translatedText: "こんにちは"
+            ) == .horizontal
+        )
+    }
+
+    @Test func geometryCapsAbnormalEstimatedFontScaleToGlyphAxis() {
+        let block = TextBlock(
+            text: "bad",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.1),
+            estimatedFontScale: 0.8,
+            textOrientation: .horizontal
+        )
+        let capped = OCRBubbleLayoutEngine.geometryCappedSourceFontSize(
+            for: block,
+            imageRect: CGRect(x: 0, y: 0, width: 390, height: 780),
+            textRect: CGRect(x: 30, y: 40, width: 120, height: 14),
+            sizingMode: .bubble
+        )
+
+        #expect(capped <= 14 * TranslationLayoutMetrics.geometryFontScaleMultiplier + 0.001)
+    }
+
     @Test func localOCRGeometryUsesPhysicalObservationAxis() {
         let geometry = OCRPreprocessor.localOCRGeometryForDiagnostics(
             observationRect: CGRect(x: 0, y: 0, width: 20.0 / 390.0, height: 40.0 / 780.0),
@@ -1476,6 +2336,57 @@ struct mreaderTests {
         #expect(choice.usesSuggestedLineBreaks == false)
         #expect(choice.text == translation)
         #expect(abs(choice.layout.fontSize - natural.fontSize) < 0.001)
+    }
+
+    @Test @MainActor func verticalTranslationUsesNaturalStringAndBoundedColumns() {
+        let source = CGRect(x: 170, y: 250, width: 28, height: 96)
+        let allowed = CGRect(x: 80, y: 100, width: 220, height: 360)
+        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
+            translation: "事故!!先走吧",
+            translationLines: ["事", "故", "先走吧"],
+            sourceFontSize: 28,
+            sourceRect: source,
+            allowedBounds: allowed,
+            lineSpacing: 2,
+            textOrientation: .vertical
+        )
+
+        #expect(choice.usesSuggestedLineBreaks == false)
+        #expect(choice.text == "事故!!先走吧")
+        #expect(!choice.text.contains("\n"))
+        #expect(allowed.contains(choice.layout.rect))
+        #expect(choice.layout.fontSize > 0)
+    }
+
+    @Test @MainActor func verticalTranslationReservesOnlyOneContentPadding() {
+        let glyphWidth: CGFloat = 14
+        let source = CGRect(x: 50, y: 50, width: glyphWidth, height: 30)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "正",
+            sourceFontSize: glyphWidth,
+            sourceRect: source,
+            allowedBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            lineSpacing: 2,
+            textOrientation: .vertical
+        )
+        let contentWidth = layout.rect.width - TranslationLayoutMetrics.contentPadding * 2
+
+        #expect(contentWidth >= glyphWidth * TranslationLayoutMetrics.verticalColumnWidthMultiplier - 0.5)
+    }
+
+    @Test func boundedTranslationBoundsProtectsThePageFromAWholePageBubble() {
+        let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let bounded = OCRBubbleLayoutEngine.boundedTranslationBounds(
+            around: CGRect(x: 180, y: 380, width: 8, height: 8),
+            within: imageBounds,
+            imageBounds: imageBounds
+        )
+        let area = bounded.width * bounded.height
+
+        #expect(imageBounds.contains(bounded))
+        #expect(bounded.width <= imageBounds.width * TranslationLayoutMetrics.maximumCardWidthFraction + 0.001)
+        #expect(bounded.height <= imageBounds.height * TranslationLayoutMetrics.maximumCardHeightFraction + 0.001)
+        #expect(area <= imageBounds.width * imageBounds.height * TranslationLayoutMetrics.maximumCardAreaFraction + 0.001)
     }
 
     @Test func translationBubbleBoxAllowsSmallOCRMappingTolerance() {
@@ -1602,12 +2513,12 @@ struct mreaderTests {
 
     @Test func ocrTranslationUsesBoundedTimeoutAndFastFallbackPolicy() {
         #expect(AITranslationRequestPolicy.pageModelAttempts == 1)
-        #expect(AITranslationRequestPolicy.pageRequestTimeout == 25)
         #expect(AITranslationRequestPolicy.fallbackModelAttempts == 1)
-        #expect(AITranslationRequestPolicy.fallbackRequestTimeout == 30)
+        #expect(AITranslationRequestPolicy.pageRequestTimeout(itemCount: 5) >= 90)
+        #expect(AITranslationRequestPolicy.bubbleRequestTimeout == 60)
         #expect(!AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: 1))
         #expect(AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: 2))
-        #expect(AITranslationRequestPolicy.maximumOCRWaitBeforeResult <= 85)
+        #expect(AITranslationRequestPolicy.maximumOCRWaitBeforeResult <= 300)
     }
 
     @Test func visualOCRVerificationSelectsOnlyUncertainBlocks() {
@@ -2717,13 +3628,43 @@ struct mreaderTests {
 private final class AITransportRecordingURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var responseData = Data(#"{"output_text":"ok"}"#.utf8)
+    private static var responseStatusCode = 200
+    private static var responseSequence: [(statusCode: Int, data: Data)] = []
+    private static var responseSequenceIndex = 0
+    private static var failure: Error?
+    private static var capturedRequestCount = 0
     private static var lastCapturedRequest: URLRequest?
 
-    static func configure(responseData: Data) {
+    static func configure(
+        responseData: Data,
+        statusCode: Int = 200,
+        failure: Error? = nil
+    ) {
         lock.lock()
         self.responseData = responseData
+        self.responseStatusCode = statusCode
+        responseSequence = []
+        responseSequenceIndex = 0
+        self.failure = failure
+        capturedRequestCount = 0
         lastCapturedRequest = nil
         lock.unlock()
+    }
+
+    static func configure(sequence: [(Int, Data)]) {
+        lock.lock()
+        responseSequence = sequence.map { (statusCode: $0.0, data: $0.1) }
+        responseSequenceIndex = 0
+        failure = nil
+        capturedRequestCount = 0
+        lastCapturedRequest = nil
+        lock.unlock()
+    }
+
+    static func requestCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedRequestCount
     }
 
     static func lastRequest() -> URLRequest? {
@@ -2733,8 +3674,18 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
     }
 
     static func captureRequest(_ request: URLRequest) {
+        var snapshot = request
+        if let url = request.url {
+            snapshot = URLRequest(url: url)
+            snapshot.httpMethod = request.httpMethod
+            snapshot.allHTTPHeaderFields = request.allHTTPHeaderFields
+            snapshot.timeoutInterval = request.timeoutInterval
+            if let body = request.httpBody {
+                snapshot.httpBody = Data(body)
+            }
+        }
         lock.lock()
-        lastCapturedRequest = request
+        lastCapturedRequest = snapshot
         lock.unlock()
     }
 
@@ -2748,13 +3699,27 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.lock.lock()
-        let data = Self.responseData
+        let sequenceResponse = Self.responseSequence.isEmpty
+            ? nil
+            : Self.responseSequence[min(Self.responseSequenceIndex, Self.responseSequence.count - 1)]
+        if !Self.responseSequence.isEmpty {
+            Self.responseSequenceIndex += 1
+        }
+        let data = sequenceResponse?.data ?? Self.responseData
+        let statusCode = sequenceResponse?.statusCode ?? Self.responseStatusCode
+        let failure = Self.failure
+        Self.capturedRequestCount += 1
         Self.lock.unlock()
+
+        if let failure {
+            client?.urlProtocol(self, didFailWithError: failure)
+            return
+        }
 
         guard let url = request.url,
               let response = HTTPURLResponse(
                 url: url,
-                statusCode: 200,
+                statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
               ) else {

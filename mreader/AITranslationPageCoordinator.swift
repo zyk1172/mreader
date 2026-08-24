@@ -20,8 +20,8 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
     /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
-    static let translationCacheRevision = "translation-v10-layout-role-japanese-vertical-ocr"
-    static let ocrGeometryRevision = "physical-axis-v4-layout-role-jpn-vert"
+    static let translationCacheRevision = "translation-v11-target-orientation-geometry-gated"
+    static let ocrGeometryRevision = "physical-axis-v5-target-orientation-bounded-card"
 
     let pageURL: URL
     let image: UIImage
@@ -469,7 +469,10 @@ nonisolated enum AITranslationPagePipeline {
         request: AITranslationPageRequest
     ) async throws {
         guard !indexes.isEmpty else { return }
-        let maximumConcurrentRequests = min(3, indexes.count)
+        // A malformed page gets one repair request first. Keep the final
+        // per-bubble fallback deliberately small so a slow provider does not
+        // turn one page failure into a request burst.
+        let maximumConcurrentRequests = min(2, indexes.count)
         let configuration = request.configuration
         let target = request.target
         var successCount = 0
@@ -498,7 +501,7 @@ nonisolated enum AITranslationPagePipeline {
                             model: configuration.textModel,
                             targetLanguage: target,
                             promptTemplate: request.translationPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            requestTimeout: AITranslationRequestPolicy.bubbleRequestTimeout,
                             modelDescriptor: configuration.textModelDescriptor
                         )
                         return (index, .success(text))

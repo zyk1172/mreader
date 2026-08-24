@@ -36,7 +36,7 @@ nonisolated enum OfflineTranslationPageProvider {
                 return
             }
             scopedURL = resolvedURL
-            didStart = resolvedURL.startAccessingSecurityScopedResource()
+            didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(resolvedURL)
         }
 
         deinit {
@@ -312,7 +312,7 @@ nonisolated enum OfflineTranslationPageProvider {
             } else {
                 fallbackURL = nil
             }
-            let fallbackStarted = fallbackURL?.startAccessingSecurityScopedResource() ?? false
+            let fallbackStarted = fallbackURL.map(LocalResourceAccessPolicy.startAccessingIfNeeded) ?? false
             defer {
                 if fallbackStarted { fallbackURL?.stopAccessingSecurityScopedResource() }
             }

@@ -888,7 +888,7 @@ struct ReaderView: View {
                     lineWidth: 18,
                     blurRadius: 0,
                     animationDuration: 2.0,
-                    colors: ColorfulTranslatedText.palette
+                    colors: TranslationTextRenderer.palette
                 )
                 .ignoresSafeArea()
                     .allowsHitTesting(false)
@@ -1381,6 +1381,29 @@ struct ReaderView: View {
                         }
                     }
                     .disabled(!comic.isOCREnabled)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("ocr.borderlessFontSize".localized)
+                            Slider(value: Binding(
+                                get: { comic.borderlessTranslationFontSize },
+                                set: { newValue in
+                                    updateComic {
+                                        $0.borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(newValue)
+                                    }
+                                }
+                            ), in: ComicBook.borderlessTranslationFontSizeRange, step: 1)
+                        }
+
+                        Text("ocr.borderlessFontSizeValue".localizedFormat(
+                            Int(comic.borderlessTranslationFontSize.rounded())
+                        ))
+                        .font(.caption.monospacedDigit())
+
+                        Text("ocr.borderlessFontSizeDescription".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section(header: Text("reader.jumpToPage".localized)) {
@@ -3591,6 +3614,9 @@ struct LocalImageView: View {
     @State private var textBlocks: [TextBlock] = []
     @State private var ocrTextBlocks: [TextBlock] = []
     @State private var debugRawBlocks: [TextBlock] = []
+    @State private var debugCandidateBlocks: [TextBlock] = []
+    @State private var debugFilteredBlocks: [TextBlock] = []
+    @State private var debugFilteredOutBlocks: [TextBlock] = []
     @State private var debugLineBlocks: [TextBlock] = []
     @State private var debugBubbleBlocks: [TextBlock] = []
     @State private var debugRejectedBlocks: [TextBlock] = []
@@ -3611,6 +3637,7 @@ struct LocalImageView: View {
     @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
+    @AppStorage("ocr_debug_stage") private var ocrDebugStageRaw = OCRDebugStage.raw.rawValue
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
@@ -3625,6 +3652,10 @@ struct LocalImageView: View {
 
     private var comicTranslationSourceLanguage: TranslationSourceLanguage {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
+    }
+
+    private var selectedOCRDebugStage: OCRDebugStage {
+        OCRDebugStage(rawValue: ocrDebugStageRaw) ?? .raw
     }
 
     private var canTranslate: Bool {
@@ -3921,14 +3952,15 @@ struct LocalImageView: View {
         if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
             ForEach(items) { item in
-                ColorfulTranslatedText(
+                TranslationTextRenderer(
                     segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
                         let value = displayTranslation(for: $0)
                         return value.isEmpty ? nil : value
                     },
                     fontSize: item.fontSize,
                     layoutSize: item.rect.size,
-                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast
+                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
+                    textOrientation: item.textOrientation
                 )
                 .position(x: item.rect.midX, y: item.rect.midY)
             }
@@ -3943,13 +3975,27 @@ struct LocalImageView: View {
     }
 
     private func displayTranslation(for block: TextBlock) -> String {
-        let lines = block.translationLines
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        if !lines.isEmpty {
-            return lines.joined(separator: "\n")
+        // translationLines are a horizontal layout suggestion. Vertical
+        // CoreText layout must receive the natural string so it can create
+        // real vertical columns and apply vertical punctuation forms.
+        if block.textOrientation == .vertical {
+            return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslationOutputValidator.validatedDisplayTranslation(
+            canonicalTranslation: block.translation ?? "",
+            translationLines: block.translationLines,
+            sourceText: block.text,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        )
+    }
+
+    private func validatedTranslationLines(for block: TextBlock) -> [String] {
+        TranslationOutputValidator.validatedTranslationLines(
+            block.translationLines,
+            canonicalTranslation: block.translation ?? "",
+            sourceText: block.text,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        )
     }
 
     @ViewBuilder
@@ -3976,10 +4022,22 @@ struct LocalImageView: View {
     @ViewBuilder
     private func ocrDebugOverlay(in size: CGSize) -> some View {
         if ocrShowDebugBoxes, isOCREnabled {
-            ocrDebugStage(debugRawBlocks, stage: "RAW", color: .yellow, in: size)
-            ocrDebugStage(debugLineBlocks, stage: "LINE", color: .blue, in: size)
-            ocrDebugStage(debugBubbleBlocks, stage: "BUBBLE", color: .green, in: size)
-            ocrDebugStage(debugRejectedBlocks, stage: "REJECT", color: .red, in: size)
+            switch selectedOCRDebugStage {
+            case .raw:
+                ocrDebugStage(debugRawBlocks, stage: selectedOCRDebugStage.token, color: .yellow, in: size)
+            case .candidate:
+                ocrDebugStage(debugCandidateBlocks, stage: selectedOCRDebugStage.token, color: .orange, in: size)
+            case .filtered:
+                ocrDebugStage(debugFilteredBlocks, stage: selectedOCRDebugStage.token, color: .cyan, in: size)
+            case .filteredOut:
+                ocrDebugStage(debugFilteredOutBlocks, stage: selectedOCRDebugStage.token, color: .pink, in: size)
+            case .rejected:
+                ocrDebugStage(debugRejectedBlocks, stage: selectedOCRDebugStage.token, color: .red, in: size)
+            case .bubble:
+                ocrDebugStage(debugBubbleBlocks, stage: selectedOCRDebugStage.token, color: .green, in: size)
+            case .translation:
+                ocrDebugTranslationStage(in: size)
+            }
         }
     }
 
@@ -3991,16 +4049,21 @@ struct LocalImageView: View {
         in size: CGSize
     ) -> some View {
         ForEach(blocks) { block in
-            let rect = overlayRect(for: block, in: size, scaleMultiplier: 1)
+            // Debug geometry must be the exact mapped OCR rectangle. The
+            // readable label is allowed to overflow/float; it must never
+            // enlarge the rectangle used to diagnose OCR or layout.
+            let rect = exactOCRDebugRect(for: block, in: size)
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .strokeBorder(color, lineWidth: 1.2)
                 Text(debugLabel(for: block, stage: stage))
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .lineLimit(3)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: true, vertical: true)
                     .padding(2)
                     .background(color.opacity(0.86))
                     .foregroundStyle(.white)
+                    .offset(x: 2, y: -2)
             }
             .frame(width: rect.width, height: rect.height)
             .position(x: rect.midX, y: rect.midY)
@@ -4014,6 +4077,45 @@ struct LocalImageView: View {
             return "\(stage) \(confidence)% \(block.filterReason ?? "common.filter".localized)\n\(block.text)"
         }
         return "\(stage) \(confidence)% \(block.ocrSource)\n\(block.text)"
+    }
+
+    @ViewBuilder
+    private func ocrDebugTranslationStage(in size: CGSize) -> some View {
+        ForEach(translationDebugItems(in: size)) { item in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .stroke(.yellow, style: StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                    .frame(width: item.sourceRect.width, height: item.sourceRect.height)
+                    .position(x: item.sourceRect.midX, y: item.sourceRect.midY)
+                Rectangle()
+                    .stroke(.blue, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    .frame(width: item.allowedBounds.width, height: item.allowedBounds.height)
+                    .position(x: item.allowedBounds.midX, y: item.allowedBounds.midY)
+                Rectangle()
+                    .stroke(.green, lineWidth: 1.5)
+                    .frame(width: item.layoutRect.width, height: item.layoutRect.height)
+                    .position(x: item.layoutRect.midX, y: item.layoutRect.midY)
+                Text("SOURCE / ALLOWED / CARD\n\(item.block.text)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(2)
+                    .background(Color.black.opacity(0.78))
+                    .foregroundStyle(.white)
+                    .position(
+                        x: item.layoutRect.minX + 2,
+                        y: max(item.layoutRect.minY - 10, 10)
+                    )
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func exactOCRDebugRect(for block: TextBlock, in size: CGSize) -> CGRect {
+        OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: ocrDisplayTransform(in: size)
+        )
     }
 
     private func overlayRect(for block: TextBlock, in size: CGSize, scaleMultiplier: CGFloat) -> CGRect {
@@ -4071,13 +4173,48 @@ struct LocalImageView: View {
     }
 
     private func translationLayoutItem(for block: TextBlock, in size: CGSize) -> TranslationLayoutItem {
+        let geometry = translationLayoutGeometry(for: block, in: size)
+        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslationLayoutItem(
+            blocks: [block],
+            rect: geometry.choice.layout.rect,
+            fontSize: geometry.choice.layout.fontSize,
+            displayText: translation.isEmpty ? nil : geometry.choice.text,
+            textOrientation: geometry.translationOrientation,
+            layoutRole: block.layoutRole
+        )
+    }
+
+    private func translationLayoutGeometry(
+        for block: TextBlock,
+        in size: CGSize
+    ) -> (
+        sourceRect: CGRect,
+        allowedBounds: CGRect,
+        layoutBounds: CGRect,
+        translationOrientation: TextOrientation,
+        choice: OCRBubbleLayoutEngine.TranslationLayoutChoice
+    ) {
         let transform = ocrDisplayTransform(in: size)
         // 离线译文以 OCR textBox 的真实显示矩形为锚点；不能复用带最小点击尺寸的 overlayRect。
         let textRect = OCRCoordinateMapper.displayRect(
             forNormalizedPageRect: block.boundingBox,
             using: transform
         )
+        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTranslation = translation.isEmpty ? block.text : translation
+        let translationOrientation = OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+            sourceOrientation: block.textOrientation,
+            targetLanguage: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            translatedText: effectiveTranslation
+        )
         let imageBounds = transform.imageRect
+        let usableBubbleBounds = usableTranslationBubbleBounds(
+            for: block,
+            textRect: textRect,
+            using: transform
+        )
+        let hasReliableBubble = usableBubbleBounds != nil
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
@@ -4090,47 +4227,77 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds: CGRect
-        if let bubbleBox = block.bubbleBox {
-            let mappedBubble = OCRCoordinateMapper.displayRect(
-                forNormalizedPageRect: bubbleBox,
-                using: transform
-            ).intersection(imageBounds)
-            // bubbleBox 与 textBox 分别来自 Vision / 本地 OCR 时常有 1~3pt 映射误差；
-            // 允许少量容差，避免一个本来正确的原气泡被过早丢弃。
-            allowedBounds = !mappedBubble.isNull
-                && mappedBubble.width > 0
-                && mappedBubble.height > 0
-                && OCRBubbleLayoutEngine.acceptsTranslationTextRect(
-                    textRect,
-                    in: mappedBubble,
-                    toleranceX: max(2, imageBounds.width * 0.005),
-                    toleranceY: max(2, imageBounds.height * 0.005)
-                )
-                ? mappedBubble
-                : fallbackBounds
-        } else {
-            allowedBounds = fallbackBounds
-        }
-        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
-            translation: translation.isEmpty ? block.text : translation,
-            translationLines: translation.isEmpty ? [] : block.translationLines,
-            sourceFontSize: preferredTranslationFontSize(
+        let allowedBounds = usableBubbleBounds ?? fallbackBounds
+        let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
+            around: textRect,
+            within: allowedBounds,
+            imageBounds: imageBounds
+        )
+        let automaticFontSize = hasReliableBubble
+            ? preferredTranslationFontSize(
                 for: block,
                 in: size,
-                textRect: textRect
-            ),
+                textRect: textRect,
+                sizingMode: .bubble
+            )
+            : 1
+        let requestedFontSize = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: hasReliableBubble,
+            automaticFontSize: automaticFontSize,
+            borderlessFontSize: borderlessTranslationFontSize
+        )
+        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
+            translation: effectiveTranslation,
+            translationLines: translation.isEmpty ? [] : validatedTranslationLines(for: block),
+            sourceFontSize: requestedFontSize,
+            sourceRect: textRect,
+            allowedBounds: layoutBounds,
+            lineSpacing: 2,
+            textOrientation: translationOrientation
+        )
+        #if DEBUG
+        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble)")
+        #endif
+        return (
             sourceRect: textRect,
             allowedBounds: allowedBounds,
-            lineSpacing: 2
+            layoutBounds: layoutBounds,
+            translationOrientation: translationOrientation,
+            choice: choice
         )
-        return TranslationLayoutItem(
-            blocks: [block],
-            rect: choice.layout.rect,
-            fontSize: choice.layout.fontSize,
-            displayText: translation.isEmpty ? nil : choice.text
+    }
+
+    private func usableTranslationBubbleBounds(
+        for block: TextBlock,
+        textRect: CGRect,
+        using transform: OCRDisplayTransform
+    ) -> CGRect? {
+        guard let bubbleBox = block.bubbleBox else { return nil }
+        let imageBounds = transform.imageRect
+        let mappedBubble = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: bubbleBox,
+            using: transform
         )
+        return OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            mappedBubble,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: max(2, imageBounds.width * 0.005),
+            toleranceY: max(2, imageBounds.height * 0.005)
+        )
+    }
+
+    private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
+        translationLayoutItems(in: size).compactMap { item in
+            guard let block = item.blocks.first else { return nil }
+            let geometry = translationLayoutGeometry(for: block, in: size)
+            return OCRTranslationDebugItem(
+                block: block,
+                sourceRect: geometry.sourceRect,
+                allowedBounds: geometry.allowedBounds,
+                layoutRect: item.rect
+            )
+        }
     }
 
     private func limitedTranslationFallbackBounds(around textRect: CGRect, within imageBounds: CGRect) -> CGRect {
@@ -4179,7 +4346,9 @@ struct LocalImageView: View {
                 blocks: item.blocks,
                 rect: rect,
                 fontSize: item.fontSize,
-                displayText: item.displayText
+                displayText: item.displayText,
+                textOrientation: item.textOrientation,
+                layoutRole: item.layoutRole
             ))
         }
         return items
@@ -4232,7 +4401,9 @@ struct LocalImageView: View {
                 blocks: [block],
                 rect: rect,
                 fontSize: uniformOCRFontSize,
-                displayText: nil
+                displayText: nil,
+                textOrientation: block.textOrientation,
+                layoutRole: block.layoutRole
             ))
         }
         return items
@@ -4263,6 +4434,9 @@ struct LocalImageView: View {
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
                 debugRawBlocks.removeAll()
+                debugCandidateBlocks.removeAll()
+                debugFilteredBlocks.removeAll()
+                debugFilteredOutBlocks.removeAll()
                 debugLineBlocks.removeAll()
                 debugBubbleBlocks.removeAll()
                 debugRejectedBlocks.removeAll()
@@ -4293,6 +4467,9 @@ struct LocalImageView: View {
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
             debugRawBlocks.removeAll()
+            debugCandidateBlocks.removeAll()
+            debugFilteredBlocks.removeAll()
+            debugFilteredOutBlocks.removeAll()
             debugLineBlocks.removeAll()
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
@@ -4421,21 +4598,32 @@ struct LocalImageView: View {
         11 + CGFloat(normalizedOCRScale) * 8
     }
 
+    private var borderlessTranslationFontSize: CGFloat {
+        CGFloat(
+            ComicBook.clampedBorderlessTranslationFontSize(
+                comic?.borderlessTranslationFontSize
+                    ?? ComicBook.defaultBorderlessTranslationFontSize
+            )
+        )
+    }
+
     private func preferredTranslationFontSize(
         for block: TextBlock,
         in size: CGSize,
-        textRect: CGRect
+        textRect: CGRect,
+        sizingMode: OCRBubbleLayoutEngine.TranslationTextSizingMode? = nil
     ) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
         // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
-        if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
-            return OCRBubbleLayoutEngine.standaloneTextFontSize(
-                for: block,
-                imageRect: imageRect,
-                textRect: textRect
-            )
-        }
-        return block.sourceFontSize(in: imageRect)
+        let mode: OCRBubbleLayoutEngine.TranslationTextSizingMode =
+            sizingMode
+            ?? (OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) ? .standaloneGlyph : .bubble)
+        return OCRBubbleLayoutEngine.geometryCappedSourceFontSize(
+            for: block,
+            imageRect: imageRect,
+            textRect: textRect,
+            sizingMode: mode
+        )
     }
 
     private var ocrTextSizeFactor: CGFloat {
@@ -4461,14 +4649,20 @@ struct LocalImageView: View {
             filtered,
             isRightToLeft: isRightToLeftReading
         )
-        let rejected = result.rejectedBlocks + annotated.filter(\.isFiltered)
+        let filteredOut = annotated.filter(\.isFiltered)
         if ocrShowDebugBoxes {
             debugRawBlocks = result.rawBlocks
+            debugCandidateBlocks = result.resolvedBlocks
+            debugFilteredBlocks = filtered
+            debugFilteredOutBlocks = filteredOut
             debugLineBlocks = segmentation.lines
             debugBubbleBlocks = segmentation.bubbles
-            debugRejectedBlocks = rejected
+            debugRejectedBlocks = result.rejectedBlocks
         } else {
             debugRawBlocks.removeAll()
+            debugCandidateBlocks.removeAll()
+            debugFilteredBlocks.removeAll()
+            debugFilteredOutBlocks.removeAll()
             debugLineBlocks.removeAll()
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
@@ -4478,8 +4672,9 @@ struct LocalImageView: View {
             resolvedBlocks: filtered,
             lineBlocks: segmentation.lines,
             bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: rejected,
-            detectedLanguage: result.detectedLanguage
+            rejectedBlocks: result.rejectedBlocks + filteredOut,
+            detectedLanguage: result.detectedLanguage,
+            quality: result.quality
         )
     }
 
@@ -4784,6 +4979,7 @@ struct LocalImageView: View {
                     // 线上 ID 是 b0/b1/...，顺序 = blocks 中的位置
                     for index in blocks.indices {
                         guard let translated = pageResult.translation(for: "b\(index)"),
+                              !translated.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                               self.textBlocks.indices.contains(index) else {
                             continue
                         }
@@ -4800,7 +4996,7 @@ struct LocalImageView: View {
         try Task.checkCancellation()
         let missingIndexes = blocks.indices.filter { !translatedIndexes.contains($0) }
         guard !missingIndexes.isEmpty else { return }
-        let maximumConcurrentRequests = min(3, missingIndexes.count)
+        let maximumConcurrentRequests = min(2, missingIndexes.count)
 
         await withTaskGroup(of: (Int, String?, String?).self) { group in
             var nextIndex = 0
@@ -4823,7 +5019,7 @@ struct LocalImageView: View {
                             model: requestModelName,
                             targetLanguage: requestTarget,
                             promptTemplate: requestPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            requestTimeout: AITranslationRequestPolicy.bubbleRequestTimeout,
                             modelDescriptor: activeConfiguration.textModelDescriptor
                         )
                         return (blockIndex, translatedText, nil)
@@ -4913,7 +5109,8 @@ struct LocalImageView: View {
                 lineBlocks: segmentation.lines,
                 bubbleBlocks: segmentation.bubbles,
                 rejectedBlocks: localResult.rejectedBlocks,
-                detectedLanguage: localResult.detectedLanguage
+                detectedLanguage: localResult.detectedLanguage,
+                quality: localResult.quality
             )
         } else {
             result = localResult
@@ -4932,8 +5129,19 @@ private struct TranslationLayoutItem: Identifiable {
     let fontSize: CGFloat
     /// 译文布局阶段选出的实际排版文本；OCR 放大气泡保持 nil。
     let displayText: String?
+    let textOrientation: TextOrientation
+    let layoutRole: TranslationLayoutRole
 
     var id: UUID { blocks.first?.id ?? UUID() }
+}
+
+private struct OCRTranslationDebugItem: Identifiable {
+    let block: TextBlock
+    let sourceRect: CGRect
+    let allowedBounds: CGRect
+    let layoutRect: CGRect
+
+    var id: UUID { block.id }
 }
 
 private enum TranslationColorStyle: String, CaseIterable {
@@ -4971,29 +5179,51 @@ private enum TranslationColorStyle: String, CaseIterable {
             ]
         }
     }
+
+    var coreTextColor: UIColor {
+        switch self {
+        case .contrast:
+            return UIColor(red: 0.02, green: 0.22, blue: 0.72, alpha: 1)
+        case .coolWarm:
+            return UIColor(red: 0.0, green: 0.32, blue: 0.82, alpha: 1)
+        case .jewel:
+            return UIColor(red: 0.05, green: 0.30, blue: 0.66, alpha: 1)
+        }
+    }
 }
 
-private struct ColorfulTranslatedText: View {
+private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
     let layoutSize: CGSize
     let style: TranslationColorStyle
+    let textOrientation: TextOrientation
 
     var body: some View {
-        VStack(spacing: segments.count > 1 ? 7 : 0) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                Text(segment)
-                    .font(.system(size: fontSize, weight: .bold))
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(2)
-                    .foregroundStyle(colorGradient(index: index))
-                    .shadow(color: .white.opacity(0.78), radius: 0.7)
-                    .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+        Group {
+            if textOrientation == .vertical {
+                CoreTextVerticalTranslationView(
+                    text: segments.joined(separator: "\n"),
+                    fontSize: fontSize,
+                    color: style.coreTextColor
+                )
+            } else {
+                VStack(spacing: segments.count > 1 ? 7 : 0) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                        Text(segment)
+                            .font(.system(size: fontSize, weight: .bold))
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(2)
+                            .foregroundStyle(colorGradient(index: index))
+                            .shadow(color: .white.opacity(0.78), radius: 0.7)
+                            .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+                    }
+                }
             }
         }
-            .padding(5)
+            .padding(TranslationLayoutMetrics.contentPadding)
             .frame(width: layoutSize.width, height: layoutSize.height)
             .background {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -5029,6 +5259,86 @@ private struct ColorfulTranslatedText: View {
         Color(red: 0.18, green: 0.50, blue: 0.78),
         Color(red: 0.72, green: 0.38, blue: 0.18).opacity(0.7)
     ]
+}
+
+/// CoreText is used for vertical source text so glyphs are shaped using the
+/// platform's vertical forms and the frame progresses right-to-left by column.
+/// It receives the natural string; no per-character newline or whole-view
+/// rotation is used.
+private struct CoreTextVerticalTranslationView: UIViewRepresentable {
+    let text: String
+    let fontSize: CGFloat
+    let color: UIColor
+
+    func makeUIView(context: Context) -> VerticalTranslationUIView {
+        VerticalTranslationUIView()
+    }
+
+    func updateUIView(_ uiView: VerticalTranslationUIView, context: Context) {
+        uiView.text = text
+        uiView.fontSize = fontSize
+        uiView.color = color
+        uiView.setNeedsDisplay()
+    }
+}
+
+private final class VerticalTranslationUIView: UIView {
+    var text = ""
+    var fontSize: CGFloat = 16
+    var color = UIColor.label
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard !text.isEmpty, rect.width > 2, rect.height > 2,
+              let context = UIGraphicsGetCurrentContext() else { return }
+
+        let font = CTFontCreateWithName(
+            UIFont.systemFont(ofSize: max(fontSize, 0.1), weight: .bold).fontName as CFString,
+            max(fontSize, 0.1),
+            nil
+        )
+        let attributed = NSMutableAttributedString(string: text)
+        let range = NSRange(location: 0, length: attributed.length)
+        attributed.addAttributes([
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
+            NSAttributedString.Key(kCTVerticalFormsAttributeName as String): true
+        ], range: range)
+
+        let path = CGPath(
+            rect: bounds.insetBy(dx: 2, dy: 2),
+            transform: nil
+        )
+        let frameAttributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFrameProgressionAttributeName as String): NSNumber(value: 1)
+        ]
+        let framesetter = CTFramesetterCreateWithAttributedString(attributed)
+        let frame = CTFramesetterCreateFrame(
+            framesetter,
+            CFRange(location: 0, length: attributed.length),
+            path,
+            frameAttributes as CFDictionary
+        )
+
+        context.saveGState()
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        CTFrameDraw(frame, context)
+        context.restoreGState()
+    }
 }
 
 private struct AppleIntelligenceGlowBorder: View {
@@ -5084,7 +5394,7 @@ private struct AppleIntelligenceGlowBorder: View {
     }
 
     private func flowingGradient(phase: Double) -> AngularGradient {
-        let palette = colors.isEmpty ? ColorfulTranslatedText.palette : colors
+        let palette = colors.isEmpty ? TranslationTextRenderer.palette : colors
         let normalizedPhase = phase.truncatingRemainder(dividingBy: 1)
         let gradientColors = palette + palette.prefix(2)
         return AngularGradient(

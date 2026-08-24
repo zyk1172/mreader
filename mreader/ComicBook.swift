@@ -31,6 +31,16 @@ struct ComicBookmark: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct ComicBook: Identifiable, Codable, Hashable, Sendable {
+    nonisolated static let defaultBorderlessTranslationFontSize = 14.0
+    nonisolated static let borderlessTranslationFontSizeRange: ClosedRange<Double> = 8...28
+
+    nonisolated static func clampedBorderlessTranslationFontSize(_ value: Double) -> Double {
+        min(
+            max(value, borderlessTranslationFontSizeRange.lowerBound),
+            borderlessTranslationFontSizeRange.upperBound
+        )
+    }
+
     var id: UUID
     var title: String
     var bookmarkData: Data // 核心：保存文件夹的持久化安全访问权限
@@ -69,6 +79,8 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var ocrTextScale: Double
     var ocrSafeAreaInset: Double
     var ocrMinimumTextHeight: Double
+    /// 没有可靠 bubbleBox 时使用的译文字号；这是显示参数，不参与 OCR/翻译缓存。
+    var borderlessTranslationFontSize: Double
     var aiTranslationModeRaw: String
     var translationSourceLanguageRaw: String
     var hasInitializedReadingPreset: Bool
@@ -91,7 +103,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
-    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, borderlessTranslationFontSize: Double = ComicBook.defaultBorderlessTranslationFontSize, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -129,6 +141,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.ocrTextScale = ocrTextScale
         self.ocrSafeAreaInset = ocrSafeAreaInset
         self.ocrMinimumTextHeight = ocrMinimumTextHeight
+        self.borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(borderlessTranslationFontSize)
         self.aiTranslationModeRaw = aiTranslationModeRaw
         self.translationSourceLanguageRaw = translationSourceLanguageRaw
         self.hasInitializedReadingPreset = hasInitializedReadingPreset
@@ -179,6 +192,10 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         ocrTextScale = try container.decodeIfPresent(Double.self, forKey: .ocrTextScale) ?? 0.55
         ocrSafeAreaInset = try container.decodeIfPresent(Double.self, forKey: .ocrSafeAreaInset) ?? 0
         ocrMinimumTextHeight = try container.decodeIfPresent(Double.self, forKey: .ocrMinimumTextHeight) ?? 0.002
+        borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(
+            try container.decodeIfPresent(Double.self, forKey: .borderlessTranslationFontSize)
+                ?? ComicBook.defaultBorderlessTranslationFontSize
+        )
         aiTranslationModeRaw = try container.decodeIfPresent(String.self, forKey: .aiTranslationModeRaw) ?? AITranslationMode.ocr.rawValue
         translationSourceLanguageRaw = try container.decodeIfPresent(String.self, forKey: .translationSourceLanguageRaw) ?? TranslationSourceLanguage.automatic.rawValue
         hasInitializedReadingPreset = try container.decodeIfPresent(Bool.self, forKey: .hasInitializedReadingPreset) ?? true

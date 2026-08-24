@@ -110,7 +110,11 @@ nonisolated enum MangaTextSegmenter {
         guard blocks.count > 1 else { return blocks[0] }
         let ordered = AITranslator.sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
         let bounds = ordered.dropFirst().reduce(ordered[0].boundingBox) { $0.union($1.boundingBox) }
-        let scale = ordered.reduce(0) { $0 + $1.estimatedFontScale } / Double(ordered.count)
+        // The merged rectangle's long axis is line length, not glyph size. A
+        // median of the source glyph estimates remains stable when one OCR
+        // observation has an over-sized crop or a rotated axis-aligned box.
+        let sortedScales = ordered.map(\.estimatedFontScale).sorted()
+        let scale = sortedScales[sortedScales.count / 2]
         let confidence = ordered.reduce(0) { $0 + $1.confidence } / Double(ordered.count)
         let sources = Array(Set(ordered.map(\.ocrSource))).sorted().joined(separator: "+")
         let selectedBubble = selectedVisualBubble(from: ordered, containing: bounds)
@@ -136,24 +140,10 @@ nonisolated enum MangaTextSegmenter {
         from blocks: [TextBlock],
         containing textBounds: CGRect
     ) -> (box: CGRect, polygon: [CGPoint])? {
-        let toleranceX = max(0.004, textBounds.width * 0.10)
-        let toleranceY = max(0.004, textBounds.height * 0.10)
-        return blocks.compactMap { block -> (box: CGRect, polygon: [CGPoint])? in
-            guard let bubbleBox = block.bubbleBox,
-                  bubbleBox.width > 0,
-                  bubbleBox.height > 0,
-                  bubbleBox.minX >= 0,
-                  bubbleBox.minY >= 0,
-                  bubbleBox.maxX <= 1.02,
-                  bubbleBox.maxY <= 1.02,
-                  bubbleBox.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textBounds) else {
-                return nil
-            }
-            return (bubbleBox, block.bubblePolygon)
-        }
-        .min { lhs, rhs in
-            lhs.box.width * lhs.box.height < rhs.box.width * rhs.box.height
-        }
+        OCRCandidateResolver.validatedBubbleGeometry(
+            for: textBounds,
+            candidates: blocks
+        )
     }
 
     /// 两个视觉框没有可观重叠、也不在小容差下相互包含，说明它们已经是不同漫画气泡。

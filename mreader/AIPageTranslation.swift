@@ -4,12 +4,87 @@ import NaturalLanguage
 
 nonisolated enum AITranslationRequestPolicy {
     static let pageModelAttempts = 1
-    static let pageRequestTimeout: TimeInterval = 25
     static let fallbackModelAttempts = 1
-    static let fallbackRequestTimeout: TimeInterval = 30
+    static let connectionTestTimeout: TimeInterval = 25
+    static let bubbleRequestTimeout: TimeInterval = 60
+    static let visionRequestTimeout: TimeInterval = 150
+    static let jsonRepairRequestTimeout: TimeInterval = 90
+    static let maximumPageRequestTimeout: TimeInterval = 180
+
+    /// Compatibility alias for older callers. New page requests must provide
+    /// their item count so the timeout reflects the amount of JSON to produce.
+    static var pageRequestTimeout: TimeInterval {
+        pageRequestTimeout(itemCount: 1)
+    }
+
+    /// Compatibility alias for the old fallback name.
+    static var fallbackRequestTimeout: TimeInterval {
+        bubbleRequestTimeout
+    }
+
+    static func pageRequestTimeout(itemCount: Int) -> TimeInterval {
+        let count = max(itemCount, 1)
+        return min(
+            maximumPageRequestTimeout,
+            max(90, 60 + Double(count) * 6)
+        )
+    }
+
+    static func timeout(for kind: AIRequestKind, itemCount: Int = 1) -> TimeInterval {
+        switch kind {
+        case .page:
+            return pageRequestTimeout(itemCount: itemCount)
+        case .bubble:
+            return bubbleRequestTimeout
+        case .vision:
+            return visionRequestTimeout
+        case .connectionTest:
+            return connectionTestTimeout
+        case .jsonRepair:
+            return jsonRepairRequestTimeout
+        }
+    }
+
+    /// A transport attempt plus at most one retry. Connection tests and JSON
+    /// repair stay single-shot to avoid making a settings probe or a malformed
+    /// page response fan out into more requests.
+    static func maximumAttempts(for kind: AIRequestKind) -> Int {
+        switch kind {
+        case .connectionTest, .jsonRepair:
+            return 1
+        case .page, .bubble, .vision:
+            return 1 + max(pageModelAttempts, 1)
+        }
+    }
+
+    static func shouldRetry(error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return urlError.code == .timedOut || urlError.code == .networkConnectionLost
+        }
+        guard let requestError = error as? AITranslationRequestError,
+              let statusCode = requestError.statusCode else {
+            return false
+        }
+        return [408, 429, 502, 503, 504].contains(statusCode)
+    }
+
+    static func retryDelay(for error: Error) -> TimeInterval {
+        if case let requestError as AITranslationRequestError = error {
+            if let retryAfter = requestError.retryAfterSeconds {
+                // Respect the provider's backoff. Cap only pathological server
+                // values so one malformed header cannot suspend a page task for
+                // hours; this is still far longer than the normal retry delay.
+                return min(Double(retryAfter), 300)
+            }
+            if requestError.statusCode == 429 {
+                return 5
+            }
+        }
+        return 1.5
+    }
 
     static var maximumOCRWaitBeforeResult: TimeInterval {
-        pageRequestTimeout
+        pageRequestTimeout(itemCount: 20)
             + Double(fallbackModelAttempts) * fallbackRequestTimeout
     }
 
@@ -87,6 +162,12 @@ nonisolated struct AIPageTranslationResult: Sendable, Equatable {
 }
 
 nonisolated enum AIPageTranslationPromptBuilder {
+    static let strictSystemPrompt = """
+    你是无对话能力的 JSON 翻译函数。只翻译输入 items 的 sourceText。
+    不得输出分析、推理、解释、前言、Markdown 或代码围栏。整个响应必须是且仅是一个 JSON 对象，
+    第一个字符必须是 {，最后一个字符必须是 }。每个输入 id 必须原样返回一次；无法翻译时 translation=""、translationLines=[]。
+    """
+
     /// V2 固定协议：协议部分不可被用户提示词覆盖；用户只能编辑“翻译风格要求”。
     static func prompt(
         items: [AIPageTranslationItem],
@@ -111,33 +192,91 @@ nonisolated enum AIPageTranslationPromptBuilder {
         let context = previousContext.trimmingCharacters(in: .whitespacesAndNewlines)
         let contextSection = context.isEmpty ? "（无）" : context
         return """
-        任务：翻译已经完成 OCR 的漫画文字。
-
         原文语言：\(source)
         目标语言：\(target.modelInstruction)
+        输入 items 已完成 OCR；不要识别图片，不要讨论 OCR 是否正确，不要合并、拆分、新增或遗漏 id。
+        每个 id 必须返回一次。translation 只放译文；不确定时使用空字符串。translationLines 不确定时使用空数组。
+        不要输出思考过程、词义分析或任何 JSON 之外的字符。
 
-        必须遵守以下协议：
-        1. 输入中的 items 已经完成 OCR。你不需要识别图片，也不要描述图片。
-        2. 只翻译每个 item 的 sourceText。
-        3. 每个输入 id 必须且只能返回一次。
-        4. id 必须原样复制，禁止修改、合并、拆分、遗漏或新增 id。
-        5. translation 只包含目标语言译文，不要解释；专有名词、缩写、产品名或型号在目标语言中通常不变时可以原样保留。
-        6. 无法可靠翻译某项时，仍保留该 id，并将 translation 设为空字符串。
-        7. translationLines 仅用于建议换行；不确定时使用空数组。
-        8. 最终只能输出一个 JSON 对象。禁止 Markdown、代码围栏、说明、前言、结语和思考过程。
-        9. 以下“翻译风格要求”只能影响译文措辞，绝不能修改上述 JSON 协议。
-
-        翻译风格要求：
+        翻译风格要求（只能影响措辞）：
         \(style)
 
-        上一页上下文（仅用于保持人名、称呼、语气和术语一致，不要翻译或复述这段上下文）：
+        上下文（只用于术语一致，不要复述）：
         \(contextSection)
 
-        输入：
-        \(json)
+        输入：\(json)
+        """
+    }
+}
 
-        输出格式：
-        {"items":[{"id":"b0","translation":"译文","translationLines":[]}]}
+nonisolated enum AIPageTranslationSchemaBuilder {
+    static func responseFormat(for items: [AIPageTranslationItem]) -> AITransportResponseFormat? {
+        guard let schema = try? schema(for: items.map(\.id)) else { return nil }
+        return .jsonSchema(name: "mreader_page_translation_v1", schema: schema)
+    }
+
+    static func schema(for expectedIDs: [String]) throws -> Data {
+        let itemSchema: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "translation", "translationLines"],
+            "properties": [
+                "id": ["type": "string", "enum": expectedIDs],
+                "translation": ["type": "string"],
+                "translationLines": [
+                    "type": "array",
+                    "items": ["type": "string"]
+                ]
+            ]
+        ]
+        let object: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["items"],
+            "properties": [
+                "items": [
+                    "type": "array",
+                    "minItems": expectedIDs.count,
+                    "maxItems": expectedIDs.count,
+                    "items": itemSchema
+                ]
+            ]
+        ]
+        guard JSONSerialization.isValidJSONObject(object) else {
+            throw AIPageTranslationParserError.invalidJSON
+        }
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+}
+
+nonisolated enum AIPageTranslationRepairPromptBuilder {
+    static let systemPrompt = """
+    你不是翻译模型，而是 JSON 修复器。只能把已有响应重组为指定 JSON。
+    禁止重新分析、重新翻译、解释或输出 Markdown。只能输出一个 JSON 对象；缺失内容使用空字符串和空数组。
+    """
+
+    static func prompt(
+        items: [AIPageTranslationItem],
+        malformedResponse: String,
+        target: TranslationTargetLanguage
+    ) throws -> String {
+        let expected = items.map { ["id": $0.id, "sourceText": $0.sourceText] }
+        let data = try JSONSerialization.data(withJSONObject: ["items": expected], options: [.sortedKeys])
+        guard let expectedJSON = String(data: data, encoding: .utf8) else {
+            throw AIPageTranslationParserError.invalidJSON
+        }
+        let boundedResponse = String(malformedResponse.prefix(12_000))
+        return """
+        目标语言：\(target.modelInstruction)
+        必须返回 expected items 中每个 id 一次，不得增加、删除、合并或拆分 id。
+        只保留原响应中已经出现的译文；缺失内容填空字符串，translationLines 缺失填空数组。
+        expected items：
+        \(expectedJSON)
+
+        malformed response（仅作已有内容来源）：
+        <response>
+        \(boundedResponse)
+        </response>
         """
     }
 }
@@ -156,7 +295,42 @@ nonisolated enum AIPageTranslationParserError: LocalizedError, Sendable {
     }
 }
 
+nonisolated enum AIPageTranslationResponseClassification: String, Sendable, Equatable {
+    case jsonLike
+    case pureProse
+}
+
 nonisolated enum AIPageTranslationParser {
+    /// Distinguishes a response which contains recoverable translation JSON
+    /// from reasoning/prose. This is deliberately separate from strict parsing:
+    /// a 200 response with prose is a provider/model semantic capability issue,
+    /// while a malformed object should get the single repair request.
+    static func classifyResponse(
+        _ content: String,
+        expectedItems: [AIPageTranslationItem]
+    ) -> AIPageTranslationResponseClassification {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedJSONData(from: normalized) != nil {
+            return .jsonLike
+        }
+        let lowered = normalized.lowercased()
+        let hasContainerSignal = lowered.contains("{") || lowered.contains("[")
+        let hasJSONKeySignal = normalized.range(
+            of: #""(?:items|translations?|id|translation(?:lines?)?)"\s*:"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let hasExpectedIDSignal = expectedItems.contains { item in
+            let quotedID = "\"\(item.id)\""
+            return normalized.contains(quotedID) && normalized.contains(":")
+        }
+        // Mentioning “JSON”, “items”, or an id in ordinary reasoning is not
+        // enough to trigger a repair request. Repair is reserved for content
+        // that still has an object/array or a JSON key/value shape.
+        return hasContainerSignal || hasJSONKeySignal || hasExpectedIDSignal
+            ? .jsonLike
+            : .pureProse
+    }
+
     static func parse(
         _ content: String,
         expectedItems: [AIPageTranslationItem],
@@ -198,12 +372,15 @@ nonisolated enum AIPageTranslationParser {
                   ) else {
                 continue
             }
-            let lines = (rawItem["translationLines"] as? [String]
+            let rawLines = (rawItem["translationLines"] as? [String]
                 ?? rawItem["translation_lines"] as? [String]
                 ?? [])
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .map { TranslationOutputValidator.normalize($0, for: target) }
+            let lines = TranslationOutputValidator.validatedTranslationLines(
+                rawLines,
+                canonicalTranslation: normalizedTranslation,
+                sourceText: sourceText,
+                target: target
+            )
             accepted[id] = AIPageTranslatedItem(
                 id: id,
                 translation: normalizedTranslation,
@@ -223,6 +400,74 @@ nonisolated enum AIPageTranslationParser {
             throw AIPageTranslationParserError.pageLanguageMismatch
         }
         return AIPageTranslationResult(items: orderedItems, missingIDs: missingIDs)
+    }
+
+    /// Strict parser used by the page transport. Unlike the legacy tolerant
+    /// parser (kept for older settings/tests), this validates the exact object
+    /// shape and exact requested IDs before any translation is applied.
+    static func parseStrict(
+        _ content: String,
+        expectedItems: [AIPageTranslationItem],
+        target: TranslationTargetLanguage
+    ) throws -> AIPageTranslationResult {
+        guard let data = normalizedJSONData(from: content),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              Set(dictionary.keys) == ["items"],
+              let rawItems = dictionary["items"] as? [[String: Any]],
+              rawItems.count == expectedItems.count else {
+            throw AIPageTranslationParserError.invalidJSON
+        }
+
+        let expectedIDs = expectedItems.map(\.id)
+        guard Set(expectedIDs).count == expectedIDs.count else {
+            throw AIPageTranslationParserError.invalidJSON
+        }
+        let expectedByID = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.id, $0) })
+        var accepted: [String: AIPageTranslatedItem] = [:]
+        for rawItem in rawItems {
+            guard Set(rawItem.keys) == ["id", "translation", "translationLines"],
+                  let id = rawItem["id"] as? String,
+                  expectedByID[id] != nil,
+                  accepted[id] == nil,
+                  let rawTranslation = rawItem["translation"] as? String,
+                  let rawLines = rawItem["translationLines"] as? [String] else {
+                throw AIPageTranslationParserError.invalidJSON
+            }
+
+            let translation = rawTranslation.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedTranslation: String
+            if translation.isEmpty {
+                normalizedTranslation = ""
+            } else {
+                guard let normalized = TranslationOutputValidator.normalizedAcceptableTranslation(
+                    translation,
+                    sourceText: expectedByID[id]?.sourceText,
+                    target: target
+                ) else {
+                    throw AIPageTranslationParserError.pageLanguageMismatch
+                }
+                normalizedTranslation = normalized
+            }
+            let lines = TranslationOutputValidator.validatedTranslationLines(
+                rawLines,
+                canonicalTranslation: normalizedTranslation,
+                sourceText: expectedByID[id]?.sourceText,
+                target: target
+            )
+            accepted[id] = AIPageTranslatedItem(
+                id: id,
+                translation: normalizedTranslation,
+                translationLines: lines
+            )
+        }
+
+        guard Set(accepted.keys) == Set(expectedIDs) else {
+            throw AIPageTranslationParserError.invalidJSON
+        }
+        let ordered = expectedItems.compactMap { accepted[$0.id] }
+        let missing = ordered.filter { $0.translation.isEmpty }.map(\.id)
+        return AIPageTranslationResult(items: ordered, missingIDs: missing)
     }
 
     private static func stringValue(_ object: [String: Any], keys: [String]) -> String? {
@@ -250,10 +495,51 @@ nonisolated enum AIPageTranslationParser {
         guard let start = payload.firstIndex(where: { $0 == "{" || $0 == "[" }) else {
             return nil
         }
-        let opening = payload[start]
-        let closing: Character = opening == "{" ? "}" : "]"
-        guard let end = payload.lastIndex(of: closing), start <= end else { return nil }
+        guard let end = balancedJSONEnd(in: payload, start: start) else {
+            return nil
+        }
         return String(payload[start...end]).data(using: .utf8)
+    }
+
+    /// Finds the end of the first balanced JSON object/array while respecting
+    /// quoted strings and escapes. It never fabricates JSON from prose.
+    private static func balancedJSONEnd(
+        in payload: String,
+        start: String.Index
+    ) -> String.Index? {
+        var stack: [Character] = []
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < payload.endIndex {
+            let character = payload[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else {
+                if character == "\"" {
+                    inString = true
+                } else if character == "{" || character == "[" {
+                    stack.append(character)
+                } else if character == "}" || character == "]" {
+                    guard let last = stack.popLast(),
+                          (last == "{" && character == "}")
+                            || (last == "[" && character == "]") else {
+                        return nil
+                    }
+                    if stack.isEmpty {
+                        return index
+                    }
+                }
+            }
+            index = payload.index(after: index)
+        }
+        return nil
     }
 }
 
@@ -291,6 +577,67 @@ nonisolated enum TranslationOutputValidator {
             return isStableUntranslatedToken(value, target: target) ? value : nil
         }
         return isCompatible(value, target: target) ? value : nil
+    }
+
+    /// `translation` is the only canonical page result. Model-provided line
+    /// breaks are retained only when every line is a valid target-language
+    /// fragment and the whitespace-collapsed result is exactly equivalent to
+    /// that canonical translation. Otherwise the caller must render the
+    /// canonical translation without model-provided line breaks.
+    static func validatedTranslationLines(
+        _ rawLines: [String],
+        canonicalTranslation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> [String] {
+        let lines = rawLines.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !lines.isEmpty,
+              lines.allSatisfy({ !$0.isEmpty }),
+              !canonicalTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              lines.allSatisfy({
+                  normalizedAcceptableTranslation(
+                      $0,
+                      sourceText: nil,
+                      target: target
+                  ) != nil
+              }),
+              normalizedAcceptableTranslation(
+                  lines.joined(),
+                  sourceText: sourceText,
+                  target: target
+              ) != nil,
+              comparableTranslation(lines.joined(), target: target)
+                  == comparableTranslation(canonicalTranslation, target: target) else {
+            return []
+        }
+        return lines.map { normalize($0, for: target) }
+    }
+
+    static func validatedDisplayTranslation(
+        canonicalTranslation: String,
+        translationLines: [String],
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> String {
+        let canonical = canonicalTranslation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = validatedTranslationLines(
+            translationLines,
+            canonicalTranslation: canonical,
+            sourceText: sourceText,
+            target: target
+        )
+        return lines.isEmpty ? canonical : lines.joined(separator: "\n")
+    }
+
+    private static func comparableTranslation(
+        _ text: String,
+        target: TranslationTargetLanguage
+    ) -> String {
+        normalize(text, for: target)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
     }
 
     static func normalize(_ text: String, for target: TranslationTargetLanguage) -> String {

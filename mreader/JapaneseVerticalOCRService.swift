@@ -14,13 +14,49 @@ nonisolated struct JapaneseVerticalOCRCoverage: Equatable, Sendable {
     }
 }
 
+nonisolated struct JapaneseVerticalOCRDiagnosticWord: Equatable, Sendable {
+    let text: String
+    let rotatedBoundingBox: CGRect
+    let confidence: Double
+    let blockNumber: Int
+    let paragraphNumber: Int
+    let lineNumber: Int
+    let wordNumber: Int
+}
+
+nonisolated struct JapaneseVerticalOCRFragmentationQuality: Equatable, Sendable {
+    let rawWordCount: Int
+    let groupedRunCount: Int
+    let totalCharacterCount: Int
+    let averageCharactersPerRun: Double
+    let medianGlyphSize: Double
+
+    func isSeverelyFragmented(
+        referenceCharacterCount: Int? = nil,
+        visionBlockCount: Int = 0
+    ) -> Bool {
+        guard groupedRunCount >= 48,
+              averageCharactersPerRun < 2.2 else { return false }
+        let referenceMismatch = referenceCharacterCount.map {
+            $0 >= max(totalCharacterCount + 12, totalCharacterCount * 2)
+                || $0 >= groupedRunCount * 2
+        } ?? false
+        let visionMismatch = visionBlockCount > 0
+            && groupedRunCount >= max(48, visionBlockCount * 5)
+        // A page which still contains dozens of one-character runs after the
+        // geometry pass is not safe to inject into the translation pipeline,
+        // even when a reference transcript is unavailable.
+        return groupedRunCount >= 80 || referenceMismatch || visionMismatch
+    }
+}
+
 /// Tesseract is not the primary OCR engine in MReader.  This service only
 /// owns the narrow escape hatch for pages where Vision has evidence of
 /// Japanese vertical writing but its result is incomplete. Automatic mode
 /// uses kana, Japanese source hints, and vertical Kanji evidence; it does not
 /// require the reader's page direction to be RTL.
 nonisolated enum JapaneseVerticalOCRService {
-    static let revision = "jpn-vert-tesseract-5.5.1-v3"
+    static let revision = "jpn-vert-tesseract-5.5.1-v4-geometry-gated"
     static let minimumAverageConfidence = 0.58
     static let minimumUsefulCharacterRatio = 0.42
 
@@ -28,26 +64,50 @@ nonisolated enum JapaneseVerticalOCRService {
     private static let sourceName = "tesseract:jpn_vert"
     private static let resourceLock = NSLock()
 
-    private struct RawWord: Sendable {
+    private struct RawTSVRecord: Sendable {
+        let pageNumber: Int
+        let blockNumber: Int
+        let paragraphNumber: Int
+        let lineNumber: Int
+        let wordNumber: Int
         let text: String
         let rotatedBoundingBox: CGRect
         let confidence: Double
     }
 
+    private struct RawWord: Sendable {
+        let text: String
+        let rotatedBoundingBox: CGRect
+        let confidence: Double
+        let blockNumber: Int
+        let paragraphNumber: Int
+        let lineNumber: Int
+        let wordNumber: Int
+        let glyphThickness: CGFloat
+    }
+
+    private struct TSVGroupingResult: Sendable {
+        let words: [RawWord]
+        let quality: JapaneseVerticalOCRFragmentationQuality
+    }
+
     private final class ResourceToken {}
 
     /// Runs only for an explicitly Japanese page, or for automatic detection
-    /// that already found kana.  A Chinese/English/Korean page therefore never
-    /// pays for the Tesseract pass merely because the reader is RTL.
+    /// with Japanese script/vertical-page evidence. A Chinese/English/Korean
+    /// page therefore never pays for the Tesseract pass merely because the
+    /// reader is RTL.
     static func recognizeIfNeeded(
         in image: UIImage,
         existingBlocks: [TextBlock],
-        options: OCRPreprocessor.Options
+        options: OCRPreprocessor.Options,
+        visionKitReference: AppleOCRReference? = nil
     ) async -> [TextBlock] {
         guard shouldRunFallback(
             in: image,
             existingBlocks: existingBlocks,
-            options: options
+            options: options,
+            visionKitReference: visionKitReference
         ) else {
             return []
         }
@@ -66,6 +126,15 @@ nonisolated enum JapaneseVerticalOCRService {
                 return try recognizeWords(data: imageData, dataPath: dataPath)
             }.value
 
+            let fragmentation = rawWords.quality
+            guard !fragmentation.isSeverelyFragmented(
+                referenceCharacterCount: visionKitReference?.characterCount,
+                visionBlockCount: existingBlocks.count
+            ) else {
+                print("MReader Japanese vertical OCR rejected fragmented output raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun)) referenceChars=\(visionKitReference?.characterCount ?? 0) visionBlocks=\(existingBlocks.count)")
+                return []
+            }
+
             let originalPixelSize = CGSize(
                 width: normalized.cgImage?.width ?? 0,
                 height: normalized.cgImage?.height ?? 0
@@ -78,7 +147,7 @@ nonisolated enum JapaneseVerticalOCRService {
                 height: originalPixelSize.width
             )
 
-            let blocks = rawWords.compactMap { word -> TextBlock? in
+            let blocks = rawWords.words.compactMap { word -> TextBlock? in
                 let text = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
                 let rotatedBox = CGRect(
@@ -94,11 +163,14 @@ nonisolated enum JapaneseVerticalOCRService {
                     boundingBox: box,
                     confidence: max(0, min(word.confidence, 1)),
                     ocrSource: sourceName,
-                    estimatedFontScale: Double(box.width),
+                    // In vertical mode the normalized original width is the
+                    // glyph thickness. Use the robust run estimate instead of
+                    // the merged column's long axis.
+                    estimatedFontScale: Double(word.glyphThickness / max(rotatedPixelSize.height, 1)),
                     textOrientation: .vertical
                 )
             }
-            print("MReader Japanese vertical OCR fallback blocks=\(blocks.count)")
+            print("MReader Japanese vertical OCR fallback blocks=\(blocks.count) raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun))")
             return blocks
         } catch is CancellationError {
             return []
@@ -114,30 +186,32 @@ nonisolated enum JapaneseVerticalOCRService {
     static func shouldRunFallback(
         in image: UIImage?,
         existingBlocks: [TextBlock],
-        options: OCRPreprocessor.Options
+        options: OCRPreprocessor.Options,
+        visionKitReference: AppleOCRReference? = nil
     ) -> Bool {
         guard isJapaneseRecoveryCandidate(
             in: image,
             existingBlocks: existingBlocks,
             isRightToLeft: options.isRightToLeft,
-            sourceLanguagePreference: options.sourceLanguagePreference
+            sourceLanguagePreference: options.sourceLanguagePreference,
+            visionKitReference: visionKitReference
         ) else {
             return false
         }
 
         // Maximum accuracy is an explicit cost/quality choice, but the reader
-        // direction is not OCR language metadata. Require vertical page
-        // evidence, then run the second engine even when Vision returned a
-        // few high-confidence blocks.
+        // direction is not OCR language metadata. Require at least one local
+        // vertical OCR column; image-only dark columns are never sufficient.
         if options.recognitionMode == .maximumAccuracy {
-            return hasVerticalPageEvidence(in: image, existingBlocks: existingBlocks)
+            return verticalColumnCount(in: existingBlocks) >= 1
         }
 
         return shouldRequestPageRecovery(
             in: image,
             existingBlocks: existingBlocks,
             isRightToLeft: options.isRightToLeft,
-            sourceLanguagePreference: options.sourceLanguagePreference
+            sourceLanguagePreference: options.sourceLanguagePreference,
+            visionKitReference: visionKitReference
         )
     }
 
@@ -145,13 +219,15 @@ nonisolated enum JapaneseVerticalOCRService {
         in image: UIImage?,
         existingBlocks: [TextBlock],
         isRightToLeft: Bool,
-        sourceLanguagePreference: TranslationSourceLanguage?
+        sourceLanguagePreference: TranslationSourceLanguage?,
+        visionKitReference: AppleOCRReference? = nil
     ) -> Bool {
         guard isJapaneseRecoveryCandidate(
             in: image,
             existingBlocks: existingBlocks,
             isRightToLeft: isRightToLeft,
-            sourceLanguagePreference: sourceLanguagePreference
+            sourceLanguagePreference: sourceLanguagePreference,
+            visionKitReference: visionKitReference
         ) else {
             return false
         }
@@ -159,20 +235,20 @@ nonisolated enum JapaneseVerticalOCRService {
         let localColumnCenters = verticalColumnCenters(in: existingBlocks)
         let imageColumnCenters = image.map(verticalColumnEvidenceCenters(in:)) ?? []
 
-        // Run the lightweight page probe even when Vision returned blocks.
-        // The important signal is an image column which has no nearby local
-        // OCR column, not merely a low confidence score on an existing block.
+        // Coverage confidence cannot prove that the whole page was observed:
+        // Vision may confidently recognize two columns and miss the rest.
+        // For an explicitly Japanese page, image-level vertical evidence is
+        // sufficient even when no local block survived. Automatic mode still
+        // requires local Japanese/vertical evidence before using the probe.
         if imageColumnCenters.count >= 2 {
-            let coveredColumnTolerance = max(
-                0.04,
-                verticalColumnAverageWidth(in: existingBlocks) * 1.6
-            )
-            let uncoveredColumnCount = imageColumnCenters.filter { imageCenter in
-                !localColumnCenters.contains { localCenter in
-                    abs(imageCenter - localCenter) <= coveredColumnTolerance
-                }
-            }.count
-            if uncoveredColumnCount > 0 {
+            if localColumnCenters.isEmpty {
+                return sourceLanguagePreference == .japanese
+            }
+            if hasSpatiallyMatchedImageEvidence(
+                imageColumnCenters,
+                localColumnCenters: localColumnCenters,
+                existingBlocks: existingBlocks
+            ) {
                 return true
             }
         }
@@ -180,12 +256,12 @@ nonisolated enum JapaneseVerticalOCRService {
         let coverage = coverage(for: existingBlocks, isRightToLeft: isRightToLeft)
         guard coverage.isInsufficient else { return false }
 
-        // Keep the established low-coverage recovery for pages where local
-        // OCR already supplies vertical evidence but the image probe cannot be
-        // used (for example, a diagnostic call without an image).
+        // Keep recovery for pages where local OCR already supplies multiple
+        // vertical columns. The image probe may add confidence only when it
+        // overlaps at least one local OCR column; it cannot create Japanese
+        // evidence from artwork lines on its own.
         if localColumnCenters.count >= 2 { return true }
-        guard existingBlocks.isEmpty else { return false }
-        return imageColumnCenters.count >= 2
+        return false
     }
 
     static func coverage(
@@ -230,12 +306,26 @@ nonisolated enum JapaneseVerticalOCRService {
         in image: UIImage?,
         existingBlocks: [TextBlock],
         isRightToLeft: Bool,
-        sourceLanguagePreference: TranslationSourceLanguage?
+        sourceLanguagePreference: TranslationSourceLanguage?,
+        visionKitReference: AppleOCRReference?
     ) -> Bool {
         if isJapanesePage(
             existingBlocks: existingBlocks,
             preference: sourceLanguagePreference
         ) {
+            return true
+        }
+        if let visionKitReference,
+           AppleOCRReferenceService.suggestsJapanese(
+                visionKitReference,
+                blocks: existingBlocks,
+                options: OCRPreprocessor.Options(
+                    isRightToLeft: isRightToLeft,
+                    minimumTextHeight: 0.006,
+                    sourceLanguagePreference: sourceLanguagePreference
+                ),
+                image: image
+           ) {
             return true
         }
         guard sourceLanguagePreference == nil || sourceLanguagePreference == .automatic else {
@@ -245,7 +335,8 @@ nonisolated enum JapaneseVerticalOCRService {
         // Automatic mode cannot use kana as its only Japanese signal: a
         // poorly recognized page may contain only Kanji. Treat Kanji-only
         // text as a Japanese recovery candidate when there is vertical-page
-        // evidence, a Japanese OCR pass hint, or the RTL direction hint.
+        // evidence or a Japanese OCR pass hint. Reader paging direction is
+        // deliberately excluded from this language decision.
         let hasCJK = existingBlocks
             .map(\.text)
             .joined()
@@ -265,18 +356,33 @@ nonisolated enum JapaneseVerticalOCRService {
         if verticalColumnCount(in: existingBlocks) >= 1 {
             return true
         }
-        if let image, verticalColumnEvidenceCenters(in: image).count >= 2 {
-            return true
-        }
-        return isRightToLeft
+        // RTL reading can affect sorting/layout, but must not be promoted to
+        // Japanese OCR evidence. Without kana, Japanese OCR source hints, or
+        // local OCR vertical geometry, an automatic CJK page remains ambiguous.
+        return false
     }
 
-    private static func hasVerticalPageEvidence(
-        in image: UIImage?,
+    private static func hasSpatiallyMatchedImageEvidence(
+        _ imageCenters: [CGFloat],
+        localColumnCenters: [CGFloat],
         existingBlocks: [TextBlock]
     ) -> Bool {
-        verticalColumnCount(in: existingBlocks) >= 1
-            || (image.map { verticalColumnEvidenceCenters(in: $0).count >= 2 } ?? false)
+        guard !localColumnCenters.isEmpty else { return false }
+        let tolerance = max(
+            0.05,
+            verticalColumnAverageWidth(in: existingBlocks) * 2.4
+        )
+        let hasMatchedColumn = imageCenters.contains { imageCenter in
+            localColumnCenters.contains { localCenter in
+                abs(imageCenter - localCenter) <= tolerance
+            }
+        }
+        let hasUncoveredColumn = imageCenters.contains { imageCenter in
+            !localColumnCenters.contains { localCenter in
+                abs(imageCenter - localCenter) <= tolerance
+            }
+        }
+        return hasMatchedColumn && hasUncoveredColumn
     }
 
     /// Returns the number of separated vertical text columns represented by
@@ -284,6 +390,12 @@ nonisolated enum JapaneseVerticalOCRService {
     /// pure function so it can be regression-tested without Vision or a model.
     static func verticalColumnCount(in blocks: [TextBlock]) -> Int {
         verticalColumnCenters(in: blocks).count
+    }
+
+    /// Exposes lightweight image evidence for diagnostics only. It must not be
+    /// used as a standalone trigger for Japanese recovery.
+    static func verticalColumnEvidenceCount(in image: UIImage) -> Int {
+        verticalColumnEvidenceCenters(in: image).count
     }
 
     private static func verticalColumnCenters(in blocks: [TextBlock]) -> [CGFloat] {
@@ -425,7 +537,7 @@ nonisolated enum JapaneseVerticalOCRService {
         }
     }
 
-    private static func recognizeWords(data: Data, dataPath: String) throws -> [RawWord] {
+    private static func recognizeWords(data: Data, dataPath: String) throws -> TSVGroupingResult {
         guard let pix = PixImage(data: data) else {
             throw JapaneseVerticalOCRError.invalidImage
         }
@@ -439,14 +551,65 @@ nonisolated enum JapaneseVerticalOCRService {
         _ = try? api.setVariable(name: "tessedit_write_line_separators", bool: false)
         try api.setImage(pix)
         try api.recognize()
-        return parseTSV(try api.getTSVText() ?? "")
+        return parseTSVResult(try api.getTSVText() ?? "")
     }
 
     private static func parseTSV(_ tsv: String) -> [RawWord] {
+        parseTSVResult(tsv).words
+    }
+
+    private static func parseTSVResult(_ tsv: String) -> TSVGroupingResult {
+        let records = parseTSVRecords(tsv)
+        let words = groupTSVRecords(records)
+        let totalCharacters = words.reduce(0) { $0 + $1.text.unicodeScalars.count }
+        let averageCharactersPerRun = words.isEmpty
+            ? 0
+            : Double(totalCharacters) / Double(words.count)
+        return TSVGroupingResult(
+            words: words,
+            quality: JapaneseVerticalOCRFragmentationQuality(
+                rawWordCount: records.count,
+                groupedRunCount: words.count,
+                totalCharacterCount: totalCharacters,
+                averageCharactersPerRun: averageCharactersPerRun,
+                medianGlyphSize: Double(median(records.map { max($0.rotatedBoundingBox.width, $0.rotatedBoundingBox.height) }))
+            )
+        )
+    }
+
+    /// Diagnostic parser used by regression tests. It exercises the same
+    /// hierarchy-aware grouping as the production Tesseract path without
+    /// requiring a bundled image or a live OCR engine.
+    static func parseTSVForDiagnostics(_ tsv: String) -> [JapaneseVerticalOCRDiagnosticWord] {
+        parseTSVResult(tsv).words.map {
+            JapaneseVerticalOCRDiagnosticWord(
+                text: $0.text,
+                rotatedBoundingBox: $0.rotatedBoundingBox,
+                confidence: $0.confidence,
+                blockNumber: $0.blockNumber,
+                paragraphNumber: $0.paragraphNumber,
+                lineNumber: $0.lineNumber,
+                wordNumber: $0.wordNumber
+            )
+        }
+    }
+
+    static func fragmentationQualityForDiagnostics(
+        _ tsv: String
+    ) -> JapaneseVerticalOCRFragmentationQuality {
+        parseTSVResult(tsv).quality
+    }
+
+    private static func parseTSVRecords(_ tsv: String) -> [RawTSVRecord] {
         tsv.split(whereSeparator: \.isNewline).compactMap { substring in
             let fields = substring.split(separator: "\t", omittingEmptySubsequences: false)
             guard fields.count >= 12,
                   fields[0] == "5",
+                  let pageNumber = Int(fields[1]),
+                  let blockNumber = Int(fields[2]),
+                  let paragraphNumber = Int(fields[3]),
+                  let lineNumber = Int(fields[4]),
+                  let wordNumber = Int(fields[5]),
                   let left = Double(fields[6]),
                   let top = Double(fields[7]),
                   let width = Double(fields[8]),
@@ -461,12 +624,130 @@ nonisolated enum JapaneseVerticalOCRService {
             guard !text.isEmpty else { return nil }
             // The actual pixel dimensions are applied by the caller.  TSV is
             // retained in pixel space here to avoid losing precision early.
-            return RawWord(
+            return RawTSVRecord(
+                pageNumber: pageNumber,
+                blockNumber: blockNumber,
+                paragraphNumber: paragraphNumber,
+                lineNumber: lineNumber,
+                wordNumber: wordNumber,
                 text: text,
                 rotatedBoundingBox: CGRect(x: left, y: top, width: width, height: height),
                 confidence: confidence / 100
             )
         }
+    }
+
+    private static func groupTSVRecords(_ records: [RawTSVRecord]) -> [RawWord] {
+        guard !records.isEmpty else { return [] }
+
+        // Tesseract's page/block/paragraph/line fields are only affinity hints.
+        // In Japanese vertical pages a single column is frequently emitted as
+        // one TSV hierarchy per glyph, so geometry is the actual reconstruction
+        // boundary. Rotation makes an original vertical column a horizontal row:
+        // rotated Y identifies the column, rotated X is top-to-bottom order.
+        var output: [RawWord] = []
+        let pages = Dictionary(grouping: records, by: \.pageNumber)
+        for pageNumber in pages.keys.sorted() {
+            guard let pageRecords = pages[pageNumber] else { continue }
+            let typicalThickness = median(pageRecords.map { $0.rotatedBoundingBox.height })
+            var columns: [[RawTSVRecord]] = []
+
+            for record in pageRecords.sorted(by: spatialRecordOrder) {
+                let candidateIndex = columns.indices
+                    .compactMap { index -> (index: Int, distance: CGFloat)? in
+                        let column = columns[index]
+                        let center = median(column.map { $0.rotatedBoundingBox.midY })
+                        let thickness = median(column.map { $0.rotatedBoundingBox.height })
+                        let minimumThickness = min(thickness, record.rotatedBoundingBox.height)
+                        let maximumThickness = max(thickness, record.rotatedBoundingBox.height)
+                        let similarSize = minimumThickness > 0
+                            && maximumThickness / minimumThickness <= 1.8
+                        let tolerance = max(
+                            typicalThickness * 1.20,
+                            minimumThickness * 0.75,
+                            4
+                        )
+                        guard similarSize,
+                              abs(record.rotatedBoundingBox.midY - center) <= tolerance else {
+                            return nil
+                        }
+                        return (index, abs(record.rotatedBoundingBox.midY - center))
+                    }
+                    .min { $0.distance < $1.distance }
+
+                if let candidateIndex {
+                    columns[candidateIndex.index].append(record)
+                } else {
+                    columns.append([record])
+                }
+            }
+
+            for column in columns.sorted(by: { lhs, rhs in
+                median(lhs.map { $0.rotatedBoundingBox.midY })
+                    < median(rhs.map { $0.rotatedBoundingBox.midY })
+            }) {
+                let sorted = column.sorted(by: spatialRecordXOrder)
+                let typicalAdvance = median(sorted.map { $0.rotatedBoundingBox.width })
+                let typicalSize = median(sorted.map { $0.rotatedBoundingBox.height })
+                let maximumGap = max(typicalAdvance * 2.0, 8)
+                var runs: [[RawTSVRecord]] = []
+
+                for record in sorted {
+                    guard let previous = runs.last?.last else {
+                        runs.append([record])
+                        continue
+                    }
+                    let gap = record.rotatedBoundingBox.minX - previous.rotatedBoundingBox.maxX
+                    let minimumSize = min(typicalSize, record.rotatedBoundingBox.height)
+                    let maximumSize = max(typicalSize, record.rotatedBoundingBox.height)
+                    let similarSize = minimumSize > 0 && maximumSize / minimumSize <= 1.8
+                    if gap <= maximumGap && similarSize {
+                        runs[runs.count - 1].append(record)
+                    } else {
+                        runs.append([record])
+                    }
+                }
+
+                for run in runs {
+                    guard let first = run.first else { continue }
+                    let union = run.dropFirst().reduce(first.rotatedBoundingBox) { $0.union($1.rotatedBoundingBox) }
+                    output.append(RawWord(
+                        text: run.map(\.text).joined(),
+                        rotatedBoundingBox: union,
+                        confidence: run.reduce(0) { $0 + $1.confidence } / Double(run.count),
+                        blockNumber: first.blockNumber,
+                        paragraphNumber: first.paragraphNumber,
+                        lineNumber: first.lineNumber,
+                        wordNumber: first.wordNumber,
+                        glyphThickness: median(run.map { $0.rotatedBoundingBox.height })
+                    ))
+                }
+            }
+        }
+        return output
+    }
+
+    private static func spatialRecordOrder(_ lhs: RawTSVRecord, _ rhs: RawTSVRecord) -> Bool {
+        if lhs.pageNumber != rhs.pageNumber { return lhs.pageNumber < rhs.pageNumber }
+        if lhs.rotatedBoundingBox.midY != rhs.rotatedBoundingBox.midY {
+            return lhs.rotatedBoundingBox.midY < rhs.rotatedBoundingBox.midY
+        }
+        return spatialRecordXOrder(lhs, rhs)
+    }
+
+    private static func spatialRecordXOrder(_ lhs: RawTSVRecord, _ rhs: RawTSVRecord) -> Bool {
+        if lhs.rotatedBoundingBox.minX != rhs.rotatedBoundingBox.minX {
+            return lhs.rotatedBoundingBox.minX < rhs.rotatedBoundingBox.minX
+        }
+        if lhs.blockNumber != rhs.blockNumber { return lhs.blockNumber < rhs.blockNumber }
+        if lhs.lineNumber != rhs.lineNumber { return lhs.lineNumber < rhs.lineNumber }
+        return lhs.wordNumber < rhs.wordNumber
+    }
+
+    private static func median(_ values: [CGFloat]) -> CGFloat {
+        guard !values.isEmpty else { return 1 }
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     /// Lightweight image evidence for both empty and partial OCR results. It

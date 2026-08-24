@@ -157,9 +157,20 @@
 "ocr.filter" = "OCR フィルター";
 "ocr.filterDescription" = "ウェブアドレス、広告、端の小さなテキストは無視され、OCRやAI翻訳に送られません。";
 "ocr.minTextSize" = "これより小さいテキストを無視";
+"ocr.borderlessFontSize" = "吹き出しなしテキストの文字サイズ";
+"ocr.borderlessFontSizeValue" = "Aa 現在 %d pt";
+"ocr.borderlessFontSizeDescription" = "信頼できる吹き出し境界がない翻訳にはこのサイズを使用し、収まらない場合は自動的に縮小します。";
 "ocr.debug" = "OCR デバッグ";
 "ocr.debugDescription" = "ビジョン翻訳は現在のページをサードパーティのOpenAI互換APIに送信します。";
 "ocr.showDebugBoxes" = "OCR デバッグボックスを表示";
+"ocr.debugStage" = "OCR デバッグレイヤー";
+"ocr.debugStage.raw" = "OCR 生候補";
+"ocr.debugStage.candidate" = "最終候補";
+"ocr.debugStage.filtered" = "フィルター後";
+"ocr.debugStage.filteredOut" = "フィルター除外";
+"ocr.debugStage.rejected" = "拒否 / ノイズ";
+"ocr.debugStage.bubble" = "吹き出しグループ";
+"ocr.debugStage.translation" = "最終翻訳カード";
 
 /* Settings */
 "settings.title" = "設定";

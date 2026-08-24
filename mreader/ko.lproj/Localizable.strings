@@ -157,9 +157,20 @@
 "ocr.filter" = "OCR 필터";
 "ocr.filterDescription" = "웹 주소, 광고, 가장자리의 작은 텍스트는 무시되어 OCR이나 AI 번역에 전송되지 않습니다.";
 "ocr.minTextSize" = "이보다 작은 텍스트 무시";
+"ocr.borderlessFontSize" = "말풍선 없는 텍스트 글자 크기";
+"ocr.borderlessFontSizeValue" = "Aa 현재 %d pt";
+"ocr.borderlessFontSizeDescription" = "신뢰할 수 있는 말풍선 경계가 없는 번역은 이 크기를 사용하며, 공간이 부족하면 자동으로 줄어듭니다.";
 "ocr.debug" = "OCR 디버그";
 "ocr.debugDescription" = "비전 번역은 현재 페이지를 서드파티 OpenAI 호환 API에 전송합니다.";
 "ocr.showDebugBoxes" = "OCR 디버그 박스 표시";
+"ocr.debugStage" = "OCR 디버그 레이어";
+"ocr.debugStage.raw" = "OCR 원시 후보";
+"ocr.debugStage.candidate" = "최종 후보";
+"ocr.debugStage.filtered" = "필터 후 후보";
+"ocr.debugStage.filteredOut" = "필터 제외";
+"ocr.debugStage.rejected" = "거부 / 노이즈";
+"ocr.debugStage.bubble" = "말풍선 그룹";
+"ocr.debugStage.translation" = "최종 번역 카드";
 
 /* Settings */
 "settings.title" = "설정";
