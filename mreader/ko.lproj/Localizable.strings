@@ -160,6 +160,14 @@
 "ocr.debug" = "OCR 디버그";
 "ocr.debugDescription" = "비전 번역은 현재 페이지를 서드파티 OpenAI 호환 API에 전송합니다.";
 "ocr.showDebugBoxes" = "OCR 디버그 박스 표시";
+"ocr.debugStage" = "OCR 디버그 레이어";
+"ocr.debugStage.raw" = "OCR 원시 후보";
+"ocr.debugStage.candidate" = "최종 후보";
+"ocr.debugStage.filtered" = "필터 후 후보";
+"ocr.debugStage.filteredOut" = "필터 제외";
+"ocr.debugStage.rejected" = "거부 / 노이즈";
+"ocr.debugStage.bubble" = "말풍선 그룹";
+"ocr.debugStage.translation" = "최종 번역 카드";
 
 /* Settings */
 "settings.title" = "설정";

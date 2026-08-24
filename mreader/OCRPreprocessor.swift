@@ -35,6 +35,8 @@ struct OCRPreprocessor {
     nonisolated private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
     // OCR 高清图上限：普通对白 4500px 足够，避免每次 12000px 解码带来巨大内存/耗时峰值
     nonisolated private static let highResolutionMaxPixelSize: CGFloat = 4_500
+    // 低阈值只能用于明确的恢复 pass，不能污染第一遍页面定位。
+    nonisolated private static let recoveryMinimumTextHeightScale = 0.72
 
     nonisolated private struct OCRImageVariant {
         let name: String
@@ -154,8 +156,8 @@ struct OCRPreprocessor {
                 )
             }
 
-            let needsImageEnhancement = needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft)
-            if needsImageEnhancement,
+            let needsRecovery = needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft)
+            if needsRecovery,
                let enhancedImage = enhancedImage(slice.image, inverted: false) {
                 let enhanced = OCRImageVariant(
                     name: "enhanced",
@@ -168,12 +170,18 @@ struct OCRPreprocessor {
                     options: options,
                     passes: options.recognitionMode == .adaptive
                         ? [plan.primary]
-                        : maximumAccuracyPasses(for: options)
+                        : maximumAccuracyPasses(for: options),
+                    minimumTextHeightScale: recoveryMinimumTextHeightScale
                 ))
             }
 
             // 暗色判断只分析低分辨率定位图，避免为了少量采样强制解码整块高清像素。
-            let shouldTryInverted = isLikelyDark(locatorImage) || needsEnhancedFallback(sliceBlocks, isRightToLeft: options.isRightToLeft)
+            // 反色是极性恢复，不是“置信度不够”时的通用第三遍 OCR。普通亮色页面即使
+            // 识别较弱，也不能因为恢复条件成立就把漫画线稿变成假文字。
+            let shouldTryInverted = shouldTryInvertedForDiagnostics(
+                isLikelyDark: isLikelyDark(locatorImage),
+                needsRecovery: needsRecovery
+            )
             if shouldTryInverted,
                let invertedImage = enhancedImage(slice.image, inverted: true) {
                 let inverted = OCRImageVariant(
@@ -187,7 +195,8 @@ struct OCRPreprocessor {
                     options: options,
                     passes: options.recognitionMode == .adaptive
                         ? [plan.primary]
-                        : maximumAccuracyPasses(for: options)
+                        : maximumAccuracyPasses(for: options),
+                    minimumTextHeightScale: recoveryMinimumTextHeightScale
                 ))
             }
             allBlocks.append(contentsOf: sliceBlocks)
@@ -241,7 +250,8 @@ struct OCRPreprocessor {
         passes: [(name: String, languages: [String])],
         level: VNRequestTextRecognitionLevel = .accurate,
         usesLanguageCorrection: Bool = true,
-        maximumCandidates: Int = 3
+        maximumCandidates: Int = 1,
+        minimumTextHeightScale: Double = 1.0
     ) async -> [TextBlock] {
         var blocks: [TextBlock] = []
         for pass in passes {
@@ -253,7 +263,8 @@ struct OCRPreprocessor {
                     passName: pass.name,
                     level: level,
                     usesLanguageCorrection: usesLanguageCorrection,
-                    maximumCandidates: maximumCandidates
+                    maximumCandidates: maximumCandidates,
+                    minimumTextHeightScale: minimumTextHeightScale
                 )
                 print("MReader OCR variant=\(variant.name) languagePass=\(pass.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(result.count) avgConfidence=\(String(format: "%.2f", averageConfidence(result)))")
                 blocks.append(contentsOf: result)
@@ -382,7 +393,8 @@ struct OCRPreprocessor {
         passName: String,
         level: VNRequestTextRecognitionLevel,
         usesLanguageCorrection: Bool,
-        maximumCandidates: Int
+        maximumCandidates: Int,
+        minimumTextHeightScale: Double
     ) async throws -> [TextBlock] {
         try await withCheckedThrowingContinuation { continuation in
             guard let cgImage = variant.image.cgImage else {
@@ -432,7 +444,12 @@ struct OCRPreprocessor {
             request.recognitionLevel = level
             request.usesLanguageCorrection = usesLanguageCorrection
             request.automaticallyDetectsLanguage = false
-            request.minimumTextHeight = min(max(Float(options.minimumTextHeight * 0.45), 0.0008), 0.04)
+            request.minimumTextHeight = Float(
+                minimumTextHeightForDiagnostics(
+                    base: options.minimumTextHeight,
+                    scale: minimumTextHeightScale
+                )
+            )
             request.recognitionLanguages = supportedRecognitionLanguages(from: languages, request: request)
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -457,6 +474,22 @@ struct OCRPreprocessor {
             observationPixelSize: observationPixelSize,
             normalizedPageRect: normalizedPageRect
         )
+    }
+
+    /// 供测试与调试：第一遍使用用户阈值，只有 recovery pass 才允许降低阈值。
+    nonisolated static func minimumTextHeightForDiagnostics(
+        base: Double,
+        scale: Double = 1.0
+    ) -> Double {
+        min(max(base * max(scale, 0), 0.0008), 0.04)
+    }
+
+    /// 供测试与调试：反色必须同时拥有暗色/反色极性证据和恢复必要性。
+    nonisolated static func shouldTryInvertedForDiagnostics(
+        isLikelyDark: Bool,
+        needsRecovery: Bool
+    ) -> Bool {
+        isLikelyDark && needsRecovery
     }
 
     nonisolated private static func localOCRGeometry(

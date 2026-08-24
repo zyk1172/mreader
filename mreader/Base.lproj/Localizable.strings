@@ -154,6 +154,14 @@
 "ocr.debug" = "OCR Debug";
 "ocr.debugDescription" = "Vision translation sends current page or slices to a third-party OpenAI-compatible API.";
 "ocr.showDebugBoxes" = "Show OCR Debug Boxes";
+"ocr.debugStage" = "OCR Debug Layer";
+"ocr.debugStage.raw" = "OCR Raw Candidates";
+"ocr.debugStage.candidate" = "Final Candidates";
+"ocr.debugStage.filtered" = "After Filtering";
+"ocr.debugStage.filteredOut" = "Filtered Out";
+"ocr.debugStage.rejected" = "Rejected / Noise";
+"ocr.debugStage.bubble" = "Bubble Groups";
+"ocr.debugStage.translation" = "Final Translation Cards";
 
 /* Settings */
 "settings.title" = "Settings";

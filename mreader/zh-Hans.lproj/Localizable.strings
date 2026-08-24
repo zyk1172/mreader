@@ -160,6 +160,14 @@
 "ocr.debug" = "OCR 调试";
 "ocr.debugDescription" = "视觉图片识别翻译会把当前页或兜底切片发送到第三方 OpenAI 兼容接口。";
 "ocr.showDebugBoxes" = "显示 OCR 调试框";
+"ocr.debugStage" = "OCR 调试层";
+"ocr.debugStage.raw" = "OCR 原始候选";
+"ocr.debugStage.candidate" = "最终候选";
+"ocr.debugStage.filtered" = "过滤后候选";
+"ocr.debugStage.filteredOut" = "过滤掉的候选";
+"ocr.debugStage.rejected" = "拒绝/噪声";
+"ocr.debugStage.bubble" = "气泡分组";
+"ocr.debugStage.translation" = "最终翻译卡";
 
 /* Settings */
 "settings.title" = "设置";

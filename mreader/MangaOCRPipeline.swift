@@ -1,5 +1,31 @@
 import UIKit
 
+nonisolated enum OCRDebugStage: String, CaseIterable, Codable, Sendable {
+    case raw
+    case candidate
+    case filtered
+    case filteredOut
+    case rejected
+    case bubble
+    case translation
+
+    var localizationKey: String {
+        "ocr.debugStage.\(rawValue)"
+    }
+
+    var token: String {
+        switch self {
+        case .raw: return "RAW"
+        case .candidate: return "CANDIDATE"
+        case .filtered: return "FILTERED"
+        case .filteredOut: return "FILTERED_OUT"
+        case .rejected: return "REJECTED"
+        case .bubble: return "BUBBLE"
+        case .translation: return "TRANSLATION"
+        }
+    }
+}
+
 nonisolated struct OCRPageQuality: Sendable, Equatable {
     let averageConfidence: Double
     let usefulCharacterRatio: Double

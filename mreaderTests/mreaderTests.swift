@@ -1470,6 +1470,41 @@ struct mreaderTests {
         #expect(result.resolvedBlocks.map(\.text).sorted() == ["快走", "等等"])
     }
 
+    @Test func ocrCandidateResolverDoesNotTreatNestedOrRotatedBoxesAsOneObservation() {
+        let large = TextBlock(
+            text: "大对白",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.30, height: 0.12),
+            textOrientation: .horizontal
+        )
+        let nested = TextBlock(
+            text: "小对白",
+            boundingBox: CGRect(x: 0.28, y: 0.23, width: 0.08, height: 0.04),
+            textOrientation: .horizontal
+        )
+        let rotated = TextBlock(
+            text: "竖排",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.12, height: 0.30),
+            textOrientation: .vertical
+        )
+
+        #expect(!OCRCandidateResolver.representsSameObservationForDiagnostics(large, nested))
+        #expect(!OCRCandidateResolver.representsSameObservationForDiagnostics(large, rotated))
+        let result = OCRCandidateResolver.resolve([large, nested, rotated], isRightToLeft: false)
+        #expect(result.resolvedBlocks.count == 3)
+    }
+
+    @Test func ocrCandidateResolverCountsAtMostOneVotePerSourceFamily() {
+        let box = CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.05)
+        let result = OCRCandidateResolver.resolve([
+            TextBlock(text: "正确", boundingBox: box, confidence: 0.82, ocrSource: "original:ja"),
+            TextBlock(text: "正确", boundingBox: box, confidence: 0.81, ocrSource: "original:zh"),
+            TextBlock(text: "错误", boundingBox: box, confidence: 0.99, ocrSource: "inverted:ja")
+        ], isRightToLeft: false)
+
+        #expect(result.resolvedBlocks.count == 1)
+        #expect(result.resolvedBlocks[0].text == "正确")
+    }
+
     @Test func ocrCandidateResolverPreservesBubbleGeometryAndUsesMedianGlyphScale() {
         let bubble = CGRect(x: 0.08, y: 0.12, width: 0.54, height: 0.30)
         let polygon = [
@@ -1611,6 +1646,25 @@ struct mreaderTests {
         #expect(passes.contains(["ja-JP"]))
         #expect(passes.contains(["ko-KR"]))
         #expect(!passes.contains(["zh-Hans", "zh-Hant", "ja-JP", "ko-KR", "en-US"]))
+    }
+
+    @Test func ocrRecoveryUsesLowerThresholdOnlyAfterPrimaryPass() {
+        #expect(OCRPreprocessor.minimumTextHeightForDiagnostics(base: 0.01) == 0.01)
+        #expect(abs(OCRPreprocessor.minimumTextHeightForDiagnostics(base: 0.01, scale: 0.72) - 0.0072) < 0.000_001)
+    }
+
+    @Test func ocrInvertedRecoveryRequiresDarkPolarityEvidence() {
+        #expect(!OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: false, needsRecovery: true))
+        #expect(!OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: true, needsRecovery: false))
+        #expect(OCRPreprocessor.shouldTryInvertedForDiagnostics(isLikelyDark: true, needsRecovery: true))
+    }
+
+    @Test func ocrDebugDefaultsToOneSelectableStage() {
+        #expect(OCRDebugStage(rawValue: "raw") == .raw)
+        #expect(OCRDebugStage.allCases.contains(.candidate))
+        #expect(OCRDebugStage.allCases.contains(.filtered))
+        #expect(OCRDebugStage.allCases.contains(.filteredOut))
+        #expect(OCRDebugStage.allCases.contains(.translation))
     }
 
     @Test func ocrAdaptiveLanguagePlanPrioritizesDetectedScript() {

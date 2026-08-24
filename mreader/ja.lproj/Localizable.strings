@@ -160,6 +160,14 @@
 "ocr.debug" = "OCR デバッグ";
 "ocr.debugDescription" = "ビジョン翻訳は現在のページをサードパーティのOpenAI互換APIに送信します。";
 "ocr.showDebugBoxes" = "OCR デバッグボックスを表示";
+"ocr.debugStage" = "OCR デバッグレイヤー";
+"ocr.debugStage.raw" = "OCR 生候補";
+"ocr.debugStage.candidate" = "最終候補";
+"ocr.debugStage.filtered" = "フィルター後";
+"ocr.debugStage.filteredOut" = "フィルター除外";
+"ocr.debugStage.rejected" = "拒否 / ノイズ";
+"ocr.debugStage.bubble" = "吹き出しグループ";
+"ocr.debugStage.translation" = "最終翻訳カード";
 
 /* Settings */
 "settings.title" = "設定";

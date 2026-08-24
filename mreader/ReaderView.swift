@@ -3591,6 +3591,9 @@ struct LocalImageView: View {
     @State private var textBlocks: [TextBlock] = []
     @State private var ocrTextBlocks: [TextBlock] = []
     @State private var debugRawBlocks: [TextBlock] = []
+    @State private var debugCandidateBlocks: [TextBlock] = []
+    @State private var debugFilteredBlocks: [TextBlock] = []
+    @State private var debugFilteredOutBlocks: [TextBlock] = []
     @State private var debugLineBlocks: [TextBlock] = []
     @State private var debugBubbleBlocks: [TextBlock] = []
     @State private var debugRejectedBlocks: [TextBlock] = []
@@ -3611,6 +3614,7 @@ struct LocalImageView: View {
     @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
+    @AppStorage("ocr_debug_stage") private var ocrDebugStageRaw = OCRDebugStage.raw.rawValue
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
@@ -3625,6 +3629,10 @@ struct LocalImageView: View {
 
     private var comicTranslationSourceLanguage: TranslationSourceLanguage {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
+    }
+
+    private var selectedOCRDebugStage: OCRDebugStage {
+        OCRDebugStage(rawValue: ocrDebugStageRaw) ?? .raw
     }
 
     private var canTranslate: Bool {
@@ -3983,10 +3991,22 @@ struct LocalImageView: View {
     @ViewBuilder
     private func ocrDebugOverlay(in size: CGSize) -> some View {
         if ocrShowDebugBoxes, isOCREnabled {
-            ocrDebugStage(debugRawBlocks, stage: "RAW", color: .yellow, in: size)
-            ocrDebugStage(debugLineBlocks, stage: "LINE", color: .blue, in: size)
-            ocrDebugStage(debugBubbleBlocks, stage: "BUBBLE", color: .green, in: size)
-            ocrDebugStage(debugRejectedBlocks, stage: "REJECT", color: .red, in: size)
+            switch selectedOCRDebugStage {
+            case .raw:
+                ocrDebugStage(debugRawBlocks, stage: selectedOCRDebugStage.token, color: .yellow, in: size)
+            case .candidate:
+                ocrDebugStage(debugCandidateBlocks, stage: selectedOCRDebugStage.token, color: .orange, in: size)
+            case .filtered:
+                ocrDebugStage(debugFilteredBlocks, stage: selectedOCRDebugStage.token, color: .cyan, in: size)
+            case .filteredOut:
+                ocrDebugStage(debugFilteredOutBlocks, stage: selectedOCRDebugStage.token, color: .pink, in: size)
+            case .rejected:
+                ocrDebugStage(debugRejectedBlocks, stage: selectedOCRDebugStage.token, color: .red, in: size)
+            case .bubble:
+                ocrDebugStage(debugBubbleBlocks, stage: selectedOCRDebugStage.token, color: .green, in: size)
+            case .translation:
+                ocrDebugTranslationStage(in: size)
+            }
         }
     }
 
@@ -3998,16 +4018,21 @@ struct LocalImageView: View {
         in size: CGSize
     ) -> some View {
         ForEach(blocks) { block in
-            let rect = overlayRect(for: block, in: size, scaleMultiplier: 1)
+            // Debug geometry must be the exact mapped OCR rectangle. The
+            // readable label is allowed to overflow/float; it must never
+            // enlarge the rectangle used to diagnose OCR or layout.
+            let rect = exactOCRDebugRect(for: block, in: size)
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .strokeBorder(color, lineWidth: 1.2)
                 Text(debugLabel(for: block, stage: stage))
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .lineLimit(3)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: true, vertical: true)
                     .padding(2)
                     .background(color.opacity(0.86))
                     .foregroundStyle(.white)
+                    .offset(x: 2, y: -2)
             }
             .frame(width: rect.width, height: rect.height)
             .position(x: rect.midX, y: rect.midY)
@@ -4021,6 +4046,45 @@ struct LocalImageView: View {
             return "\(stage) \(confidence)% \(block.filterReason ?? "common.filter".localized)\n\(block.text)"
         }
         return "\(stage) \(confidence)% \(block.ocrSource)\n\(block.text)"
+    }
+
+    @ViewBuilder
+    private func ocrDebugTranslationStage(in size: CGSize) -> some View {
+        ForEach(translationDebugItems(in: size)) { item in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .stroke(.yellow, style: StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                    .frame(width: item.sourceRect.width, height: item.sourceRect.height)
+                    .position(x: item.sourceRect.midX, y: item.sourceRect.midY)
+                Rectangle()
+                    .stroke(.blue, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    .frame(width: item.allowedBounds.width, height: item.allowedBounds.height)
+                    .position(x: item.allowedBounds.midX, y: item.allowedBounds.midY)
+                Rectangle()
+                    .stroke(.green, lineWidth: 1.5)
+                    .frame(width: item.layoutRect.width, height: item.layoutRect.height)
+                    .position(x: item.layoutRect.midX, y: item.layoutRect.midY)
+                Text("SOURCE / ALLOWED / CARD\n\(item.block.text)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(2)
+                    .background(Color.black.opacity(0.78))
+                    .foregroundStyle(.white)
+                    .position(
+                        x: item.layoutRect.minX + 2,
+                        y: max(item.layoutRect.minY - 10, 10)
+                    )
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func exactOCRDebugRect(for block: TextBlock, in size: CGSize) -> CGRect {
+        OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: ocrDisplayTransform(in: size)
+        )
     }
 
     private func overlayRect(for block: TextBlock, in size: CGSize, scaleMultiplier: CGFloat) -> CGRect {
@@ -4078,6 +4142,26 @@ struct LocalImageView: View {
     }
 
     private func translationLayoutItem(for block: TextBlock, in size: CGSize) -> TranslationLayoutItem {
+        let geometry = translationLayoutGeometry(for: block, in: size)
+        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslationLayoutItem(
+            blocks: [block],
+            rect: geometry.choice.layout.rect,
+            fontSize: geometry.choice.layout.fontSize,
+            displayText: translation.isEmpty ? nil : geometry.choice.text,
+            textOrientation: block.textOrientation,
+            layoutRole: block.layoutRole
+        )
+    }
+
+    private func translationLayoutGeometry(
+        for block: TextBlock,
+        in size: CGSize
+    ) -> (
+        sourceRect: CGRect,
+        allowedBounds: CGRect,
+        choice: OCRBubbleLayoutEngine.TranslationLayoutChoice
+    ) {
         let transform = ocrDisplayTransform(in: size)
         // 离线译文以 OCR textBox 的真实显示矩形为锚点；不能复用带最小点击尺寸的 overlayRect。
         let textRect = OCRCoordinateMapper.displayRect(
@@ -4136,14 +4220,20 @@ struct LocalImageView: View {
         #if DEBUG
         print("MReader translation-layout orientation=\(block.textOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", preferredTranslationFontSize(for: block, in: size, textRect: textRect))) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) bubble=\(block.bubbleBox != nil)")
         #endif
-        return TranslationLayoutItem(
-            blocks: [block],
-            rect: choice.layout.rect,
-            fontSize: choice.layout.fontSize,
-            displayText: translation.isEmpty ? nil : choice.text,
-            textOrientation: block.textOrientation,
-            layoutRole: block.layoutRole
-        )
+        return (sourceRect: textRect, allowedBounds: allowedBounds, choice: choice)
+    }
+
+    private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
+        translationLayoutItems(in: size).compactMap { item in
+            guard let block = item.blocks.first else { return nil }
+            let geometry = translationLayoutGeometry(for: block, in: size)
+            return OCRTranslationDebugItem(
+                block: block,
+                sourceRect: geometry.sourceRect,
+                allowedBounds: geometry.allowedBounds,
+                layoutRect: item.rect
+            )
+        }
     }
 
     private func limitedTranslationFallbackBounds(around textRect: CGRect, within imageBounds: CGRect) -> CGRect {
@@ -4280,6 +4370,9 @@ struct LocalImageView: View {
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
                 debugRawBlocks.removeAll()
+                debugCandidateBlocks.removeAll()
+                debugFilteredBlocks.removeAll()
+                debugFilteredOutBlocks.removeAll()
                 debugLineBlocks.removeAll()
                 debugBubbleBlocks.removeAll()
                 debugRejectedBlocks.removeAll()
@@ -4310,6 +4403,9 @@ struct LocalImageView: View {
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
             debugRawBlocks.removeAll()
+            debugCandidateBlocks.removeAll()
+            debugFilteredBlocks.removeAll()
+            debugFilteredOutBlocks.removeAll()
             debugLineBlocks.removeAll()
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
@@ -4480,14 +4576,20 @@ struct LocalImageView: View {
             filtered,
             isRightToLeft: isRightToLeftReading
         )
-        let rejected = result.rejectedBlocks + annotated.filter(\.isFiltered)
+        let filteredOut = annotated.filter(\.isFiltered)
         if ocrShowDebugBoxes {
             debugRawBlocks = result.rawBlocks
+            debugCandidateBlocks = result.resolvedBlocks
+            debugFilteredBlocks = filtered
+            debugFilteredOutBlocks = filteredOut
             debugLineBlocks = segmentation.lines
             debugBubbleBlocks = segmentation.bubbles
-            debugRejectedBlocks = rejected
+            debugRejectedBlocks = result.rejectedBlocks
         } else {
             debugRawBlocks.removeAll()
+            debugCandidateBlocks.removeAll()
+            debugFilteredBlocks.removeAll()
+            debugFilteredOutBlocks.removeAll()
             debugLineBlocks.removeAll()
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
@@ -4497,7 +4599,7 @@ struct LocalImageView: View {
             resolvedBlocks: filtered,
             lineBlocks: segmentation.lines,
             bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: rejected,
+            rejectedBlocks: result.rejectedBlocks + filteredOut,
             detectedLanguage: result.detectedLanguage,
             quality: result.quality
         )
@@ -4958,6 +5060,15 @@ private struct TranslationLayoutItem: Identifiable {
     let layoutRole: TranslationLayoutRole
 
     var id: UUID { blocks.first?.id ?? UUID() }
+}
+
+private struct OCRTranslationDebugItem: Identifiable {
+    let block: TextBlock
+    let sourceRect: CGRect
+    let allowedBounds: CGRect
+    let layoutRect: CGRect
+
+    var id: UUID { block.id }
 }
 
 private enum TranslationColorStyle: String, CaseIterable {
