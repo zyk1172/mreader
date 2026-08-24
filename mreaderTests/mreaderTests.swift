@@ -3327,8 +3327,18 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
     }
 
     static func captureRequest(_ request: URLRequest) {
+        var snapshot = request
+        if let url = request.url {
+            snapshot = URLRequest(url: url)
+            snapshot.httpMethod = request.httpMethod
+            snapshot.allHTTPHeaderFields = request.allHTTPHeaderFields
+            snapshot.timeoutInterval = request.timeoutInterval
+            if let body = request.httpBody {
+                snapshot.httpBody = Data(body)
+            }
+        }
         lock.lock()
-        lastCapturedRequest = request
+        lastCapturedRequest = snapshot
         lock.unlock()
     }
 
@@ -3341,7 +3351,6 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        let capturedRequest = Self.requestWithMaterializedBody(request)
         Self.lock.lock()
         let sequenceResponse = Self.responseSequence.isEmpty
             ? nil
@@ -3352,9 +3361,6 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
         let data = sequenceResponse?.data ?? Self.responseData
         let statusCode = sequenceResponse?.statusCode ?? Self.responseStatusCode
         let failure = Self.failure
-        if request.httpBody != nil || request.httpBodyStream != nil {
-            Self.lastCapturedRequest = capturedRequest
-        }
         Self.capturedRequestCount += 1
         Self.lock.unlock()
 
@@ -3379,28 +3385,6 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
-
-    private static func requestWithMaterializedBody(_ request: URLRequest) -> URLRequest {
-        guard request.httpBody == nil, let stream = request.httpBodyStream else {
-            return request
-        }
-
-        stream.open()
-        defer { stream.close() }
-
-        var body = Data()
-        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
-        while stream.hasBytesAvailable {
-            let count = stream.read(&buffer, maxLength: buffer.count)
-            guard count > 0 else { break }
-            body.append(buffer, count: count)
-        }
-
-        var materialized = request
-        materialized.httpBody = body
-        materialized.httpBodyStream = nil
-        return materialized
-    }
 }
 
 private func aiTransportRecordingSession() -> URLSession {
