@@ -377,6 +377,36 @@ struct mreaderTests {
         }
     }
 
+    @Test func pageParserUsesCanonicalTranslationWhenLinesAreUnrelated() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "こんにちは", order: 0)
+        ]
+        let canonical = "你好，今天怎么样？"
+
+        let invalidLines = try AIPageTranslationParser.parseStrict(
+            #"{"items":[{"id":"b0","translation":"你好，今天怎么样？","translationLines":["Hello,","how are you today?"]}]}"#,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(invalidLines.items[0].translation == canonical)
+        #expect(invalidLines.items[0].translationLines.isEmpty)
+        #expect(
+            TranslationOutputValidator.validatedDisplayTranslation(
+                canonicalTranslation: invalidLines.items[0].translation,
+                translationLines: invalidLines.items[0].translationLines,
+                sourceText: expected[0].sourceText,
+                target: .simplifiedChinese
+            ) == canonical
+        )
+
+        let validLines = try AIPageTranslationParser.parseStrict(
+            #"{"items":[{"id":"b0","translation":"你好，今天怎么样？","translationLines":["你好，","今天怎么样？"]}]}"#,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(validLines.items[0].translationLines == ["你好，", "今天怎么样？"])
+    }
+
     @Test func pageResponseClassifierDoesNotTreatJSONDiscussionAsRepairableJSON() {
         let expected = [AIPageTranslationItem(id: "b0", sourceText: "じこ", order: 0)]
         #expect(
@@ -1540,6 +1570,17 @@ struct mreaderTests {
 
         #expect(result.resolvedBlocks.count == 1)
         #expect(result.resolvedBlocks[0].text == "正确")
+    }
+
+    @Test func ocrCandidateResolverClassifiesActualJapaneseReferenceSource() {
+        #expect(
+            OCRCandidateResolver.sourceFamilyForDiagnostics("original:ja-reference")
+                == "ja-reference"
+        )
+        #expect(
+            OCRCandidateResolver.sourceFamilyForDiagnostics("original:ja")
+                == "original"
+        )
     }
 
     @Test func ocrCandidateResolverPreservesBubbleGeometryAndUsesMedianGlyphScale() {

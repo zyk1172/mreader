@@ -123,6 +123,10 @@ nonisolated enum OCRCandidateResolver {
         representsSameObservation(lhs, rhs)
     }
 
+    nonisolated static func sourceFamilyForDiagnostics(_ source: String) -> String {
+        sourceFamily(source)
+    }
+
     nonisolated static func validatedBubbleGeometry(
         for textRect: CGRect,
         candidates: [TextBlock]
@@ -244,13 +248,11 @@ nonisolated enum OCRCandidateResolver {
     private static func sourceFamily(_ source: String) -> String {
         let normalized = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("+") { return "merged" }
+        if normalized.contains("ja-reference") { return "ja-reference" }
         if normalized.hasPrefix("original:") || normalized == "original" { return "original" }
         if normalized.hasPrefix("enhanced:") || normalized == "enhanced" { return "enhanced" }
         if normalized.hasPrefix("inverted:") || normalized == "inverted" { return "inverted" }
         if normalized.hasPrefix("tesseract:") || normalized.contains("tesseract") { return "tesseract" }
-        if normalized.hasPrefix("ja-reference:") || normalized == "ja-reference" {
-            return "ja-reference"
-        }
         if normalized.hasPrefix("vision") || normalized.hasPrefix("visual-") {
             return "vision"
         }

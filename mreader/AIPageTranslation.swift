@@ -372,12 +372,15 @@ nonisolated enum AIPageTranslationParser {
                   ) else {
                 continue
             }
-            let lines = (rawItem["translationLines"] as? [String]
+            let rawLines = (rawItem["translationLines"] as? [String]
                 ?? rawItem["translation_lines"] as? [String]
                 ?? [])
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .map { TranslationOutputValidator.normalize($0, for: target) }
+            let lines = TranslationOutputValidator.validatedTranslationLines(
+                rawLines,
+                canonicalTranslation: normalizedTranslation,
+                sourceText: sourceText,
+                target: target
+            )
             accepted[id] = AIPageTranslatedItem(
                 id: id,
                 translation: normalizedTranslation,
@@ -446,9 +449,12 @@ nonisolated enum AIPageTranslationParser {
                 }
                 normalizedTranslation = normalized
             }
-            let lines = rawLines
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .map { TranslationOutputValidator.normalize($0, for: target) }
+            let lines = TranslationOutputValidator.validatedTranslationLines(
+                rawLines,
+                canonicalTranslation: normalizedTranslation,
+                sourceText: expectedByID[id]?.sourceText,
+                target: target
+            )
             accepted[id] = AIPageTranslatedItem(
                 id: id,
                 translation: normalizedTranslation,
@@ -571,6 +577,67 @@ nonisolated enum TranslationOutputValidator {
             return isStableUntranslatedToken(value, target: target) ? value : nil
         }
         return isCompatible(value, target: target) ? value : nil
+    }
+
+    /// `translation` is the only canonical page result. Model-provided line
+    /// breaks are retained only when every line is a valid target-language
+    /// fragment and the whitespace-collapsed result is exactly equivalent to
+    /// that canonical translation. Otherwise the caller must render the
+    /// canonical translation without model-provided line breaks.
+    static func validatedTranslationLines(
+        _ rawLines: [String],
+        canonicalTranslation: String,
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> [String] {
+        let lines = rawLines.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !lines.isEmpty,
+              lines.allSatisfy({ !$0.isEmpty }),
+              !canonicalTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              lines.allSatisfy({
+                  normalizedAcceptableTranslation(
+                      $0,
+                      sourceText: nil,
+                      target: target
+                  ) != nil
+              }),
+              normalizedAcceptableTranslation(
+                  lines.joined(),
+                  sourceText: sourceText,
+                  target: target
+              ) != nil,
+              comparableTranslation(lines.joined(), target: target)
+                  == comparableTranslation(canonicalTranslation, target: target) else {
+            return []
+        }
+        return lines.map { normalize($0, for: target) }
+    }
+
+    static func validatedDisplayTranslation(
+        canonicalTranslation: String,
+        translationLines: [String],
+        sourceText: String?,
+        target: TranslationTargetLanguage
+    ) -> String {
+        let canonical = canonicalTranslation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = validatedTranslationLines(
+            translationLines,
+            canonicalTranslation: canonical,
+            sourceText: sourceText,
+            target: target
+        )
+        return lines.isEmpty ? canonical : lines.joined(separator: "\n")
+    }
+
+    private static func comparableTranslation(
+        _ text: String,
+        target: TranslationTargetLanguage
+    ) -> String {
+        normalize(text, for: target)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
     }
 
     static func normalize(_ text: String, for target: TranslationTargetLanguage) -> String {

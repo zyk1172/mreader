@@ -3981,13 +3981,21 @@ struct LocalImageView: View {
         if block.textOrientation == .vertical {
             return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        let lines = block.translationLines
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        if !lines.isEmpty {
-            return lines.joined(separator: "\n")
-        }
-        return (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslationOutputValidator.validatedDisplayTranslation(
+            canonicalTranslation: block.translation ?? "",
+            translationLines: block.translationLines,
+            sourceText: block.text,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        )
+    }
+
+    private func validatedTranslationLines(for block: TextBlock) -> [String] {
+        TranslationOutputValidator.validatedTranslationLines(
+            block.translationLines,
+            canonicalTranslation: block.translation ?? "",
+            sourceText: block.text,
+            target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        )
     }
 
     @ViewBuilder
@@ -4240,7 +4248,7 @@ struct LocalImageView: View {
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: effectiveTranslation,
-            translationLines: translation.isEmpty ? [] : block.translationLines,
+            translationLines: translation.isEmpty ? [] : validatedTranslationLines(for: block),
             sourceFontSize: requestedFontSize,
             sourceRect: textRect,
             allowedBounds: layoutBounds,
