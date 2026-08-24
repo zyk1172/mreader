@@ -415,7 +415,8 @@ struct mreaderTests {
             baseURL: "https://api.example.test/v1",
             model: "repair-model",
             target: .simplifiedChinese,
-            session: aiTransportRecordingSession()
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
         )
         #expect(result.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 2)
@@ -431,7 +432,8 @@ struct mreaderTests {
                 baseURL: "https://api.example.test/v1",
                 model: "repair-failure-model",
                 target: .simplifiedChinese,
-                session: aiTransportRecordingSession()
+                session: aiTransportRecordingSession(),
+                requestObserver: AITransportRecordingURLProtocol.captureRequest
             )
             Issue.record("repair 失败后不应伪装成整页成功")
         } catch let error as AITranslationRequestError {
@@ -451,7 +453,8 @@ struct mreaderTests {
             baseURL: "https://api.example.test/v1",
             model: "schema-fallback-model",
             target: .simplifiedChinese,
-            session: aiTransportRecordingSession()
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
         )
         #expect(result.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 2)
@@ -474,7 +477,8 @@ struct mreaderTests {
             baseURL: "https://api.example.test/v1",
             model: model,
             target: .simplifiedChinese,
-            session: aiTransportRecordingSession()
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
         )
         #expect(first.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 2)
@@ -492,7 +496,8 @@ struct mreaderTests {
             baseURL: "https://api.example.test/v1",
             model: model,
             target: .simplifiedChinese,
-            session: aiTransportRecordingSession()
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
         )
         #expect(AITransportRecordingURLProtocol.requestCount() == 1)
         let cachedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
@@ -514,7 +519,8 @@ struct mreaderTests {
             baseURL: "https://api.example.test/v1",
             model: model,
             target: .simplifiedChinese,
-            session: aiTransportRecordingSession()
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
         )
         #expect(result.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 2)
@@ -3346,7 +3352,9 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
         let data = sequenceResponse?.data ?? Self.responseData
         let statusCode = sequenceResponse?.statusCode ?? Self.responseStatusCode
         let failure = Self.failure
-        Self.lastCapturedRequest = capturedRequest
+        if request.httpBody != nil || request.httpBodyStream != nil {
+            Self.lastCapturedRequest = capturedRequest
+        }
         Self.capturedRequestCount += 1
         Self.lock.unlock()
 

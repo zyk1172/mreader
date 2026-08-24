@@ -557,7 +557,8 @@ class AITranslator {
         sourceLanguage: TranslationSourceLanguage? = nil,
         previousContext: String = "",
         modelDescriptor: AIModelDescriptor? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        requestObserver: (@Sendable (URLRequest) -> Void)? = nil
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -575,7 +576,8 @@ class AITranslator {
             sourceLanguage: sourceLanguage,
             previousContext: previousContext,
             requestTimeout: AITranslationRequestPolicy.pageRequestTimeout(itemCount: items.count),
-            session: session
+            session: session,
+            requestObserver: requestObserver
         )
     }
 
@@ -590,7 +592,8 @@ class AITranslator {
         sourceLanguage: TranslationSourceLanguage?,
         previousContext: String,
         requestTimeout: TimeInterval,
-        session: URLSession
+        session: URLSession,
+        requestObserver: (@Sendable (URLRequest) -> Void)?
     ) async throws -> AIPageTranslationResult {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -606,7 +609,12 @@ class AITranslator {
             previousContext: previousContext
         )
 
-        let client = AITranslationClient(apiKey: apiKey, baseURL: baseURL, session: session)
+        let client = AITranslationClient(
+            apiKey: apiKey,
+            baseURL: baseURL,
+            session: session,
+            requestObserver: requestObserver
+        )
         let cacheKey = "\(baseURL)|\(modelDescriptor.apiProtocol.rawValue)|\(model)"
         var mode = modelDescriptor.apiProtocol == .anthropicMessages
             ? PageResponseFormatMode.promptOnly
