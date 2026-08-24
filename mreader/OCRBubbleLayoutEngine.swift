@@ -19,6 +19,10 @@ nonisolated enum OCRBubbleLayoutEngine {
         max(sourceFontSize, 1)
     }
 
+    static func usesStandaloneLayout(for block: TextBlock) -> Bool {
+        block.layoutRole == .standalone
+    }
+
     /// Standalone text (sound effects, labels, and tilted words) has no real
     /// bubbleBox to provide a generous layout area. Its axis-aligned OCR box
     /// can be much larger than the glyphs when the word is rotated, so use the
@@ -30,7 +34,7 @@ nonisolated enum OCRBubbleLayoutEngine {
         textRect: CGRect
     ) -> CGFloat {
         let sourceFontSize = block.sourceFontSize(in: imageRect)
-        guard block.bubbleBox == nil else { return sourceFontSize }
+        guard usesStandaloneLayout(for: block) else { return sourceFontSize }
 
         let glyphCount = max(block.text.filter { !$0.isWhitespace }.count, 1)
         let areaPerGlyph = sqrt(

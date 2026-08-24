@@ -18,7 +18,7 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
         let rawValue = [
             // OCR geometry and the Japanese vertical fallback changed; do not
             // reuse pages written before this pipeline revision.
-            "local-ocr-v3-japanese-vertical-ocr",
+            "local-ocr-v4-layout-role-japanese-vertical-ocr",
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
@@ -45,6 +45,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
     let estimatedFontScale: Double
     let textColorHex: String?
     let textOrientation: TextOrientation?
+    let layoutRole: TranslationLayoutRole?
 
     init(_ block: TextBlock) {
         id = block.id
@@ -58,6 +59,7 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
         estimatedFontScale = block.estimatedFontScale
         textColorHex = block.textColorHex
         textOrientation = block.textOrientation
+        layoutRole = block.layoutRole
     }
 
     var textBlock: TextBlock {
@@ -69,7 +71,8 @@ nonisolated private struct CachedOCRBlock: Codable, Sendable {
             ocrSource: source,
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
-            textOrientation: textOrientation
+            textOrientation: textOrientation,
+            layoutRole: layoutRole
         )
     }
 }

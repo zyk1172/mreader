@@ -99,6 +99,7 @@ nonisolated enum MangaTextSegmenter {
     }
 
     private static func stylesAreCompatible(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
+        guard lhs.layoutRole == rhs.layoutRole else { return false }
         let smaller = min(fontScale(lhs), fontScale(rhs))
         let larger = max(fontScale(lhs), fontScale(rhs))
         guard larger / max(smaller, 0.000_1) <= 1.25 else { return false }
@@ -124,7 +125,8 @@ nonisolated enum MangaTextSegmenter {
             bubbleBox: selectedBubble?.box,
             polygon: ordered.flatMap(\.polygon),
             bubblePolygon: selectedBubble?.polygon ?? [],
-            textOrientation: ordered[0].textOrientation
+            textOrientation: ordered[0].textOrientation,
+            layoutRole: ordered[0].layoutRole
         )
     }
 

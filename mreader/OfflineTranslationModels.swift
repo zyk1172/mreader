@@ -371,10 +371,11 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
     let estimatedFontScale: Double
     let textColorHex: String?
     let textOrientation: TextOrientation
+    let layoutRole: TranslationLayoutRole?
 
     private enum CodingKeys: String, CodingKey {
         case id, sourceText, translation, translationLines, lines, textBox, bubbleBox
-        case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex, textOrientation
+        case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex, textOrientation, layoutRole
     }
 
     init(
@@ -390,7 +391,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         classification: String,
         estimatedFontScale: Double,
         textColorHex: String? = nil,
-        textOrientation: TextOrientation? = nil
+        textOrientation: TextOrientation? = nil,
+        layoutRole: TranslationLayoutRole? = nil
     ) {
         self.id = id
         self.sourceText = sourceText
@@ -405,6 +407,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         self.estimatedFontScale = estimatedFontScale
         self.textColorHex = textColorHex
         self.textOrientation = textOrientation ?? .inferred(from: textBox.cgRect)
+        self.layoutRole = layoutRole
     }
 
     init(from decoder: Decoder) throws {
@@ -427,6 +430,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         textColorHex = try container.decodeIfPresent(String.self, forKey: .textColorHex)
         textOrientation = try container.decodeIfPresent(TextOrientation.self, forKey: .textOrientation)
             ?? .inferred(from: textBox.cgRect)
+        layoutRole = try container.decodeIfPresent(TranslationLayoutRole.self, forKey: .layoutRole)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -444,6 +448,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         try container.encode(estimatedFontScale, forKey: .estimatedFontScale)
         try container.encodeIfPresent(textColorHex, forKey: .textColorHex)
         try container.encode(textOrientation, forKey: .textOrientation)
+        try container.encodeIfPresent(layoutRole, forKey: .layoutRole)
     }
 
     init(block: TextBlock, id: String? = nil) {
@@ -479,7 +484,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             classification: classification,
             estimatedFontScale: block.estimatedFontScale,
             textColorHex: block.textColorHex,
-            textOrientation: block.textOrientation
+            textOrientation: block.textOrientation,
+            layoutRole: block.layoutRole
         )
     }
 
@@ -497,7 +503,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             polygon: textPolygon.map(\.cgPoint),
             bubblePolygon: bubblePolygon.map(\.cgPoint),
             translationLines: translationLines,
-            textOrientation: textOrientation
+            textOrientation: textOrientation,
+            layoutRole: layoutRole
         )
     }
 

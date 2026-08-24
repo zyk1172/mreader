@@ -43,6 +43,76 @@ nonisolated enum TextOrientation: String, Codable, Sendable {
     }
 }
 
+nonisolated enum TranslationLayoutRole: String, Codable, Sendable {
+    case dialogue
+    case standalone
+
+    static func fromClassification(_ classification: String) -> Self {
+        let normalized = classification
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch normalized {
+        case "narration", "soundeffect", "sfx", "label", "url",
+             "advertisement", "advertising", "watermark", "copyright", "pagenumber":
+            return .standalone
+        default:
+            return .dialogue
+        }
+    }
+
+    static func inferred(
+        ocrSource: String,
+        bubbleBox: CGRect?,
+        polygon: [CGPoint],
+        textOrientation: TextOrientation
+    ) -> Self {
+        let sourceClassification = ocrSource
+            .split(separator: ":")
+            .last?
+            .split(separator: "+", maxSplits: 1)
+            .first
+            .map(String.init) ?? ocrSource
+        if fromClassification(sourceClassification) == .standalone {
+            return .standalone
+        }
+
+        // A normal dialogue block may also lack a bubbleBox. Only treat a
+        // polygon as standalone evidence when its long axis is visibly
+        // rotated away from the expected horizontal/vertical text axis.
+        guard bubbleBox == nil, polygon.count >= 4,
+              polygonIndicatesRotation(polygon, textOrientation: textOrientation) else {
+            return .dialogue
+        }
+        return .standalone
+    }
+
+    private static func polygonIndicatesRotation(
+        _ polygon: [CGPoint],
+        textOrientation: TextOrientation
+    ) -> Bool {
+        var longestLength: CGFloat = 0
+        var longestAngle: CGFloat = 0
+        for index in polygon.indices {
+            let next = polygon[(index + 1) % polygon.count]
+            let point = polygon[index]
+            let vector = CGPoint(x: next.x - point.x, y: next.y - point.y)
+            let length = hypot(vector.x, vector.y)
+            guard length > longestLength else { continue }
+            longestLength = length
+            longestAngle = atan2(vector.y, vector.x)
+        }
+        guard longestLength > 0 else { return false }
+
+        var axialAngle = longestAngle.truncatingRemainder(dividingBy: .pi)
+        if axialAngle < 0 { axialAngle += .pi }
+        let expectedAngle: CGFloat = textOrientation == .horizontal ? 0 : .pi / 2
+        let difference = abs(axialAngle - expectedAngle)
+        let distanceFromAxis = min(difference, .pi - difference)
+        return distanceFromAxis >= .pi / 12
+    }
+}
+
 // 定义识别出的文本块模型
 struct TextBlock: Identifiable, Sendable {
     let id: UUID
@@ -62,8 +132,14 @@ struct TextBlock: Identifiable, Sendable {
     var translationLines: [String]
     /// 在最初 OCR observation 阶段确定的文字方向；合并成 line/bubble 后必须继承。
     var textOrientation: TextOrientation
+    /// 布局语义不能从 bubbleBox 是否存在反推；纯 OCR 对白同样可能没有 bubbleBox。
+    var layoutRole: TranslationLayoutRole
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil) {
+    var isStandaloneText: Bool {
+        layoutRole == .standalone
+    }
+
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil, layoutRole: TranslationLayoutRole? = nil) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -79,7 +155,14 @@ struct TextBlock: Identifiable, Sendable {
         self.polygon = polygon
         self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
-        self.textOrientation = textOrientation ?? .inferred(from: boundingBox)
+        let resolvedOrientation = textOrientation ?? .inferred(from: boundingBox)
+        self.textOrientation = resolvedOrientation
+        self.layoutRole = layoutRole ?? .inferred(
+            ocrSource: ocrSource,
+            bubbleBox: bubbleBox,
+            polygon: polygon,
+            textOrientation: resolvedOrientation
+        )
     }
 
     /// OCR 字号尺度始终取原文短边：横排文字对应 textBox 高度，竖排文字对应宽度。
@@ -934,7 +1017,10 @@ class AITranslator {
                     polygon: original.polygon,
                     bubblePolygon: bubbleGeometry.bubblePolygon,
                     translationLines: original.translationLines,
-                    textOrientation: best.textOrientation
+                    textOrientation: best.textOrientation,
+                    layoutRole: original.layoutRole == .standalone || best.layoutRole == .standalone
+                        ? .standalone
+                        : .dialogue
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
             } catch is CancellationError {
@@ -993,7 +1079,8 @@ class AITranslator {
                         polygon: block.polygon,
                         bubblePolygon: block.bubblePolygon,
                         translationLines: block.translationLines,
-                        textOrientation: block.textOrientation
+                        textOrientation: block.textOrientation,
+                        layoutRole: block.layoutRole
                     )
                 }
                 corrected = mergeVisualPageRecoveryBlocks(
@@ -1963,7 +2050,8 @@ class AITranslator {
                 polygon: mappedTextPolygon,
                 bubblePolygon: mappedBubblePolygon,
                 translationLines: item.rawLines,
-                textOrientation: fallbackGeometry.orientation
+                textOrientation: fallbackGeometry.orientation,
+                layoutRole: TranslationLayoutRole.fromClassification(item.classification)
             )
         }
         if requiresTextBox, blocks.count != rawItems.count {
@@ -2096,7 +2184,8 @@ class AITranslator {
                     bubbleBox: validBubbleRect,
                     polygon: mappedTextPolygon,
                     bubblePolygon: mappedBubblePolygon,
-                    textOrientation: fallbackGeometry.orientation
+                    textOrientation: fallbackGeometry.orientation,
+                    layoutRole: TranslationLayoutRole.fromClassification(item.classification)
                 )
             )
         }
