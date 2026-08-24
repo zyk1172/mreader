@@ -194,6 +194,7 @@ private struct AIProviderEditorView: View {
     @State private var baseURL: String
     @State private var apiKey: String
     @State private var modelsText: String
+    @State private var modelDescriptors: [String: AIModelDescriptor]
     @State private var selectedTextModel: String
     @State private var selectedVisionModel: String
     @State private var testingKind: ConnectionTestKind?
@@ -206,6 +207,22 @@ private struct AIProviderEditorView: View {
         case vision
     }
 
+    private enum VisionCapability: String, CaseIterable, Identifiable {
+        case unknown
+        case supported
+        case unsupported
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .unknown: return "未知"
+            case .supported: return "支持"
+            case .unsupported: return "不支持"
+            }
+        }
+    }
+
     init(profile: AIProviderProfile?, onSaved: @escaping () -> Void) {
         let id = profile?.id ?? UUID()
         self.onSaved = onSaved
@@ -215,12 +232,21 @@ private struct AIProviderEditorView: View {
         _baseURL = State(initialValue: profile?.baseURL ?? "https://api.openai.com/v1")
         _apiKey = State(initialValue: profile.map { AIProviderStore.shared.apiKey(for: $0.id) } ?? "")
         _modelsText = State(initialValue: profile?.models.joined(separator: "\n") ?? "gpt-4o-mini")
+        _modelDescriptors = State(
+            initialValue: Dictionary(
+                uniqueKeysWithValues: (profile?.modelDescriptors ?? []).map { ($0.id, $0) }
+            )
+        )
         _selectedTextModel = State(initialValue: profile?.selectedTextModel ?? "gpt-4o-mini")
         _selectedVisionModel = State(initialValue: profile?.selectedVisionModel ?? profile?.selectedTextModel ?? "gpt-4o-mini")
     }
 
     private var normalizedModels: [String] {
         AIProviderProfile.normalizedModels(from: modelsText)
+    }
+
+    private var visionModels: [String] {
+        normalizedModels.filter { descriptor(for: $0).supportsVision != false }
     }
 
     private var isTesting: Bool { testingKind != nil }
@@ -256,9 +282,37 @@ private struct AIProviderEditorView: View {
                         }
                     }
                     Picker("aiProvider.visionModel".localized, selection: $selectedVisionModel) {
-                        ForEach(normalizedModels, id: \.self) { model in
+                        ForEach(visionModels, id: \.self) { model in
                             Text(model).tag(model)
                         }
+                    }
+                    if visionModels.isEmpty {
+                        Text("没有标记为支持视觉输入的模型")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    ForEach(normalizedModels, id: \.self) { model in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(model)
+                                .font(.subheadline.monospaced())
+                            Picker("API 协议", selection: protocolBinding(for: model)) {
+                                ForEach(AIAPIProtocol.allCases, id: \.self) { apiProtocol in
+                                    Text(apiProtocol.displayName).tag(apiProtocol)
+                                }
+                            }
+                            Picker("视觉能力", selection: visionCapabilityBinding(for: model)) {
+                                ForEach(VisionCapability.allCases) { capability in
+                                    Text(capability.title).tag(capability)
+                                }
+                            }
+                            if descriptor(for: model).supportsVision == nil {
+                                Text("视觉能力未知：允许选择，但测试或正式请求失败时请改用明确支持视觉的模型。")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
             } header: {
@@ -288,7 +342,7 @@ private struct AIProviderEditorView: View {
                         Label("settings.testVisionConnection".localized, systemImage: "photo")
                     }
                 }
-                .disabled(testingKind != nil || apiKey.isEmpty || normalizedModels.isEmpty)
+                .disabled(testingKind != nil || apiKey.isEmpty || visionModels.isEmpty)
 
                 if let testMessage {
                     Text(testMessage)
@@ -312,7 +366,9 @@ private struct AIProviderEditorView: View {
                 selectedTextModel = normalizedModels.first ?? ""
             }
             if !normalizedModels.contains(selectedVisionModel) {
-                selectedVisionModel = normalizedModels.first ?? ""
+                selectedVisionModel = visionModels.first ?? ""
+            } else if descriptor(for: selectedVisionModel).supportsVision == false {
+                selectedVisionModel = visionModels.first ?? ""
             }
         }
         .alert(
@@ -337,7 +393,8 @@ private struct AIProviderEditorView: View {
             selectedTextModel: selectedTextModel,
             selectedVisionModel: selectedVisionModel,
             createdAt: createdAt,
-            updatedAt: Date()
+            updatedAt: Date(),
+            modelDescriptors: normalizedModels.map { descriptor(for: $0) }
         )
         guard !profile.baseURL.isEmpty else {
             validationMessage = "settings.invalidUrl".localized
@@ -349,6 +406,10 @@ private struct AIProviderEditorView: View {
         }
         guard !profile.selectedTextModel.isEmpty || !profile.selectedVisionModel.isEmpty else {
             validationMessage = "aiProvider.modelRequired".localized
+            return
+        }
+        guard profile.descriptor(for: profile.selectedVisionModel).supportsVision != false else {
+            validationMessage = "视觉模型明确不支持图片输入，请选择支持或未知的模型。"
             return
         }
         do {
@@ -367,78 +428,55 @@ private struct AIProviderEditorView: View {
     private func testConnection(kind: ConnectionTestKind) {
         let model = kind == .text
             ? (normalizedModels.contains(selectedTextModel) ? selectedTextModel : (normalizedModels.first ?? ""))
-            : (normalizedModels.contains(selectedVisionModel) ? selectedVisionModel : (normalizedModels.first ?? ""))
+            : (visionModels.contains(selectedVisionModel) ? selectedVisionModel : (visionModels.first ?? ""))
         guard !model.isEmpty else { return }
+        let modelDescriptor = descriptor(for: model)
+        guard kind != .vision || modelDescriptor.supportsVision != false else {
+            testFailed = true
+            testMessage = "当前模型明确不支持视觉输入。"
+            return
+        }
         testingKind = kind
         testMessage = nil
+        testFailed = false
         Task {
             // 无论成功/失败/提前 return，都要清理测试状态，避免 spinner 卡住（项5）
             defer { testingKind = nil }
             do {
-                // 与生产共用同一个 endpoint 解析（项6），兼容 /v1 或完整 /chat/completions
-                guard let url = AIEndpointResolver.chatCompletionsURL(from: baseURL) else {
-                    throw AITranslationRequestError.invalidConfiguration("settings.invalidUrl".localized)
-                }
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.timeoutInterval = 25
-                let body: [String: Any]
+                let request: AITransportRequest
+                let expectedItems = [
+                    AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
+                    AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
+                ]
                 if kind == .vision {
-                    // 与 AITranslator.recognizeVisionImage 相同的内容格式：小图验证多模态输入
                     guard let imageURL = tinyPNGDataURL() else {
                         throw AITranslationRequestError.invalidConfiguration("settings.imageEncodingFailed".localized)
                     }
-                    body = [
-                        "model": model,
-                        "messages": [
-                            [
-                                "role": "user",
-                                "content": [
-                                    ["type": "text", "text": "Return OK."],
-                                    ["type": "image_url", "image_url": ["url": imageURL]]
-                                ]
-                            ]
-                        ],
-                        "max_tokens": 8
-                    ]
+                    request = AITransportRequest(
+                        model: modelDescriptor,
+                        userPrompt: "Return OK.",
+                        imageDataURL: imageURL,
+                        maxTokens: 8,
+                        timeout: 25
+                    )
                 } else {
-                    // 文本模型测试直接走真实整页翻译协议（审查 #2）：
-                    // 只有 parser 能通过才显示“兼容”，避免“连接成功但读漫画报错”。
-                    let testItems = [
-                        AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
-                        AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
-                    ]
                     let prompt = try AIPageTranslationPromptBuilder.prompt(
-                        items: testItems,
+                        items: expectedItems,
                         sourceLanguage: nil,
                         target: .simplifiedChinese,
                         styleInstructions: AITranslator.defaultTranslationStyleInstructions
                     )
-                    body = [
-                        "model": model,
-                        "messages": [
-                            ["role": "system", "content": "你只做漫画整页翻译。必须保留输入 id，只输出严格 JSON。"],
-                            ["role": "user", "content": prompt]
-                        ],
-                        "temperature": 0.15,
-                        "max_tokens": 200
-                    ]
-                }
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let response = response as? HTTPURLResponse else {
-                    throw AITranslationRequestError.invalidConfiguration("settings.invalidResponse".localized)
-                }
-                guard (200..<300).contains(response.statusCode) else {
-                    let details = String(data: data.prefix(300), encoding: .utf8) ?? ""
-                    throw AITranslationRequestError.server(
-                        model: model,
-                        statusCode: response.statusCode,
-                        message: details
+                    request = AITransportRequest(
+                        model: modelDescriptor,
+                        systemPrompt: "你只做漫画整页翻译。必须保留输入 id，只输出严格 JSON。",
+                        userPrompt: prompt,
+                        responseFormat: .jsonObject,
+                        temperature: 0.15,
+                        maxTokens: 200,
+                        timeout: 25
                     )
                 }
+                let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(request)
                 if kind == .text {
                     let decoded = AIChatResponseDecoder.decode(data)
                     guard let content = decoded.content else {
@@ -450,10 +488,7 @@ private struct AIProviderEditorView: View {
                     do {
                         let result = try AIPageTranslationParser.parse(
                             content,
-                            expectedItems: [
-                                AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
-                                AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
-                            ],
+                            expectedItems: expectedItems,
                             target: .simplifiedChinese
                         )
                         guard !result.items.isEmpty else {
@@ -490,5 +525,49 @@ private struct AIProviderEditorView: View {
         }
         guard let data = image.pngData() else { return nil }
         return "data:image/png;base64,\(data.base64EncodedString())"
+    }
+
+    private func descriptor(for model: String) -> AIModelDescriptor {
+        modelDescriptors[model] ?? AIModelProtocolCatalog.descriptor(for: model)
+    }
+
+    private func protocolBinding(for model: String) -> Binding<AIAPIProtocol> {
+        Binding(
+            get: { descriptor(for: model).apiProtocol },
+            set: { value in
+                let current = descriptor(for: model)
+                modelDescriptors[model] = AIModelDescriptor(
+                    id: model,
+                    apiProtocol: value,
+                    supportsVision: current.supportsVision
+                )
+            }
+        )
+    }
+
+    private func visionCapabilityBinding(for model: String) -> Binding<VisionCapability> {
+        Binding(
+            get: {
+                switch descriptor(for: model).supportsVision {
+                case .some(true): return .supported
+                case .some(false): return .unsupported
+                case .none: return .unknown
+                }
+            },
+            set: { value in
+                let current = descriptor(for: model)
+                let supportsVision: Bool?
+                switch value {
+                case .supported: supportsVision = true
+                case .unsupported: supportsVision = false
+                case .unknown: supportsVision = nil
+                }
+                modelDescriptors[model] = AIModelDescriptor(
+                    id: model,
+                    apiProtocol: current.apiProtocol,
+                    supportsVision: supportsVision
+                )
+            }
+        )
     }
 }

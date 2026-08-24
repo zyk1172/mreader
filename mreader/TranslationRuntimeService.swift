@@ -12,7 +12,8 @@ nonisolated enum TranslationRuntimeService {
         model: String,
         targetLanguage: TranslationTargetLanguage = .simplifiedChinese,
         promptTemplate: String = AITranslator.defaultTranslationPromptTemplate,
-        requestTimeout: TimeInterval = 45
+        requestTimeout: TimeInterval = 45,
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> String {
         try await AITranslator.translate(
             text: text,
@@ -23,7 +24,8 @@ nonisolated enum TranslationRuntimeService {
             model: model,
             targetLanguage: targetLanguage,
             promptTemplate: promptTemplate,
-            requestTimeout: requestTimeout
+            requestTimeout: requestTimeout,
+            modelDescriptor: modelDescriptor
         )
     }
 
@@ -35,7 +37,8 @@ nonisolated enum TranslationRuntimeService {
         target: TranslationTargetLanguage,
         promptTemplate: String = AITranslator.defaultTranslationPromptTemplate,
         sourceLanguage: TranslationSourceLanguage? = nil,
-        previousContext: String = ""
+        previousContext: String = "",
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> AIPageTranslationResult {
         try await AITranslator.translatePage(
             blocks: blocks,
@@ -45,7 +48,8 @@ nonisolated enum TranslationRuntimeService {
             target: target,
             promptTemplate: promptTemplate,
             sourceLanguage: sourceLanguage,
-            previousContext: previousContext
+            previousContext: previousContext,
+            modelDescriptor: modelDescriptor
         )
     }
 
@@ -55,7 +59,8 @@ nonisolated enum TranslationRuntimeService {
         apiKey: String,
         baseURL: String,
         model: String,
-        isRightToLeft: Bool
+        isRightToLeft: Bool,
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
         try await AITranslator.visualVerifyOCRRegions(
             image: image,
@@ -63,7 +68,8 @@ nonisolated enum TranslationRuntimeService {
             apiKey: apiKey,
             baseURL: baseURL,
             model: model,
-            isRightToLeft: isRightToLeft
+            isRightToLeft: isRightToLeft,
+            modelDescriptor: modelDescriptor
         )
     }
 
@@ -77,7 +83,9 @@ nonisolated enum TranslationRuntimeService {
         promptTemplate: String = AITranslator.defaultVisionTranslationPromptTemplate,
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
-        sourceLanguage: TranslationSourceLanguage? = nil
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        visionModelDescriptor: AIModelDescriptor? = nil,
+        textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
         try await AITranslator.translateVisionPage(
             image: image,
@@ -89,7 +97,9 @@ nonisolated enum TranslationRuntimeService {
             promptTemplate: promptTemplate,
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
-            sourceLanguage: sourceLanguage
+            sourceLanguage: sourceLanguage,
+            visionModelDescriptor: visionModelDescriptor,
+            textFallbackModelDescriptor: textFallbackModelDescriptor
         )
     }
 }

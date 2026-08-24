@@ -4677,7 +4677,8 @@ struct LocalImageView: View {
                     model: activeConfiguration.textModel,
                     target: requestTarget,
                     promptTemplate: translationStyleInstructions,
-                    sourceLanguage: comicTranslationSourceLanguage
+                    sourceLanguage: comicTranslationSourceLanguage,
+                    modelDescriptor: activeConfiguration.textModelDescriptor
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
@@ -4751,7 +4752,8 @@ struct LocalImageView: View {
                     model: requestModelName,
                     target: requestTarget,
                     promptTemplate: requestPromptTemplate,
-                    sourceLanguage: comicTranslationSourceLanguage
+                    sourceLanguage: comicTranslationSourceLanguage,
+                    modelDescriptor: activeConfiguration.textModelDescriptor
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
@@ -4798,7 +4800,8 @@ struct LocalImageView: View {
                             model: requestModelName,
                             targetLanguage: requestTarget,
                             promptTemplate: requestPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
+                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            modelDescriptor: activeConfiguration.textModelDescriptor
                         )
                         return (blockIndex, translatedText, nil)
                     } catch {
@@ -4838,7 +4841,7 @@ struct LocalImageView: View {
 
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
         let activeConfiguration = AIProviderStore.shared.activeConfiguration()
-        let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")"
+        let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|text-protocol=\(activeConfiguration?.textModelDescriptor.apiProtocol.rawValue ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")|vision-protocol=\(activeConfiguration?.visionModelDescriptor.apiProtocol.rawValue ?? "none")"
         let key = "\(url.absoluteString)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
         if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
             return recognizedPipelineCache
@@ -4871,7 +4874,8 @@ struct LocalImageView: View {
                 apiKey: activeConfiguration.apiKey,
                 baseURL: activeConfiguration.baseURL,
                 model: activeConfiguration.visionModel,
-                isRightToLeft: isRightToLeftReading
+                isRightToLeft: isRightToLeftReading,
+                modelDescriptor: activeConfiguration.visionModelDescriptor
             )
             let segmentation = MangaTextSegmenter.segment(
                 corrected,
