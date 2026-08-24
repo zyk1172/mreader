@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct mreaderApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
         Task { @MainActor in
             OfflineDownloadManager.shared.reconcileStorage()
@@ -72,6 +74,12 @@ struct mreaderApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .background else { return }
+            Task {
+                await OCRSearchIndex.shared.flush()
+            }
         }
     }
 }
