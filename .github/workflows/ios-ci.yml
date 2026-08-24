@@ -6,30 +6,37 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ios-ci-${{ github.ref }}
+  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  XCODE_PATH: /Applications/Xcode_26.5.app/Contents/Developer
+  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.5
 
 jobs:
   build-and-test:
+    name: Unit tests
     runs-on: macos-26
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26.5 and inspect simulator runtimes
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Select Xcode and inspect simulator runtimes
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          sudo xcode-select -s "$XCODE_PATH"
           xcodebuild -version
-          xcrun simctl list devices available
+          xcrun simctl list runtimes
 
       - name: Resolve Swift packages
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -resolvePackageDependencies
+        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
 
       - name: Build unit-test bundle
         run: |
@@ -37,10 +44,11 @@ jobs:
             -project mreader.xcodeproj \
             -scheme mreader \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
+            -destination "$DESTINATION" \
             -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
             build-for-testing
 
       - name: Run unit tests
@@ -49,20 +57,76 @@ jobs:
             -project mreader.xcodeproj \
             -scheme mreader \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
+            -destination "$DESTINATION" \
             -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
             -only-testing:mreaderTests \
-            -resultBundlePath "$RUNNER_TEMP/MReaderTests.xcresult" \
+            -resultBundlePath "$RUNNER_TEMP/MReaderUnitTests.xcresult" \
             test-without-building
 
-      - name: Upload test result
+      - name: Upload unit test result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mreader-test-results
+          name: mreader-unit-test-results
           path: |
-            ${{ runner.temp }}/MReaderTests.xcresult
+            ${{ runner.temp }}/MReaderUnitTests.xcresult
+            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
+          if-no-files-found: warn
+
+  ui-smoke:
+    name: UI smoke tests
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode and inspect simulator runtimes
+        run: |
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Resolve Swift packages
+        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
+
+      - name: Build UI-test bundle
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            build-for-testing
+
+      - name: Run UI smoke tests
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            -only-testing:mreaderUITests \
+            -resultBundlePath "$RUNNER_TEMP/MReaderUISmoke.xcresult" \
+            test-without-building
+
+      - name: Upload UI test result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mreader-ui-smoke-results
+          path: |
+            ${{ runner.temp }}/MReaderUISmoke.xcresult
             ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
           if-no-files-found: warn

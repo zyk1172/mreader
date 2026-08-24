@@ -441,6 +441,7 @@ struct ContentView: View {
                 iCloudSync.push(comics: library.comics, activityDays: days)
             }
         }
+        .accessibilityIdentifier("mreader.shelf.root")
     }
 
     private func reloadMediaSourceState() async {
@@ -641,12 +642,14 @@ struct ContentView: View {
                 } label: {
                     Label("import.files".localized, systemImage: "doc.badge.plus")
                 }
+                .accessibilityIdentifier("mreader.shelf.importFiles")
                 Button {
                     HapticManager.shared.play(.light)
                     beginImport(.folder)
                 } label: {
                     Label("import.folder".localized, systemImage: "folder.badge.plus")
                 }
+                .accessibilityIdentifier("mreader.shelf.importFolder")
                 Button {
                     HapticManager.shared.play(.medium)
                     selectedPage = .library
@@ -660,6 +663,7 @@ struct ContentView: View {
                 } label: {
                     Label("ocr.search.title".localized, systemImage: "text.magnifyingglass")
                 }
+                .accessibilityIdentifier("mreader.shelf.ocrSearch")
                 Button {
                     HapticManager.shared.play(.light)
                     selectedPage = .library
@@ -708,6 +712,7 @@ struct ContentView: View {
                 } label: {
                     Label("nav.settings".localized, systemImage: "gearshape")
                 }
+                .accessibilityIdentifier("mreader.shelf.settings")
                 Button {
                     HapticManager.shared.play(.light)
                     showStorageManager = true
@@ -719,6 +724,7 @@ struct ContentView: View {
                     .font(.system(size: 22, weight: .semibold))
                     .frame(width: 44, height: 44)
             }
+            .accessibilityIdentifier("mreader.shelf.menu")
         }
     }
 
@@ -922,6 +928,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .hapticTap(.light)
+                    .accessibilityIdentifier("mreader.shelf.openReader")
                 }
             }
             .padding(.horizontal, 18)
@@ -956,6 +963,7 @@ struct ContentView: View {
                 Button("nav.done".localized) {
                     showSettings = false
                 }
+                .accessibilityIdentifier("mreader.settings.done")
             }
             .sheet(isPresented: $showTranslationPrompt) {
                 NavigationStack {
@@ -1018,6 +1026,7 @@ struct ContentView: View {
                 }
             }
         }
+        .accessibilityIdentifier("mreader.settings.root")
     }
 
     @ViewBuilder
@@ -1026,18 +1035,21 @@ struct ContentView: View {
             shelfPageContent(for: .continueReading)
                 .tabItem {
                     Label("tab.continueReading".localized, systemImage: "book")
+                        .accessibilityIdentifier("mreader.tab.continueReading")
                 }
                 .tag(MainShelfPage.continueReading)
 
             shelfPageContent(for: .library)
                 .tabItem {
                     Label("tab.library".localized, systemImage: "books.vertical")
+                        .accessibilityIdentifier("mreader.tab.library")
                 }
                 .tag(MainShelfPage.library)
 
             shelfPageContent(for: .statistics)
                 .tabItem {
                     Label("tab.statistics".localized, systemImage: "chart.bar.doc.horizontal")
+                        .accessibilityIdentifier("mreader.tab.statistics")
                 }
                 .tag(MainShelfPage.statistics)
         }
@@ -1083,6 +1095,7 @@ struct ContentView: View {
                 isLibraryRootPicking = true
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("mreader.shelf.selectLibraryRoot")
         }
     }
 
@@ -1097,9 +1110,11 @@ struct ContentView: View {
                     beginImport(.files)
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("mreader.shelf.importFiles")
                 Button("shelf.importFolder".localized) {
                     beginImport(.folder)
                 }
+                .accessibilityIdentifier("mreader.shelf.importFolder")
             }
             .frame(maxWidth: .infinity)
             .frame(minHeight: 460)
@@ -1508,6 +1523,7 @@ struct ContentView: View {
             } label: {
                 Label("Komga / OPDS", systemImage: "server.rack")
             }
+            .accessibilityIdentifier("mreader.settings.remoteSources")
         }
     }
 

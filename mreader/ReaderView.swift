@@ -1033,6 +1033,7 @@ struct ReaderView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle("")
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
+        .accessibilityIdentifier("mreader.reader.root")
         .defersSystemGestures(on: .horizontal) // 将水平滑动优先级完全交给翻页
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showComicSettings) {
@@ -1144,12 +1145,14 @@ struct ReaderView: View {
                         .frame(width: 36, height: 36)
                 }
                 .disabled(currentPageIndex <= 0)
+                .accessibilityIdentifier("mreader.reader.previousPage")
 
                 Spacer()
 
                 Text("\(currentPageIndex + 1) / \(manager.pages.count)")
                     .font(.system(.headline, design: .rounded))
                     .monospacedDigit()
+                    .accessibilityIdentifier("mreader.reader.progress")
 
                 Spacer()
 
@@ -1158,6 +1161,7 @@ struct ReaderView: View {
                         .frame(width: 36, height: 36)
                 }
                 .disabled(currentPageIndex >= max(0, manager.pages.count - 1))
+                .accessibilityIdentifier("mreader.reader.nextPage")
             }
 
             let sliderBinding = Binding<Double>(get: { Double(currentPageIndex) }, set: { currentPageIndex = Int($0) })
@@ -1212,11 +1216,13 @@ struct ReaderView: View {
                 } label: {
                     Label("offlineTranslation.startFromReader".localized, systemImage: "text.bubble.fill")
                 }
+                .accessibilityIdentifier("mreader.reader.offlineTranslationStart")
                 Button {
                     showOfflineTranslationManager = true
                 } label: {
                     Label("offlineTranslation.manage".localized, systemImage: "list.bullet.rectangle")
                 }
+                .accessibilityIdentifier("mreader.reader.offlineTranslationManage")
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 17, weight: .semibold))
@@ -1224,6 +1230,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 40)
             }
             .accessibilityLabel("offlineTranslation.menu".localized)
+            .accessibilityIdentifier("mreader.reader.offlineTranslationMenu")
 
             Button {
                 HapticManager.shared.play(.light)
@@ -1236,6 +1243,7 @@ struct ReaderView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("reader.settings".localized)
+            .accessibilityIdentifier("mreader.reader.settings")
         }
         .contentShape(Rectangle())
     }
@@ -1450,6 +1458,7 @@ struct ReaderView: View {
                         Label("reader.mode.doublePage".localized, systemImage: "book.pages").tag(ReadingMode.doublePage.rawValue)
                         Label("reader.mode.guidedPanel".localized, systemImage: "rectangle.split.2x2").tag(ReadingMode.guidedPanel.rawValue)
                     }
+                    .accessibilityIdentifier("mreader.reader.modePicker")
 
                     Picker("reader.direction".localized, selection: readingDirectionRaw) {
                         Label("reader.direction.leftToRight".localized, systemImage: "arrow.right").tag(ReadingDirection.leftToRight.rawValue)
@@ -1481,8 +1490,10 @@ struct ReaderView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 Button("nav.done".localized) { showComicSettings = false }
+                    .accessibilityIdentifier("mreader.reader.settings.done")
             }
         }
+        .accessibilityIdentifier("mreader.reader.settings.sheet")
     }
 
     private func initializeReadingPresetIfNeeded() async {
