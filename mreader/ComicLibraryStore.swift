@@ -273,6 +273,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
             merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
+            merged.borderlessTranslationFontSize = existing.borderlessTranslationFontSize
             merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
             merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw
@@ -1131,6 +1132,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.ocrTextScale = existing.ocrTextScale
             merged.ocrSafeAreaInset = existing.ocrSafeAreaInset
             merged.ocrMinimumTextHeight = existing.ocrMinimumTextHeight
+            merged.borderlessTranslationFontSize = existing.borderlessTranslationFontSize
             merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
             merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw

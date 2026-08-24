@@ -1381,6 +1381,29 @@ struct ReaderView: View {
                         }
                     }
                     .disabled(!comic.isOCREnabled)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("ocr.borderlessFontSize".localized)
+                            Slider(value: Binding(
+                                get: { comic.borderlessTranslationFontSize },
+                                set: { newValue in
+                                    updateComic {
+                                        $0.borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(newValue)
+                                    }
+                                }
+                            ), in: ComicBook.borderlessTranslationFontSizeRange, step: 1)
+                        }
+
+                        Text("ocr.borderlessFontSizeValue".localizedFormat(
+                            Int(comic.borderlessTranslationFontSize.rounded())
+                        ))
+                        .font(.caption.monospacedDigit())
+
+                        Text("ocr.borderlessFontSizeDescription".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section(header: Text("reader.jumpToPage".localized)) {
@@ -4178,6 +4201,12 @@ struct LocalImageView: View {
             translatedText: effectiveTranslation
         )
         let imageBounds = transform.imageRect
+        let usableBubbleBounds = usableTranslationBubbleBounds(
+            for: block,
+            textRect: textRect,
+            using: transform
+        )
+        let hasReliableBubble = usableBubbleBounds != nil
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
@@ -4190,48 +4219,36 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds: CGRect
-        if let bubbleBox = block.bubbleBox {
-            let mappedBubble = OCRCoordinateMapper.displayRect(
-                forNormalizedPageRect: bubbleBox,
-                using: transform
-            ).intersection(imageBounds)
-            // bubbleBox 与 textBox 分别来自 Vision / 本地 OCR 时常有 1~3pt 映射误差；
-            // 允许少量容差，避免一个本来正确的原气泡被过早丢弃。
-            allowedBounds = !mappedBubble.isNull
-                && mappedBubble.width > 0
-                && mappedBubble.height > 0
-                && OCRBubbleLayoutEngine.acceptsTranslationTextRect(
-                    textRect,
-                    in: mappedBubble,
-                    toleranceX: max(2, imageBounds.width * 0.005),
-                    toleranceY: max(2, imageBounds.height * 0.005)
-                )
-                ? mappedBubble
-                : fallbackBounds
-        } else {
-            allowedBounds = fallbackBounds
-        }
+        let allowedBounds = usableBubbleBounds ?? fallbackBounds
         let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
             around: textRect,
             within: allowedBounds,
             imageBounds: imageBounds
         )
+        let automaticFontSize = hasReliableBubble
+            ? preferredTranslationFontSize(
+                for: block,
+                in: size,
+                textRect: textRect,
+                sizingMode: .bubble
+            )
+            : 1
+        let requestedFontSize = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: hasReliableBubble,
+            automaticFontSize: automaticFontSize,
+            borderlessFontSize: borderlessTranslationFontSize
+        )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: effectiveTranslation,
             translationLines: translation.isEmpty ? [] : block.translationLines,
-            sourceFontSize: preferredTranslationFontSize(
-                for: block,
-                in: size,
-                textRect: textRect
-            ),
+            sourceFontSize: requestedFontSize,
             sourceRect: textRect,
             allowedBounds: layoutBounds,
             lineSpacing: 2,
             textOrientation: translationOrientation
         )
         #if DEBUG
-        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", preferredTranslationFontSize(for: block, in: size, textRect: textRect))) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(block.bubbleBox != nil)")
+        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble)")
         #endif
         return (
             sourceRect: textRect,
@@ -4239,6 +4256,26 @@ struct LocalImageView: View {
             layoutBounds: layoutBounds,
             translationOrientation: translationOrientation,
             choice: choice
+        )
+    }
+
+    private func usableTranslationBubbleBounds(
+        for block: TextBlock,
+        textRect: CGRect,
+        using transform: OCRDisplayTransform
+    ) -> CGRect? {
+        guard let bubbleBox = block.bubbleBox else { return nil }
+        let imageBounds = transform.imageRect
+        let mappedBubble = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: bubbleBox,
+            using: transform
+        )
+        return OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            mappedBubble,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: max(2, imageBounds.width * 0.005),
+            toleranceY: max(2, imageBounds.height * 0.005)
         )
     }
 
@@ -4553,17 +4590,26 @@ struct LocalImageView: View {
         11 + CGFloat(normalizedOCRScale) * 8
     }
 
+    private var borderlessTranslationFontSize: CGFloat {
+        CGFloat(
+            ComicBook.clampedBorderlessTranslationFontSize(
+                comic?.borderlessTranslationFontSize
+                    ?? ComicBook.defaultBorderlessTranslationFontSize
+            )
+        )
+    }
+
     private func preferredTranslationFontSize(
         for block: TextBlock,
         in size: CGSize,
-        textRect: CGRect
+        textRect: CGRect,
+        sizingMode: OCRBubbleLayoutEngine.TranslationTextSizingMode? = nil
     ) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
         // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
         let mode: OCRBubbleLayoutEngine.TranslationTextSizingMode =
-            OCRBubbleLayoutEngine.usesStandaloneLayout(for: block)
-            ? .standaloneGlyph
-            : .bubble
+            sizingMode
+            ?? (OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) ? .standaloneGlyph : .bubble)
         return OCRBubbleLayoutEngine.geometryCappedSourceFontSize(
             for: block,
             imageRect: imageRect,

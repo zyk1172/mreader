@@ -35,6 +35,21 @@ nonisolated enum OCRBubbleLayoutEngine {
         min(max(sourceFontSize, 1), TranslationLayoutMetrics.absoluteFontSizeCap)
     }
 
+    /// 有可靠气泡时沿用 OCR 几何字号；没有可靠气泡时，OCR 框不再参与字号决策。
+    /// 后续布局仍会在 allowedBounds 内按实际文本测量结果缩小字号。
+    static func requestedTranslationFontSize(
+        hasReliableBubble: Bool,
+        automaticFontSize: CGFloat,
+        borderlessFontSize: CGFloat
+    ) -> CGFloat {
+        guard !hasReliableBubble else {
+            return preferredTranslationFontSize(sourceFontSize: automaticFontSize)
+        }
+        return CGFloat(
+            ComicBook.clampedBorderlessTranslationFontSize(Double(borderlessFontSize))
+        )
+    }
+
     static func effectiveTranslationOrientation(
         sourceOrientation: TextOrientation,
         targetLanguage: TranslationTargetLanguage,
@@ -446,6 +461,46 @@ nonisolated enum OCRBubbleLayoutEngine {
             dx: -max(toleranceX, 0),
             dy: -max(toleranceY, 0)
         ).contains(textRect)
+    }
+
+    /// 将模型给出的 bubbleBox 收口为可用于翻译布局的可靠边界。
+    /// 除了容纳 textRect，还拒绝明显越出图片或几乎覆盖整页的病态框。
+    static func reliableTranslationBubbleBounds(
+        _ bubbleRect: CGRect?,
+        textRect: CGRect,
+        imageBounds: CGRect,
+        toleranceX: CGFloat,
+        toleranceY: CGFloat
+    ) -> CGRect? {
+        let safeImageBounds = imageBounds.standardized
+        guard let bubbleRect,
+              safeImageBounds.width > 0,
+              safeImageBounds.height > 0 else {
+            return nil
+        }
+
+        let safeBubble = bubbleRect.standardized
+        guard safeBubble.width > 0,
+              safeBubble.height > 0,
+              safeImageBounds.insetBy(
+                  dx: -max(toleranceX, 0),
+                  dy: -max(toleranceY, 0)
+              ).contains(safeBubble),
+              acceptsTranslationTextRect(
+                  textRect,
+                  in: safeBubble,
+                  toleranceX: toleranceX,
+                  toleranceY: toleranceY
+              ) else {
+            return nil
+        }
+
+        let isNearlyWholePage = safeBubble.width >= safeImageBounds.width * 0.96
+            && safeBubble.height >= safeImageBounds.height * 0.96
+        guard !isNearlyWholePage else { return nil }
+
+        let clipped = safeBubble.intersection(safeImageBounds)
+        return clipped.width > 0 && clipped.height > 0 ? clipped : nil
     }
 
     /// 兼容旧调用；离线翻译改用 anchoredTranslationLayout，以 textBox 为锚点。

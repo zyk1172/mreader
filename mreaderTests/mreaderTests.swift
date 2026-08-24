@@ -1836,6 +1836,111 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
     }
 
+    @Test @MainActor func borderlessTranslationFontIgnoresPathologicalOCRGeometry() {
+        let requested = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: false,
+            automaticFontSize: 120,
+            borderlessFontSize: 14
+        )
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "In the stationary species",
+            sourceFontSize: requested,
+            sourceRect: CGRect(x: 100, y: 100, width: 40, height: 20),
+            allowedBounds: CGRect(x: 80, y: 80, width: 80, height: 60),
+            lineSpacing: 2
+        )
+        #expect(layout.fontSize <= 14.001)
+
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 14
+            ) == 14
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 3
+            ) == 8
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: false,
+                automaticFontSize: 72,
+                borderlessFontSize: 40
+            ) == 28
+        )
+        #expect(
+            OCRBubbleLayoutEngine.requestedTranslationFontSize(
+                hasReliableBubble: true,
+                automaticFontSize: 80,
+                borderlessFontSize: 14
+            ) == TranslationLayoutMetrics.absoluteFontSizeCap
+        )
+    }
+
+    @Test func translationBubbleReliabilityRejectsMissingOutsideAndWholePageBounds() {
+        let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let textRect = CGRect(x: 150, y: 260, width: 70, height: 32)
+        let valid = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: 125, y: 220, width: 120, height: 100),
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(valid != nil)
+
+        let missing = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            nil,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(missing == nil)
+
+        let outside = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: -20, y: 220, width: 120, height: 100),
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(outside == nil)
+
+        let wholePage = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            imageBounds,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(wholePage == nil)
+    }
+
+    @Test @MainActor func comicBookBorderlessTranslationFontDefaultsAndClampsAcrossCodable() throws {
+        let clamped = ComicBook(
+            title: "font-setting",
+            bookmarkData: Data(),
+            totalPages: 1,
+            borderlessTranslationFontSize: 99
+        )
+        #expect(clamped.borderlessTranslationFontSize == 28)
+
+        let encoded = try JSONEncoder().encode(clamped)
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "borderlessTranslationFontSize")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decoded = try JSONDecoder().decode(ComicBook.self, from: legacyData)
+
+        #expect(decoded.borderlessTranslationFontSize == ComicBook.defaultBorderlessTranslationFontSize)
+    }
+
     @Test @MainActor func standaloneRotatedTextUsesGlyphGeometryInsteadOfAxisAlignedBox() {
         let imageRect = CGRect(x: 0, y: 0, width: 390, height: 780)
         let center = CGPoint(x: 190, y: 260)
