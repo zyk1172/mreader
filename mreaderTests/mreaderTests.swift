@@ -2236,7 +2236,7 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.lock.lock()
-        Self.lastCapturedRequest = request
+        Self.lastCapturedRequest = Self.requestWithCapturedBody(request)
         let data = Self.responseData
         Self.lock.unlock()
 
@@ -2256,6 +2256,23 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private static func requestWithCapturedBody(_ request: URLRequest) -> URLRequest {
+        guard let stream = request.httpBodyStream else { return request }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 8 * 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+        var captured = request
+        captured.httpBody = body
+        captured.httpBodyStream = nil
+        return captured
+    }
 }
 
 private func aiTransportRecordingSession() -> URLSession {
