@@ -130,11 +130,18 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
     private let apiKey: String
     private let baseURL: String
     private let session: URLSession
+    private let requestObserver: ((URLRequest) -> Void)?
 
-    init(apiKey: String, baseURL: String, session: URLSession = .shared) {
+    init(
+        apiKey: String,
+        baseURL: String,
+        session: URLSession = .shared,
+        requestObserver: ((URLRequest) -> Void)? = nil
+    ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.session = session
+        self.requestObserver = requestObserver
     }
 
     func send(_ request: AITransportRequest) async throws -> Data {
@@ -160,6 +167,7 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         addAuthenticationHeaders(to: &urlRequest, protocol: request.model.apiProtocol)
         urlRequest.httpBody = try makeBody(for: request)
+        requestObserver?(urlRequest)
 
         let (data, response) = try await session.data(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
