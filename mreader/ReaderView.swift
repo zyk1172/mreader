@@ -31,18 +31,7 @@ struct ReaderContainerView: View {
         .onAppear {
             guard !isLoaded && !loadFailed else { return }
             Task {
-                let result: ComicManager.LoadResult?
-                switch comic.sourceType {
-                case .local:
-                    let bookmarkData = comic.bookmarkData
-                    result = await Task.detached(priority: .userInitiated) {
-                        ComicManager.loadPages(bookmarkData: bookmarkData)
-                    }.value
-                case .komga:
-                    result = await RemotePageLoader.loadPages(for: comic)
-                case .opds:
-                    result = await OPDSProvider.loadPages(for: comic)
-                }
+                let result = await ReaderPageSourceService.loadPages(for: comic)
                 if let result {
                     if comic.sourceType == .komga,
                        let remoteProgress = try? await KomgaProvider.remoteReadingProgressSnapshot(for: comic) {
@@ -4670,7 +4659,7 @@ struct LocalImageView: View {
             let requestTarget = TranslationTargetLanguage.migrateLegacyValue(self.targetLanguage)
             do {
                 // 纯文本兜底：用文本模型而不是昂贵的视觉模型（审查 #14）
-                let pageResult = try await AITranslator.translatePage(
+                let pageResult = try await TranslationRuntimeService.translatePage(
                     blocks: missingBlocks,
                     apiKey: activeConfiguration.apiKey,
                     baseURL: activeConfiguration.baseURL,
@@ -4744,7 +4733,7 @@ struct LocalImageView: View {
 
         if AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: blocks.count) {
             do {
-                let pageResult = try await AITranslator.translatePage(
+                let pageResult = try await TranslationRuntimeService.translatePage(
                     blocks: blocks,
                     apiKey: requestAPIKey,
                     baseURL: requestBaseURL,
@@ -4789,7 +4778,7 @@ struct LocalImageView: View {
                     : ""
                 group.addTask {
                     do {
-                        let translatedText = try await AITranslator.translate(
+                        let translatedText = try await TranslationRuntimeService.translate(
                             text: block.text,
                             ocrMetadata: AITranslator.ocrMetadata(for: block),
                             pageContext: pageContext,
@@ -4854,9 +4843,9 @@ struct LocalImageView: View {
             fallbackImage: image,
             options: options
         )
-        let localResult = try await OCRRecognitionCache.shared.result(for: cacheRequest)
+        let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
         if let comicID, let pageIndex {
-            await OCRSearchIndex.shared.index(
+            await OCRRuntimeService.index(
                 comicID: comicID,
                 pageIndex: pageIndex,
                 blocks: localResult.bubbleBlocks
@@ -4865,7 +4854,7 @@ struct LocalImageView: View {
         let result: OCRPipelineResult
         if ocrVisualVerificationEnabled, let activeConfiguration {
             let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
-            let corrected = try await AITranslator.visualVerifyOCRRegions(
+            let corrected = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: localResult.resolvedBlocks,
                 apiKey: activeConfiguration.apiKey,

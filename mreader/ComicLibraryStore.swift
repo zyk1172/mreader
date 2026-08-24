@@ -318,7 +318,7 @@ final class ComicLibraryStore: ObservableObject {
                 try? await OfflineTranslationStorageManager.shared.deleteComicTranslations(comicID: comic.id)
             }
             OfflineDownloadManager.shared.remove(comic)
-            Task { await OCRSearchIndex.shared.remove(comicID: comic.id) }
+            Task { await OCRRuntimeService.remove(comicID: comic.id) }
             if comic.sourceType == .local {
                 ComicManager.deleteLibraryPath(comic.libraryPath)
             } else if comic.sourceType == .komga {
@@ -404,7 +404,7 @@ final class ComicLibraryStore: ObservableObject {
     func addSeries(title: String, libraryPath: String? = nil) -> ComicSeries? {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { return nil }
-        let folderPath = libraryPath ?? ComicManager.createSeriesFolder(title: trimmedTitle)?.path
+        let folderPath = libraryPath ?? LibraryImportService.createSeriesFolder(title: trimmedTitle)?.path
         let newSeries = ComicSeries(title: trimmedTitle, libraryPath: folderPath)
         series.insert(newSeries, at: 0)
         saveSeries()
@@ -444,13 +444,13 @@ final class ComicLibraryStore: ObservableObject {
         guard !comic.bookmarkData.isEmpty else { return false }
 
         // 执行文件移动
-        guard let newBookmark = ComicManager.moveComicFile(bookmarkData: comic.bookmarkData, to: URL(fileURLWithPath: targetPath, isDirectory: true)) else {
+        guard let newBookmark = LibraryImportService.moveComicFile(bookmarkData: comic.bookmarkData, to: URL(fileURLWithPath: targetPath, isDirectory: true)) else {
             return false
         }
 
         comics[index].seriesID = seriesID
         comics[index].bookmarkData = newBookmark
-        if let newLibraryPath = ComicManager.libraryPathOfMovedFile(oldBookmark: comic.bookmarkData, newBookmark: newBookmark) {
+        if let newLibraryPath = LibraryImportService.libraryPathOfMovedFile(oldBookmark: comic.bookmarkData, newBookmark: newBookmark) {
             comics[index].libraryPath = newLibraryPath
             comics[index].libraryRelativePath = ComicManager.libraryRelativePath(for: URL(fileURLWithPath: newLibraryPath))
         }
@@ -497,7 +497,7 @@ final class ComicLibraryStore: ObservableObject {
 
     private func performLocalLibrarySync() async {
         let scanned = await Task.detached(priority: .utility) {
-            ComicManager.scanLocalLibraryHierarchy()
+            LibraryImportService.scanLocalLibraryHierarchy()
         }.value
         applyScan(scanned)
     }

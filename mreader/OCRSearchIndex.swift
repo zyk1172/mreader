@@ -185,16 +185,16 @@ final class OCRLibraryIndexer: ObservableObject {
                             recognitionMode: .adaptive
                         )
                     )
-                    let ocrResult = try await OCRRecognitionCache.shared.result(for: request)
-                    await OCRSearchIndex.shared.index(comicID: comic.id, pageIndex: page.index, blocks: ocrResult.bubbleBlocks)
+                    let ocrResult = try await OCRRuntimeService.recognize(for: request)
+                    await OCRRuntimeService.index(comicID: comic.id, pageIndex: page.index, blocks: ocrResult.bubbleBlocks)
                     progress = Double(page.index + 1) / Double(pageCount)
                 }
-                await OCRSearchIndex.shared.flush()
+                await OCRRuntimeService.flush()
                 HapticManager.shared.play(.success)
             } catch is CancellationError {
-                await OCRSearchIndex.shared.flush()
+                await OCRRuntimeService.flush()
             } catch {
-                await OCRSearchIndex.shared.flush()
+                await OCRRuntimeService.flush()
                 lastError = error.localizedDescription
                 HapticManager.shared.play(.error)
             }
@@ -210,14 +210,7 @@ final class OCRLibraryIndexer: ObservableObject {
     }
 
     private static func loadPages(for comic: ComicBook) async -> ComicManager.LoadResult? {
-        switch comic.sourceType {
-        case .local:
-            return ComicManager.loadPages(bookmarkData: comic.bookmarkData)
-        case .komga:
-            return await RemotePageLoader.loadPages(for: comic)
-        case .opds:
-            return await OPDSProvider.loadPages(for: comic)
-        }
+        await ReaderPageSourceService.loadPages(for: comic)
     }
 }
 
@@ -255,7 +248,7 @@ struct OCRSearchView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, prompt: "ocr.search.placeholder".localized)
             .onChange(of: query) { _, value in
-                Task { results = await OCRSearchIndex.shared.search(value, comics: comics) }
+                Task { results = await OCRRuntimeService.search(value, comics: comics) }
             }
             .toolbar { Button("nav.done".localized) { dismiss() } }
         }
