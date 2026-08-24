@@ -56,6 +56,9 @@ nonisolated enum OCRCandidateResolver {
             let representative = winningGroup.max { lhs, rhs in
                 candidateScore(lhs) < candidateScore(rhs)
             } ?? winningGroup[0]
+            let inheritedLayoutRole: TranslationLayoutRole = winningGroup.contains {
+                $0.layoutRole == .standalone
+            } ? .standalone : representative.layoutRole
             let inheritedColor = winningGroup.compactMap(\.textColorHex).first
                 ?? group.compactMap(\.textColorHex).first
             resolved.append(TextBlock(
@@ -71,7 +74,8 @@ nonisolated enum OCRCandidateResolver {
                 textColorHex: inheritedColor,
                 polygon: representative.polygon,
                 translationLines: representative.translationLines,
-                textOrientation: representative.textOrientation
+                textOrientation: representative.textOrientation,
+                layoutRole: inheritedLayoutRole
             ))
             rejected.append(contentsOf: group.filter { $0.id != representative.id })
         }

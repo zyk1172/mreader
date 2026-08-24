@@ -16,9 +16,11 @@ nonisolated struct JapaneseVerticalOCRCoverage: Equatable, Sendable {
 
 /// Tesseract is not the primary OCR engine in MReader.  This service only
 /// owns the narrow escape hatch for pages where Vision has evidence of
-/// Japanese vertical writing but its result is incomplete.
+/// Japanese vertical writing but its result is incomplete. Automatic mode
+/// uses kana, Japanese source hints, and vertical Kanji evidence; it does not
+/// require the reader's page direction to be RTL.
 nonisolated enum JapaneseVerticalOCRService {
-    static let revision = "jpn-vert-tesseract-5.5.1-v2"
+    static let revision = "jpn-vert-tesseract-5.5.1-v3"
     static let minimumAverageConfidence = 0.58
     static let minimumUsefulCharacterRatio = 0.42
 
@@ -114,20 +116,21 @@ nonisolated enum JapaneseVerticalOCRService {
         existingBlocks: [TextBlock],
         options: OCRPreprocessor.Options
     ) -> Bool {
-        guard options.isRightToLeft,
-              isJapanesePage(
-                  existingBlocks: existingBlocks,
-                  preference: options.sourceLanguagePreference
-              ) else {
+        guard isJapaneseRecoveryCandidate(
+            in: image,
+            existingBlocks: existingBlocks,
+            isRightToLeft: options.isRightToLeft,
+            sourceLanguagePreference: options.sourceLanguagePreference
+        ) else {
             return false
         }
 
-        // Maximum accuracy is an explicit cost/quality choice.  Do not use
-        // Vision's own confidence as a proxy for page coverage here: a page
-        // with two confidently recognized columns can still be missing eight
-        // other columns entirely.
+        // Maximum accuracy is an explicit cost/quality choice, but the reader
+        // direction is not OCR language metadata. Require vertical page
+        // evidence, then run the second engine even when Vision returned a
+        // few high-confidence blocks.
         if options.recognitionMode == .maximumAccuracy {
-            return true
+            return hasVerticalPageEvidence(in: image, existingBlocks: existingBlocks)
         }
 
         return shouldRequestPageRecovery(
@@ -144,11 +147,12 @@ nonisolated enum JapaneseVerticalOCRService {
         isRightToLeft: Bool,
         sourceLanguagePreference: TranslationSourceLanguage?
     ) -> Bool {
-        guard isRightToLeft,
-              isJapanesePage(
-                  existingBlocks: existingBlocks,
-                  preference: sourceLanguagePreference
-              ) else {
+        guard isJapaneseRecoveryCandidate(
+            in: image,
+            existingBlocks: existingBlocks,
+            isRightToLeft: isRightToLeft,
+            sourceLanguagePreference: sourceLanguagePreference
+        ) else {
             return false
         }
 
@@ -220,6 +224,59 @@ nonisolated enum JapaneseVerticalOCRService {
             (0x3040...0x30FF).contains(scalar.value)
                 || (0x31F0...0x31FF).contains(scalar.value)
         } || existingBlocks.contains { $0.ocrSource.localizedCaseInsensitiveContains(":ja") }
+    }
+
+    private static func isJapaneseRecoveryCandidate(
+        in image: UIImage?,
+        existingBlocks: [TextBlock],
+        isRightToLeft: Bool,
+        sourceLanguagePreference: TranslationSourceLanguage?
+    ) -> Bool {
+        if isJapanesePage(
+            existingBlocks: existingBlocks,
+            preference: sourceLanguagePreference
+        ) {
+            return true
+        }
+        guard sourceLanguagePreference == nil || sourceLanguagePreference == .automatic else {
+            return false
+        }
+
+        // Automatic mode cannot use kana as its only Japanese signal: a
+        // poorly recognized page may contain only Kanji. Treat Kanji-only
+        // text as a Japanese recovery candidate when there is vertical-page
+        // evidence, a Japanese OCR pass hint, or the RTL direction hint.
+        let hasCJK = existingBlocks
+            .map(\.text)
+            .joined()
+            .unicodeScalars
+            .contains { scalar in
+                (0x3400...0x4DBF).contains(scalar.value)
+                    || (0x4E00...0x9FFF).contains(scalar.value)
+                    || (0xF900...0xFAFF).contains(scalar.value)
+            }
+        guard hasCJK else { return false }
+        if existingBlocks.contains(where: { block in
+            let source = block.ocrSource.lowercased()
+            return source.contains(":ja") || source.contains("-ja") || source.contains("_ja")
+        }) {
+            return true
+        }
+        if verticalColumnCount(in: existingBlocks) >= 1 {
+            return true
+        }
+        if let image, verticalColumnEvidenceCenters(in: image).count >= 2 {
+            return true
+        }
+        return isRightToLeft
+    }
+
+    private static func hasVerticalPageEvidence(
+        in image: UIImage?,
+        existingBlocks: [TextBlock]
+    ) -> Bool {
+        verticalColumnCount(in: existingBlocks) >= 1
+            || (image.map { verticalColumnEvidenceCenters(in: $0).count >= 2 } ?? false)
     }
 
     /// Returns the number of separated vertical text columns represented by

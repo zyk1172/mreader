@@ -80,6 +80,34 @@ struct mreaderTests {
         #expect(AIEndpointResolver.endpointURL(for: .anthropicMessages, from: "https://api.example.test/v1/messages")?.absoluteString == "https://api.example.test/v1/messages")
     }
 
+    @Test func aiModelSettingsRepairsSelectedVisionModelWhenCapabilityIsRemoved() {
+        let models = ["muse-spark-1.2-contributor", "mimo-v2.5"]
+        let descriptors = [
+            models[0]: AIModelDescriptor(
+                id: models[0],
+                apiProtocol: .openAIResponses,
+                supportsVision: true
+            ),
+            models[1]: AIModelDescriptor(
+                id: models[1],
+                supportsVision: true
+            )
+        ]
+        let repaired = AIProviderModelSelectionPolicy.repairedVisionModel(
+            selectedModel: models[0],
+            changedModelID: models[0],
+            changedDescriptor: AIModelDescriptor(
+                id: models[0],
+                apiProtocol: .openAIResponses,
+                supportsVision: false
+            ),
+            models: models,
+            descriptors: descriptors
+        )
+
+        #expect(repaired == models[1])
+    }
+
     @Test func aiResponseDecoderSupportsChatResponsesAndAnthropic() throws {
         let chat = try JSONSerialization.data(withJSONObject: [
             "choices": [["message": ["content": "chat answer"], "finish_reason": "stop"]]
@@ -273,7 +301,7 @@ struct mreaderTests {
             isRightToLeft: true,
             sourceLanguagePreference: .korean
         ))
-        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+        #expect(JapaneseVerticalOCRService.shouldRequestPageRecovery(
             in: nil,
             existingBlocks: verticalBlocks,
             isRightToLeft: false,
@@ -353,7 +381,7 @@ struct mreaderTests {
 
     @Test func japaneseVerticalMaximumAccuracyDoesNotTrustPartialVisionCoverage() {
         var options = OCRPreprocessor.Options(
-            isRightToLeft: true,
+            isRightToLeft: false,
             minimumTextHeight: 0.01,
             recognitionMode: .maximumAccuracy,
             sourceLanguagePreference: .japanese
@@ -370,6 +398,45 @@ struct mreaderTests {
         #expect(JapaneseVerticalOCRService.shouldRunFallback(
             in: nil,
             existingBlocks: [confidentBlock],
+            options: options
+        ))
+    }
+
+    @Test func japaneseVerticalAutomaticModeRecoversKanjiOnlyPageWithoutRTL() throws {
+        let size = CGSize(width: 160, height: 240)
+        var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
+        let context = try #require(CGContext(
+            data: &pixels,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 28, y: 30, width: 6, height: 180))
+        context.fill(CGRect(x: 122, y: 30, width: 6, height: 180))
+        let image = UIImage(cgImage: try #require(context.makeImage()))
+        let localBlock = TextBlock(
+            text: "今日会社時間",
+            boundingBox: CGRect(x: 0.16, y: 0.12, width: 0.06, height: 0.70),
+            confidence: 0.95,
+            ocrSource: "vision",
+            textOrientation: .vertical
+        )
+        let options = OCRPreprocessor.Options(
+            isRightToLeft: false,
+            minimumTextHeight: 0.01,
+            recognitionMode: .adaptive,
+            sourceLanguagePreference: .automatic
+        )
+
+        #expect(JapaneseVerticalOCRService.shouldRunFallback(
+            in: image,
+            existingBlocks: [localBlock],
             options: options
         ))
     }
@@ -1179,9 +1246,42 @@ struct mreaderTests {
             textRect: CGRect(x: 100, y: 180, width: 180, height: 156)
         )
 
+        #expect(block.layoutRole == .standalone)
         #expect(axisAlignedSize == 156)
         #expect(standaloneSize < axisAlignedSize * 0.5)
         #expect(standaloneSize > 20)
+    }
+
+    @Test func bubbleBoxAbsenceDoesNotSelectStandaloneLayout() {
+        let dialogue = TextBlock(
+            text: "I knew it wouldn't be...",
+            boundingBox: CGRect(x: 0.20, y: 0.30, width: 0.42, height: 0.08),
+            ocrSource: "vision:ja",
+            textOrientation: .horizontal
+        )
+        let soundEffect = TextBlock(
+            text: "FIDGET",
+            boundingBox: CGRect(x: 0.20, y: 0.22, width: 0.46, height: 0.20),
+            ocrSource: "vision-model:soundEffect",
+            textOrientation: .horizontal
+        )
+
+        #expect(dialogue.layoutRole == .dialogue)
+        #expect(!OCRBubbleLayoutEngine.usesStandaloneLayout(for: dialogue))
+        #expect(OCRBubbleLayoutEngine.standaloneTextFontSize(
+            for: dialogue,
+            imageRect: CGRect(x: 0, y: 0, width: 390, height: 780),
+            textRect: CGRect(x: 78, y: 234, width: 164, height: 62)
+        ) == dialogue.sourceFontSize(in: CGRect(x: 0, y: 0, width: 390, height: 780)))
+        #expect(soundEffect.layoutRole == .standalone)
+        #expect(OCRBubbleLayoutEngine.usesStandaloneLayout(for: soundEffect))
+    }
+
+    @Test func translationLayoutRoleMapsExplicitClassifications() {
+        #expect(TranslationLayoutRole.fromClassification("dialogue") == .dialogue)
+        #expect(TranslationLayoutRole.fromClassification("narration") == .standalone)
+        #expect(TranslationLayoutRole.fromClassification("soundEffect") == .standalone)
+        #expect(TranslationLayoutRole.fromClassification("page_number") == .standalone)
     }
 
     @Test @MainActor func standaloneLongTranslationShrinksInsideFinitePadding() {
@@ -1191,7 +1291,8 @@ struct mreaderTests {
             text: "FIDGET",
             boundingBox: CGRect(x: 0.28, y: 0.27, width: 0.31, height: 0.054),
             estimatedFontScale: 0.054,
-            textOrientation: .horizontal
+            textOrientation: .horizontal,
+            layoutRole: .standalone
         )
         let fontSize = OCRBubbleLayoutEngine.standaloneTextFontSize(
             for: block,
@@ -1236,7 +1337,8 @@ struct mreaderTests {
             text: "ド",
             boundingBox: CGRect(x: 0.30, y: 0.28, width: 0.25, height: 0.25),
             estimatedFontScale: 0.25,
-            textOrientation: .horizontal
+            textOrientation: .horizontal,
+            layoutRole: .standalone
         )
         let largeGlyphSize = OCRBubbleLayoutEngine.standaloneTextFontSize(
             for: largeGlyph,
@@ -4607,6 +4709,28 @@ private func makeTestPageRequest(
         )
 
         #expect(OfflineTranslatedBlock(block: block).classification == "narration")
+    }
+
+    @Test func offlineTranslationPreservesStandaloneLayoutRole() throws {
+        let block = TextBlock(
+            text: "斜体音效",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.25, height: 0.12),
+            polygon: [
+                CGPoint(x: 0.2, y: 0.2),
+                CGPoint(x: 0.43, y: 0.31),
+                CGPoint(x: 0.40, y: 0.38),
+                CGPoint(x: 0.17, y: 0.27)
+            ],
+            textOrientation: .horizontal,
+            layoutRole: .standalone
+        )
+        let decoded = try JSONDecoder().decode(
+            OfflineTranslatedBlock.self,
+            from: JSONEncoder().encode(OfflineTranslatedBlock(block: block))
+        )
+
+        #expect(decoded.layoutRole == .standalone)
+        #expect(decoded.textBlock().layoutRole == .standalone)
     }
 
     @Test func offlineTranslationPartialPagePrefersMatchingCompleteFallback() {

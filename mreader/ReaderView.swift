@@ -4079,7 +4079,7 @@ struct LocalImageView: View {
         )
         let imageBounds = transform.imageRect
         let fallbackBounds: CGRect
-        if block.bubbleBox == nil {
+        if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
                 around: textRect,
                 within: imageBounds
@@ -4428,7 +4428,7 @@ struct LocalImageView: View {
     ) -> CGFloat {
         let imageRect = ocrDisplayTransform(in: size).imageRect
         // 字号缩放统一由 LayoutEngine 在“确实装不下”时决定，避免 0.98 被重复套用。
-        if block.bubbleBox == nil {
+        if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             return OCRBubbleLayoutEngine.standaloneTextFontSize(
                 for: block,
                 imageRect: imageRect,

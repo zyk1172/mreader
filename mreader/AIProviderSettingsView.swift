@@ -32,6 +32,26 @@ private enum AIModelVisionCapability: String, CaseIterable, Identifiable {
     }
 }
 
+nonisolated enum AIProviderModelSelectionPolicy {
+    static func repairedVisionModel(
+        selectedModel: String,
+        changedModelID: String,
+        changedDescriptor: AIModelDescriptor,
+        models: [String],
+        descriptors: [String: AIModelDescriptor]
+    ) -> String {
+        guard selectedModel == changedModelID,
+              changedDescriptor.supportsVision == false else {
+            return selectedModel
+        }
+        var updatedDescriptors = descriptors
+        updatedDescriptors[changedModelID] = changedDescriptor
+        return models.first { model in
+            (updatedDescriptors[model] ?? AIModelProtocolCatalog.descriptor(for: model)).supportsVision != false
+        } ?? ""
+    }
+}
+
 struct AIProviderSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var profiles: [AIProviderProfile] = []
@@ -384,7 +404,15 @@ private struct AIProviderEditorView: View {
                     modelID: item.id,
                     descriptor: descriptor(for: item.id)
                 ) { updatedDescriptor in
+                    let repairedVisionModel = AIProviderModelSelectionPolicy.repairedVisionModel(
+                        selectedModel: selectedVisionModel,
+                        changedModelID: item.id,
+                        changedDescriptor: updatedDescriptor,
+                        models: normalizedModels,
+                        descriptors: modelDescriptors
+                    )
                     modelDescriptors[item.id] = updatedDescriptor
+                    selectedVisionModel = repairedVisionModel
                     editingModel = nil
                 }
             }
