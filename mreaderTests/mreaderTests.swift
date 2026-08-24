@@ -3345,6 +3345,7 @@ private final class AITransportRecordingURLProtocol: URLProtocol {
         let data = sequenceResponse?.data ?? Self.responseData
         let statusCode = sequenceResponse?.statusCode ?? Self.responseStatusCode
         let failure = Self.failure
+        Self.lastCapturedRequest = request
         Self.capturedRequestCount += 1
         Self.lock.unlock()
 

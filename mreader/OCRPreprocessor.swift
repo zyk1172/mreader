@@ -775,14 +775,15 @@ struct OCRPreprocessor {
             } else {
                 primary = english
             }
-            // A locator that only saw Latin glyphs is weak evidence. A
-            // vertical column layout is stronger manga/Japanese evidence and
-            // must win over the accidental English candidate. A low-confidence
-            // or very short Latin locator is also weak evidence; run Japanese
-            // accurate OCR first so one fast misread cannot lock the whole page
-            // to English.
+            // A vertical column layout is stronger manga/Japanese evidence
+            // and must win over an accidental English candidate. A short
+            // all-Latin locator such as “FIDGET” is weak evidence in
+            // a Japanese manga page, but a complete phrase such as “Hello
+            // world” should remain English when no Japanese/vertical signal
+            // exists. Confidence is the primary weak-evidence signal; the
+            // length guard is intentionally limited to isolated short words.
             let weakLatinEvidence = (locatorConfidence.map { $0 < 0.72 } ?? false)
-                || scalars.count < 16
+                || scalars.count < 8
             if verticalEvidence || weakLatinEvidence {
                 return RecognitionPlan(primary: japanese, fallback: primary)
             }
