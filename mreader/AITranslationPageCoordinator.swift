@@ -20,7 +20,7 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
     /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
-    static let translationCacheRevision = "translation-v7"
+    static let translationCacheRevision = "translation-v8-ai-transports"
     static let ocrGeometryRevision = "physical-axis-v2"
 
     let pageURL: URL
@@ -53,10 +53,10 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
         switch mode {
         case .ocr:
             modelIdentity = usesVisualOCRVerification
-                ? "text=\(configuration.textModel)|vision=\(configuration.visionModel)"
-                : "text=\(configuration.textModel)"
+                ? "text=\(configuration.textModel)|text-protocol=\(configuration.textModelDescriptor.apiProtocol.rawValue)|vision=\(configuration.visionModel)|vision-protocol=\(configuration.visionModelDescriptor.apiProtocol.rawValue)"
+                : "text=\(configuration.textModel)|text-protocol=\(configuration.textModelDescriptor.apiProtocol.rawValue)"
         case .vision:
-            modelIdentity = "vision=\(configuration.visionModel)|text=\(configuration.textModel)"
+            modelIdentity = "vision=\(configuration.visionModel)|vision-protocol=\(configuration.visionModelDescriptor.apiProtocol.rawValue)|text=\(configuration.textModel)|text-protocol=\(configuration.textModelDescriptor.apiProtocol.rawValue)"
         }
         let rawValue = [
             Self.translationCacheRevision,
@@ -310,7 +310,9 @@ nonisolated enum AITranslationPagePipeline {
                 promptTemplate: request.visionPromptTemplate,
                 isRightToLeft: request.isRightToLeft,
                 viewportAspect: request.viewportAspect,
-                sourceLanguage: request.sourceLanguagePreference
+                sourceLanguage: request.sourceLanguagePreference,
+                visionModelDescriptor: request.configuration.visionModelDescriptor,
+                textFallbackModelDescriptor: request.configuration.textModelDescriptor
             )
         }
     }
@@ -383,7 +385,8 @@ nonisolated enum AITranslationPagePipeline {
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
                 model: request.configuration.visionModel,
-                isRightToLeft: request.isRightToLeft
+                isRightToLeft: request.isRightToLeft,
+                modelDescriptor: request.configuration.visionModelDescriptor
             )
         } else {
             resolvedBlocks = localResult.resolvedBlocks
@@ -489,7 +492,8 @@ nonisolated enum AITranslationPagePipeline {
                             model: configuration.textModel,
                             targetLanguage: target,
                             promptTemplate: request.translationPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout
+                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            modelDescriptor: configuration.textModelDescriptor
                         )
                         return (index, .success(text))
                     } catch is CancellationError {
@@ -548,7 +552,8 @@ nonisolated enum AITranslationPagePipeline {
             target: request.target,
             promptTemplate: request.translationPromptTemplate,
             sourceLanguage: request.sourceLanguagePreference,
-            previousContext: request.previousContext
+            previousContext: request.previousContext,
+            modelDescriptor: request.configuration.textModelDescriptor
         )
         // 线上 ID 是 b0/b1/...，顺序 = requestedBlocks（即 indexes）中的位置
         for (position, index) in indexes.enumerated() {

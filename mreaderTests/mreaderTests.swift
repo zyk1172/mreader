@@ -13,6 +13,7 @@ import Vision
 import ZIPFoundation
 @testable import mreader
 
+@Suite(.serialized)
 struct mreaderTests {
 
     @Test func translationTargetsMigrateLegacyChineseWithoutDuplicateOption() {
@@ -30,6 +31,199 @@ struct mreaderTests {
         #expect(targets.count == 15)
         #expect(Set(targets.map(\.rawValue)).count == targets.count)
         #expect(targets.allSatisfy { $0.modelInstruction.contains($0.rawValue) })
+    }
+
+    @Test func aiModelCatalogMapsOpenCodeGoProtocolsAndPrefixes() {
+        #expect(AIModelProtocolCatalog.descriptor(for: "mimo-v2.5").apiProtocol == .openAIChatCompletions)
+        #expect(AIModelProtocolCatalog.descriptor(for: "muse-spark-1.2-contributor").apiProtocol == .openAIResponses)
+        #expect(AIModelProtocolCatalog.descriptor(for: "minimax-m3").apiProtocol == .anthropicMessages)
+        #expect(AIModelProtocolCatalog.descriptor(for: "qwen3.7-plus").apiProtocol == .anthropicMessages)
+        #expect(AIModelProtocolCatalog.descriptor(for: "opencode-go/muse-spark-1.2-contributor").apiProtocol == .openAIResponses)
+    }
+
+    @Test func aiProviderProfileMigratesLegacyModelsToChatAndRoundTripsDescriptors() throws {
+        let legacyProfile = AIProviderProfile.normalized(
+            name: "legacy",
+            baseURL: "https://api.example.test/v1",
+            modelsText: "muse-spark-1.2-contributor\nmimo-v2.5",
+            selectedTextModel: "mimo-v2.5",
+            selectedVisionModel: "mimo-v2.5",
+            modelDescriptors: [
+                AIModelDescriptor(
+                    id: "muse-spark-1.2-contributor",
+                    apiProtocol: .openAIResponses,
+                    supportsVision: true
+                )
+            ]
+        )
+        let encoded = try JSONEncoder().encode(legacyProfile)
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "modelDescriptors")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let migrated = try JSONDecoder().decode(AIProviderProfile.self, from: legacyData)
+        #expect(migrated.modelDescriptors.allSatisfy { $0.apiProtocol == .openAIChatCompletions })
+
+        let roundTripData = try JSONEncoder().encode(legacyProfile)
+        let roundTripped = try JSONDecoder().decode(AIProviderProfile.self, from: roundTripData)
+        #expect(roundTripped.modelDescriptors.first?.apiProtocol == .openAIResponses)
+        #expect(roundTripped.modelDescriptors.first?.supportsVision == true)
+    }
+
+    @Test func aiEndpointResolverReplacesEveryKnownEndpointFamily() {
+        let base = "https://api.example.test/v1"
+        #expect(AIEndpointResolver.endpointURL(for: .openAIChatCompletions, from: base)?.absoluteString == "https://api.example.test/v1/chat/completions")
+        #expect(AIEndpointResolver.endpointURL(for: .openAIResponses, from: base)?.absoluteString == "https://api.example.test/v1/responses")
+        #expect(AIEndpointResolver.endpointURL(for: .anthropicMessages, from: base)?.absoluteString == "https://api.example.test/v1/messages")
+        #expect(AIEndpointResolver.endpointURL(for: .openAIResponses, from: "https://api.example.test/v1/chat/completions")?.absoluteString == "https://api.example.test/v1/responses")
+        #expect(AIEndpointResolver.endpointURL(for: .anthropicMessages, from: "https://api.example.test/v1/messages")?.absoluteString == "https://api.example.test/v1/messages")
+    }
+
+    @Test func aiResponseDecoderSupportsChatResponsesAndAnthropic() throws {
+        let chat = try JSONSerialization.data(withJSONObject: [
+            "choices": [["message": ["content": "chat answer"], "finish_reason": "stop"]]
+        ])
+        let responses = try JSONSerialization.data(withJSONObject: [
+            "output_text": "responses answer"
+        ])
+        let anthropic = try JSONSerialization.data(withJSONObject: [
+            "content": [["type": "text", "text": "anthropic answer"]],
+            "stop_reason": "end_turn"
+        ])
+
+        #expect(AIChatResponseDecoder.decode(chat).content == "chat answer")
+        #expect(AIChatResponseDecoder.decode(responses).content == "responses answer")
+        #expect(AIChatResponseDecoder.decode(anthropic).content == "anthropic answer")
+        #expect(AIChatResponseDecoder.decode(anthropic).finishReason == "end_turn")
+    }
+
+    @Test func aiTranslationClientBuildsChatCompletionsRequest() async throws {
+        AITransportRecordingURLProtocol.configure(responseData: Data(#"{"output_text":"ok"}"#.utf8))
+        let client = AITranslationClient(
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            session: aiTransportRecordingSession()
+        )
+        _ = try await client.send(
+            AITransportRequest(
+                model: AIModelDescriptor(id: "mimo-v2.5", apiProtocol: .openAIChatCompletions),
+                systemPrompt: "system",
+                userPrompt: "hello",
+                responseFormat: .jsonObject,
+                temperature: 0.2,
+                maxTokens: 32
+            )
+        )
+        guard let request = AITransportRecordingURLProtocol.lastRequest(),
+              let body = try JSONSerialization.jsonObject(with: try #require(request.httpBody)) as? [String: Any] else {
+            Issue.record("没有捕获 Chat Completions 请求")
+            return
+        }
+        #expect(request.url?.absoluteString == "https://api.example.test/v1/chat/completions")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+        #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
+        #expect(body["model"] as? String == "mimo-v2.5")
+        #expect((body["messages"] as? [[String: Any]])?.count == 2)
+        #expect((body["response_format"] as? [String: Any])?["type"] as? String == "json_object")
+        #expect(body["max_tokens"] as? Int == 32)
+    }
+
+    @Test func aiTranslationClientBuildsResponsesRequestWithImage() async throws {
+        AITransportRecordingURLProtocol.configure(responseData: Data(#"{"output_text":"ok"}"#.utf8))
+        let client = AITranslationClient(
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1/chat/completions",
+            session: aiTransportRecordingSession()
+        )
+        _ = try await client.send(
+            AITransportRequest(
+                model: AIModelDescriptor(id: "opencode-go/muse-spark-1.2-contributor", apiProtocol: .openAIResponses),
+                systemPrompt: "instructions",
+                userPrompt: "read image",
+                imageDataURL: "data:image/png;base64,QUJD",
+                responseFormat: .jsonSchema(name: "answer", schema: Data(#"{"type":"object"}"#.utf8)),
+                temperature: 0.2,
+                maxTokens: 64
+            )
+        )
+        guard let request = AITransportRecordingURLProtocol.lastRequest(),
+              let body = try JSONSerialization.jsonObject(with: try #require(request.httpBody)) as? [String: Any] else {
+            Issue.record("没有捕获 Responses 请求")
+            return
+        }
+        #expect(request.url?.absoluteString == "https://api.example.test/v1/responses")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+        #expect(body["model"] as? String == "muse-spark-1.2-contributor")
+        let input = body["input"] as? [[String: Any]]
+        let content = input?.first?["content"] as? [[String: Any]]
+        #expect(content?.map { $0["type"] as? String } == ["input_text", "input_image"])
+        #expect(body["instructions"] as? String == "instructions")
+        #expect(body["max_output_tokens"] as? Int == 64)
+        #expect(body["temperature"] == nil)
+        let format = (body["text"] as? [String: Any])?["format"] as? [String: Any]
+        #expect(format?["type"] as? String == "json_schema")
+    }
+
+    @Test func aiTranslationClientBuildsAnthropicMessagesRequestWithBase64Image() async throws {
+        AITransportRecordingURLProtocol.configure(responseData: Data(#"{"content":[{"type":"text","text":"ok"}]}"#.utf8))
+        let client = AITranslationClient(
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1/responses",
+            session: aiTransportRecordingSession()
+        )
+        _ = try await client.send(
+            AITransportRequest(
+                model: AIModelDescriptor(id: "minimax-m3", apiProtocol: .anthropicMessages),
+                systemPrompt: "system",
+                userPrompt: "read image",
+                imageDataURL: "data:image/png;base64,QUJD",
+                responseFormat: .jsonObject,
+                maxTokens: 32
+            )
+        )
+        guard let request = AITransportRecordingURLProtocol.lastRequest(),
+              let body = try JSONSerialization.jsonObject(with: try #require(request.httpBody)) as? [String: Any] else {
+            Issue.record("没有捕获 Anthropic Messages 请求")
+            return
+        }
+        #expect(request.url?.absoluteString == "https://api.example.test/v1/messages")
+        #expect(request.value(forHTTPHeaderField: "x-api-key") == "secret")
+        #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(body["system"] as? String == "system")
+        let messages = body["messages"] as? [[String: Any]]
+        let content = messages?.first?["content"] as? [[String: Any]]
+        let source = content?.first?["source"] as? [String: Any]
+        #expect(source?["type"] as? String == "base64")
+        #expect(source?["media_type"] as? String == "image/png")
+        #expect(source?["data"] as? String == "QUJD")
+        #expect(body["max_tokens"] as? Int == 32)
+        #expect(body["response_format"] == nil)
+    }
+
+    @Test @MainActor func aiProviderStoreRejectsExplicitlyUnsupportedVisionModel() throws {
+        let suiteName = "mreader-ai-provider-tests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let credentials = InMemoryAICredentialStore()
+        let store = AIProviderStore(defaults: defaults, credentials: credentials)
+        let profile = AIProviderProfile.normalized(
+            name: "test",
+            baseURL: "https://api.example.test/v1",
+            modelsText: "vision-ok\ntext-only",
+            selectedTextModel: "vision-ok",
+            selectedVisionModel: "vision-ok",
+            modelDescriptors: [
+                AIModelDescriptor(id: "vision-ok", supportsVision: true),
+                AIModelDescriptor(id: "text-only", supportsVision: false)
+            ]
+        )
+        try store.save(profile: profile, apiKey: "secret", activate: true)
+        do {
+            try store.setSelectedVisionModel("text-only", for: profile.id)
+            Issue.record("不支持视觉的模型不应被设为视觉模型")
+        } catch AIProviderStoreError.unsupportedVisionModel {
+            // expected
+        }
     }
 
     @Test func startupRemoteSyncDoesNotScanLocalLibrary() {
@@ -2012,6 +2206,62 @@ struct mreaderTests {
         #expect(up == [0, 2])
     }
 
+}
+
+private final class AITransportRecordingURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var responseData = Data(#"{"output_text":"ok"}"#.utf8)
+    private static var lastCapturedRequest: URLRequest?
+
+    static func configure(responseData: Data) {
+        lock.lock()
+        self.responseData = responseData
+        lastCapturedRequest = nil
+        lock.unlock()
+    }
+
+    static func lastRequest() -> URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastCapturedRequest
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "api.example.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.lastCapturedRequest = request
+        let data = Self.responseData
+        Self.lock.unlock()
+
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private func aiTransportRecordingSession() -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AITransportRecordingURLProtocol.self]
+    return URLSession(configuration: configuration)
 }
 
 private actor LibrarySyncProbe {

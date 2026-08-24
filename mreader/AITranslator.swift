@@ -1,15 +1,6 @@
 import Foundation
 import UIKit
 
-// AI 翻译专用 URLSession。单个模型不应长期占住整页翻译任务。
-private let aiTranslationSession: URLSession = {
-    let config = URLSessionConfiguration.default
-    config.timeoutIntervalForRequest = 60
-    config.timeoutIntervalForResource = 90
-    config.waitsForConnectivity = true
-    return URLSession(configuration: config)
-}()
-
 private enum VisionResponseFormatMode: String {
     case jsonSchema
     case jsonObject
@@ -151,8 +142,21 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
         case .invalidResponseEnvelope, .missingAssistantContent,
              .invalidTranslationJSON, .incompleteResponse:
             return true
-        default:
-            return false
+        case .server(_, _, let message),
+             .serverWithRetryAfter(_, _, let message, _):
+            let normalized = message.lowercased()
+            let mentionsFormat = normalized.contains("response_format")
+                || normalized.contains("text.format")
+                || normalized.contains("json_schema")
+                || normalized.contains("json schema")
+                || normalized.contains("structured output")
+            let unsupported = normalized.contains("unsupported")
+                || normalized.contains("not support")
+                || normalized.contains("not allowed")
+                || normalized.contains("unknown parameter")
+                || normalized.contains("invalid parameter")
+            return mentionsFormat && unsupported
+        default: return false
         }
     }
 }
@@ -160,14 +164,29 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
 /// 共享的 Chat Completions endpoint 解析（项6）：生产与设置页测试共用，
 /// 兼容 `https://xxx/v1` 与已填写完整 `/chat/completions` 的 Base URL。
 nonisolated enum AIEndpointResolver {
-    static func chatCompletionsURL(from baseURL: String) -> URL? {
+    static func endpointURL(for apiProtocol: AIAPIProtocol, from baseURL: String) -> URL? {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasSuffix("/chat/completions") {
-            return URL(string: trimmed)
+
+        let endpoint = switch apiProtocol {
+        case .openAIChatCompletions: "chat/completions"
+        case .openAIResponses: "responses"
+        case .anthropicMessages: "messages"
         }
-        let withoutTrailingSlash = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return URL(string: "\(withoutTrailingSlash)/chat/completions")
+        let knownSuffixes = ["/chat/completions", "/responses", "/messages"]
+        var root = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        for suffix in knownSuffixes where root.hasSuffix(suffix) {
+            root.removeLast(suffix.count)
+            break
+        }
+        guard let url = URL(string: "\(root)/\(endpoint)"), url.scheme != nil, url.host != nil else {
+            return nil
+        }
+        return url
+    }
+
+    static func chatCompletionsURL(from baseURL: String) -> URL? {
+        endpointURL(for: .openAIChatCompletions, from: baseURL)
     }
 }
 
@@ -214,6 +233,21 @@ nonisolated enum AIChatResponseDecoder {
             }.joined(separator: "\n")
             if !texts.isEmpty {
                 return Decoded(content: texts, finishReason: topFinish, hasReasoningOnly: false)
+            }
+        }
+
+        // Anthropic Messages: content[].text
+        if let content = json["content"] as? [[String: Any]] {
+            let texts = content.compactMap { part -> String? in
+                guard let text = part["text"] as? String else { return nil }
+                return text.isEmpty ? nil : text
+            }.joined(separator: "\n")
+            if !texts.isEmpty {
+                return Decoded(
+                    content: texts,
+                    finishReason: (json["stop_reason"] as? String) ?? topFinish,
+                    hasReasoningOnly: false
+                )
             }
         }
 
@@ -364,13 +398,14 @@ class AITranslator {
     }
 
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45) async throws -> String {
+    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45, modelDescriptor: AIModelDescriptor? = nil) async throws -> String {
         try Task.checkCancellation()
         return try await translateTextUsingModel(
             text: text,
             apiKey: apiKey,
             baseURL: baseURL,
             model: model,
+            modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model),
             targetLanguage: targetLanguage,
             promptTemplate: promptTemplate,
             ocrMetadata: ocrMetadata,
@@ -387,7 +422,8 @@ class AITranslator {
         target: TranslationTargetLanguage,
         promptTemplate: String = defaultTranslationPromptTemplate,
         sourceLanguage: TranslationSourceLanguage? = nil,
-        previousContext: String = ""
+        previousContext: String = "",
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -399,6 +435,7 @@ class AITranslator {
             apiKey: apiKey,
             baseURL: baseURL,
             model: model,
+            modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model),
             target: target,
             promptTemplate: promptTemplate,
             sourceLanguage: sourceLanguage,
@@ -412,6 +449,7 @@ class AITranslator {
         apiKey: String,
         baseURL: String,
         model: String,
+        modelDescriptor: AIModelDescriptor,
         target: TranslationTargetLanguage,
         promptTemplate: String,
         sourceLanguage: TranslationSourceLanguage?,
@@ -422,10 +460,6 @@ class AITranslator {
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AITranslationRequestError.invalidConfiguration("未配置模型")
         }
-        guard let url = chatCompletionsURL(from: baseURL) else {
-            throw AITranslationRequestError.invalidConfiguration("接口地址无效")
-        }
-
         // V2：固定 JSON 协议在 PromptBuilder 内，用户模板只作为“翻译风格要求”传入，
         // 旧整页/逐气泡提示词不再被原样注入新协议（审查 #3/#4）。
         let prompt = try AIPageTranslationPromptBuilder.prompt(
@@ -436,35 +470,16 @@ class AITranslator {
             previousContext: previousContext
         )
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = requestTimeout
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。不要描述图片、解释、续写、总结或输出思考过程。"
-                ],
-                ["role": "user", "content": prompt]
-            ],
-            "temperature": 0.15
-        ])
-
-        let (data, response) = try await aiTranslationSession.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.server(
-                model: model,
-                statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+        let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(
+            AITransportRequest(
+                model: modelDescriptor,
+                systemPrompt: "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。不要描述图片、解释、续写、总结或输出思考过程。",
+                userPrompt: prompt,
+                responseFormat: .jsonObject,
+                temperature: 0.15,
+                timeout: requestTimeout
             )
-        }
-        if let message = apiErrorMessage(from: data) {
-            throw AITranslationRequestError.server(model: model, statusCode: nil, message: message)
-        }
+        )
         let decoded = AIChatResponseDecoder.decode(data)
         guard let content = decoded.content,
               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -474,12 +489,11 @@ class AITranslator {
                     finishReason: decoded.finishReason
                 )
             }
-            let contentType = (response as? HTTPURLResponse)?.mimeType
             let excerpt = String(data: data.prefix(300), encoding: .utf8)
                 ?? "<non-utf8 \(data.count) bytes>"
             throw AITranslationRequestError.invalidResponseEnvelope(
                 model: model,
-                contentType: contentType,
+                contentType: nil,
                 excerpt: excerpt
             )
         }
@@ -495,10 +509,9 @@ class AITranslator {
         }
     }
 
-    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
+    private static func translateTextUsingModel(text: String, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, targetLanguage: TranslationTargetLanguage, promptTemplate: String, ocrMetadata: String, pageContext: String, requestTimeout: TimeInterval) async throws -> String {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置模型") }
-        guard let url = chatCompletionsURL(from: baseURL) else { throw AITranslationRequestError.invalidConfiguration("接口地址无效") }
         // 单气泡也必须使用固定协议（项1）：style 只是风格要求，
         // 待翻译原文、目标语言、上下文与 OCR 信息始终由固定模板提供。
         let prompt = singleBubbleTranslationPrompt(
@@ -509,37 +522,15 @@ class AITranslator {
             styleInstructions: promptTemplate
         )
         
-        var request = URLRequest(url: url)
-        request.timeoutInterval = requestTimeout
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
-            "messages": [
-                ["role": "system", "content": "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。"],
-                ["role": "user", "content": prompt]
-            ],
-            "temperature": 0.3
-        ]
-
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await aiTranslationSession.data(for: request)
-
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.server(
-                model: model,
-                statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+        let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(
+            AITransportRequest(
+                model: modelDescriptor,
+                systemPrompt: "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。",
+                userPrompt: prompt,
+                temperature: 0.3,
+                timeout: requestTimeout
             )
-        }
-
-        if let message = apiErrorMessage(from: data) {
-            throw AITranslationRequestError.server(model: model, statusCode: nil, message: message)
-        }
+        )
 
         let decoded = AIChatResponseDecoder.decode(data)
         if let content = decoded.content,
@@ -569,7 +560,9 @@ class AITranslator {
         promptTemplate: String = defaultVisionTranslationPromptTemplate,
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
-        sourceLanguage: TranslationSourceLanguage? = nil
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        visionModelDescriptor: AIModelDescriptor? = nil,
+        textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
         let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let recognized = try await recognizeVisionPage(
@@ -580,7 +573,8 @@ class AITranslator {
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             translationTarget: target,
-            translationPromptTemplate: promptTemplate
+            translationPromptTemplate: promptTemplate,
+            modelDescriptor: visionModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel)
         )
         try Task.checkCancellation()
 
@@ -598,7 +592,8 @@ class AITranslator {
                 model: textFallbackModel,
                 target: target,
                 promptTemplate: defaultTranslationPromptTemplate,
-                sourceLanguage: sourceLanguage
+                sourceLanguage: sourceLanguage,
+                modelDescriptor: textFallbackModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: textFallbackModel)
             )
             // 线上 ID 是 b0/b1/...（顺序 = missingBlocks 中的位置）
             for (position, index) in missingIndexes.enumerated() {
@@ -625,7 +620,8 @@ class AITranslator {
         viewportAspect: CGFloat = 2.0,
         additionalInstructions: String = "",
         translationTarget: TranslationTargetLanguage? = nil,
-        translationPromptTemplate: String = defaultVisionTranslationPromptTemplate
+        translationPromptTemplate: String = defaultVisionTranslationPromptTemplate,
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
         try Task.checkCancellation()
         return try await recognizeVisionPageUsingModel(
@@ -633,6 +629,7 @@ class AITranslator {
             apiKey: apiKey,
             baseURL: baseURL,
             model: model,
+            modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model),
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             additionalInstructions: additionalInstructions,
@@ -654,7 +651,8 @@ class AITranslator {
         styleInstructions: String,
         previousContext: String,
         isRightToLeft: Bool = false,
-        viewportAspect: CGFloat = 2.0
+        viewportAspect: CGFloat = 2.0,
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> OfflineVisionPageResult {
         let prompt = OfflineTranslationPromptBuilder.make(
             sourceLanguage: sourceLanguage,
@@ -668,6 +666,7 @@ class AITranslator {
             apiKey: apiKey,
             baseURL: baseURL,
             model: visionModel,
+            modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel),
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             additionalInstructions: "",
@@ -687,12 +686,13 @@ class AITranslator {
         let failedSlices: Int
     }
 
-    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
+    private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         try await recognizeVisionPageUsingModelWithStats(
             image: image,
             apiKey: apiKey,
             baseURL: baseURL,
             model: model,
+            modelDescriptor: modelDescriptor,
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             additionalInstructions: additionalInstructions,
@@ -702,13 +702,14 @@ class AITranslator {
         ).blocks
     }
 
-    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
             return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
+                modelDescriptor: modelDescriptor,
                 isRightToLeft: isRightToLeft,
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
@@ -724,6 +725,7 @@ class AITranslator {
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
+                modelDescriptor: modelDescriptor,
                 isRightToLeft: isRightToLeft,
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
@@ -754,6 +756,7 @@ class AITranslator {
                 apiKey: apiKey,
                 baseURL: baseURL,
                 model: model,
+                modelDescriptor: modelDescriptor,
                 isRightToLeft: isRightToLeft,
                 viewportAspect: viewportAspect,
                 additionalInstructions: additionalInstructions,
@@ -764,7 +767,7 @@ class AITranslator {
         }
     }
 
-    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
@@ -786,6 +789,7 @@ class AITranslator {
                             apiKey: apiKey,
                             baseURL: baseURL,
                             model: model,
+                            modelDescriptor: modelDescriptor,
                             isRightToLeft: isRightToLeft,
                             additionalInstructions: additionalInstructions,
                             translationTarget: translationTarget,
@@ -850,7 +854,8 @@ class AITranslator {
         apiKey: String,
         baseURL: String,
         model: String,
-        isRightToLeft: Bool
+        isRightToLeft: Bool,
+        modelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let cgImage = image.cgImage else {
@@ -886,7 +891,8 @@ class AITranslator {
                     baseURL: baseURL,
                     model: model,
                     isRightToLeft: isRightToLeft,
-                    viewportAspect: max(cropImage.size.height / max(cropImage.size.width, 1), 1.25)
+                    viewportAspect: max(cropImage.size.height / max(cropImage.size.width, 1), 1.25),
+                    modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model)
                 )
                 let original = corrected[originalIndex]
                 guard let match = visualVerificationMatch(
@@ -1061,10 +1067,9 @@ class AITranslator {
         return CGFloat(previous.last ?? 0) / CGFloat(max(leftScalars.count, rightScalars.count))
     }
 
-    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
+    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
-        guard let url = chatCompletionsURL(from: baseURL) else { throw VisionTranslationError.api("接口地址无效") }
         let preparedImage = resizedImageForVision(image, maxDimension: 2048)
         guard let imageDataURL = encodedVisionImageDataURL(preparedImage) else { throw VisionTranslationError.imageEncodingFailed }
         let inputPixelSize = pixelSize(of: preparedImage)
@@ -1086,9 +1091,10 @@ class AITranslator {
             systemPrompt = "你只做漫画图片中文字识别、断句和精确坐标标注，不要翻译。只使用 coordinateSpace、items、id、sourceText、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
         }
         let data = try await visionCompletionData(
-            url: url,
             apiKey: apiKey,
+            baseURL: baseURL,
             model: model,
+            modelDescriptor: modelDescriptor,
             systemPrompt: systemPrompt,
             prompt: prompt,
             imageDataURL: imageDataURL,
@@ -1138,36 +1144,6 @@ class AITranslator {
         return blocks
     }
 
-    private static func chatCompletionsURL(from baseURL: String) -> URL? {
-        AIEndpointResolver.chatCompletionsURL(from: baseURL)
-    }
-
-    private static func retryAfterSeconds(from response: HTTPURLResponse) -> UInt64? {
-        guard let value = response.value(forHTTPHeaderField: "Retry-After"),
-              let seconds = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
-              seconds >= 0 else {
-            return nil
-        }
-        return UInt64(ceil(seconds))
-    }
-
-    private static func apiErrorMessage(from data: Data) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let error = json["error"] as? [String: Any] else {
-            return nil
-        }
-        if let message = error["message"] as? String, !message.isEmpty {
-            return message
-        }
-        if let code = error["code"] as? String, !code.isEmpty {
-            return code
-        }
-        if let type = error["type"] as? String, !type.isEmpty {
-            return type
-        }
-        return nil
-    }
-
     private static func assistantContent(from json: [String: Any]) -> String? {
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
         return AIChatResponseDecoder.decode(data).content
@@ -1176,30 +1152,33 @@ class AITranslator {
     /// 优先使用 JSON Schema；不支持时降级 json_object，仍不支持才回退到纯 Prompt。
     /// 结果按 Provider + model 缓存，避免每个页面都重复触发一次不兼容请求。
     private static func visionCompletionData(
-        url: URL,
         apiKey: String,
+        baseURL: String,
         model: String,
+        modelDescriptor: AIModelDescriptor,
         systemPrompt: String,
         prompt: String,
         imageDataURL: String,
         usesTranslationSchema: Bool
     ) async throws -> Data {
-        let cacheKey = "\(url.absoluteString)|\(model)|translation=\(usesTranslationSchema)"
+        let cacheKey = "\(modelDescriptor.apiProtocol.rawValue)|\(model)|translation=\(usesTranslationSchema)"
         let defaultMode: VisionResponseFormatMode = usesTranslationSchema ? .jsonSchema : .jsonObject
         var mode = VisionResponseFormatCache.shared.mode(for: cacheKey, default: defaultMode)
 
         while true {
             do {
                 let data = try await visionCompletionData(
-                    url: url,
                     apiKey: apiKey,
+                    baseURL: baseURL,
                     model: model,
+                    modelDescriptor: modelDescriptor,
                     systemPrompt: systemPrompt,
                     prompt: prompt,
                     imageDataURL: imageDataURL,
-                    responseFormat: responseFormatPayload(
+                    responseFormat: transportResponseFormat(
                         mode: mode,
-                        usesTranslationSchema: usesTranslationSchema
+                        usesTranslationSchema: usesTranslationSchema,
+                        apiProtocol: modelDescriptor.apiProtocol
                     )
                 )
                 VisionResponseFormatCache.shared.set(mode, for: cacheKey)
@@ -1217,56 +1196,27 @@ class AITranslator {
     }
 
     private static func visionCompletionData(
-        url: URL,
         apiKey: String,
+        baseURL: String,
         model: String,
+        modelDescriptor: AIModelDescriptor,
         systemPrompt: String,
         prompt: String,
         imageDataURL: String,
-        responseFormat: [String: Any]?
+        responseFormat: AITransportResponseFormat?
     ) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 60
-        request.httpMethod = "POST"
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        var body: [String: Any] = [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines),
-            "messages": [
-                [
-                    "role": "system",
-                    "content": systemPrompt
-                ],
-                [
-                    "role": "user",
-                    "content": [
-                        ["type": "text", "text": prompt],
-                        ["type": "image_url", "image_url": ["url": imageDataURL]]
-                    ]
-                ]
-            ],
-            "temperature": 0.1
-        ]
-        if let responseFormat {
-            body["response_format"] = responseFormat
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await aiTranslationSession.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw AITranslationRequestError.serverWithRetryAfter(
-                model: model,
-                statusCode: httpResponse.statusCode,
-                message: apiErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
-                retryAfterSeconds: retryAfterSeconds(from: httpResponse)
+        try await AITranslationClient(apiKey: apiKey, baseURL: baseURL)
+            .send(
+                AITransportRequest(
+                    model: modelDescriptor,
+                    systemPrompt: systemPrompt,
+                    userPrompt: prompt,
+                    imageDataURL: imageDataURL,
+                    responseFormat: responseFormat,
+                    temperature: 0.1,
+                    timeout: 60
+                )
             )
-        }
-        if let message = apiErrorMessage(from: data) {
-            throw VisionTranslationError.api(message)
-        }
-        return data
     }
 
     private static func isUnsupportedResponseFormat(_ error: Error) -> Bool {
@@ -1283,27 +1233,27 @@ class AITranslator {
         return mentionsFormat && unsupported
     }
 
-    private static func responseFormatPayload(
+    private static func transportResponseFormat(
         mode: VisionResponseFormatMode,
-        usesTranslationSchema: Bool
-    ) -> [String: Any]? {
+        usesTranslationSchema: Bool,
+        apiProtocol: AIAPIProtocol
+    ) -> AITransportResponseFormat? {
+        guard apiProtocol != .anthropicMessages else { return nil }
         switch mode {
         case .promptOnly:
             return nil
         case .jsonObject:
-            return ["type": "json_object"]
+            return .jsonObject
         case .jsonSchema:
             guard usesTranslationSchema else {
-                return ["type": "json_object"]
+                return .jsonObject
             }
-            return [
-                "type": "json_schema",
-                "json_schema": [
-                    "name": "manga_offline_translation",
-                    "strict": true,
-                    "schema": offlineVisionTranslationSchema()
-                ]
-            ]
+            guard let schema = try? JSONSerialization.data(
+                withJSONObject: offlineVisionTranslationSchema()
+            ) else {
+                return nil
+            }
+            return .jsonSchema(name: "manga_offline_translation", schema: schema)
         }
     }
 

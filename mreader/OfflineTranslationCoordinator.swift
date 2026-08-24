@@ -1226,7 +1226,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         styleInstructions: styleInstructions,
                         previousContext: previousContext,
                         isRightToLeft: isRightToLeft,
-                        viewportAspect: viewportAspect
+                        viewportAspect: viewportAspect,
+                        modelDescriptor: configuration.visionModelDescriptor
                     )
                 }
                 return (result, retryCount: attempt)
@@ -1454,9 +1455,6 @@ final class OfflineTranslationCoordinator: ObservableObject {
         let apiKey = store.apiKey(for: profileID).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiKey.isEmpty else { throw OfflineTranslationConfigurationError.missingAPIKey }
         let baseURL = expectedBaseURL ?? profile.baseURL
-        guard AIEndpointResolver.chatCompletionsURL(from: baseURL) != nil else {
-            throw OfflineTranslationConfigurationError.invalidBaseURL
-        }
         let requestedTextModel = (expectedTextModel ?? profile.selectedTextModel)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let requestedVisionModel = (expectedVisionModel ?? profile.selectedVisionModel)
@@ -1473,13 +1471,24 @@ final class OfflineTranslationCoordinator: ObservableObject {
             throw OfflineTranslationConfigurationError.missingVisionModel
         }
         let visionModel = requestedVisionModel.isEmpty ? textModel : requestedVisionModel
+        let textDescriptor = profile.descriptor(for: textModel)
+        let visionDescriptor = profile.descriptor(for: visionModel)
+        guard AIEndpointResolver.endpointURL(for: textDescriptor.apiProtocol, from: baseURL) != nil,
+              (!requiresVision || AIEndpointResolver.endpointURL(for: visionDescriptor.apiProtocol, from: baseURL) != nil) else {
+            throw OfflineTranslationConfigurationError.invalidBaseURL
+        }
+        guard !requiresVision || visionDescriptor.supportsVision != false else {
+            throw OfflineTranslationConfigurationError.missingVisionModel
+        }
         return AIActiveConfiguration(
             profileID: profile.id,
             profileName: profile.name,
             baseURL: baseURL,
             apiKey: apiKey,
             textModel: textModel,
-            visionModel: visionModel
+            visionModel: visionModel,
+            textModelDescriptor: textDescriptor,
+            visionModelDescriptor: visionDescriptor
         )
     }
 

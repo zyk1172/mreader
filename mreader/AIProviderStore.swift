@@ -6,6 +6,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
     var name: String
     var baseURL: String
     var models: [String]
+    var modelDescriptors: [AIModelDescriptor]
     /// 纯文本翻译模型：OCR 识别后的整页文字翻译、Apple 翻译云端兜底。
     var selectedTextModel: String
     /// 视觉模型：整页 Vision 翻译、OCR 低置信度区域视觉复核。
@@ -18,6 +19,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         case name
         case baseURL
         case models
+        case modelDescriptors
         case selectedModel
         case selectedTextModel
         case selectedVisionModel
@@ -33,12 +35,17 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         selectedTextModel: String,
         selectedVisionModel: String,
         createdAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        modelDescriptors: [AIModelDescriptor]? = nil
     ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.models = models
+        self.modelDescriptors = AIModelProtocolCatalog.descriptors(
+            for: models,
+            existing: modelDescriptors ?? []
+        )
         self.selectedTextModel = selectedTextModel
         self.selectedVisionModel = selectedVisionModel
         self.createdAt = createdAt
@@ -52,6 +59,19 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         name = try container.decode(String.self, forKey: .name)
         baseURL = try container.decode(String.self, forKey: .baseURL)
         models = try container.decode([String].self, forKey: .models)
+        if let storedDescriptors = try container.decodeIfPresent(
+            [AIModelDescriptor].self,
+            forKey: .modelDescriptors
+        ) {
+            modelDescriptors = AIModelProtocolCatalog.descriptors(
+                for: models,
+                existing: storedDescriptors
+            )
+        } else {
+            // v1 配置没有协议元数据，必须保持旧行为，不能因为模型名称
+            // 恰好命中今日的内置目录而在升级后改变请求端点。
+            modelDescriptors = models.map { AIModelDescriptor(id: $0) }
+        }
         let legacy = try container.decodeIfPresent(String.self, forKey: .selectedModel)
         let fallback = legacy ?? models.first ?? ""
         selectedTextModel = try container.decodeIfPresent(String.self, forKey: .selectedTextModel) ?? fallback
@@ -66,6 +86,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         try container.encode(name, forKey: .name)
         try container.encode(baseURL, forKey: .baseURL)
         try container.encode(models, forKey: .models)
+        try container.encode(modelDescriptors, forKey: .modelDescriptors)
         try container.encode(selectedTextModel, forKey: .selectedTextModel)
         try container.encode(selectedVisionModel, forKey: .selectedVisionModel)
         try container.encode(createdAt, forKey: .createdAt)
@@ -80,7 +101,8 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         selectedTextModel: String,
         selectedVisionModel: String,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        modelDescriptors: [AIModelDescriptor]? = nil
     ) -> AIProviderProfile {
         let models = normalizedModels(from: modelsText)
         func pick(_ requested: String) -> String {
@@ -97,8 +119,14 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
             selectedTextModel: pick(selectedTextModel),
             selectedVisionModel: pick(selectedVisionModel),
             createdAt: createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            modelDescriptors: modelDescriptors
         )
+    }
+
+    func descriptor(for modelID: String) -> AIModelDescriptor {
+        modelDescriptors.first(where: { $0.id == modelID })
+            ?? AIModelProtocolCatalog.descriptor(for: modelID)
     }
 
     static func fromLegacySettings(
@@ -111,12 +139,14 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         let combined = ([primary] + normalizedModels(from: poolText))
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
+        let legacyModels = normalizedModels(from: combined)
         return normalized(
             name: apiDisplayName,
             baseURL: baseURL,
             modelsText: combined,
             selectedTextModel: primary,
-            selectedVisionModel: primary
+            selectedVisionModel: primary,
+            modelDescriptors: legacyModels.map { AIModelDescriptor(id: $0) }
         )
     }
 
@@ -146,12 +176,37 @@ nonisolated struct AIActiveConfiguration: Sendable, Equatable {
     let textModel: String
     /// 视觉模型（整页 Vision 翻译 / OCR 视觉复核）。
     let visionModel: String
+    let textModelDescriptor: AIModelDescriptor
+    let visionModelDescriptor: AIModelDescriptor
+
+    init(
+        profileID: UUID,
+        profileName: String,
+        baseURL: String,
+        apiKey: String,
+        textModel: String,
+        visionModel: String,
+        textModelDescriptor: AIModelDescriptor? = nil,
+        visionModelDescriptor: AIModelDescriptor? = nil
+    ) {
+        self.profileID = profileID
+        self.profileName = profileName
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.textModel = textModel
+        self.visionModel = visionModel
+        self.textModelDescriptor = textModelDescriptor
+            ?? AIModelProtocolCatalog.descriptor(for: textModel)
+        self.visionModelDescriptor = visionModelDescriptor
+            ?? AIModelProtocolCatalog.descriptor(for: visionModel)
+    }
 }
 
 nonisolated enum AIProviderStoreError: LocalizedError, Sendable {
     case missingProfile
     case missingAPIKey
     case missingModel
+    case unsupportedVisionModel
     case credentialFailure(OSStatus)
 
     var errorDescription: String? {
@@ -159,6 +214,7 @@ nonisolated enum AIProviderStoreError: LocalizedError, Sendable {
         case .missingProfile: return "尚未选择 AI 接口配置"
         case .missingAPIKey: return "当前 AI 接口没有 API Key"
         case .missingModel: return "当前 AI 接口没有选择子模型"
+        case .unsupportedVisionModel: return "当前模型不支持视觉输入"
         case .credentialFailure(let status): return "AI 凭据保存失败（\(status)）"
         }
     }
@@ -273,13 +329,16 @@ final class AIProviderStore {
             ? profile.selectedTextModel
             : profile.selectedVisionModel
         guard !textModel.isEmpty || !visionModel.isEmpty else { return nil }
+        guard profile.descriptor(for: visionModel).supportsVision != false else { return nil }
         return AIActiveConfiguration(
             profileID: profile.id,
             profileName: profile.name,
             baseURL: profile.baseURL,
             apiKey: apiKey,
             textModel: textModel,
-            visionModel: visionModel
+            visionModel: visionModel,
+            textModelDescriptor: profile.descriptor(for: textModel),
+            visionModelDescriptor: profile.descriptor(for: visionModel)
         )
     }
 
@@ -288,6 +347,10 @@ final class AIProviderStore {
     }
 
     func save(profile: AIProviderProfile, apiKey: String, activate: Bool = false) throws {
+        guard profile.selectedVisionModel.isEmpty
+                || profile.descriptor(for: profile.selectedVisionModel).supportsVision != false else {
+            throw AIProviderStoreError.unsupportedVisionModel
+        }
         var allProfiles = profiles()
         if let index = allProfiles.firstIndex(where: { $0.id == profile.id }) {
             allProfiles[index] = profile
@@ -340,6 +403,9 @@ final class AIProviderStore {
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard allProfiles[index].models.contains(trimmedModel) else {
             throw AIProviderStoreError.missingModel
+        }
+        guard allProfiles[index].descriptor(for: trimmedModel).supportsVision != false else {
+            throw AIProviderStoreError.unsupportedVisionModel
         }
         allProfiles[index].selectedVisionModel = trimmedModel
         allProfiles[index].updatedAt = Date()
