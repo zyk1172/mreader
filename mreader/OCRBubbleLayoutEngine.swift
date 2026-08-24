@@ -480,14 +480,17 @@ nonisolated enum OCRBubbleLayoutEngine {
         }
 
         let safeBubble = bubbleRect.standardized
+        let safeTextRect = textRect.standardized
         guard safeBubble.width > 0,
               safeBubble.height > 0,
+              safeTextRect.width > 0,
+              safeTextRect.height > 0,
               safeImageBounds.insetBy(
                   dx: -max(toleranceX, 0),
                   dy: -max(toleranceY, 0)
               ).contains(safeBubble),
               acceptsTranslationTextRect(
-                  textRect,
+                  safeTextRect,
                   in: safeBubble,
                   toleranceX: toleranceX,
                   toleranceY: toleranceY
@@ -498,6 +501,31 @@ nonisolated enum OCRBubbleLayoutEngine {
         let isNearlyWholePage = safeBubble.width >= safeImageBounds.width * 0.96
             && safeBubble.height >= safeImageBounds.height * 0.96
         guard !isNearlyWholePage else { return nil }
+
+        let bubbleArea = safeBubble.width * safeBubble.height
+        let textArea = safeTextRect.width * safeTextRect.height
+        let pageArea = safeImageBounds.width * safeImageBounds.height
+        let bubbleToPageAreaRatio = bubbleArea / pageArea
+        let bubbleToTextAreaRatio = bubbleArea / max(textArea, 1)
+        let maximumAxisExpansion = max(
+            safeBubble.width / max(safeTextRect.width, max(toleranceX, 1)),
+            safeBubble.height / max(safeTextRect.height, max(toleranceY, 1))
+        )
+        // 这些是“允许自动字号”的保守上限，而不是气泡绘制上限；超过任一
+        // 条件就回退到无气泡字号，避免一个异常大框重新放大译文。
+        guard bubbleToPageAreaRatio <= 0.72,
+              bubbleToTextAreaRatio <= 48,
+              maximumAxisExpansion <= 18 else {
+            return nil
+        }
+
+        let centerDistance = hypot(
+            safeBubble.midX - safeTextRect.midX,
+            safeBubble.midY - safeTextRect.midY
+        )
+        let maximumCenterDistance = hypot(safeBubble.width, safeBubble.height) * 0.55
+            + max(toleranceX, toleranceY)
+        guard centerDistance <= maximumCenterDistance else { return nil }
 
         let clipped = safeBubble.intersection(safeImageBounds)
         return clipped.width > 0 && clipped.height > 0 ? clipped : nil

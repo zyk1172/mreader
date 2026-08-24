@@ -960,6 +960,35 @@ struct mreaderTests {
         #expect(allRejectedByQuality)
     }
 
+    @Test @MainActor func translationSafeBlocksAlwaysRejectUnsafeRecoveryCandidates() {
+        let valid = TextBlock(
+            text: "正确对白",
+            boundingBox: CGRect(x: 0.20, y: 0.20, width: 0.24, height: 0.05),
+            confidence: 0.92,
+            ocrSource: "original"
+        )
+        let lowConfidenceInverted = TextBlock(
+            text: "衣服纹理",
+            boundingBox: CGRect(x: 0.60, y: 0.20, width: 0.18, height: 0.05),
+            confidence: 0.50,
+            ocrSource: "vision:inverted"
+        )
+        let invalidGeometry = TextBlock(
+            text: "假候选",
+            boundingBox: CGRect(x: 1.20, y: 0.20, width: 0.18, height: 0.05),
+            confidence: 0.92,
+            ocrSource: "original"
+        )
+
+        let result = OCRPageQuality.translationSafeBlocks(
+            [valid, lowConfidenceInverted, invalidGeometry]
+        )
+
+        #expect(result.accepted.map(\.text) == ["正确对白"])
+        #expect(result.rejected.count == 2)
+        #expect(result.rejected.allSatisfy { $0.isFiltered })
+    }
+
     @Test func japaneseVerticalVisualRecoveryHonorsSettingAndMergesMissingColumn() {
         let local = TextBlock(
             text: "ノート",
@@ -1919,6 +1948,15 @@ struct mreaderTests {
             toleranceY: 2
         )
         #expect(wholePage == nil)
+
+        let oversizedButNotWholePage = OCRBubbleLayoutEngine.reliableTranslationBubbleBounds(
+            CGRect(x: 50, y: 175, width: 300, height: 450),
+            textRect: CGRect(x: 185, y: 275, width: 30, height: 20),
+            imageBounds: CGRect(x: 0, y: 0, width: 400, height: 800),
+            toleranceX: 2,
+            toleranceY: 2
+        )
+        #expect(oversizedButNotWholePage == nil)
     }
 
     @Test @MainActor func comicBookBorderlessTranslationFontDefaultsAndClampsAcrossCodable() throws {

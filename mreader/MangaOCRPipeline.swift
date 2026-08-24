@@ -84,12 +84,22 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
             sourceLanguagePreference: sourceLanguagePreference,
             visionKitReference: visionKitReference
         )
-        guard quality.isSuspicious else { return (blocks, []) }
+        let hardAccepted = blocks.filter(isHardSafeBlock)
+        let hardAcceptedIDs = Set(hardAccepted.map(\.id))
+        let hardRejected = rejectedBlocks(
+            blocks.filter { !hardAcceptedIDs.contains($0.id) },
+            reason: "OCR几何/字符/恢复来源不安全"
+        )
 
-        let accepted = blocks.filter { block in
+        // 页面质量只决定是否进入更严格的 block 级检查；几何、可用字符和
+        // inverted/Tesseract 的来源置信度不能因为同页其它对白正确而被跳过。
+        guard quality.isSuspicious else {
+            return (hardAccepted, hardRejected)
+        }
+
+        let accepted = hardAccepted.filter { block in
             guard block.confidence >= 0.55,
-                  isGeometryPlausible(block),
-                  containsUsefulCharacter(block.text) else {
+                  isHardSafeBlock(block) else {
                 return false
             }
             let counts = scriptCounts(in: block.text)
@@ -105,24 +115,14 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
             default:
                 break
             }
-
-            let source = block.ocrSource.lowercased()
-            if source.contains("inverted") && block.confidence < 0.85 {
-                return false
-            }
-            if source.contains("tesseract") && block.confidence < 0.70 {
-                return false
-            }
             return true
         }
         let acceptedIDs = Set(accepted.map(\.id))
-        let rejected = blocks.filter { !acceptedIDs.contains($0.id) }.map { block in
-            var rejectedBlock = block
-            rejectedBlock.isFiltered = true
-            rejectedBlock.filterReason = "OCR质量可疑"
-            return rejectedBlock
-        }
-        return (accepted, rejected)
+        let strictRejected = rejectedBlocks(
+            hardAccepted.filter { !acceptedIDs.contains($0.id) },
+            reason: "OCR质量可疑"
+        )
+        return (accepted, hardRejected + strictRejected)
     }
 
     static func make(
@@ -184,9 +184,11 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
         let sourceReliability = sourceWeights.isEmpty
             ? 0
             : sourceWeights.reduce(0, +) / Double(sourceWeights.count)
-        let geometryPlausibility = blocks.isEmpty
+        let averageGeometryPlausibility = blocks.isEmpty
             ? 0
-            : blocks.map { geometryPlausibility(for: $0) }.reduce(0, +) / Double(blocks.count)
+            : blocks
+                .map { Self.geometryPlausibility(for: $0) }
+                .reduce(0, +) / Double(blocks.count)
         let recoverySourceCount = blocks.filter { block in
             let source = block.ocrSource.lowercased()
             return source.contains("enhanced")
@@ -212,7 +214,7 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
             visionKitDetectedLanguage: visionKitReference?.detectedLanguage,
             visionKitCoverage: visionKitCoverage,
             sourceReliability: sourceReliability,
-            geometryPlausibility: geometryPlausibility,
+            geometryPlausibility: averageGeometryPlausibility,
             recoverySourceRatio: Double(recoverySourceCount) / Double(max(blocks.count, 1))
         )
     }
@@ -220,6 +222,32 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
     private static func containsUsefulCharacter(_ text: String) -> Bool {
         text.unicodeScalars.contains {
             CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }
+    }
+
+    private static func isHardSafeBlock(_ block: TextBlock) -> Bool {
+        isGeometryPlausible(block)
+            && containsUsefulCharacter(block.text)
+            && isSourceSpecificConfidenceSafe(block)
+    }
+
+    private static func isSourceSpecificConfidenceSafe(_ block: TextBlock) -> Bool {
+        let source = block.ocrSource.lowercased()
+        if source.contains("inverted") {
+            return block.confidence >= 0.85
+        }
+        if source.contains("tesseract") {
+            return block.confidence >= 0.70
+        }
+        return true
+    }
+
+    private static func rejectedBlocks(_ blocks: [TextBlock], reason: String) -> [TextBlock] {
+        blocks.map { block in
+            var rejectedBlock = block
+            rejectedBlock.isFiltered = true
+            rejectedBlock.filterReason = reason
+            return rejectedBlock
         }
     }
 
