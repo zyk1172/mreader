@@ -42,6 +42,9 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
     let visionKitCharacterCount: Int
     let visionKitDetectedLanguage: String?
     let visionKitCoverage: Double
+    let sourceReliability: Double
+    let geometryPlausibility: Double
+    let recoverySourceRatio: Double
 
     var score: Double {
         min(
@@ -55,12 +58,71 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
                     + min(Double(verticalColumnCount) / 4, 1) * 0.05
                     + visionKitCoverage * 0.14
                     + min(charactersPerBlock / 1.5, 1) * 0.08
+                    + sourceReliability * 0.08
+                    + geometryPlausibility * 0.07
             )
         )
     }
 
     var isSuspicious: Bool {
-        score < 0.55 || expectedScriptRatio < 0.35 || languagePlausibility < 0.45
+        score < 0.55
+            || expectedScriptRatio < 0.35
+            || languagePlausibility < 0.45
+            || sourceReliability < 0.55
+            || geometryPlausibility < 0.45
+            || (recoverySourceRatio >= 0.50 && charactersPerBlock < 2.0)
+    }
+
+    static func translationSafeBlocks(
+        _ blocks: [TextBlock],
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        visionKitReference: AppleOCRReference? = nil
+    ) -> (accepted: [TextBlock], rejected: [TextBlock]) {
+        guard !blocks.isEmpty else { return ([], []) }
+        let quality = make(
+            blocks: blocks,
+            sourceLanguagePreference: sourceLanguagePreference,
+            visionKitReference: visionKitReference
+        )
+        guard quality.isSuspicious else { return (blocks, []) }
+
+        let accepted = blocks.filter { block in
+            guard block.confidence >= 0.55,
+                  isGeometryPlausible(block),
+                  containsUsefulCharacter(block.text) else {
+                return false
+            }
+            let counts = scriptCounts(in: block.text)
+            switch sourceLanguagePreference {
+            case .japanese:
+                guard counts.kana + counts.han > 0 else { return false }
+            case .english:
+                guard counts.latin > 0 else { return false }
+            case .simplifiedChinese, .traditionalChinese:
+                guard counts.han > 0, counts.kana == 0, counts.hangul == 0 else { return false }
+            case .korean:
+                guard counts.hangul > 0 else { return false }
+            default:
+                break
+            }
+
+            let source = block.ocrSource.lowercased()
+            if source.contains("inverted") && block.confidence < 0.85 {
+                return false
+            }
+            if source.contains("tesseract") && block.confidence < 0.70 {
+                return false
+            }
+            return true
+        }
+        let acceptedIDs = Set(accepted.map(\.id))
+        let rejected = blocks.filter { !acceptedIDs.contains($0.id) }.map { block in
+            var rejectedBlock = block
+            rejectedBlock.isFiltered = true
+            rejectedBlock.filterReason = "OCR质量可疑"
+            return rejectedBlock
+        }
+        return (accepted, rejected)
     }
 
     static func make(
@@ -118,6 +180,19 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
         } else {
             visionKitCoverage = 1
         }
+        let sourceWeights = blocks.map { sourceWeight(for: $0.ocrSource) }
+        let sourceReliability = sourceWeights.isEmpty
+            ? 0
+            : sourceWeights.reduce(0, +) / Double(sourceWeights.count)
+        let geometryPlausibility = blocks.isEmpty
+            ? 0
+            : blocks.map { geometryPlausibility(for: $0) }.reduce(0, +) / Double(blocks.count)
+        let recoverySourceCount = blocks.filter { block in
+            let source = block.ocrSource.lowercased()
+            return source.contains("enhanced")
+                || source.contains("inverted")
+                || source.contains("tesseract")
+        }.count
         return Self(
             averageConfidence: averageConfidence,
             usefulCharacterRatio: Double(useful) / Double(count),
@@ -135,8 +210,67 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
             latinCount: latin,
             visionKitCharacterCount: visionKitReference?.characterCount ?? 0,
             visionKitDetectedLanguage: visionKitReference?.detectedLanguage,
-            visionKitCoverage: visionKitCoverage
+            visionKitCoverage: visionKitCoverage,
+            sourceReliability: sourceReliability,
+            geometryPlausibility: geometryPlausibility,
+            recoverySourceRatio: Double(recoverySourceCount) / Double(max(blocks.count, 1))
         )
+    }
+
+    private static func containsUsefulCharacter(_ text: String) -> Bool {
+        text.unicodeScalars.contains {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }
+    }
+
+    private static func isGeometryPlausible(_ block: TextBlock) -> Bool {
+        let rect = block.boundingBox
+        guard rect.width > 0,
+              rect.height > 0,
+              rect.minX >= -0.02,
+              rect.minY >= -0.02,
+              rect.maxX <= 1.02,
+              rect.maxY <= 1.02,
+              block.estimatedFontScale.isFinite,
+              block.estimatedFontScale > 0 else {
+            return false
+        }
+        let minimumAxis = max(min(rect.width, rect.height), 0.000_1)
+        return block.estimatedFontScale / Double(minimumAxis) <= 3.0
+    }
+
+    private static func geometryPlausibility(for block: TextBlock) -> Double {
+        guard isGeometryPlausible(block) else { return 0 }
+        let minimumAxis = max(min(block.boundingBox.width, block.boundingBox.height), 0.000_1)
+        let ratio = block.estimatedFontScale / Double(minimumAxis)
+        return min(1, 1 / max(ratio, 1))
+    }
+
+    private static func sourceWeight(for source: String) -> Double {
+        let normalized = source.lowercased()
+        if normalized.contains("inverted") { return 0.35 }
+        if normalized.contains("tesseract") { return 0.65 }
+        if normalized.contains("enhanced") { return 0.80 }
+        if normalized.contains("original") || normalized.contains("vision") {
+            return 1.0
+        }
+        return 0.70
+    }
+
+    private static func scriptCounts(in text: String) -> (
+        kana: Int, han: Int, hangul: Int, latin: Int
+    ) {
+        var counts = (kana: 0, han: 0, hangul: 0, latin: 0)
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x31F0...0x31FF: counts.kana += 1
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF: counts.han += 1
+            case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: counts.hangul += 1
+            case 0x0041...0x024F: counts.latin += 1
+            default: break
+            }
+        }
+        return counts
     }
 }
 
@@ -199,29 +333,34 @@ nonisolated enum MangaOCRPipeline {
         visionKitReference: AppleOCRReference? = nil
     ) -> OCRPipelineResult {
         let resolution = OCRCandidateResolver.resolve(rawBlocks, isRightToLeft: isRightToLeft)
-        let segmentation = MangaTextSegmenter.segment(
+        let quality = OCRPageQuality.make(
+            blocks: resolution.resolvedBlocks,
+            sourceLanguagePreference: sourceLanguagePreference,
+            visionKitReference: visionKitReference
+        )
+        let qualityGate = OCRPageQuality.translationSafeBlocks(
             resolution.resolvedBlocks,
+            sourceLanguagePreference: sourceLanguagePreference,
+            visionKitReference: visionKitReference
+        )
+        let segmentation = MangaTextSegmenter.segment(
+            qualityGate.accepted,
             isRightToLeft: isRightToLeft
         )
         let result = OCRPipelineResult(
             rawBlocks: rawBlocks,
-            resolvedBlocks: resolution.resolvedBlocks,
+            resolvedBlocks: qualityGate.accepted,
             lineBlocks: segmentation.lines,
             bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: resolution.rejectedBlocks,
+            rejectedBlocks: resolution.rejectedBlocks + qualityGate.rejected,
             detectedLanguage: detectedLanguage(
                 in: rawBlocks,
                 sourceLanguagePreference: sourceLanguagePreference,
                 visionKitReference: visionKitReference
             ),
-            quality: OCRPageQuality.make(
-                blocks: resolution.resolvedBlocks,
-                sourceLanguagePreference: sourceLanguagePreference,
-                visionKitReference: visionKitReference
-            )
+            quality: quality
         )
-        let quality = result.quality
-        print("MReader OCR summary raw=\(rawBlocks.count) resolved=\(resolution.resolvedBlocks.count) lines=\(segmentation.lines.count) bubbles=\(segmentation.bubbles.count) chars=\(quality?.characterCount ?? 0) language=\(result.detectedLanguage ?? "unknown") jpScript=\(String(format: "%.2f", quality?.japaneseScriptRatio ?? 0)) kana=\(quality?.kanaCount ?? 0) han=\(quality?.hanCount ?? 0) latin=\(quality?.latinCount ?? 0) visionKitChars=\(quality?.visionKitCharacterCount ?? 0) visionKitCoverage=\(String(format: "%.2f", quality?.visionKitCoverage ?? 1)) charsPerBlock=\(String(format: "%.2f", quality?.charactersPerBlock ?? 0)) coverage=\(String(format: "%.2f", quality?.score ?? 0))")
+        print("MReader OCR summary raw=\(rawBlocks.count) resolved=\(qualityGate.accepted.count) lines=\(segmentation.lines.count) bubbles=\(segmentation.bubbles.count) chars=\(quality.characterCount) language=\(result.detectedLanguage ?? "unknown") jpScript=\(String(format: "%.2f", quality.japaneseScriptRatio)) kana=\(quality.kanaCount) han=\(quality.hanCount) latin=\(quality.latinCount) visionKitChars=\(quality.visionKitCharacterCount) visionKitCoverage=\(String(format: "%.2f", quality.visionKitCoverage)) charsPerBlock=\(String(format: "%.2f", quality.charactersPerBlock)) coverage=\(String(format: "%.2f", quality.score)) suspicious=\(quality.isSuspicious) rejectedByQuality=\(qualityGate.rejected.count)")
         return result
     }
 

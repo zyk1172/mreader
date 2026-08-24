@@ -18,7 +18,7 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
         let rawValue = [
             // OCR geometry and the Japanese vertical fallback changed; do not
             // reuse pages written before this pipeline revision.
-            "local-ocr-v4-layout-role-japanese-vertical-ocr",
+            "local-ocr-v5-quality-geometry-gated",
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",

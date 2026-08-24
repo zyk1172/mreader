@@ -56,7 +56,7 @@ nonisolated struct JapaneseVerticalOCRFragmentationQuality: Equatable, Sendable 
 /// uses kana, Japanese source hints, and vertical Kanji evidence; it does not
 /// require the reader's page direction to be RTL.
 nonisolated enum JapaneseVerticalOCRService {
-    static let revision = "jpn-vert-tesseract-5.5.1-v3"
+    static let revision = "jpn-vert-tesseract-5.5.1-v4-geometry-gated"
     static let minimumAverageConfidence = 0.58
     static let minimumUsefulCharacterRatio = 0.42
 
@@ -200,11 +200,10 @@ nonisolated enum JapaneseVerticalOCRService {
         }
 
         // Maximum accuracy is an explicit cost/quality choice, but the reader
-        // direction is not OCR language metadata. Require vertical page
-        // evidence, then run the second engine even when Vision returned a
-        // few high-confidence blocks.
+        // direction is not OCR language metadata. Require at least one local
+        // vertical OCR column; image-only dark columns are never sufficient.
         if options.recognitionMode == .maximumAccuracy {
-            return hasVerticalPageEvidence(in: image, existingBlocks: existingBlocks)
+            return verticalColumnCount(in: existingBlocks) >= 1
         }
 
         return shouldRequestPageRecovery(
@@ -235,34 +234,27 @@ nonisolated enum JapaneseVerticalOCRService {
 
         let localColumnCenters = verticalColumnCenters(in: existingBlocks)
         let imageColumnCenters = image.map(verticalColumnEvidenceCenters(in:)) ?? []
-
-        // Run the lightweight page probe even when Vision returned blocks.
-        // The important signal is an image column which has no nearby local
-        // OCR column, not merely a low confidence score on an existing block.
-        if imageColumnCenters.count >= 2 {
-            let coveredColumnTolerance = max(
-                0.04,
-                verticalColumnAverageWidth(in: existingBlocks) * 1.6
-            )
-            let uncoveredColumnCount = imageColumnCenters.filter { imageCenter in
-                !localColumnCenters.contains { localCenter in
-                    abs(imageCenter - localCenter) <= coveredColumnTolerance
-                }
-            }.count
-            if uncoveredColumnCount > 0 {
-                return true
-            }
-        }
-
         let coverage = coverage(for: existingBlocks, isRightToLeft: isRightToLeft)
         guard coverage.isInsufficient else { return false }
 
-        // Keep the established low-coverage recovery for pages where local
-        // OCR already supplies vertical evidence but the image probe cannot be
-        // used (for example, a diagnostic call without an image).
+        // Keep recovery for pages where local OCR already supplies multiple
+        // vertical columns. The image probe may add confidence only when it
+        // overlaps at least one local OCR column; it cannot create Japanese
+        // evidence from artwork lines on its own.
         if localColumnCenters.count >= 2 { return true }
-        guard existingBlocks.isEmpty else { return false }
-        return imageColumnCenters.count >= 2
+        guard imageColumnCenters.count >= 2,
+              hasSpatiallyMatchedImageEvidence(
+                imageColumnCenters,
+                localColumnCenters: localColumnCenters,
+                existingBlocks: existingBlocks
+              ) else {
+            return false
+        }
+        guard let visionKitReference,
+              visionKitReference.isJapaneseEvidence else {
+            return false
+        }
+        return true
     }
 
     static func coverage(
@@ -329,18 +321,6 @@ nonisolated enum JapaneseVerticalOCRService {
            ) {
             return true
         }
-        // A Han-only Live Text transcript cannot identify Japanese by script
-        // alone. Combined with two or more image-level vertical columns it is
-        // still meaningful Japanese manga evidence, even when Vision returned
-        // no geometry and the reader is configured LTR. Do not use image
-        // columns without a language signal, otherwise vertical Chinese pages
-        // would pay for the Japanese fallback too.
-        if let visionKitReference,
-           visionKitReference.hanCount >= 4,
-           let image,
-           verticalColumnEvidenceCenters(in: image).count >= 2 {
-            return true
-        }
         guard sourceLanguagePreference == nil || sourceLanguagePreference == .automatic else {
             return false
         }
@@ -369,21 +349,33 @@ nonisolated enum JapaneseVerticalOCRService {
         if verticalColumnCount(in: existingBlocks) >= 1 {
             return true
         }
-        if let image, verticalColumnEvidenceCenters(in: image).count >= 2 {
-            return true
-        }
         // RTL reading can affect sorting/layout, but must not be promoted to
         // Japanese OCR evidence. Without kana, Japanese OCR source hints, or
-        // vertical page geometry, an automatic CJK page remains ambiguous.
+        // local OCR vertical geometry, an automatic CJK page remains ambiguous.
         return false
     }
 
-    private static func hasVerticalPageEvidence(
-        in image: UIImage?,
+    private static func hasSpatiallyMatchedImageEvidence(
+        _ imageCenters: [CGFloat],
+        localColumnCenters: [CGFloat],
         existingBlocks: [TextBlock]
     ) -> Bool {
-        verticalColumnCount(in: existingBlocks) >= 1
-            || (image.map { verticalColumnEvidenceCenters(in: $0).count >= 2 } ?? false)
+        guard !localColumnCenters.isEmpty else { return false }
+        let tolerance = max(
+            0.05,
+            verticalColumnAverageWidth(in: existingBlocks) * 2.4
+        )
+        let hasMatchedColumn = imageCenters.contains { imageCenter in
+            localColumnCenters.contains { localCenter in
+                abs(imageCenter - localCenter) <= tolerance
+            }
+        }
+        let hasUncoveredColumn = imageCenters.contains { imageCenter in
+            !localColumnCenters.contains { localCenter in
+                abs(imageCenter - localCenter) <= tolerance
+            }
+        }
+        return hasMatchedColumn && hasUncoveredColumn
     }
 
     /// Returns the number of separated vertical text columns represented by
@@ -393,10 +385,8 @@ nonisolated enum JapaneseVerticalOCRService {
         verticalColumnCenters(in: blocks).count
     }
 
-    /// Exposes the same lightweight image-only evidence used by the recovery
-    /// policy so the adaptive Vision locator can consider page structure even
-    /// when its first language pass returned only a few high-confidence Latin
-    /// observations.
+    /// Exposes lightweight image evidence for diagnostics only. It must not be
+    /// used as a standalone trigger for Japanese recovery.
     static func verticalColumnEvidenceCount(in image: UIImage) -> Int {
         verticalColumnEvidenceCenters(in: image).count
     }

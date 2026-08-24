@@ -127,8 +127,10 @@ struct OCRPreprocessor {
                     detectedTexts: locatorBlocks.map(\.text),
                     options: options,
                     locatorConfidence: averageConfidence(locatorBlocks),
+                    // Image-only dark columns are auxiliary diagnostics, not
+                    // language evidence. Artwork lines must not switch the
+                    // primary Vision pass to Japanese recovery.
                     verticalEvidence: JapaneseVerticalOCRService.verticalColumnCount(in: locatorBlocks) >= 2
-                        || JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: locatorImage) >= 2
                 )
                 print("MReader OCR locator rect=\(Int(slice.rect.minY))-\(Int(slice.rect.maxY)) blocks=\(locatorBlocks.count) primary=\(plan.primary.name)")
                 sliceBlocks = await recognize(

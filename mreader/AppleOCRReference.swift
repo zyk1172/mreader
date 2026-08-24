@@ -50,10 +50,9 @@ nonisolated enum AppleOCRReferenceService {
         }.count
         let usefulRatio = Double(usefulCharacters) / Double(total)
         let verticalColumns = JapaneseVerticalOCRService.verticalColumnCount(in: preliminaryBlocks)
-        let imageVerticalColumns = image.map {
-            JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: $0)
-        } ?? 0
-        let hasVerticalEvidence = verticalColumns >= 2 || imageVerticalColumns >= 2
+        // Image-only dark columns are intentionally excluded here. They are
+        // useful for diagnostics, but comic artwork is not language evidence.
+        let hasVerticalEvidence = verticalColumns >= 2
         let hasJapaneseScript = counts.kana > 0 || counts.han >= 4
         let weakCoverage = preliminaryBlocks.isEmpty
             || averageConfidence < 0.58
@@ -219,14 +218,10 @@ nonisolated enum AppleOCRReferenceService {
             return false
         }
         // ImageAnalyzer transcript has no geometry. Existing vertical blocks
-        // or a lightweight image column probe are the only automatic-mode
-        // hints for a Kanji-only page. Reader paging direction is deliberately
-        // not used as an OCR language signal.
+        // are the only automatic-mode geometry hint for a Kanji-only page;
+        // image-only dark columns are deliberately not language evidence.
         return options.sourceLanguagePreference == .japanese
             || JapaneseVerticalOCRService.verticalColumnCount(in: blocks) >= 1
-            || (image.map {
-                JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: $0) >= 2
-            } ?? false)
     }
 
     private static func scriptCounts(in text: String) -> (kana: Int, han: Int, hangul: Int, latin: Int) {

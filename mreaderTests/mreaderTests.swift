@@ -734,7 +734,7 @@ struct mreaderTests {
         ))
     }
 
-    @Test func japaneseVerticalAutomaticModeUsesHanReferenceAndColumnsWithoutRTL() throws {
+    @Test func japaneseVerticalAutomaticModeDoesNotTrustImageOnlyColumnsWithoutLocalEvidence() throws {
         let size = CGSize(width: 160, height: 240)
         var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
         let context = try #require(CGContext(
@@ -760,7 +760,12 @@ struct mreaderTests {
             sourceLanguagePreference: .automatic
         )
 
-        #expect(JapaneseVerticalOCRService.shouldRunFallback(
+        #expect(!JapaneseVerticalOCRService.shouldRunFallback(
+            in: image,
+            existingBlocks: [],
+            options: options
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRunFallback(
             in: image,
             existingBlocks: [],
             options: options,
@@ -893,7 +898,7 @@ struct mreaderTests {
             sourceLanguagePreference: .automatic
         )
         #expect(!AppleOCRReferenceService.suggestsJapanese(reference, blocks: [], options: options))
-        #expect(AppleOCRReferenceService.suggestsJapanese(reference, blocks: [], options: options, image: image))
+        #expect(!AppleOCRReferenceService.suggestsJapanese(reference, blocks: [], options: options, image: image))
     }
 
     @Test func japaneseVerticalTSVRebuildsCharactersOnOneLineWithoutSpaces() {
@@ -950,6 +955,9 @@ struct mreaderTests {
         #expect(result.quality?.expectedScriptRatio ?? 1 < 0.1)
         #expect(result.quality?.japaneseScriptRatio == 0)
         #expect(result.quality?.isSuspicious == true)
+        #expect(result.resolvedBlocks.isEmpty)
+        let allRejectedByQuality = result.rejectedBlocks.allSatisfy { $0.isFiltered }
+        #expect(allRejectedByQuality)
     }
 
     @Test func japaneseVerticalVisualRecoveryHonorsSettingAndMergesMissingColumn() {
@@ -1526,6 +1534,28 @@ struct mreaderTests {
         #expect(abs(resolved.estimatedFontScale - 0.06) < 0.0001)
     }
 
+    @Test func ocrCandidateResolverDoesNotInheritAPathologicalBubble() {
+        let textBox = CGRect(x: 0.20, y: 0.20, width: 0.02, height: 0.02)
+        let result = OCRCandidateResolver.resolve([
+            TextBlock(
+                text: "同じ",
+                boundingBox: textBox,
+                confidence: 0.82,
+                ocrSource: "original"
+            ),
+            TextBlock(
+                text: "同じ",
+                boundingBox: textBox,
+                confidence: 0.91,
+                ocrSource: "enhanced",
+                bubbleBox: CGRect(x: 0.10, y: 0.10, width: 0.50, height: 0.50)
+            )
+        ], isRightToLeft: false)
+
+        #expect(result.resolvedBlocks.count == 1)
+        #expect(result.resolvedBlocks[0].bubbleBox == nil)
+    }
+
     @Test func mangaSegmenterDoesNotTransitivelyMergeThreeBubbles() {
         let blocks = [
             TextBlock(text: "第一句", boundingBox: CGRect(x: 0.05, y: 0.10, width: 0.20, height: 0.04), estimatedFontScale: 0.04),
@@ -1965,6 +1995,54 @@ struct mreaderTests {
         #expect(abs(vertical.sourceFontSize(in: displayedPage) - 15.6) < 0.001)
     }
 
+    @Test func verticalSourceUsesTargetLanguageForTranslationOrientation() {
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .english,
+                translatedText: "In the station"
+            ) == .horizontal
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .simplifiedChinese,
+                translatedText: "在车站里"
+            ) == .vertical
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .vertical,
+                targetLanguage: .simplifiedChinese,
+                translatedText: "The station"
+            ) == .horizontal
+        )
+        #expect(
+            OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+                sourceOrientation: .horizontal,
+                targetLanguage: .japanese,
+                translatedText: "こんにちは"
+            ) == .horizontal
+        )
+    }
+
+    @Test func geometryCapsAbnormalEstimatedFontScaleToGlyphAxis() {
+        let block = TextBlock(
+            text: "bad",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.1),
+            estimatedFontScale: 0.8,
+            textOrientation: .horizontal
+        )
+        let capped = OCRBubbleLayoutEngine.geometryCappedSourceFontSize(
+            for: block,
+            imageRect: CGRect(x: 0, y: 0, width: 390, height: 780),
+            textRect: CGRect(x: 30, y: 40, width: 120, height: 14),
+            sizingMode: .bubble
+        )
+
+        #expect(capped <= 14 * TranslationLayoutMetrics.geometryFontScaleMultiplier + 0.001)
+    }
+
     @Test func localOCRGeometryUsesPhysicalObservationAxis() {
         let geometry = OCRPreprocessor.localOCRGeometryForDiagnostics(
             observationRect: CGRect(x: 0, y: 0, width: 20.0 / 390.0, height: 40.0 / 780.0),
@@ -2094,6 +2172,37 @@ struct mreaderTests {
         #expect(!choice.text.contains("\n"))
         #expect(allowed.contains(choice.layout.rect))
         #expect(choice.layout.fontSize > 0)
+    }
+
+    @Test @MainActor func verticalTranslationReservesOnlyOneContentPadding() {
+        let glyphWidth: CGFloat = 14
+        let source = CGRect(x: 50, y: 50, width: glyphWidth, height: 30)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "正",
+            sourceFontSize: glyphWidth,
+            sourceRect: source,
+            allowedBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            lineSpacing: 2,
+            textOrientation: .vertical
+        )
+        let contentWidth = layout.rect.width - TranslationLayoutMetrics.contentPadding * 2
+
+        #expect(contentWidth >= glyphWidth * TranslationLayoutMetrics.verticalColumnWidthMultiplier - 0.5)
+    }
+
+    @Test func boundedTranslationBoundsProtectsThePageFromAWholePageBubble() {
+        let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let bounded = OCRBubbleLayoutEngine.boundedTranslationBounds(
+            around: CGRect(x: 180, y: 380, width: 8, height: 8),
+            within: imageBounds,
+            imageBounds: imageBounds
+        )
+        let area = bounded.width * bounded.height
+
+        #expect(imageBounds.contains(bounded))
+        #expect(bounded.width <= imageBounds.width * TranslationLayoutMetrics.maximumCardWidthFraction + 0.001)
+        #expect(bounded.height <= imageBounds.height * TranslationLayoutMetrics.maximumCardHeightFraction + 0.001)
+        #expect(area <= imageBounds.width * imageBounds.height * TranslationLayoutMetrics.maximumCardAreaFraction + 0.001)
     }
 
     @Test func translationBubbleBoxAllowsSmallOCRMappingTolerance() {

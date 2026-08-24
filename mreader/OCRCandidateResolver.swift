@@ -71,10 +71,10 @@ nonisolated enum OCRCandidateResolver {
                 > winningGroup.count / 2
                 ? TextOrientation.vertical
                 : TextOrientation.horizontal
-            let inheritedBubble = winningGroup.compactMap(\.bubbleBox).first
-                ?? group.compactMap(\.bubbleBox).first
-            let inheritedBubblePolygon = winningGroup.first(where: { !$0.bubblePolygon.isEmpty })?.bubblePolygon
-                ?? group.first(where: { !$0.bubblePolygon.isEmpty })?.bubblePolygon
+            let inheritedBubbleGeometry = validatedBubbleGeometry(
+                for: representative.boundingBox,
+                in: winningGroup
+            )
             resolved.append(TextBlock(
                 id: representative.id,
                 text: representative.text,
@@ -86,9 +86,9 @@ nonisolated enum OCRCandidateResolver {
                 filterReason: representative.filterReason,
                 estimatedFontScale: inheritedScale,
                 textColorHex: inheritedColor,
-                bubbleBox: inheritedBubble,
+                bubbleBox: inheritedBubbleGeometry?.box,
                 polygon: representative.polygon,
-                bubblePolygon: inheritedBubblePolygon ?? [],
+                bubblePolygon: inheritedBubbleGeometry?.polygon ?? [],
                 translationLines: representative.translationLines,
                 textOrientation: inheritedOrientation,
                 layoutRole: inheritedLayoutRole
@@ -121,6 +121,39 @@ nonisolated enum OCRCandidateResolver {
         _ rhs: TextBlock
     ) -> Bool {
         representsSameObservation(lhs, rhs)
+    }
+
+    nonisolated static func validatedBubbleGeometry(
+        for textRect: CGRect,
+        candidates: [TextBlock]
+    ) -> (box: CGRect, polygon: [CGPoint])? {
+        validatedBubbleGeometry(for: textRect, in: candidates)
+    }
+
+    private static func validatedBubbleGeometry(
+        for textRect: CGRect,
+        in candidates: [TextBlock]
+    ) -> (box: CGRect, polygon: [CGPoint])? {
+        let textArea = area(textRect)
+        guard textArea > 0 else { return nil }
+        let toleranceX = max(0.004, textRect.width * 0.10)
+        let toleranceY = max(0.004, textRect.height * 0.10)
+        return candidates.compactMap { candidate -> (box: CGRect, polygon: [CGPoint])? in
+            guard let bubble = candidate.bubbleBox,
+                  bubble.width > 0,
+                  bubble.height > 0,
+                  bubble.minX >= 0,
+                  bubble.minY >= 0,
+                  bubble.maxX <= 1.02,
+                  bubble.maxY <= 1.02,
+                  bubble.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textRect),
+                  area(bubble) <= 0.55,
+                  area(bubble) / textArea <= 600 else {
+                return nil
+            }
+            return (bubble, candidate.bubblePolygon)
+        }
+        .min { lhs, rhs in area(lhs.box) < area(rhs.box) }
     }
 
     private static func representsSameObservation(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {

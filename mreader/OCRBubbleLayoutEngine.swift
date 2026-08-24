@@ -2,6 +2,17 @@ import CoreGraphics
 import Foundation
 import UIKit
 
+nonisolated enum TranslationLayoutMetrics {
+    static let contentPadding: CGFloat = 5
+    static let verticalAdvanceMultiplier: CGFloat = 1.08
+    static let verticalColumnWidthMultiplier: CGFloat = 1.10
+    static let geometryFontScaleMultiplier: CGFloat = 1.25
+    static let absoluteFontSizeCap: CGFloat = 72
+    static let maximumCardWidthFraction: CGFloat = 0.78
+    static let maximumCardHeightFraction: CGFloat = 0.68
+    static let maximumCardAreaFraction: CGFloat = 0.38
+}
+
 nonisolated enum OCRBubbleLayoutEngine {
     nonisolated enum TranslationTextSizingMode: Sendable {
         case bubble
@@ -21,7 +32,46 @@ nonisolated enum OCRBubbleLayoutEngine {
 
     static func preferredTranslationFontSize(sourceFontSize: CGFloat) -> CGFloat {
         // 先尝试原文字号；气泡边界是硬约束，装不下时由 anchoredTranslationLayout 缩小文字。
-        max(sourceFontSize, 1)
+        min(max(sourceFontSize, 1), TranslationLayoutMetrics.absoluteFontSizeCap)
+    }
+
+    static func effectiveTranslationOrientation(
+        sourceOrientation: TextOrientation,
+        targetLanguage: TranslationTargetLanguage,
+        translatedText: String
+    ) -> TextOrientation {
+        guard sourceOrientation == .vertical else { return .horizontal }
+        switch targetLanguage {
+        case .simplifiedChinese, .traditionalChinese, .japanese:
+            return isPrimarilyCJK(translatedText) ? .vertical : .horizontal
+        default:
+            return .horizontal
+        }
+    }
+
+    static func isPrimarilyCJK(_ text: String) -> Bool {
+        var cjkCount = 0
+        var meaningfulCount = 0
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x31F0...0x31FF,
+                 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+                cjkCount += 1
+                meaningfulCount += 1
+            case 0x0041...0x024F,
+                 0x0400...0x052F,
+                 0x0E00...0x0E7F,
+                 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF,
+                 0xAC00...0xD7AF:
+                meaningfulCount += 1
+            default:
+                if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                    meaningfulCount += 1
+                }
+            }
+        }
+        guard meaningfulCount > 0 else { return false }
+        return Double(cjkCount) / Double(meaningfulCount) >= 0.60
     }
 
     static func usesStandaloneLayout(for block: TextBlock) -> Bool {
@@ -79,6 +129,79 @@ nonisolated enum OCRBubbleLayoutEngine {
         }
     }
 
+    static func geometryCappedSourceFontSize(
+        for block: TextBlock,
+        imageRect: CGRect,
+        textRect: CGRect,
+        sizingMode: TranslationTextSizingMode
+    ) -> CGFloat {
+        let estimated = sourceFontSize(
+            for: block,
+            imageRect: imageRect,
+            textRect: textRect,
+            sizingMode: sizingMode
+        )
+        let glyphAxis = block.textOrientation == .horizontal
+            ? textRect.height
+            : textRect.width
+        let geometryCap = max(
+            glyphAxis * TranslationLayoutMetrics.geometryFontScaleMultiplier,
+            1
+        )
+        return min(
+            max(estimated, 1),
+            geometryCap,
+            TranslationLayoutMetrics.absoluteFontSizeCap
+        )
+    }
+
+    /// Caps a pathological OCR/model bubble before layout can expand a card
+    /// over the artwork. The returned rectangle remains inside the original
+    /// allowed bounds, while the debug layer can continue to show the raw
+    /// allowed bounds separately.
+    static func boundedTranslationBounds(
+        around sourceRect: CGRect,
+        within allowedBounds: CGRect,
+        imageBounds: CGRect
+    ) -> CGRect {
+        let safeImageBounds = imageBounds.standardized
+        let safeAllowed = allowedBounds.standardized.intersection(safeImageBounds)
+        guard safeAllowed.width > 0, safeAllowed.height > 0 else {
+            return safeAllowed
+        }
+
+        var width = min(
+            safeAllowed.width,
+            safeImageBounds.width * TranslationLayoutMetrics.maximumCardWidthFraction
+        )
+        var height = min(
+            safeAllowed.height,
+            safeImageBounds.height * TranslationLayoutMetrics.maximumCardHeightFraction
+        )
+        let maximumArea = safeImageBounds.width
+            * safeImageBounds.height
+            * TranslationLayoutMetrics.maximumCardAreaFraction
+        if width * height > maximumArea, maximumArea > 0 {
+            let scale = sqrt(maximumArea / (width * height))
+            width *= scale
+            height *= scale
+        }
+
+        let center = CGPoint(
+            x: min(max(sourceRect.midX, safeAllowed.minX), safeAllowed.maxX),
+            y: min(max(sourceRect.midY, safeAllowed.minY), safeAllowed.maxY)
+        )
+        let capped = CGRect(
+            x: center.x - width / 2,
+            y: center.y - height / 2,
+            width: width,
+            height: height
+        )
+        return capped.intersection(safeAllowed).isNull
+            ? safeAllowed
+            : clamped(capped, to: safeAllowed, margin: 0)
+    }
+
     /// Standalone translations may grow only by a small, finite padding around
     /// the original textBox. A long translation therefore causes the layout
     /// engine to reduce the font size instead of creating a large card over the
@@ -124,7 +247,7 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceRect: CGRect,
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
-        padding: CGFloat = 5,
+        padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal
     ) -> TranslationLayout {
         if textOrientation == .vertical {
@@ -245,7 +368,7 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceRect: CGRect,
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
-        padding: CGFloat = 5,
+        padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal
     ) -> TranslationLayoutChoice {
         let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -440,8 +563,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         let targetFontSize = max(sourceFontSize, 1)
 
         func layout(fontSize: CGFloat) -> TranslationLayout? {
-            let advance = max(fontSize * 1.08, 1)
-            let columnWidth = max(fontSize * 1.10, 1)
+            let advance = max(fontSize * TranslationLayoutMetrics.verticalAdvanceMultiplier, 1)
+            let columnWidth = max(fontSize * TranslationLayoutMetrics.verticalColumnWidthMultiplier, 1)
             let availableHeight = max(safeBounds.height - padding * 2, advance)
             let rows = max(Int(floor(availableHeight / advance)), 1)
             let columns = max(Int(ceil(Double(glyphCount) / Double(rows))), 1)

@@ -4149,7 +4149,7 @@ struct LocalImageView: View {
             rect: geometry.choice.layout.rect,
             fontSize: geometry.choice.layout.fontSize,
             displayText: translation.isEmpty ? nil : geometry.choice.text,
-            textOrientation: block.textOrientation,
+            textOrientation: geometry.translationOrientation,
             layoutRole: block.layoutRole
         )
     }
@@ -4160,6 +4160,8 @@ struct LocalImageView: View {
     ) -> (
         sourceRect: CGRect,
         allowedBounds: CGRect,
+        layoutBounds: CGRect,
+        translationOrientation: TextOrientation,
         choice: OCRBubbleLayoutEngine.TranslationLayoutChoice
     ) {
         let transform = ocrDisplayTransform(in: size)
@@ -4167,6 +4169,13 @@ struct LocalImageView: View {
         let textRect = OCRCoordinateMapper.displayRect(
             forNormalizedPageRect: block.boundingBox,
             using: transform
+        )
+        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTranslation = translation.isEmpty ? block.text : translation
+        let translationOrientation = OCRBubbleLayoutEngine.effectiveTranslationOrientation(
+            sourceOrientation: block.textOrientation,
+            targetLanguage: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
+            translatedText: effectiveTranslation
         )
         let imageBounds = transform.imageRect
         let fallbackBounds: CGRect
@@ -4203,9 +4212,13 @@ struct LocalImageView: View {
         } else {
             allowedBounds = fallbackBounds
         }
-        let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
+            around: textRect,
+            within: allowedBounds,
+            imageBounds: imageBounds
+        )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
-            translation: translation.isEmpty ? block.text : translation,
+            translation: effectiveTranslation,
             translationLines: translation.isEmpty ? [] : block.translationLines,
             sourceFontSize: preferredTranslationFontSize(
                 for: block,
@@ -4213,14 +4226,20 @@ struct LocalImageView: View {
                 textRect: textRect
             ),
             sourceRect: textRect,
-            allowedBounds: allowedBounds,
+            allowedBounds: layoutBounds,
             lineSpacing: 2,
-            textOrientation: block.textOrientation
+            textOrientation: translationOrientation
         )
         #if DEBUG
-        print("MReader translation-layout orientation=\(block.textOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", preferredTranslationFontSize(for: block, in: size, textRect: textRect))) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) bubble=\(block.bubbleBox != nil)")
+        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", preferredTranslationFontSize(for: block, in: size, textRect: textRect))) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) textRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(block.bubbleBox != nil)")
         #endif
-        return (sourceRect: textRect, allowedBounds: allowedBounds, choice: choice)
+        return (
+            sourceRect: textRect,
+            allowedBounds: allowedBounds,
+            layoutBounds: layoutBounds,
+            translationOrientation: translationOrientation,
+            choice: choice
+        )
     }
 
     private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
@@ -4545,7 +4564,7 @@ struct LocalImageView: View {
             OCRBubbleLayoutEngine.usesStandaloneLayout(for: block)
             ? .standaloneGlyph
             : .bubble
-        return OCRBubbleLayoutEngine.sourceFontSize(
+        return OCRBubbleLayoutEngine.geometryCappedSourceFontSize(
             for: block,
             imageRect: imageRect,
             textRect: textRect,
@@ -5134,7 +5153,6 @@ private struct TranslationTextRenderer: View {
                     fontSize: fontSize,
                     color: style.coreTextColor
                 )
-                .padding(5)
             } else {
                 VStack(spacing: segments.count > 1 ? 7 : 0) {
                     ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
@@ -5151,7 +5169,7 @@ private struct TranslationTextRenderer: View {
                 }
             }
         }
-            .padding(5)
+            .padding(TranslationLayoutMetrics.contentPadding)
             .frame(width: layoutSize.width, height: layoutSize.height)
             .background {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)

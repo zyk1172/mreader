@@ -140,24 +140,10 @@ nonisolated enum MangaTextSegmenter {
         from blocks: [TextBlock],
         containing textBounds: CGRect
     ) -> (box: CGRect, polygon: [CGPoint])? {
-        let toleranceX = max(0.004, textBounds.width * 0.10)
-        let toleranceY = max(0.004, textBounds.height * 0.10)
-        return blocks.compactMap { block -> (box: CGRect, polygon: [CGPoint])? in
-            guard let bubbleBox = block.bubbleBox,
-                  bubbleBox.width > 0,
-                  bubbleBox.height > 0,
-                  bubbleBox.minX >= 0,
-                  bubbleBox.minY >= 0,
-                  bubbleBox.maxX <= 1.02,
-                  bubbleBox.maxY <= 1.02,
-                  bubbleBox.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textBounds) else {
-                return nil
-            }
-            return (bubbleBox, block.bubblePolygon)
-        }
-        .min { lhs, rhs in
-            lhs.box.width * lhs.box.height < rhs.box.width * rhs.box.height
-        }
+        OCRCandidateResolver.validatedBubbleGeometry(
+            for: textBounds,
+            candidates: blocks
+        )
     }
 
     /// 两个视觉框没有可观重叠、也不在小容差下相互包含，说明它们已经是不同漫画气泡。
