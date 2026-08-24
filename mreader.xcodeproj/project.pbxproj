@@ -290,6 +290,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
@@ -355,6 +356,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
@@ -418,12 +420,8 @@
 				DEVELOPMENT_TEAM = JUQXD87P93;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = mreader-offline-translation-Info.plist;
-				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
-					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued",
-					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.*",
-					"zhengyk.mreader.offline-translation.processing",
-				);
+				INFOPLIST_FILE = "mreader-offline-translation-Info.plist";
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = "$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued $(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.* zhengyk.mreader.offline-translation.processing";
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -464,12 +462,8 @@
 				DEVELOPMENT_TEAM = JUQXD87P93;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = mreader-offline-translation-Info.plist;
-				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
-					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued",
-					"$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.*",
-					"zhengyk.mreader.offline-translation.processing",
-				);
+				INFOPLIST_FILE = "mreader-offline-translation-Info.plist";
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = "$(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued $(PRODUCT_BUNDLE_IDENTIFIER).offline-translation.continued.* zhengyk.mreader.offline-translation.processing";
 				INFOPLIST_KEY_CFBundleDisplayName = MReader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -626,14 +620,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/lexiaoyao20/tesseract-Apple.git";
-			requirement = {
-				kind = exactVersion;
-				version = 5.5.1;
-			};
-		};
 		788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/weichsel/ZIPFoundation.git";
@@ -642,18 +628,26 @@
 				minimumVersion = 0.9.0;
 			};
 		};
+		D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/lexiaoyao20/tesseract-Apple.git";
+			requirement = {
+				kind = exactVersion;
+				version = 5.5.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		D17E00010000000000000003 /* TesseractSwift */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */;
-			productName = TesseractSwift;
-		};
 		788190C42FE2F100007BDA15 /* ZIPFoundation */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 788190C52FE2F100007BDA15 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
 			productName = ZIPFoundation;
+		};
+		D17E00010000000000000003 /* TesseractSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D17E00010000000000000002 /* XCRemoteSwiftPackageReference "tesseract-Apple" */;
+			productName = TesseractSwift;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
