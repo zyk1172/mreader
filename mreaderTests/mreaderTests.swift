@@ -1070,6 +1070,111 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
     }
 
+    @Test @MainActor func standaloneRotatedTextUsesGlyphGeometryInsteadOfAxisAlignedBox() {
+        let imageRect = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let center = CGPoint(x: 190, y: 260)
+        let angle = CGFloat.pi / 6
+        let axis = CGPoint(x: cos(angle), y: sin(angle))
+        let perpendicular = CGPoint(x: -sin(angle), y: cos(angle))
+        let displayPolygon = [
+            CGPoint(
+                x: center.x + axis.x * 86 + perpendicular.x * 16,
+                y: center.y + axis.y * 86 + perpendicular.y * 16
+            ),
+            CGPoint(
+                x: center.x + axis.x * 86 - perpendicular.x * 16,
+                y: center.y + axis.y * 86 - perpendicular.y * 16
+            ),
+            CGPoint(
+                x: center.x - axis.x * 86 - perpendicular.x * 16,
+                y: center.y - axis.y * 86 - perpendicular.y * 16
+            ),
+            CGPoint(
+                x: center.x - axis.x * 86 + perpendicular.x * 16,
+                y: center.y - axis.y * 86 + perpendicular.y * 16
+            )
+        ]
+        let block = TextBlock(
+            text: "FIDGET",
+            boundingBox: CGRect(x: 0.20, y: 0.22, width: 0.46, height: 0.20),
+            estimatedFontScale: 0.20,
+            polygon: displayPolygon.map { CGPoint(x: $0.x / imageRect.width, y: $0.y / imageRect.height) },
+            textOrientation: .horizontal
+        )
+        let axisAlignedSize = block.sourceFontSize(in: imageRect)
+        let standaloneSize = OCRBubbleLayoutEngine.standaloneTextFontSize(
+            for: block,
+            imageRect: imageRect,
+            textRect: CGRect(x: 100, y: 180, width: 180, height: 156)
+        )
+
+        #expect(axisAlignedSize == 156)
+        #expect(standaloneSize < axisAlignedSize * 0.5)
+        #expect(standaloneSize > 20)
+    }
+
+    @Test @MainActor func standaloneLongTranslationShrinksInsideFinitePadding() {
+        let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let sourceRect = CGRect(x: 110, y: 210, width: 120, height: 42)
+        let block = TextBlock(
+            text: "FIDGET",
+            boundingBox: CGRect(x: 0.28, y: 0.27, width: 0.31, height: 0.054),
+            estimatedFontScale: 0.054,
+            textOrientation: .horizontal
+        )
+        let fontSize = OCRBubbleLayoutEngine.standaloneTextFontSize(
+            for: block,
+            imageRect: imageBounds,
+            textRect: sourceRect
+        )
+        let allowed = OCRBubbleLayoutEngine.standaloneTranslationBounds(
+            around: sourceRect,
+            within: imageBounds
+        )
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "坐立不安的",
+            sourceFontSize: fontSize,
+            sourceRect: sourceRect,
+            allowedBounds: allowed,
+            lineSpacing: 2
+        )
+
+        #expect(allowed.width <= sourceRect.width + 48)
+        #expect(allowed.height <= sourceRect.height + 40)
+        #expect(allowed.contains(layout.rect))
+        #expect(layout.fontSize < block.sourceFontSize(in: imageBounds))
+    }
+
+    @Test @MainActor func standaloneFontHeuristicDoesNotChangeBubbleTextOrShrinkLargeGlyph() {
+        let imageRect = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let bubble = TextBlock(
+            text: "I knew it wouldn't be...",
+            boundingBox: CGRect(x: 0.20, y: 0.30, width: 0.42, height: 0.08),
+            estimatedFontScale: 0.08,
+            bubbleBox: CGRect(x: 0.15, y: 0.25, width: 0.55, height: 0.20),
+            textOrientation: .horizontal
+        )
+        let bubbleSourceSize = bubble.sourceFontSize(in: imageRect)
+        #expect(OCRBubbleLayoutEngine.standaloneTextFontSize(
+            for: bubble,
+            imageRect: imageRect,
+            textRect: CGRect(x: 78, y: 220, width: 164, height: 62)
+        ) == bubbleSourceSize)
+
+        let largeGlyph = TextBlock(
+            text: "ド",
+            boundingBox: CGRect(x: 0.30, y: 0.28, width: 0.25, height: 0.25),
+            estimatedFontScale: 0.25,
+            textOrientation: .horizontal
+        )
+        let largeGlyphSize = OCRBubbleLayoutEngine.standaloneTextFontSize(
+            for: largeGlyph,
+            imageRect: imageRect,
+            textRect: CGRect(x: 115, y: 190, width: 160, height: 160)
+        )
+        #expect(largeGlyphSize > 100)
+    }
+
     @Test func sourceFontSizeUsesTheMatchingDisplayAxisForTextDirection() {
         let displayedPage = CGRect(x: 0, y: 0, width: 390, height: 780)
         let horizontal = TextBlock(

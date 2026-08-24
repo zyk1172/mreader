@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import UIKit
 
 nonisolated enum OCRBubbleLayoutEngine {
@@ -16,6 +17,75 @@ nonisolated enum OCRBubbleLayoutEngine {
     static func preferredTranslationFontSize(sourceFontSize: CGFloat) -> CGFloat {
         // 先尝试原文字号；气泡边界是硬约束，装不下时由 anchoredTranslationLayout 缩小文字。
         max(sourceFontSize, 1)
+    }
+
+    /// Standalone text (sound effects, labels, and tilted words) has no real
+    /// bubbleBox to provide a generous layout area. Its axis-aligned OCR box
+    /// can be much larger than the glyphs when the word is rotated, so use the
+    /// actual polygon short axis or the per-glyph area estimate as a lower
+    /// bound for the display font size.
+    static func standaloneTextFontSize(
+        for block: TextBlock,
+        imageRect: CGRect,
+        textRect: CGRect
+    ) -> CGFloat {
+        let sourceFontSize = block.sourceFontSize(in: imageRect)
+        guard block.bubbleBox == nil else { return sourceFontSize }
+
+        let glyphCount = max(block.text.filter { !$0.isWhitespace }.count, 1)
+        let areaPerGlyph = sqrt(
+            max(textRect.width * textRect.height, 1) / CGFloat(glyphCount)
+        )
+        var candidates = [sourceFontSize, areaPerGlyph]
+
+        let displayPolygon = block.polygon.map { point in
+            CGPoint(
+                x: imageRect.minX + point.x * imageRect.width,
+                y: imageRect.minY + point.y * imageRect.height
+            )
+        }
+        if let shortAxis = orientedShortAxis(of: displayPolygon) {
+            candidates.append(shortAxis)
+        }
+        return max(candidates.min() ?? sourceFontSize, 1)
+    }
+
+    /// Standalone translations may grow only by a small, finite padding around
+    /// the original textBox. A long translation therefore causes the layout
+    /// engine to reduce the font size instead of creating a large card over the
+    /// artwork.
+    static func standaloneTranslationBounds(
+        around textRect: CGRect,
+        within imageBounds: CGRect
+    ) -> CGRect {
+        guard !textRect.isNull,
+              !imageBounds.isNull,
+              textRect.width > 0,
+              textRect.height > 0,
+              imageBounds.width > 0,
+              imageBounds.height > 0 else {
+            return textRect
+        }
+
+        let horizontalPadding = min(max(textRect.width * 0.35, 8), 24)
+        let verticalPadding = min(max(textRect.height * 0.35, 6), 20)
+        let maximumWidth = max(
+            textRect.width,
+            min(textRect.width + horizontalPadding * 2, imageBounds.width * 0.36)
+        )
+        let maximumHeight = max(
+            textRect.height,
+            min(textRect.height + verticalPadding * 2, imageBounds.height * 0.28)
+        )
+        let bounds = CGRect(
+            x: textRect.midX - maximumWidth / 2,
+            y: textRect.midY - maximumHeight / 2,
+            width: maximumWidth,
+            height: maximumHeight
+        ).intersection(imageBounds)
+        return bounds.isNull || bounds.width <= 0 || bounds.height <= 0
+            ? textRect.intersection(imageBounds)
+            : bounds
     }
 
     @MainActor
@@ -249,6 +319,41 @@ nonisolated enum OCRBubbleLayoutEngine {
             width: width,
             height: height
         )
+    }
+
+    private static func orientedShortAxis(of points: [CGPoint]) -> CGFloat? {
+        guard points.count >= 3 else { return nil }
+
+        var best: CGFloat?
+        for firstIndex in points.indices {
+            for secondIndex in points.indices where secondIndex > firstIndex {
+                let dx = points[secondIndex].x - points[firstIndex].x
+                let dy = points[secondIndex].y - points[firstIndex].y
+                let length = hypot(dx, dy)
+                guard length > 0.001 else { continue }
+                let angle = atan2(dy, dx)
+                let cosine = cos(angle)
+                let sine = sin(angle)
+                var minimumAlong = CGFloat.greatestFiniteMagnitude
+                var maximumAlong = -CGFloat.greatestFiniteMagnitude
+                var minimumAcross = CGFloat.greatestFiniteMagnitude
+                var maximumAcross = -CGFloat.greatestFiniteMagnitude
+                for point in points {
+                    let along = point.x * cosine + point.y * sine
+                    let across = -point.x * sine + point.y * cosine
+                    minimumAlong = min(minimumAlong, along)
+                    maximumAlong = max(maximumAlong, along)
+                    minimumAcross = min(minimumAcross, across)
+                    maximumAcross = max(maximumAcross, across)
+                }
+                let width = maximumAlong - minimumAlong
+                let height = maximumAcross - minimumAcross
+                guard width > 0.001, height > 0.001 else { continue }
+                let shortAxis = min(width, height)
+                best = min(best ?? shortAxis, shortAxis)
+            }
+        }
+        return best
     }
 
     static func nonOverlappingRect(
