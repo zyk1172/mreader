@@ -234,6 +234,25 @@ nonisolated enum JapaneseVerticalOCRService {
 
         let localColumnCenters = verticalColumnCenters(in: existingBlocks)
         let imageColumnCenters = image.map(verticalColumnEvidenceCenters(in:)) ?? []
+
+        // Coverage confidence cannot prove that the whole page was observed:
+        // Vision may confidently recognize two columns and miss the rest.
+        // For an explicitly Japanese page, image-level vertical evidence is
+        // sufficient even when no local block survived. Automatic mode still
+        // requires local Japanese/vertical evidence before using the probe.
+        if imageColumnCenters.count >= 2 {
+            if localColumnCenters.isEmpty {
+                return sourceLanguagePreference == .japanese
+            }
+            if hasSpatiallyMatchedImageEvidence(
+                imageColumnCenters,
+                localColumnCenters: localColumnCenters,
+                existingBlocks: existingBlocks
+            ) {
+                return true
+            }
+        }
+
         let coverage = coverage(for: existingBlocks, isRightToLeft: isRightToLeft)
         guard coverage.isInsufficient else { return false }
 
@@ -242,19 +261,7 @@ nonisolated enum JapaneseVerticalOCRService {
         // overlaps at least one local OCR column; it cannot create Japanese
         // evidence from artwork lines on its own.
         if localColumnCenters.count >= 2 { return true }
-        guard imageColumnCenters.count >= 2,
-              hasSpatiallyMatchedImageEvidence(
-                imageColumnCenters,
-                localColumnCenters: localColumnCenters,
-                existingBlocks: existingBlocks
-              ) else {
-            return false
-        }
-        guard let visionKitReference,
-              visionKitReference.isJapaneseEvidence else {
-            return false
-        }
-        return true
+        return false
     }
 
     static func coverage(

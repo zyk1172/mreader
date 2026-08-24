@@ -198,12 +198,33 @@ nonisolated enum OCRCandidateResolver {
             }
             result[family] = block
         }
-        let weightedVotes = bestByFamily.reduce(0.0) { total, entry in
-            total + sourceWeight(for: entry.key)
+        let bestCandidate = bestByFamily.values.max {
+            consensusCandidateScore($0) < consensusCandidateScore($1)
+        } ?? group[0]
+        let corroborationBonus = min(
+            Double(max(bestByFamily.count - 1, 0)) * 0.08,
+            0.16
+        )
+        return consensusCandidateScore(bestCandidate) + corroborationBonus
+    }
+
+    private static func consensusCandidateScore(_ block: TextBlock) -> Double {
+        let recoveryPenalty: Double
+        switch sourceFamily(block.ocrSource) {
+        case "enhanced":
+            // Enhanced Vision is useful recovery evidence, but a higher raw
+            // confidence should still beat a weak original pass.
+            recoveryPenalty = 0.05
+        case "inverted":
+            recoveryPenalty = 0.55
+        case "tesseract":
+            recoveryPenalty = 0.25
+        case "ja-reference":
+            recoveryPenalty = 0.15
+        default:
+            recoveryPenalty = 0
         }
-        let confidence = bestByFamily.values.reduce(0.0) { $0 + $1.confidence }
-            / Double(max(bestByFamily.count, 1))
-        return weightedVotes + confidence * 0.5
+        return block.confidence - recoveryPenalty
     }
 
     private static func candidateScore(_ block: TextBlock) -> Double {
