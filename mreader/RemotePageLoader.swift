@@ -115,7 +115,7 @@ nonisolated enum RemotePageLoader {
               let bookID = comic.komgaBookID else {
             return nil
         }
-        guard KomgaProvider.loadSources().contains(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+        guard await KomgaProvider.loadSources().contains(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
             print("Komga 源已禁用，拒绝打开远程漫画: \(comic.title)")
             return nil
         }
@@ -397,7 +397,7 @@ actor RemotePageCache {
     nonisolated private static func download(key: PageCacheKey, diskURL: URL) async -> Data? {
         if Task.isCancelled { return nil }
         do {
-            guard let source = KomgaProvider.loadSources().first(where: { $0.id == key.sourceID && $0.type == .komga && $0.isEnabled }),
+            guard let source = await KomgaProvider.loadSources().first(where: { $0.id == key.sourceID && $0.type == .komga && $0.isEnabled }),
                   let apiKey = KomgaProvider.apiKey(for: key.sourceID) else {
                 return nil
             }
@@ -413,7 +413,7 @@ actor RemotePageCache {
             print("Komga 页面不存在 book=\(key.bookID) page=\(key.pageIndex)")
             return nil
         } catch {
-            KomgaProvider.invalidateResolvedURL(for: key.sourceID)
+            await KomgaProvider.invalidateResolvedURL(for: key.sourceID)
             print("Komga 页面加载失败 page=\(key.pageIndex): \(error.localizedDescription)")
             return nil
         }

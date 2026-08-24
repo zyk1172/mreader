@@ -250,6 +250,8 @@ struct ContentView: View {
     @State private var deleteRequest: DeleteRequest?
     @State private var hideKomgaRequest: ComicBook?
     @State private var hiddenKomgaVersion = 0
+    @State private var mediaSources: [MediaSource] = []
+    @State private var hiddenKomgaComics: [HiddenKomgaComic] = []
     @State private var isRefreshingLibraries = false
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
@@ -277,12 +279,12 @@ struct ContentView: View {
     @State private var renamingSeries: ComicSeries?
 
     private var hasAnyLibrarySource: Bool {
-        hasLibraryRoot || KomgaProvider.loadSources().contains { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
+        hasLibraryRoot || mediaSources.contains { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
     }
 
     private var visibleComics: [ComicBook] {
         _ = hiddenKomgaVersion
-        let hiddenKeys = KomgaProvider.hiddenKomgaComicKeys()
+        let hiddenKeys = Set(hiddenKomgaComics.map(\.key))
         let displayableComics = library.comics.filter { comic in
             guard let hiddenKey = KomgaProvider.hiddenKey(for: comic) else { return true }
             return !hiddenKeys.contains(hiddenKey)
@@ -393,7 +395,7 @@ struct ContentView: View {
                         backupPasswordRequest = nil
                     },
                     onSubmit: { password in
-                        handleBackupPassword(password, request: request)
+                        await handleBackupPassword(password, request: request)
                     }
                 )
             }
@@ -407,6 +409,7 @@ struct ContentView: View {
                 }
             }
             .task {
+                await reloadMediaSourceState()
                 iCloudSync.start { payload in
                     library.applySyncedMetadata(payload)
                     readingActivity.mergeSyncedDays(payload.activityDays)
@@ -427,6 +430,11 @@ struct ContentView: View {
                 iCloudSync.push(comics: library.comics, activityDays: days)
             }
         }
+    }
+
+    private func reloadMediaSourceState() async {
+        mediaSources = await KomgaProvider.loadSources()
+        hiddenKomgaComics = await KomgaProvider.hiddenKomgaComics()
     }
 
     private struct AlertModifiers: ViewModifier {
@@ -1479,7 +1487,12 @@ struct ContentView: View {
     private var mediaSourceSettingsSection: some View {
         Section(header: Text("import.comicMediaLibrary".localized)) {
             NavigationLink {
-                MediaSourceSettingsView(library: library)
+                MediaSourceSettingsView(
+                    library: library,
+                    onSourcesChanged: {
+                        Task { await reloadMediaSourceState() }
+                    }
+                )
             } label: {
                 Label("Komga / OPDS", systemImage: "server.rack")
             }
@@ -1616,12 +1629,16 @@ struct ContentView: View {
     private func performConfirmedKomgaHide() {
         guard let comic = hideKomgaRequest else { return }
         HapticManager.shared.play(.medium)
-        KomgaProvider.hideComic(comic, sourceName: KomgaProvider.sourceName(for: comic))
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            hiddenKomgaVersion += 1
+        Task {
+            let sourceName = await KomgaProvider.sourceName(for: comic)
+            await KomgaProvider.hideComic(comic, sourceName: sourceName)
+            await reloadMediaSourceState()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                hiddenKomgaVersion += 1
+            }
+            library.refreshVisibility()
+            hideKomgaRequest = nil
         }
-        library.refreshVisibility()
-        hideKomgaRequest = nil
     }
 
     private func readerDestination(for comic: ComicBook) -> some View {
@@ -1950,8 +1967,12 @@ struct ContentView: View {
     }
 
     /// 备份现在必须携带密钥（API Key / 媒体源 Key），并始终以密码加密导出。
-    private func makeSettingsBackup() -> MReaderSettingsBackup {
-        let mediaSources = KomgaProvider.loadSources().map { source in
+    private func makeSettingsBackup() async -> MReaderSettingsBackup {
+        // The settings screen owns its editing lifecycle. Fetch the repository
+        // snapshot at export time instead of trusting ContentView's UI snapshot,
+        // which may predate a source added or edited in the nested screen.
+        let currentMediaSources = await KomgaProvider.loadSources()
+        let mediaSourceBackups = currentMediaSources.map { source in
             MediaSourceBackup(
                 source: source,
                 apiKey: KomgaProvider.apiKey(for: source.id)
@@ -1976,7 +1997,7 @@ struct ContentView: View {
             translationStyleInstructions: translationStyleInstructions,
             visionTranslationPromptTemplate: visionTranslationPromptTemplate,
             isHapticFeedbackEnabled: isHapticFeedbackEnabled,
-            mediaSources: mediaSources,
+            mediaSources: mediaSourceBackups,
             translationColorStyle: translationColorStyleRaw,
             isAITranslationBorderProgressEnabled: isAITranslationBorderProgressEnabled,
             isOCRDebugBoxesEnabled: isOCRDebugBoxesEnabled,
@@ -1992,9 +2013,9 @@ struct ContentView: View {
     }
 
     /// 导出设置备份：始终包含密钥，且必须用密码加密（不允许明文携带密钥）。
-    private func exportSettingsBackup(password: String? = nil) {
+    private func exportSettingsBackup(password: String? = nil) async {
         do {
-            let backup = makeSettingsBackup()
+            let backup = await makeSettingsBackup()
             guard let password else { throw SettingsBackupCodecError.invalidPassword }
             let data = try SettingsBackupCodec.encodeEncrypted(backup, password: password)
             settingsBackupDocument = SettingsBackupDocument(data: data)
@@ -2025,7 +2046,17 @@ struct ContentView: View {
                 return
             }
             let backup = try SettingsBackupCodec.decode(data)
-            try applySettingsBackup(backup)
+            Task { @MainActor in
+                do {
+                    try await applySettingsBackup(backup)
+                } catch {
+                    HapticManager.shared.play(.error)
+                    settingsRestoreNotice = SettingsRestoreNotice(
+                        title: "settings.restoreFailed".localized,
+                        message: "设置备份恢复失败：\(error.localizedDescription)"
+                    )
+                }
+            }
         } catch {
             HapticManager.shared.play(.error)
             settingsRestoreNotice = SettingsRestoreNotice(
@@ -2035,7 +2066,7 @@ struct ContentView: View {
         }
     }
 
-    private func applySettingsBackup(_ backup: MReaderSettingsBackup) throws {
+    private func applySettingsBackup(_ backup: MReaderSettingsBackup) async throws {
             if let providers = backup.aiProviders, !providers.isEmpty {
                 let providerStore = AIProviderStore.shared
                 try AIProviderStore.shared.replaceProfiles(
@@ -2079,7 +2110,8 @@ struct ContentView: View {
             readingDailyPageGoal = min(max(backup.readingDailyPageGoal ?? readingDailyPageGoal, 0), 5_000)
             isBurnInProtectionEnabled = backup.isBurnInProtectionEnabled ?? isBurnInProtectionEnabled
             isICloudMetadataSyncEnabled = backup.isICloudMetadataSyncEnabled ?? isICloudMetadataSyncEnabled
-            try restoreMediaSources(from: backup.mediaSources ?? [])
+            try await restoreMediaSources(from: backup.mediaSources ?? [])
+            await reloadMediaSourceState()
             Task {
                 await library.syncAllLibrariesAsync()
             }
@@ -2087,15 +2119,15 @@ struct ContentView: View {
             settingsRestoreNotice = SettingsRestoreNotice(title: "settings.restoreSuccess".localized, message: "settings.restoreSuccessMessage".localized)
     }
 
-    private func handleBackupPassword(_ password: String, request: BackupPasswordRequest) -> String? {
+    private func handleBackupPassword(_ password: String, request: BackupPasswordRequest) async -> String? {
         do {
             switch request.purpose {
             case .export:
                 backupPasswordRequest = nil
-                exportSettingsBackup(password: password)
+                await exportSettingsBackup(password: password)
             case .restore(let data):
                 let backup = try SettingsBackupCodec.decode(data, password: password)
-                try applySettingsBackup(backup)
+                try await applySettingsBackup(backup)
                 backupPasswordRequest = nil
             }
             return nil
@@ -2105,20 +2137,17 @@ struct ContentView: View {
         }
     }
 
-    private func restoreMediaSources(from backups: [MediaSourceBackup]) throws {
+    private func restoreMediaSources(from backups: [MediaSourceBackup]) async throws {
         guard !backups.isEmpty else { return }
-        var sources = KomgaProvider.loadSources()
+        var restoredSources: [MediaSource] = []
         for backup in backups {
             let source = backup.mediaSource
-            sources.removeAll { existing in
-                existing.id == source.id || (existing.type == source.type && existing.baseURL == source.baseURL)
-            }
-            sources.append(source)
+            restoredSources.append(source)
             if let apiKey = backup.apiKey, !apiKey.isEmpty {
                 try KomgaProvider.saveAPIKey(apiKey, for: source.id)
             }
         }
-        try KomgaProvider.saveSources(sources)
+        try await KomgaProvider.mergeSources(restoredSources)
     }
 
 }
@@ -2126,7 +2155,7 @@ struct ContentView: View {
 private struct BackupPasswordView: View {
     let isCreatingBackup: Bool
     let onCancel: () -> Void
-    let onSubmit: (String) -> String?
+    let onSubmit: (String) async -> String?
 
     @State private var password = ""
     @State private var confirmation = ""
@@ -2160,7 +2189,9 @@ private struct BackupPasswordView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("nav.done".localized) {
-                        errorMessage = onSubmit(password)
+                        Task {
+                            errorMessage = await onSubmit(password)
+                        }
                     }
                     .disabled(password.count < 8 || (isCreatingBackup && password != confirmation))
                 }

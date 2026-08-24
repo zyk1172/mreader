@@ -521,7 +521,7 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func performKomgaSourcesSync(sourceIDs: Set<UUID>? = nil) async -> Int {
-        let loadedSources = KomgaProvider.loadSources().filter { $0.type == .komga }
+        let loadedSources = await KomgaProvider.loadSources().filter { $0.type == .komga }
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
         comics.removeAll { comic in
@@ -591,7 +591,7 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func performOPDSSourcesSync(sourceIDs: Set<UUID>? = nil) async -> Int {
-        let loadedSources = KomgaProvider.loadSources().filter { $0.type == .opds }
+        let loadedSources = await KomgaProvider.loadSources().filter { $0.type == .opds }
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
         comics.removeAll { comic in
@@ -635,10 +635,10 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     func setKomgaSourceEnabled(id: UUID, isEnabled: Bool) async {
-        var sources = KomgaProvider.loadSources()
+        var sources = await KomgaProvider.loadSources()
         guard let index = sources.firstIndex(where: { $0.id == id }) else { return }
         sources[index].isEnabled = isEnabled
-        try? KomgaProvider.updateSource(sources[index])
+        try? await KomgaProvider.updateSource(sources[index])
         if isEnabled {
             await syncKomgaSources()
         } else {
@@ -647,10 +647,10 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     func setMediaSourceEnabled(id: UUID, isEnabled: Bool) async {
-        guard let source = KomgaProvider.loadSources().first(where: { $0.id == id }) else { return }
+        guard let source = await KomgaProvider.loadSources().first(where: { $0.id == id }) else { return }
         var updatedSource = source
         updatedSource.isEnabled = isEnabled
-        try? KomgaProvider.updateSource(updatedSource)
+        try? await KomgaProvider.updateSource(updatedSource)
         switch source.type {
         case .komga:
             if isEnabled { _ = await syncKomgaSources() } else { removeKomgaSource(id: id) }
@@ -962,7 +962,7 @@ final class ComicLibraryStore: ObservableObject {
         return false
     }
 
-    private func removeLocalKomgaState(for comic: ComicBook) {
+    private func removeLocalKomgaState(for comic: ComicBook) async {
         pendingKomgaProgressTasks[comic.id]?.cancel()
         pendingKomgaProgressTasks[comic.id] = nil
         comics.removeAll { existing in
@@ -978,7 +978,7 @@ final class ComicLibraryStore: ObservableObject {
             return true
         }
         if let key = KomgaProvider.hiddenKey(for: comic) {
-            KomgaProvider.unhideComic(key: key)
+            await KomgaProvider.unhideComic(key: key)
         }
         if let sourceID = comic.mediaSourceID, let bookID = comic.komgaBookID {
             RemoteImageLoader.removeCachedImages(sourceID: sourceID, bookID: bookID)
@@ -1110,10 +1110,10 @@ final class ComicLibraryStore: ObservableObject {
     private func deleteKomgaComic(_ comic: ComicBook) async {
         do {
             try await KomgaProvider.deleteBook(comic)
-            removeLocalKomgaState(for: comic)
+            await removeLocalKomgaState(for: comic)
             HapticManager.shared.play(.success)
         } catch MediaSourceError.notFound {
-            removeLocalKomgaState(for: comic)
+            await removeLocalKomgaState(for: comic)
             HapticManager.shared.play(.success)
         } catch {
             print("Komga 删除失败 \(comic.title): \(error.localizedDescription)")

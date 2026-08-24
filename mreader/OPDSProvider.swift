@@ -60,16 +60,13 @@ nonisolated enum OPDSProvider {
         _ = try await OPDSClient(source: source, credential: credential).publications(limit: 1)
         source.lastSyncAt = Date()
         try KomgaProvider.saveAPIKey(credential, for: source.id)
-        var sources = KomgaProvider.loadSources()
-        sources.removeAll { $0.type == .opds && $0.baseURL == source.baseURL }
-        sources.append(source)
-        try KomgaProvider.saveSources(sources)
+        try await KomgaProvider.addOrReplaceSource(source, replacingType: .opds, baseURL: source.baseURL)
         return source
     }
 
     static func syncEnabledSources(sourceIDs: Set<UUID>? = nil) async -> [OPDSSourceSyncResult] {
         var results: [OPDSSourceSyncResult] = []
-        var sources = KomgaProvider.loadSources().filter { $0.type == .opds && $0.isEnabled }
+        var sources = await KomgaProvider.loadSources().filter { $0.type == .opds && $0.isEnabled }
         if let sourceIDs {
             sources = sources.filter { sourceIDs.contains($0.id) }
         }
@@ -85,7 +82,7 @@ nonisolated enum OPDSProvider {
                 let comics = publications.map { makeComic(source: source, publication: $0) }
                 var updatedSource = source
                 updatedSource.lastSyncAt = Date()
-                try? KomgaProvider.updateSource(updatedSource)
+                try? await KomgaProvider.updateSource(updatedSource)
                 results.append(
                     OPDSSourceSyncResult(
                         source: updatedSource,
@@ -124,7 +121,7 @@ nonisolated enum OPDSProvider {
             return "opds-offline:\(OfflineTranslationFingerprint.sha256(for: data))"
         }
         guard
-              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let source = await KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
               let credential = KomgaProvider.apiKey(for: sourceID),
               let value = comic.sourceURL ?? comic.chapterPath,
               let acquisitionURL = URL(string: value) else {
@@ -142,7 +139,7 @@ nonisolated enum OPDSProvider {
     static func loadPages(for comic: ComicBook) async -> ComicManager.LoadResult? {
         guard comic.sourceType == .opds,
               let sourceID = comic.mediaSourceID,
-              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let source = await KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
               let remoteURLString = comic.sourceURL,
               let remoteURL = URL(string: remoteURLString),
               let credential = KomgaProvider.apiKey(for: sourceID) else {
@@ -181,7 +178,7 @@ nonisolated enum OPDSProvider {
     static func downloadFile(for comic: ComicBook) async throws -> URL {
         guard comic.sourceType == .opds,
               let sourceID = comic.mediaSourceID,
-              let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+              let source = await KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
               let remoteURLString = comic.sourceURL,
               let remoteURL = URL(string: remoteURLString),
               let credential = KomgaProvider.apiKey(for: sourceID) else {
@@ -231,7 +228,7 @@ nonisolated enum OPDSProvider {
            let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
             return data
         }
-        guard let source = KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
+        guard let source = await KomgaProvider.loadSources().first(where: { $0.id == sourceID && $0.type == .opds && $0.isEnabled }),
               let credential = KomgaProvider.apiKey(for: sourceID),
               let data = try? await OPDSClient(source: source, credential: credential).data(from: remoteURL) else {
             return nil
