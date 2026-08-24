@@ -855,14 +855,17 @@ class AITranslator {
         baseURL: String,
         model: String,
         isRightToLeft: Bool,
-        modelDescriptor: AIModelDescriptor? = nil
+        modelDescriptor: AIModelDescriptor? = nil,
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        detectedLanguage: String? = nil,
+        visualVerificationEnabled: Bool = true
     ) async throws -> [TextBlock] {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        guard visualVerificationEnabled,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let cgImage = image.cgImage else {
             return blocks
         }
         let regions = visualVerificationRegionsForDiagnostics(blocks)
-        guard !regions.isEmpty else { return blocks }
 
         var corrected = blocks
         let pagePixelBounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
@@ -940,7 +943,126 @@ class AITranslator {
                 print("MReader OCR visual review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
             }
         }
+
+        // Existing verification is deliberately block-scoped and cannot see a
+        // column that Vision omitted entirely.  When the merged local result
+        // still looks like an under-covered Japanese vertical page, make one
+        // page-level recognition request so the model can discover missing
+        // text.  This branch is reached only from the explicit visual-review
+        // setting and never recursively invokes visualVerifyOCRRegions.
+        let effectiveSourceLanguage: TranslationSourceLanguage?
+        if sourceLanguagePreference == .japanese
+            || detectedLanguage?.lowercased().hasPrefix("ja") == true {
+            effectiveSourceLanguage = .japanese
+        } else {
+            effectiveSourceLanguage = sourceLanguagePreference
+        }
+        if JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: image,
+            existingBlocks: corrected,
+            isRightToLeft: isRightToLeft,
+            sourceLanguagePreference: effectiveSourceLanguage
+        ) {
+            do {
+                let recovered = try await recognizeVisionImage(
+                    image: image,
+                    sourceRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    model: model,
+                    modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model),
+                    isRightToLeft: isRightToLeft,
+                    additionalInstructions: "这是日文竖排页面的整页补漏。请识别页面中所有可读文字，包括本地 OCR 没有产生 block 的整列竖排文字；不要因为已有识别结果而省略任何文字。",
+                    translationTarget: nil,
+                    translationPromptTemplate: defaultVisionTranslationPromptTemplate,
+                    strictTranslationGeometry: false
+                )
+                let marked = recovered.map { block in
+                    TextBlock(
+                        id: block.id,
+                        text: block.text,
+                        boundingBox: block.boundingBox,
+                        translation: block.translation,
+                        confidence: block.confidence,
+                        ocrSource: "visual-page-recovery",
+                        isFiltered: block.isFiltered,
+                        filterReason: block.filterReason,
+                        estimatedFontScale: block.estimatedFontScale,
+                        textColorHex: block.textColorHex,
+                        bubbleBox: block.bubbleBox,
+                        polygon: block.polygon,
+                        bubblePolygon: block.bubblePolygon,
+                        translationLines: block.translationLines,
+                        textOrientation: block.textOrientation
+                    )
+                }
+                corrected = mergeVisualPageRecoveryBlocks(
+                    marked,
+                    into: corrected,
+                    isRightToLeft: isRightToLeft
+                )
+                print("MReader OCR visual page recovery blocks=\(marked.count)")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("MReader OCR visual page recovery fallback reason=\(error.localizedDescription)")
+            }
+        }
         return corrected
+    }
+
+    static func visualPageRecoveryShouldRunForDiagnostics(
+        image: UIImage?,
+        blocks: [TextBlock],
+        isRightToLeft: Bool,
+        sourceLanguagePreference: TranslationSourceLanguage?,
+        visualVerificationEnabled: Bool
+    ) -> Bool {
+        guard visualVerificationEnabled else { return false }
+        return JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: image,
+            existingBlocks: blocks,
+            isRightToLeft: isRightToLeft,
+            sourceLanguagePreference: sourceLanguagePreference
+        )
+    }
+
+    static func mergeVisualPageRecoveryBlocksForDiagnostics(
+        _ recovered: [TextBlock],
+        into local: [TextBlock],
+        isRightToLeft: Bool
+    ) -> [TextBlock] {
+        mergeVisualPageRecoveryBlocks(recovered, into: local, isRightToLeft: isRightToLeft)
+    }
+
+    private static func mergeVisualPageRecoveryBlocks(
+        _ recovered: [TextBlock],
+        into local: [TextBlock],
+        isRightToLeft: Bool
+    ) -> [TextBlock] {
+        var merged = local
+        for candidate in recovered {
+            let duplicateIndex = merged.firstIndex { existing in
+                let overlap = visualVerificationIntersectionOverUnion(
+                    existing.boundingBox,
+                    candidate.boundingBox
+                )
+                let textSimilarity = visualVerificationTextSimilarity(
+                    existing.text,
+                    candidate.text
+                )
+                return overlap >= 0.35
+                    || (textSimilarity >= 0.82 && overlap >= 0.08)
+            }
+            if let duplicateIndex {
+                if candidate.confidence > merged[duplicateIndex].confidence {
+                    merged[duplicateIndex] = candidate
+                }
+            } else {
+                merged.append(candidate)
+            }
+        }
+        return sortedTextBlocks(merged, isRightToLeft: isRightToLeft)
     }
 
     /// 裁剪图中的 Vision 坐标需要先映射回整页，再与原 OCR block 比较；不能仅凭置信度

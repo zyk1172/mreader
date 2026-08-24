@@ -16,7 +16,13 @@ nonisolated enum MangaOCRPipeline {
         in image: UIImage,
         options: OCRPreprocessor.Options
     ) async throws -> OCRPipelineResult {
-        let rawBlocks = try await OCRPreprocessor.recognizeCandidates(in: image, options: options)
+        let visionBlocks = try await OCRPreprocessor.recognizeCandidates(in: image, options: options)
+        let verticalBlocks = await JapaneseVerticalOCRService.recognizeIfNeeded(
+            in: image,
+            existingBlocks: visionBlocks,
+            options: options
+        )
+        let rawBlocks = visionBlocks + verticalBlocks
         return resolveForDiagnostics(rawBlocks, isRightToLeft: options.isRightToLeft)
     }
 

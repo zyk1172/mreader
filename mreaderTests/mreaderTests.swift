@@ -13,6 +13,8 @@ import Vision
 import ZIPFoundation
 @testable import mreader
 
+private final class OCRFixtureResourceToken {}
+
 @Suite(.serialized)
 struct mreaderTests {
 
@@ -227,6 +229,229 @@ struct mreaderTests {
         } catch AIProviderStoreError.unsupportedVisionModel {
             // expected
         }
+    }
+
+    @Test func japaneseVerticalFallbackRequiresJapaneseVerticalEvidence() {
+        let verticalBlocks = [
+            TextBlock(
+                text: "?",
+                boundingBox: CGRect(x: 0.10, y: 0.12, width: 0.04, height: 0.28),
+                confidence: 0.2,
+                ocrSource: "vision:ja",
+                textOrientation: .vertical
+            ),
+            TextBlock(
+                text: "?",
+                boundingBox: CGRect(x: 0.72, y: 0.14, width: 0.04, height: 0.28),
+                confidence: 0.2,
+                ocrSource: "vision:ja",
+                textOrientation: .vertical
+            )
+        ]
+        #expect(JapaneseVerticalOCRService.verticalColumnCount(in: verticalBlocks) == 2)
+        #expect(JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: verticalBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .japanese
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: verticalBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .simplifiedChinese
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: verticalBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .english
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: verticalBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .korean
+        ))
+        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: verticalBlocks,
+            isRightToLeft: false,
+            sourceLanguagePreference: .japanese
+        ))
+
+        let horizontalBlocks = verticalBlocks.map { block in
+            TextBlock(
+                text: block.text,
+                boundingBox: CGRect(
+                    x: block.boundingBox.minX,
+                    y: block.boundingBox.minY,
+                    width: 0.28,
+                    height: 0.04
+                ),
+                confidence: block.confidence,
+                ocrSource: "vision:ja",
+                textOrientation: .horizontal
+            )
+        }
+        #expect(JapaneseVerticalOCRService.verticalColumnCount(in: horizontalBlocks) == 0)
+        #expect(!JapaneseVerticalOCRService.shouldRequestPageRecovery(
+            in: nil,
+            existingBlocks: horizontalBlocks,
+            isRightToLeft: true,
+            sourceLanguagePreference: .japanese
+        ))
+    }
+
+    @Test func japaneseVerticalCoordinateMappingRoundTrips() {
+        let original = CGRect(x: 0.16, y: 0.21, width: 0.08, height: 0.31)
+        let rotated = JapaneseVerticalOCRService.originalBoundingBoxToRotatedForDiagnostics(original)
+        let roundTrip = JapaneseVerticalOCRService.rotatedBoundingBoxToOriginalForDiagnostics(rotated)
+        #expect(abs(roundTrip.minX - original.minX) < 0.0001)
+        #expect(abs(roundTrip.minY - original.minY) < 0.0001)
+        #expect(abs(roundTrip.width - original.width) < 0.0001)
+        #expect(abs(roundTrip.height - original.height) < 0.0001)
+    }
+
+    @Test func japaneseVerticalVisualRecoveryHonorsSettingAndMergesMissingColumn() {
+        let local = TextBlock(
+            text: "ノート",
+            boundingBox: CGRect(x: 0.10, y: 0.12, width: 0.06, height: 0.35),
+            confidence: 0.2,
+            ocrSource: "vision:ja",
+            textOrientation: .vertical
+        )
+        let missingColumn = TextBlock(
+            text: "買った。",
+            boundingBox: CGRect(x: 0.72, y: 0.12, width: 0.06, height: 0.35),
+            confidence: 0.9,
+            ocrSource: "visual-page-recovery",
+            textOrientation: .vertical
+        )
+        #expect(!AITranslator.visualPageRecoveryShouldRunForDiagnostics(
+            image: nil,
+            blocks: [local],
+            isRightToLeft: true,
+            sourceLanguagePreference: .japanese,
+            visualVerificationEnabled: false
+        ))
+        let merged = AITranslator.mergeVisualPageRecoveryBlocksForDiagnostics(
+            [missingColumn],
+            into: [local],
+            isRightToLeft: true
+        )
+        #expect(merged.count == 2)
+        #expect(merged.contains { $0.ocrSource == "visual-page-recovery" })
+        let recoveredFromEmptyPage = AITranslator.mergeVisualPageRecoveryBlocksForDiagnostics(
+            [missingColumn],
+            into: [],
+            isRightToLeft: true
+        )
+        #expect(recoveredFromEmptyPage.count == 1)
+        #expect(recoveredFromEmptyPage[0].text == "買った。")
+    }
+
+    @Test func mangaPipelineKeepsTesseractColumnWhenVisionReturnsNothing() {
+        let tesseractBlock = TextBlock(
+            text: "ノートを買った。",
+            boundingBox: CGRect(x: 0.08, y: 0.06, width: 0.36, height: 0.88),
+            confidence: 0.86,
+            ocrSource: "tesseract:jpn_vert",
+            textOrientation: .vertical
+        )
+        let result = MangaOCRPipeline.resolveForDiagnostics(
+            [tesseractBlock],
+            isRightToLeft: true
+        )
+        #expect(result.rawBlocks.count == 1)
+        #expect(result.resolvedBlocks.contains { $0.ocrSource == "tesseract:jpn_vert" })
+        #expect(result.bubbleBlocks.contains { $0.text.contains("ノート") })
+    }
+
+    @Test func japaneseVerticalVisualRecoveryCanBePlannedWithoutLocalBlocks() throws {
+        let size = CGSize(width: 160, height: 240)
+        var pixels = [UInt8](repeating: 255, count: Int(size.width * size.height * 4))
+        let context = try #require(CGContext(
+            data: &pixels,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 28, y: 30, width: 6, height: 180))
+        context.fill(CGRect(x: 122, y: 30, width: 6, height: 180))
+        let cgImage = try #require(context.makeImage())
+        let image = UIImage(cgImage: cgImage)
+        #expect(AITranslator.visualPageRecoveryShouldRunForDiagnostics(
+            image: image,
+            blocks: [],
+            isRightToLeft: true,
+            sourceLanguagePreference: .japanese,
+            visualVerificationEnabled: true
+        ))
+    }
+
+    @Test func japaneseVerticalFixtureIsBundledWithGoldenTokens() async throws {
+        let bundle = Bundle(for: OCRFixtureResourceToken.self)
+        let url = try #require(
+            bundle.url(forResource: "japanese_vertical_tateyoko_crop", withExtension: "png")
+                ?? Bundle.main.url(forResource: "japanese_vertical_tateyoko_crop", withExtension: "png")
+        )
+        let image = try #require(UIImage(contentsOfFile: url.path))
+        let lowCoverageBlocks = [
+            TextBlock(
+                text: "?",
+                boundingBox: CGRect(x: 0.08, y: 0.12, width: 0.04, height: 0.28),
+                confidence: 0.2,
+                ocrSource: "vision:ja",
+                textOrientation: .vertical
+            ),
+            TextBlock(
+                text: "?",
+                boundingBox: CGRect(x: 0.74, y: 0.12, width: 0.04, height: 0.28),
+                confidence: 0.2,
+                ocrSource: "vision:ja",
+                textOrientation: .vertical
+            )
+        ]
+        let options = OCRPreprocessor.Options(
+            isRightToLeft: true,
+            minimumTextHeight: 0.002,
+            sourceLanguagePreference: .japanese
+        )
+        let blocks = await JapaneseVerticalOCRService.recognizeIfNeeded(
+            in: image,
+            existingBlocks: lowCoverageBlocks,
+            options: options
+        )
+        #expect(!blocks.isEmpty)
+        #expect(blocks.allSatisfy { $0.ocrSource == "tesseract:jpn_vert" })
+        #expect(blocks.allSatisfy { $0.textOrientation == .vertical })
+        let recognized = blocks.map(\.text).joined()
+        let expectedTokens = ["ノ", "ー", "ト", "を", "買", "っ", "た"]
+        #expect(expectedTokens.filter { recognized.contains($0) }.count >= 5)
+        #expect(blocks.contains {
+            $0.textOrientation == .vertical
+                && $0.boundingBox.minX < 0.25
+                && $0.boundingBox.maxX <= 1
+                && $0.boundingBox.maxY <= 1
+        })
+        let expectedColumn = CGRect(x: 0, y: 0, width: 0.75, height: 1)
+        let bestColumnIoU = blocks.map { block -> CGFloat in
+            let intersection = block.boundingBox.intersection(expectedColumn)
+            guard !intersection.isNull else { return 0 }
+            let intersectionArea = intersection.width * intersection.height
+            let unionArea = block.boundingBox.width * block.boundingBox.height
+                + expectedColumn.width * expectedColumn.height
+                - intersectionArea
+            return unionArea > 0 ? intersectionArea / unionArea : 0
+        }.max() ?? 0
+        #expect(bestColumnIoU > 0.04)
     }
 
     @Test func startupRemoteSyncDoesNotScanLocalLibrary() {

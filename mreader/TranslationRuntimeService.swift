@@ -60,7 +60,10 @@ nonisolated enum TranslationRuntimeService {
         baseURL: String,
         model: String,
         isRightToLeft: Bool,
-        modelDescriptor: AIModelDescriptor? = nil
+        modelDescriptor: AIModelDescriptor? = nil,
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        detectedLanguage: String? = nil,
+        visualVerificationEnabled: Bool = true
     ) async throws -> [TextBlock] {
         try await AITranslator.visualVerifyOCRRegions(
             image: image,
@@ -69,7 +72,10 @@ nonisolated enum TranslationRuntimeService {
             baseURL: baseURL,
             model: model,
             isRightToLeft: isRightToLeft,
-            modelDescriptor: modelDescriptor
+            modelDescriptor: modelDescriptor,
+            sourceLanguagePreference: sourceLanguagePreference,
+            detectedLanguage: detectedLanguage,
+            visualVerificationEnabled: visualVerificationEnabled
         )
     }
 
