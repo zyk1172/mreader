@@ -1,5 +1,37 @@
 import SwiftUI
 
+private enum AIModelVisionCapability: String, CaseIterable, Identifiable {
+    case unknown
+    case supported
+    case unsupported
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .unknown: return "未知"
+        case .supported: return "支持"
+        case .unsupported: return "不支持"
+        }
+    }
+
+    init(supportsVision: Bool?) {
+        switch supportsVision {
+        case .some(true): self = .supported
+        case .some(false): self = .unsupported
+        case .none: self = .unknown
+        }
+    }
+
+    var supportsVision: Bool? {
+        switch self {
+        case .unknown: return nil
+        case .supported: return true
+        case .unsupported: return false
+        }
+    }
+}
+
 struct AIProviderSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var profiles: [AIProviderProfile] = []
@@ -197,6 +229,7 @@ private struct AIProviderEditorView: View {
     @State private var modelDescriptors: [String: AIModelDescriptor]
     @State private var selectedTextModel: String
     @State private var selectedVisionModel: String
+    @State private var editingModel: ModelEditorItem?
     @State private var testingKind: ConnectionTestKind?
     @State private var testMessage: String?
     @State private var testFailed = false
@@ -207,20 +240,8 @@ private struct AIProviderEditorView: View {
         case vision
     }
 
-    private enum VisionCapability: String, CaseIterable, Identifiable {
-        case unknown
-        case supported
-        case unsupported
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .unknown: return "未知"
-            case .supported: return "支持"
-            case .unsupported: return "不支持"
-            }
-        }
+    private struct ModelEditorItem: Identifiable {
+        let id: String
     }
 
     init(profile: AIProviderProfile?, onSaved: @escaping () -> Void) {
@@ -293,26 +314,12 @@ private struct AIProviderEditorView: View {
                     }
 
                     ForEach(normalizedModels, id: \.self) { model in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(model)
-                                .font(.subheadline.monospaced())
-                            Picker("API 协议", selection: protocolBinding(for: model)) {
-                                ForEach(AIAPIProtocol.allCases, id: \.self) { apiProtocol in
-                                    Text(apiProtocol.displayName).tag(apiProtocol)
-                                }
-                            }
-                            Picker("视觉能力", selection: visionCapabilityBinding(for: model)) {
-                                ForEach(VisionCapability.allCases) { capability in
-                                    Text(capability.title).tag(capability)
-                                }
-                            }
-                            if descriptor(for: model).supportsVision == nil {
-                                Text("视觉能力未知：允许选择，但测试或正式请求失败时请改用明确支持视觉的模型。")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            }
+                        Button {
+                            editingModel = ModelEditorItem(id: model)
+                        } label: {
+                            modelSummaryRow(for: model)
                         }
-                        .padding(.vertical, 4)
+                        .buttonStyle(.plain)
                     }
                 }
             } header: {
@@ -369,6 +376,17 @@ private struct AIProviderEditorView: View {
                 selectedVisionModel = visionModels.first ?? ""
             } else if descriptor(for: selectedVisionModel).supportsVision == false {
                 selectedVisionModel = visionModels.first ?? ""
+            }
+        }
+        .sheet(item: $editingModel) { item in
+            NavigationStack {
+                AIModelDescriptorEditorView(
+                    modelID: item.id,
+                    descriptor: descriptor(for: item.id)
+                ) { updatedDescriptor in
+                    modelDescriptors[item.id] = updatedDescriptor
+                    editingModel = nil
+                }
             }
         }
         .alert(
@@ -531,43 +549,116 @@ private struct AIProviderEditorView: View {
         modelDescriptors[model] ?? AIModelProtocolCatalog.descriptor(for: model)
     }
 
-    private func protocolBinding(for model: String) -> Binding<AIAPIProtocol> {
-        Binding(
-            get: { descriptor(for: model).apiProtocol },
-            set: { value in
-                let current = descriptor(for: model)
-                modelDescriptors[model] = AIModelDescriptor(
-                    id: model,
-                    apiProtocol: value,
-                    supportsVision: current.supportsVision
-                )
+    @ViewBuilder
+    private func modelSummaryRow(for model: String) -> some View {
+        let modelDescriptor = descriptor(for: model)
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model)
+                    .font(.subheadline.monospaced())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(modelDescriptor.apiProtocol.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    visionCapabilityLabel(for: modelDescriptor.supportsVision)
+                }
             }
-        )
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
     }
 
-    private func visionCapabilityBinding(for model: String) -> Binding<VisionCapability> {
-        Binding(
-            get: {
-                switch descriptor(for: model).supportsVision {
-                case .some(true): return .supported
-                case .some(false): return .unsupported
-                case .none: return .unknown
+    @ViewBuilder
+    private func visionCapabilityLabel(for supportsVision: Bool?) -> some View {
+        switch supportsVision {
+        case .some(true):
+            Label("视觉", systemImage: "eye.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .some(false):
+            Label("无视觉", systemImage: "eye.slash")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .none:
+            Label("视觉未知", systemImage: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+}
+
+private struct AIModelDescriptorEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let modelID: String
+    let onSave: (AIModelDescriptor) -> Void
+
+    @State private var apiProtocol: AIAPIProtocol
+    @State private var visionCapability: AIModelVisionCapability
+
+    init(
+        modelID: String,
+        descriptor: AIModelDescriptor,
+        onSave: @escaping (AIModelDescriptor) -> Void
+    ) {
+        self.modelID = modelID
+        self.onSave = onSave
+        _apiProtocol = State(initialValue: descriptor.apiProtocol)
+        _visionCapability = State(initialValue: AIModelVisionCapability(
+            supportsVision: descriptor.supportsVision
+        ))
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("API 协议", selection: $apiProtocol) {
+                    ForEach(AIAPIProtocol.allCases, id: \.self) { value in
+                        Text(value.displayName).tag(value)
+                    }
                 }
-            },
-            set: { value in
-                let current = descriptor(for: model)
-                let supportsVision: Bool?
-                switch value {
-                case .supported: supportsVision = true
-                case .unsupported: supportsVision = false
-                case .unknown: supportsVision = nil
-                }
-                modelDescriptors[model] = AIModelDescriptor(
-                    id: model,
-                    apiProtocol: current.apiProtocol,
-                    supportsVision: supportsVision
-                )
+            } header: {
+                Text("API 协议")
             }
-        )
+
+            Section {
+                Picker("视觉输入", selection: $visionCapability) {
+                    ForEach(AIModelVisionCapability.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                }
+                if visionCapability == .unknown {
+                    Text("视觉能力未知：允许选择，但测试或正式请求失败时请改用明确支持视觉的模型。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("视觉输入")
+            }
+        }
+        .navigationTitle(modelID)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("nav.cancel".localized) { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("nav.save".localized) {
+                    onSave(AIModelDescriptor(
+                        id: modelID,
+                        apiProtocol: apiProtocol,
+                        supportsVision: visionCapability.supportsVision
+                    ))
+                    dismiss()
+                }
+            }
+        }
     }
 }
