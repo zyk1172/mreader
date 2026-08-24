@@ -469,7 +469,10 @@ nonisolated enum AITranslationPagePipeline {
         request: AITranslationPageRequest
     ) async throws {
         guard !indexes.isEmpty else { return }
-        let maximumConcurrentRequests = min(3, indexes.count)
+        // A malformed page gets one repair request first. Keep the final
+        // per-bubble fallback deliberately small so a slow provider does not
+        // turn one page failure into a request burst.
+        let maximumConcurrentRequests = min(2, indexes.count)
         let configuration = request.configuration
         let target = request.target
         var successCount = 0
@@ -498,7 +501,7 @@ nonisolated enum AITranslationPagePipeline {
                             model: configuration.textModel,
                             targetLanguage: target,
                             promptTemplate: request.translationPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            requestTimeout: AITranslationRequestPolicy.bubbleRequestTimeout,
                             modelDescriptor: configuration.textModelDescriptor
                         )
                         return (index, .success(text))

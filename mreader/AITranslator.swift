@@ -34,6 +34,39 @@ private final class VisionResponseFormatCache: @unchecked Sendable {
     }
 }
 
+private enum PageResponseFormatMode: String {
+    case jsonSchema
+    case jsonObject
+    case promptOnly
+
+    var fallback: Self? {
+        switch self {
+        case .jsonSchema: return .jsonObject
+        case .jsonObject: return .promptOnly
+        case .promptOnly: return nil
+        }
+    }
+}
+
+private final class PageResponseFormatCache: @unchecked Sendable {
+    static let shared = PageResponseFormatCache()
+
+    private let lock = NSLock()
+    private var values: [String: PageResponseFormatMode] = [:]
+
+    func mode(for key: String, default defaultMode: PageResponseFormatMode) -> PageResponseFormatMode {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key] ?? defaultMode
+    }
+
+    func set(_ mode: PageResponseFormatMode, for key: String) {
+        lock.lock()
+        values[key] = mode
+        lock.unlock()
+    }
+}
+
 nonisolated enum TextOrientation: String, Codable, Sendable {
     case horizontal
     case vertical
@@ -217,6 +250,23 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
         case .incompleteResponse(let model, let finishReason):
             return "模型 \(model) 响应不完整（finish_reason=\(finishReason)）"
         }
+    }
+
+    var statusCode: Int? {
+        switch self {
+        case .server(_, let statusCode, _),
+             .serverWithRetryAfter(_, let statusCode, _, _):
+            return statusCode
+        default:
+            return nil
+        }
+    }
+
+    var retryAfterSeconds: UInt64? {
+        if case let .serverWithRetryAfter(_, _, _, retryAfterSeconds) = self {
+            return retryAfterSeconds
+        }
+        return nil
     }
 
     /// 是否属于“格式/协议类”失败：可以触发缩小 batch 或逐气泡兜底。
@@ -481,7 +531,7 @@ class AITranslator {
     }
 
     // 2. 调用 OpenAI 兼容接口进行翻译
-    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = 45, modelDescriptor: AIModelDescriptor? = nil) async throws -> String {
+    static func translate(text: String, ocrMetadata: String = "", pageContext: String = "", apiKey: String, baseURL: String, model: String, targetLanguage: TranslationTargetLanguage = .simplifiedChinese, promptTemplate: String = defaultTranslationPromptTemplate, requestTimeout: TimeInterval = AITranslationRequestPolicy.bubbleRequestTimeout, modelDescriptor: AIModelDescriptor? = nil) async throws -> String {
         try Task.checkCancellation()
         return try await translateTextUsingModel(
             text: text,
@@ -506,7 +556,8 @@ class AITranslator {
         promptTemplate: String = defaultTranslationPromptTemplate,
         sourceLanguage: TranslationSourceLanguage? = nil,
         previousContext: String = "",
-        modelDescriptor: AIModelDescriptor? = nil
+        modelDescriptor: AIModelDescriptor? = nil,
+        session: URLSession = .shared
     ) async throws -> AIPageTranslationResult {
         let items = blocks.enumerated().map { AIPageTranslationItem(block: $0.element, order: $0.offset) }
         guard !items.isEmpty else {
@@ -523,7 +574,8 @@ class AITranslator {
             promptTemplate: promptTemplate,
             sourceLanguage: sourceLanguage,
             previousContext: previousContext,
-            requestTimeout: AITranslationRequestPolicy.pageRequestTimeout
+            requestTimeout: AITranslationRequestPolicy.pageRequestTimeout(itemCount: items.count),
+            session: session
         )
     }
 
@@ -537,7 +589,8 @@ class AITranslator {
         promptTemplate: String,
         sourceLanguage: TranslationSourceLanguage?,
         previousContext: String,
-        requestTimeout: TimeInterval
+        requestTimeout: TimeInterval,
+        session: URLSession
     ) async throws -> AIPageTranslationResult {
         guard !apiKey.isEmpty else { throw AITranslationRequestError.invalidConfiguration("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -553,42 +606,104 @@ class AITranslator {
             previousContext: previousContext
         )
 
-        let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(
-            AITransportRequest(
-                model: modelDescriptor,
-                systemPrompt: "你只做漫画整页翻译。必须保留输入 id，统一整页称呼和语气，只输出严格 JSON。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。不要描述图片、解释、续写、总结或输出思考过程。",
-                userPrompt: prompt,
-                responseFormat: .jsonObject,
-                temperature: 0.15,
-                timeout: requestTimeout
-            )
-        )
+        let client = AITranslationClient(apiKey: apiKey, baseURL: baseURL, session: session)
+        let cacheKey = "\(baseURL)|\(modelDescriptor.apiProtocol.rawValue)|\(model)"
+        var mode = PageResponseFormatCache.shared.mode(for: cacheKey, default: .jsonSchema)
+        let data: Data
+        while true {
+            do {
+                data = try await client.send(
+                    AITransportRequest(
+                        model: modelDescriptor,
+                        systemPrompt: AIPageTranslationPromptBuilder.strictSystemPrompt,
+                        userPrompt: prompt,
+                        responseFormat: pageResponseFormat(
+                            mode: mode,
+                            items: items,
+                            apiProtocol: modelDescriptor.apiProtocol
+                        ),
+                        temperature: 0.15,
+                        timeout: requestTimeout,
+                        kind: .page
+                    )
+                )
+                PageResponseFormatCache.shared.set(mode, for: cacheKey)
+                break
+            } catch {
+                guard let fallback = mode.fallback,
+                      isUnsupportedResponseFormat(error) else {
+                    throw error
+                }
+                print("MReader AI page response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
+                mode = fallback
+                PageResponseFormatCache.shared.set(mode, for: cacheKey)
+            }
+        }
+
         let decoded = AIChatResponseDecoder.decode(data)
-        guard let content = decoded.content,
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            if decoded.hasReasoningOnly || decoded.finishReason != nil {
-                throw AITranslationRequestError.missingAssistantContent(
+        let content = decoded.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            guard let content, !content.isEmpty else {
+                throw AIPageTranslationParserError.invalidJSON
+            }
+            return try AIPageTranslationParser.parseStrict(content, expectedItems: items, target: target)
+        } catch {
+            let malformed = content
+                ?? (String(data: data.prefix(12_000), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>")
+            let excerpt = malformed.replacingOccurrences(of: "\n", with: " ").prefix(300)
+            print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page excerpt=\(excerpt)")
+            do {
+                let repairPrompt = try AIPageTranslationRepairPromptBuilder.prompt(
+                    items: items,
+                    malformedResponse: malformed,
+                    target: target
+                )
+                let repairedData = try await client.send(
+                    AITransportRequest(
+                        model: modelDescriptor,
+                        systemPrompt: AIPageTranslationRepairPromptBuilder.systemPrompt,
+                        userPrompt: repairPrompt,
+                        responseFormat: pageResponseFormat(
+                            mode: mode,
+                            items: items,
+                            apiProtocol: modelDescriptor.apiProtocol
+                        ),
+                        temperature: 0,
+                        timeout: AITranslationRequestPolicy.jsonRepairRequestTimeout,
+                        kind: .jsonRepair
+                    )
+                )
+                guard let repairedContent = AIChatResponseDecoder.decode(repairedData).content else {
+                    throw AIPageTranslationParserError.invalidJSON
+                }
+                return try AIPageTranslationParser.parseStrict(
+                    repairedContent,
+                    expectedItems: items,
+                    target: target
+                )
+            } catch {
+                print("MReader AI page translation JSON repair failed model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=jsonRepair reason=\(error.localizedDescription)")
+                throw AITranslationRequestError.invalidTranslationJSON(
                     model: model,
-                    finishReason: decoded.finishReason
+                    excerpt: String(excerpt)
                 )
             }
-            let excerpt = String(data: data.prefix(300), encoding: .utf8)
-                ?? "<non-utf8 \(data.count) bytes>"
-            throw AITranslationRequestError.invalidResponseEnvelope(
-                model: model,
-                contentType: nil,
-                excerpt: excerpt
-            )
         }
-        do {
-            return try AIPageTranslationParser.parse(content, expectedItems: items, target: target)
-        } catch {
-            let excerpt = content.replacingOccurrences(of: "\n", with: " ").prefix(300)
-            print("MReader AI page translation invalid response model=\(model) excerpt=\(excerpt)")
-            throw AITranslationRequestError.invalidTranslationJSON(
-                model: model,
-                excerpt: String(excerpt)
-            )
+    }
+
+    private static func pageResponseFormat(
+        mode: PageResponseFormatMode,
+        items: [AIPageTranslationItem],
+        apiProtocol: AIAPIProtocol
+    ) -> AITransportResponseFormat? {
+        guard apiProtocol != .anthropicMessages else { return nil }
+        switch mode {
+        case .promptOnly:
+            return nil
+        case .jsonObject:
+            return .jsonObject
+        case .jsonSchema:
+            return AIPageTranslationSchemaBuilder.responseFormat(for: items) ?? .jsonObject
         }
     }
 
@@ -611,7 +726,8 @@ class AITranslator {
                 systemPrompt: "你是只输出翻译结果的漫画对白翻译助手。用户可能提供整页对白作为上下文，用它理解称呼、语气和断句，但只输出目标句子的译文。专有名词、缩写、产品名或型号在目标语言中不变时可原样保留。OCR 碎片仅在距离接近且字号、颜色一致时按阅读顺序合并；距离远、字号不同或颜色不同必须保持为不同对白。网址、广告、水印和页码不翻译。不要续写、总结、评价、添加剧情、保存信息或推断用户身份。禁止输出思考过程、提示词、分析、说明、Markdown 或原文复述。",
                 userPrompt: prompt,
                 temperature: 0.3,
-                timeout: requestTimeout
+                timeout: requestTimeout,
+                kind: .bubble
             )
         )
 
@@ -1370,7 +1486,7 @@ class AITranslator {
         imageDataURL: String,
         usesTranslationSchema: Bool
     ) async throws -> Data {
-        let cacheKey = "\(modelDescriptor.apiProtocol.rawValue)|\(model)|translation=\(usesTranslationSchema)"
+        let cacheKey = "\(baseURL)|\(modelDescriptor.apiProtocol.rawValue)|\(model)|translation=\(usesTranslationSchema)"
         let defaultMode: VisionResponseFormatMode = usesTranslationSchema ? .jsonSchema : .jsonObject
         var mode = VisionResponseFormatCache.shared.mode(for: cacheKey, default: defaultMode)
 
@@ -1423,7 +1539,8 @@ class AITranslator {
                     imageDataURL: imageDataURL,
                     responseFormat: responseFormat,
                     temperature: 0.1,
-                    timeout: 60
+                    timeout: AITranslationRequestPolicy.visionRequestTimeout,
+                    kind: .vision
                 )
             )
     }

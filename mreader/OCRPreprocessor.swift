@@ -16,6 +16,11 @@ nonisolated enum OCRRecognitionMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
+nonisolated struct OCRCandidateRecognitionResult: Sendable {
+    let blocks: [TextBlock]
+    let visionKitReference: AppleOCRReference?
+}
+
 struct OCRPreprocessor {
     struct Options: Sendable {
         var isRightToLeft: Bool
@@ -73,9 +78,18 @@ struct OCRPreprocessor {
     }
 
     nonisolated static func recognizeCandidates(in image: UIImage, options: Options) async throws -> [TextBlock] {
+        try await recognizeCandidatesWithReference(in: image, options: options).blocks
+    }
+
+    nonisolated static func recognizeCandidatesWithReference(
+        in image: UIImage,
+        options: Options
+    ) async throws -> OCRCandidateRecognitionResult {
         let normalizedImage = normalizedOrientationImage(image)
         let fullSize = pixelSize(for: normalizedImage)
-        guard fullSize.width > 8, fullSize.height > 8 else { return [] }
+        guard fullSize.width > 8, fullSize.height > 8 else {
+            return OCRCandidateRecognitionResult(blocks: [], visionKitReference: nil)
+        }
 
         let slices = sliceImage(normalizedImage, fullPixelSize: fullSize)
         print("MReader OCR preprocess slices=\(slices.count) strategy=\(options.recognitionMode.rawValue) image=\(Int(fullSize.width))x\(Int(fullSize.height))")
@@ -102,14 +116,16 @@ struct OCRPreprocessor {
                 let locatorBlocks = await recognize(
                     locator,
                     options: options,
-                    passes: [("script", effectiveLanguages(for: options))],
+                    passes: locatorPasses(for: options),
                     level: .fast,
                     usesLanguageCorrection: false,
                     maximumCandidates: 1
                 )
                 plan = recognitionPlan(
                     detectedTexts: locatorBlocks.map(\.text),
-                    options: options
+                    options: options,
+                    verticalEvidence: JapaneseVerticalOCRService.verticalColumnCount(in: locatorBlocks) >= 2
+                        || JapaneseVerticalOCRService.verticalColumnEvidenceCount(in: locatorImage) >= 2
                 )
                 print("MReader OCR locator rect=\(Int(slice.rect.minY))-\(Int(slice.rect.maxY)) blocks=\(locatorBlocks.count) primary=\(plan.primary.name)")
                 sliceBlocks = await recognize(
@@ -146,7 +162,9 @@ struct OCRPreprocessor {
                 sliceBlocks.append(contentsOf: await recognize(
                     enhanced,
                     options: options,
-                    passes: options.recognitionMode == .adaptive ? [plan.primary] : plan.orderedPasses
+                    passes: options.recognitionMode == .adaptive
+                        ? [plan.primary]
+                        : maximumAccuracyPasses(for: options)
                 ))
             }
 
@@ -163,14 +181,53 @@ struct OCRPreprocessor {
                 sliceBlocks.append(contentsOf: await recognize(
                     inverted,
                     options: options,
-                    passes: options.recognitionMode == .adaptive ? [plan.primary] : plan.orderedPasses
+                    passes: options.recognitionMode == .adaptive
+                        ? [plan.primary]
+                        : maximumAccuracyPasses(for: options)
                 ))
             }
             allBlocks.append(contentsOf: sliceBlocks)
         }
 
+        let visionKitReference = await AppleOCRReferenceService.analyzeIfNeeded(
+            image: normalizedImage,
+            options: options,
+            preliminaryBlocks: allBlocks
+        )
+
+        // ImageAnalyzer has no stable per-observation geometry. When its
+        // transcript is clearly Japanese and richer than the local result,
+        // run one explicit Japanese accurate pass so the existing Vision
+        // geometry pipeline remains the source of translation boxes.
+        if shouldRunJapaneseReferencePass(
+            reference: visionKitReference,
+            blocks: allBlocks,
+            options: options
+        ) {
+            print("MReader OCR ImageAnalyzer indicates Japanese coverage gap; running ja-JP accurate pass")
+            for slice in slices {
+                try Task.checkCancellation()
+                let original = OCRImageVariant(
+                    name: "original",
+                    image: slice.image,
+                    sliceRect: slice.rect,
+                    fullPixelSize: fullSize
+                )
+                allBlocks.append(contentsOf: await recognize(
+                    original,
+                    options: options,
+                    passes: [("ja-reference", ["ja-JP"])],
+                    level: .accurate,
+                    usesLanguageCorrection: true
+                ))
+            }
+        }
+
         print("MReader OCR raw candidates=\(allBlocks.count)")
-        return allBlocks
+        return OCRCandidateRecognitionResult(
+            blocks: allBlocks,
+            visionKitReference: visionKitReference
+        )
     }
 
     nonisolated private static func recognize(
@@ -369,6 +426,7 @@ struct OCRPreprocessor {
 
             request.recognitionLevel = level
             request.usesLanguageCorrection = usesLanguageCorrection
+            request.automaticallyDetectsLanguage = false
             request.minimumTextHeight = min(max(Float(options.minimumTextHeight * 0.45), 0.0008), 0.04)
             request.recognitionLanguages = supportedRecognitionLanguages(from: languages, request: request)
 
@@ -502,7 +560,8 @@ struct OCRPreprocessor {
     nonisolated static func preferredLanguagePassesForDiagnostics(
         detectedTexts: [String],
         isRightToLeft: Bool = false,
-        sourceLanguagePreference: TranslationSourceLanguage? = nil
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        verticalEvidence: Bool = false
     ) -> [[String]] {
         recognitionPlan(
             detectedTexts: detectedTexts,
@@ -510,7 +569,8 @@ struct OCRPreprocessor {
                 isRightToLeft: isRightToLeft,
                 minimumTextHeight: 0.006,
                 sourceLanguagePreference: sourceLanguagePreference
-            )
+            ),
+            verticalEvidence: verticalEvidence
         ).orderedPasses.map(\.languages)
     }
 
@@ -557,8 +617,30 @@ struct OCRPreprocessor {
 
     nonisolated private static func languagePasses() -> [(name: String, languages: [String])] {
         [
-            ("zh-ko", ["zh-Hans", "zh-Hant", "ko-KR", "en-US"]),
-            ("ja", ["ja-JP", "en-US"])
+            ("zh", ["zh-Hans", "zh-Hant"]),
+            ("ja", ["ja-JP"]),
+            ("ko", ["ko-KR"]),
+            ("en", ["en-US"])
+        ]
+    }
+
+    /// Locator 只做脚本/版式探测，不把五六种语言塞进一个 Vision 请求让
+    /// Vision 自己猜。正式 OCR 仍只使用 recognitionPlan 选出的主语言，
+    /// 这里的多个 fast pass 结果只作为弱证据汇总。
+    nonisolated private static func locatorPasses(
+        for options: Options
+    ) -> [(name: String, languages: [String])] {
+        if let source = options.sourceLanguagePreference, source != .automatic {
+            return [(source.rawValue, filteredLanguages(
+                source.recognitionLanguageIdentifiers,
+                allowed: effectiveLanguages(for: options)
+            ))]
+        }
+        return [
+            ("locator-ja", filteredLanguages(["ja-JP"], allowed: options.languages)),
+            ("locator-zh", filteredLanguages(["zh-Hans", "zh-Hant"], allowed: options.languages)),
+            ("locator-ko", filteredLanguages(["ko-KR"], allowed: options.languages)),
+            ("locator-en", filteredLanguages(["en-US"], allowed: options.languages))
         ]
     }
 
@@ -579,7 +661,8 @@ struct OCRPreprocessor {
 
     nonisolated private static func recognitionPlan(
         detectedTexts: [String],
-        options: Options
+        options: Options,
+        verticalEvidence: Bool = false
     ) -> RecognitionPlan {
         let scalars = detectedTexts.joined().unicodeScalars
         var kanaCount = 0
@@ -623,9 +706,9 @@ struct OCRPreprocessor {
             )
         }
 
-        let japanese = ("ja", filteredLanguages(["ja-JP", "en-US"], allowed: options.languages))
-        let chinese = ("zh", filteredLanguages(["zh-Hans", "zh-Hant", "en-US"], allowed: options.languages))
-        let korean = ("ko", filteredLanguages(["ko-KR", "en-US"], allowed: options.languages))
+        let japanese = ("ja", filteredLanguages(["ja-JP"], allowed: options.languages))
+        let chinese = ("zh", filteredLanguages(["zh-Hans", "zh-Hant"], allowed: options.languages))
+        let korean = ("ko", filteredLanguages(["ko-KR"], allowed: options.languages))
         let english = ("en", filteredLanguages(["en-US"], allowed: options.languages))
 
         if kanaCount > 0 {
@@ -649,6 +732,9 @@ struct OCRPreprocessor {
         }
         if cjkCount > 0 {
             // 用户显式指定原文语言时优先遵循，替代“用阅读方向猜中/日文”的弱启发（审查 #21）
+            if verticalEvidence {
+                return RecognitionPlan(primary: japanese, fallback: chinese)
+            }
             switch options.sourceLanguagePreference {
             case .japanese:
                 return RecognitionPlan(primary: japanese, fallback: chinese)
@@ -673,6 +759,12 @@ struct OCRPreprocessor {
             } else {
                 primary = english
             }
+            // A locator that only saw Latin glyphs is weak evidence. A
+            // vertical column layout is stronger manga/Japanese evidence and
+            // must win over the accidental English candidate.
+            if verticalEvidence {
+                return RecognitionPlan(primary: japanese, fallback: primary)
+            }
             return RecognitionPlan(primary: primary, fallback: options.isRightToLeft ? japanese : chinese)
         }
 
@@ -696,6 +788,41 @@ struct OCRPreprocessor {
     nonisolated private static func filteredLanguages(_ preferred: [String], allowed: [String]) -> [String] {
         let filtered = preferred.filter(allowed.contains)
         return filtered.isEmpty ? preferred : filtered
+    }
+
+    nonisolated private static func shouldRunJapaneseReferencePass(
+        reference: AppleOCRReference?,
+        blocks: [TextBlock],
+        options: Options
+    ) -> Bool {
+        guard let reference,
+              AppleOCRReferenceService.suggestsJapanese(
+                reference,
+                blocks: blocks,
+                options: options
+              ) else { return false }
+        guard options.sourceLanguagePreference == nil
+                || options.sourceLanguagePreference == .automatic
+                || options.sourceLanguagePreference == .japanese else {
+            return false
+        }
+        let text = blocks.map(\.text).joined()
+        let localCounts = text.unicodeScalars.reduce(into: (kana: 0, han: 0, latin: 0)) { counts, scalar in
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x31F0...0x31FF: counts.kana += 1
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF: counts.han += 1
+            case 0x0041...0x005A, 0x0061...0x007A: counts.latin += 1
+            default: break
+            }
+        }
+        let localJapanese = localCounts.kana + localCounts.han
+        let referenceJapanese = reference.kanaCount + reference.hanCount
+        // An explicit Japanese request already ran the accurate ja-JP pass;
+        // use ImageAnalyzer to detect a coverage gap, not to trigger a second
+        // identical pass on every page.
+        return localJapanese == 0
+            || localCounts.latin > localJapanese
+            || referenceJapanese > max(localJapanese * 2, localJapanese + 8)
     }
 
     nonisolated private static func downsampledImage(_ image: UIImage, maxDimension: CGFloat) -> UIImage? {

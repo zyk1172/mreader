@@ -4479,7 +4479,8 @@ struct LocalImageView: View {
             lineBlocks: segmentation.lines,
             bubbleBlocks: segmentation.bubbles,
             rejectedBlocks: rejected,
-            detectedLanguage: result.detectedLanguage
+            detectedLanguage: result.detectedLanguage,
+            quality: result.quality
         )
     }
 
@@ -4784,6 +4785,7 @@ struct LocalImageView: View {
                     // 线上 ID 是 b0/b1/...，顺序 = blocks 中的位置
                     for index in blocks.indices {
                         guard let translated = pageResult.translation(for: "b\(index)"),
+                              !translated.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                               self.textBlocks.indices.contains(index) else {
                             continue
                         }
@@ -4800,7 +4802,7 @@ struct LocalImageView: View {
         try Task.checkCancellation()
         let missingIndexes = blocks.indices.filter { !translatedIndexes.contains($0) }
         guard !missingIndexes.isEmpty else { return }
-        let maximumConcurrentRequests = min(3, missingIndexes.count)
+        let maximumConcurrentRequests = min(2, missingIndexes.count)
 
         await withTaskGroup(of: (Int, String?, String?).self) { group in
             var nextIndex = 0
@@ -4823,7 +4825,7 @@ struct LocalImageView: View {
                             model: requestModelName,
                             targetLanguage: requestTarget,
                             promptTemplate: requestPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.fallbackRequestTimeout,
+                            requestTimeout: AITranslationRequestPolicy.bubbleRequestTimeout,
                             modelDescriptor: activeConfiguration.textModelDescriptor
                         )
                         return (blockIndex, translatedText, nil)
@@ -4913,7 +4915,8 @@ struct LocalImageView: View {
                 lineBlocks: segmentation.lines,
                 bubbleBlocks: segmentation.bubbles,
                 rejectedBlocks: localResult.rejectedBlocks,
-                detectedLanguage: localResult.detectedLanguage
+                detectedLanguage: localResult.detectedLanguage,
+                quality: localResult.quality
             )
         } else {
             result = localResult
