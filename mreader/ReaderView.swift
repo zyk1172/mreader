@@ -4217,14 +4217,12 @@ struct LocalImageView: View {
             textRect: textRect,
             using: transform
         )
-        // 气泡存在性只有一个来源：渲染层的表面样式由此派生，字号与排版范围也复用它，
-        // 避免"布局层知道没有气泡、渲染层却照画背景"这类状态丢失。
-        let surfaceStyle = OCRBubbleLayoutEngine.translationSurfaceStyle(
-            for: block,
-            textRect: textRect,
-            using: transform
+        // 气泡存在性只判定一次：allowedBounds、字号策略与渲染层的表面样式都从这
+        // 一个结果派生，避免"布局判断 A、渲染判断 B"的状态漂移。
+        let hasReliableBubble = usableBubbleBounds != nil
+        let surfaceStyle = TranslationSurfacePolicy.surfaceStyle(
+            hasReliableBubble: hasReliableBubble
         )
-        let hasReliableBubble = surfaceStyle == .bubble
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(

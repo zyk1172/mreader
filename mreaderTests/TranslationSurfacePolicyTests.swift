@@ -6,7 +6,12 @@
 //
 //  这里锁定的不变量是：
 //  只要画面上不存在可靠的漫画气泡（usableTranslationBubbleBounds == nil），
-//  最终渲染层就绝不能产生覆盖整个 translation rect 的 RoundedRectangle。
+//  policy 就必须让 renderer 收到 .borderless，从而不产生覆盖整个 translation
+//  rect 的 RoundedRectangle。
+//
+//  说明：这里测的是 policy 层而不是 SwiftUI 的 View tree——renderer 的 switch
+//  是直白的二分支。真正的视觉回归（背景是否真的没画、描边是否够清晰）最好
+//  以后补 snapshot / UI test。
 //
 
 import Testing
@@ -240,6 +245,57 @@ import UIKit
 
         #expect(allowedBounds.contains(borderless.rect))
         #expect(allowedBounds.contains(bubble.rect))
+    }
+
+    /// 病态超宽的 OCR 框同样不能被继承。borderless 已经不画背景，但超宽的透明
+    /// translation rect 仍会参与避让计算，把附近的正常译文推走。
+    @Test @MainActor func horizontalBorderlessLayoutIgnoresWideOCRBox() {
+        let sourceRect = CGRect(x: 40, y: 300, width: 320, height: 40)
+        let allowedBounds = CGRect(x: 20, y: 260, width: 360, height: 120)
+
+        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "Yes.",
+            sourceFontSize: 16,
+            sourceRect: sourceRect,
+            allowedBounds: allowedBounds,
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            useSourceRectAsMinimumExtent: false
+        )
+        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "Yes.",
+            sourceFontSize: 16,
+            sourceRect: sourceRect,
+            allowedBounds: allowedBounds,
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            useSourceRectAsMinimumExtent: true
+        )
+
+        #expect(borderless.rect.width < sourceRect.width)
+        #expect(borderless.rect.width < bubble.rect.width)
+        // 有气泡时保持原有行为：译文宽度应当填满气泡。
+        #expect(bubble.rect.width >= sourceRect.width)
+        #expect(allowedBounds.contains(borderless.rect))
+    }
+
+    /// 文字自然宽度超过允许区域时必须被截断，而不是溢出到画面外。
+    @Test @MainActor func borderlessWidthNeverExceedsAllowedBounds() {
+        let sourceRect = CGRect(x: 60, y: 300, width: 300, height: 40)
+        let allowedBounds = CGRect(x: 20, y: 260, width: 140, height: 200)
+
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "This is a very long translated sentence that cannot fit on one line.",
+            sourceFontSize: 16,
+            sourceRect: sourceRect,
+            allowedBounds: allowedBounds,
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            useSourceRectAsMinimumExtent: false
+        )
+
+        #expect(layout.rect.width <= allowedBounds.width + 0.5)
+        #expect(allowedBounds.contains(layout.rect))
     }
 
     @Test @MainActor func horizontalBorderlessLayoutIgnoresTallOCRBox() {

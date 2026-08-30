@@ -314,8 +314,12 @@ actor RemotePageCache {
 
     /// NSCache 自身的回收时机不可控，收到系统内存警告时主动清空压缩页缓存，
     /// 把内存让给正在显示的页面。磁盘缓存不受影响，重新翻回时不会重新走网络。
+    ///
+    /// 必须复用 `clearMemoryCache()`：它同时清掉 `cachedKeys`，否则这个集合会
+    /// 继续认为一堆已不在 NSCache 里的 key 仍处于缓存管理之下，多次内存警告后
+    /// 会持续积累 stale keys。
     func reduceMemoryPressure() {
-        memoryCache.removeAllObjects()
+        clearMemoryCache()
         print("MReader remote cache cleared by memory warning memoryLimitMB=\(memoryLimitMB)")
     }
 

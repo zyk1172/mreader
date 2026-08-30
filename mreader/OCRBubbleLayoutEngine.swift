@@ -150,8 +150,10 @@ nonisolated enum OCRBubbleLayoutEngine {
 
     /// 从 TextBlock 直接得出渲染层表面样式。
     ///
-    /// 这是"是否允许绘制气泡背景"的唯一判定入口：气泡存在性在布局层得到后，
+    /// 这是"是否允许绘制气泡背景"的端到端判定入口：气泡存在性在布局层得到后，
     /// 必须由渲染层消费，任何一条译文都不能在没有可靠气泡时凭空获得背景卡片。
+    /// ReaderView 已经算过 `usableTranslationBubbleBounds` 时会直接复用该结果再套
+    /// policy；本函数供尚未持有该结果（以及测试）的场景使用，判定组件完全相同。
     static func translationSurfaceStyle(
         for block: TextBlock,
         textRect: CGRect,
@@ -364,7 +366,25 @@ nonisolated enum OCRBubbleLayoutEngine {
             y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
         )
         let targetFontSize = preferredTranslationFontSize(sourceFontSize: sourceFontSize)
-        let initialWidth = min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
+
+        /// 文字在给定字号下的自然宽度，取最长行。translationLines 用换行分隔，
+        /// 因此不能只测量整串。
+        func measuredNaturalWidth(fontSize: CGFloat) -> CGFloat {
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+            return lines.reduce(CGFloat(0)) { widest, line in
+                max(widest, (String(line) as NSString).size(withAttributes: [.font: font]).width)
+            }
+        }
+
+        // 有可靠气泡时从 OCR textBox 宽度起步，译文会填满气泡；没有可靠气泡时从文字
+        // 自身的测量宽度起步。后者不只是视觉问题：病态超宽的 OCR 框会产生超宽的
+        // 透明 translation rect，虽然 borderless 不画背景，它仍会参与避让计算，
+        // 把附近的正常译文推走。
+        let initialWidth = useSourceRectAsMinimumExtent
+            ? min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
+            : min(max(measuredNaturalWidth(fontSize: targetFontSize) + padding * 2, 1), safeBounds.width)
+
         // 原 textBox 本身可能几乎占满模型给出的 bubbleBox。此时仍优先让实际文字测量结果决定高度，
         // 不因为 padding 把本来可显示的译文错误判为无法容纳。
         let minimumHeight = useSourceRectAsMinimumExtent
