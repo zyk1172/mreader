@@ -260,12 +260,15 @@ enum RemotePagePriority: Sendable {
 
 nonisolated private func remoteCacheLimits() -> (memoryLimitMB: Int, diskLimitMB: Int) {
     let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+    // 这是压缩后的图片 Data 缓存。除它之外进程里还同时存在解码后的 UIImage、
+    // SwiftUI/UIKit 视图层、OCR 图像和 AI 请求图片，因此内存预算必须留足余量。
+    // 阅读器长时间连续翻页时真正要防的是 jetsam，而不是缓存未命中。
     if ramGB >= 6 {
-        return (450, 2_048)
+        return (180, 2_048)
     } else if ramGB >= 4 {
-        return (240, 1_024)
+        return (130, 1_024)
     } else {
-        return (120, 512)
+        return (90, 512)
     }
 }
 
@@ -295,6 +298,25 @@ actor RemotePageCache {
         diskLimitBytes = Int64(limits.diskLimitMB) * 1024 * 1024
         memoryCache.countLimit = 0
         memoryCache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
+        registerMemoryWarningObserver()
+    }
+
+    private func registerMemoryWarningObserver() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.reduceMemoryPressure() }
+        }
+    }
+
+    /// NSCache 自身的回收时机不可控，收到系统内存警告时主动清空压缩页缓存，
+    /// 把内存让给正在显示的页面。磁盘缓存不受影响，重新翻回时不会重新走网络。
+    func reduceMemoryPressure() {
+        memoryCache.removeAllObjects()
+        print("MReader remote cache cleared by memory warning memoryLimitMB=\(memoryLimitMB)")
     }
 
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {

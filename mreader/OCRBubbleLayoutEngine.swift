@@ -2,6 +2,39 @@ import CoreGraphics
 import Foundation
 import UIKit
 
+/// 译文表面样式：决定渲染层能否绘制背景卡片。
+///
+/// 这是与 `TranslationLayoutRole` 正交的维度。`layoutRole` 描述文字的语义类别
+/// （对白 / 旁白 / 音效），而 `surfaceStyle` 只回答一个问题：
+/// **译文下面存不存在一个真实的漫画气泡？**
+///
+/// 两者不能混用。没有 bubbleBox 的对白并不等于 standalone：纯 OCR 完全可能
+/// 识别不到气泡，此时若按 standalone 处理会丢失对白的排版语义；但它同样
+/// 不能凭空获得一张白色卡片，因为卡片会遮挡漫画原画。
+nonisolated enum TranslationSurfaceStyle: String, Sendable, Codable, CaseIterable {
+    /// 存在经过验证的漫画气泡，译文可以沿用气泡背景。
+    case bubble
+    /// 没有可靠气泡，译文必须直接贴合原画，禁止绘制任何背景或边框。
+    case borderless
+
+    var drawsBackground: Bool {
+        switch self {
+        case .bubble: return true
+        case .borderless: return false
+        }
+    }
+}
+
+nonisolated enum TranslationSurfacePolicy {
+    /// 唯一入口：可靠气泡存在时才允许绘制气泡背景。
+    ///
+    /// `hasReliableBubble` 必须来自 `OCRBubbleLayoutEngine.reliableTranslationBubbleBounds`
+    /// 的判定结果——它已经排除了 bubbleBox 缺失、越界、覆盖整页等病态情况。
+    static func surfaceStyle(hasReliableBubble: Bool) -> TranslationSurfaceStyle {
+        hasReliableBubble ? .bubble : .borderless
+    }
+}
+
 nonisolated enum TranslationLayoutMetrics {
     static let contentPadding: CGFloat = 5
     static let verticalAdvanceMultiplier: CGFloat = 1.08
@@ -91,6 +124,46 @@ nonisolated enum OCRBubbleLayoutEngine {
 
     static func usesStandaloneLayout(for block: TextBlock) -> Bool {
         block.layoutRole == .standalone
+    }
+
+    /// 把 OCR bubbleBox 映射到显示坐标，并剔除不可靠的气泡（缺失、越界、覆盖整页、
+    /// 与文字实际位置不匹配）。返回值非空才代表"画面上确实存在一个漫画气泡"。
+    static func usableTranslationBubbleBounds(
+        for block: TextBlock,
+        textRect: CGRect,
+        using transform: OCRDisplayTransform
+    ) -> CGRect? {
+        guard let bubbleBox = block.bubbleBox else { return nil }
+        let imageBounds = transform.imageRect
+        let mappedBubble = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: bubbleBox,
+            using: transform
+        )
+        return reliableTranslationBubbleBounds(
+            mappedBubble,
+            textRect: textRect,
+            imageBounds: imageBounds,
+            toleranceX: max(2, imageBounds.width * 0.005),
+            toleranceY: max(2, imageBounds.height * 0.005)
+        )
+    }
+
+    /// 从 TextBlock 直接得出渲染层表面样式。
+    ///
+    /// 这是"是否允许绘制气泡背景"的唯一判定入口：气泡存在性在布局层得到后，
+    /// 必须由渲染层消费，任何一条译文都不能在没有可靠气泡时凭空获得背景卡片。
+    static func translationSurfaceStyle(
+        for block: TextBlock,
+        textRect: CGRect,
+        using transform: OCRDisplayTransform
+    ) -> TranslationSurfaceStyle {
+        TranslationSurfacePolicy.surfaceStyle(
+            hasReliableBubble: usableTranslationBubbleBounds(
+                for: block,
+                textRect: textRect,
+                using: transform
+            ) != nil
+        )
     }
 
     /// Standalone text (sound effects, labels, and tilted words) has no real
@@ -256,6 +329,10 @@ nonisolated enum OCRBubbleLayoutEngine {
     }
 
     @MainActor
+    /// - Parameter useSourceRectAsMinimumExtent: 有可靠气泡时，译文应当填满气泡，
+    ///   因此把 OCR textBox 当作最小排版范围；没有可靠气泡时译文直接贴在画面上，
+    ///   排版范围必须完全由文字测量结果决定，否则又窄又高的 OCR 框（例如竖排原文）
+    ///   会把译文区域撑成巨大矩形。
     static func anchoredTranslationLayout(
         text: String,
         sourceFontSize: CGFloat,
@@ -263,7 +340,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
-        textOrientation: TextOrientation = .horizontal
+        textOrientation: TextOrientation = .horizontal,
+        useSourceRectAsMinimumExtent: Bool = true
     ) -> TranslationLayout {
         if textOrientation == .vertical {
             return anchoredVerticalTranslationLayout(
@@ -271,7 +349,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 sourceFontSize: sourceFontSize,
                 sourceRect: sourceRect,
                 allowedBounds: allowedBounds,
-                padding: padding
+                padding: padding,
+                useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
             )
         }
 
@@ -288,10 +367,9 @@ nonisolated enum OCRBubbleLayoutEngine {
         let initialWidth = min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
         // 原 textBox 本身可能几乎占满模型给出的 bubbleBox。此时仍优先让实际文字测量结果决定高度，
         // 不因为 padding 把本来可显示的译文错误判为无法容纳。
-        let minimumHeight = min(
-            max(sourceRect.height + padding * 2, 1),
-            safeBounds.height
-        )
+        let minimumHeight = useSourceRectAsMinimumExtent
+            ? min(max(sourceRect.height + padding * 2, 1), safeBounds.height)
+            : 0
 
         func measuredHeight(fontSize: CGFloat, contentWidth: CGFloat) -> CGFloat {
             let paragraphStyle = NSMutableParagraphStyle()
@@ -384,7 +462,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         allowedBounds: CGRect,
         lineSpacing: CGFloat,
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
-        textOrientation: TextOrientation = .horizontal
+        textOrientation: TextOrientation = .horizontal,
+        useSourceRectAsMinimumExtent: Bool = true
     ) -> TranslationLayoutChoice {
         let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         if textOrientation == .vertical {
@@ -398,7 +477,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                     allowedBounds: allowedBounds,
                     lineSpacing: lineSpacing,
                     padding: padding,
-                    textOrientation: .vertical
+                    textOrientation: .vertical,
+                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
                 ),
                 usesSuggestedLineBreaks: false
             )
@@ -425,7 +505,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                     allowedBounds: allowedBounds,
                     lineSpacing: lineSpacing,
                     padding: padding,
-                    textOrientation: textOrientation
+                    textOrientation: textOrientation,
+                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
                 ),
                 usesSuggestedLineBreaks: candidate.usesSuggestedLineBreaks
             )
@@ -631,7 +712,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceFontSize: CGFloat,
         sourceRect: CGRect,
         allowedBounds: CGRect,
-        padding: CGFloat
+        padding: CGFloat,
+        useSourceRectAsMinimumExtent: Bool
     ) -> TranslationLayout {
         let safeBounds = allowedBounds.standardized
         guard safeBounds.width > 0, safeBounds.height > 0 else {
@@ -651,14 +733,20 @@ nonisolated enum OCRBubbleLayoutEngine {
             let availableHeight = max(safeBounds.height - padding * 2, advance)
             let rows = max(Int(floor(availableHeight / advance)), 1)
             let columns = max(Int(ceil(Double(glyphCount) / Double(rows))), 1)
+            let measuredColumnsWidth = CGFloat(columns) * columnWidth + padding * 2
             let width = min(
                 safeBounds.width,
-                max(sourceRect.width + padding * 2, CGFloat(columns) * columnWidth + padding * 2)
+                useSourceRectAsMinimumExtent
+                    ? max(sourceRect.width + padding * 2, measuredColumnsWidth)
+                    : measuredColumnsWidth
             )
             let usedRows = min(rows, Int(ceil(Double(glyphCount) / Double(columns))))
+            let measuredRowsHeight = CGFloat(usedRows) * advance + padding * 2
             let height = min(
                 safeBounds.height,
-                max(sourceRect.height + padding * 2, CGFloat(usedRows) * advance + padding * 2)
+                useSourceRectAsMinimumExtent
+                    ? max(sourceRect.height + padding * 2, measuredRowsHeight)
+                    : measuredRowsHeight
             )
             guard width >= CGFloat(columns) * columnWidth + padding * 2 - 0.5,
                   height >= CGFloat(usedRows) * advance + padding * 2 - 0.5 else {
