@@ -20,7 +20,11 @@ private enum LocalWebServerFileError: LocalizedError {
     }
 }
 
-final class HTTPRequestReceiveState {
+/// 接收状态机：在 NWConnection 的全局队列回调里按连接串行使用，
+/// 关键状态转换（markFinished / cleanup / 空闲超时）用 NSLock 保护，
+/// 因此声明为 nonisolated 而不是默认的 MainActor 隔离；Sendable 由
+/// 内部锁纪律保证（@unchecked）。
+nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
     private static let maxHeaderBytes = 64 * 1024
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
@@ -153,21 +157,16 @@ final class HTTPRequestReceiveState {
     }
 }
 
+/// 局域网上传服务的 SwiftUI 门面：持有 @Published 状态（必须在主线程更新）
+/// 和 NWListener 生命周期。连接处理委托给 `WebUploadServerCore`。
 final class LocalWebServer: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var address = ""
     @Published var errorMessage: String?
 
     private var listener: NWListener?
-    private var onUpload: ((URL) -> Void)?
-    private var token = ""
+    private var serverCore: WebUploadServerCore?
     private let port: UInt16 = 8080
-    private let maxUploadSize = 300 * 1024 * 1024
-    private let maximumConnections = 4
-    private let idleTimeout: TimeInterval = 30
-    private let connectionLock = NSLock()
-    private var activeConnectionCount = 0
-    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
 
     nonisolated static func clearStaleBodyFiles() {
         let tempRoot = FileManager.default.temporaryDirectory
@@ -178,20 +177,20 @@ final class LocalWebServer: ObservableObject {
     }
 
     func start(onUpload: @escaping (URL) -> Void) {
-        self.onUpload = onUpload
         stop()
-        token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         Self.clearStaleBodyFiles()
 
         do {
             let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
+            let core = WebUploadServerCore(token: token, onUpload: onUpload)
             listener.stateUpdateHandler = { [weak self] state in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     switch state {
                     case .ready:
                         self.isRunning = true
-                        self.address = "http://\(Self.localIPAddress() ?? "127.0.0.1"):\(self.port)/\(self.token)/"
+                        self.address = "http://\(Self.localIPAddress() ?? "127.0.0.1"):\(self.port)/\(token)/"
                         self.errorMessage = nil
                     case .failed(let error):
                         self.isRunning = false
@@ -204,10 +203,11 @@ final class LocalWebServer: ObservableObject {
                     }
                 }
             }
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(connection)
+            listener.newConnectionHandler = { connection in
+                core.handle(connection)
             }
             self.listener = listener
+            self.serverCore = core
             listener.start(queue: .global(qos: .userInitiated))
         } catch {
             errorMessage = "网页服务启动失败: \(error.localizedDescription)"
@@ -217,11 +217,53 @@ final class LocalWebServer: ObservableObject {
     func stop() {
         listener?.cancel()
         listener = nil
+        serverCore = nil
         isRunning = false
         address = ""
     }
 
-    private func handle(_ connection: NWConnection) {
+    private static func localIPAddress() -> String? {
+        var address: String?
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else { return nil }
+        defer { freeifaddrs(interfaces) }
+
+        for pointer in sequence(first: firstInterface, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            let addrFamily = interface.ifa_addr.pointee.sa_family
+            guard addrFamily == UInt8(AF_INET) else { continue }
+
+            let name = String(cString: interface.ifa_name)
+            guard name == "en0" || name == "en1" else { continue }
+
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+            address = String(cString: hostname)
+            break
+        }
+        return address
+    }
+}
+
+/// 上传服务的连接处理核心：所有回调都运行在 NWListener / NWConnection 的
+/// 全局队列上。连接计数由 NSLock 保护；token / onUpload 在服务启动后写后
+/// 只读，因此以 @unchecked Sendable + nonisolated 声明其真实并发语义。
+nonisolated final class WebUploadServerCore: @unchecked Sendable {
+    private let token: String
+    private let onUpload: (URL) -> Void
+    private let maxUploadSize = 300 * 1024 * 1024
+    private let maximumConnections = 4
+    private let idleTimeout: TimeInterval = 30
+    private let connectionLock = NSLock()
+    private var activeConnectionCount = 0
+    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
+
+    init(token: String, onUpload: @escaping (URL) -> Void) {
+        self.token = token
+        self.onUpload = onUpload
+    }
+
+    func handle(_ connection: NWConnection) {
         guard acquireConnection() else {
             connection.start(queue: .global(qos: .utility))
             sendResponse(
@@ -389,8 +431,8 @@ final class LocalWebServer: ObservableObject {
             try? FileManager.default.removeItem(at: destinationURL)
             try copyFileRange(from: bodyURL, range: uploadedFile.range, to: destinationURL)
 
-            DispatchQueue.main.async { [weak self] in
-                self?.onUpload?(destinationURL)
+            DispatchQueue.main.async { [onUpload] in
+                onUpload(destinationURL)
             }
 
             return httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: successPage(fileName: uploadedFile.fileName))
@@ -535,27 +577,5 @@ final class LocalWebServer: ObservableObject {
         <p><a href="/\(token)/">继续上传</a></p>
         </main></body></html>
         """
-    }
-
-    private static func localIPAddress() -> String? {
-        var address: String?
-        var interfaces: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else { return nil }
-        defer { freeifaddrs(interfaces) }
-
-        for pointer in sequence(first: firstInterface, next: { $0.pointee.ifa_next }) {
-            let interface = pointer.pointee
-            let addrFamily = interface.ifa_addr.pointee.sa_family
-            guard addrFamily == UInt8(AF_INET) else { continue }
-
-            let name = String(cString: interface.ifa_name)
-            guard name == "en0" || name == "en1" else { continue }
-
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
-            address = String(cString: hostname)
-            break
-        }
-        return address
     }
 }

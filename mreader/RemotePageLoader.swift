@@ -301,7 +301,9 @@ actor RemotePageCache {
         registerMemoryWarningObserver()
     }
 
-    private func registerMemoryWarningObserver() {
+    /// 只注册 NotificationCenter 观察者（线程安全 API），不需要 actor 隔离；
+    /// 内存回收动作再经 Task 跳回 actor。
+    nonisolated private func registerMemoryWarningObserver() {
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,

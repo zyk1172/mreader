@@ -1,5 +1,6 @@
 import UIKit
 import VisionKit
+import os
 
 /// Apple Live Text is used as a page-level reference only. It supplies
 /// language/completeness evidence, not geometry for translation overlays.
@@ -18,10 +19,12 @@ nonisolated struct AppleOCRReference: Equatable, Sendable {
 }
 
 nonisolated enum AppleOCRReferenceService {
-    private static let capabilityLock = NSLock()
-    private static var processCapability: ProcessCapability = .unknown
+    // 单值缓存的进程级能力标记，用 unfair lock 保证并发安全。
+    private static let processCapability = OSAllocatedUnfairLock<ProcessCapability>(
+        initialState: .unknown
+    )
 
-    private enum ProcessCapability {
+    private enum ProcessCapability: Sendable {
         case unknown
         case available
         case unavailable
@@ -152,21 +155,15 @@ nonisolated enum AppleOCRReferenceService {
     }
 
     private static func isProcessUnavailable() -> Bool {
-        capabilityLock.lock()
-        defer { capabilityLock.unlock() }
-        return processCapability == .unavailable
+        processCapability.withLock { $0 == .unavailable }
     }
 
     private static func markProcessAvailable() {
-        capabilityLock.lock()
-        processCapability = .available
-        capabilityLock.unlock()
+        processCapability.withLock { $0 = .available }
     }
 
     private static func markProcessUnavailable() {
-        capabilityLock.lock()
-        processCapability = .unavailable
-        capabilityLock.unlock()
+        processCapability.withLock { $0 = .unavailable }
     }
 
     private static func isExplicitUnavailableError(_ error: Error) -> Bool {

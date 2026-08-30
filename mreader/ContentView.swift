@@ -5,7 +5,9 @@ import ImageIO
 import Combine
 import LocalAuthentication
 
-fileprivate final class SecurityScopeBox: @unchecked Sendable {
+/// 安全作用域资源句柄：只包装 start/stopAccessing，与 UI 无关，
+/// deinit 里也要能同步释放，因此声明为 nonisolated。
+nonisolated fileprivate final class SecurityScopeBox: @unchecked Sendable {
     private var url: URL?
     private var released = false
 
@@ -3253,7 +3255,9 @@ private struct ReadingGoalArcControl: View {
     }
 }
 
-private struct ArcShape: Shape {
+/// 纯 CG 几何的 Shape：path(in:) 不能依赖 MainActor，否则 Shape 协议一致性
+/// 会跨隔离域。
+nonisolated private struct ArcShape: Shape {
     var startAngle: Angle
     var endAngle: Angle
 

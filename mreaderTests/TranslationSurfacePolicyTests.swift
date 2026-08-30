@@ -5,13 +5,19 @@
 //  译文"表面样式"的回归测试。
 //
 //  这里锁定的不变量是：
-//  只要画面上不存在可靠的漫画气泡（usableTranslationBubbleBounds == nil），
-//  policy 就必须让 renderer 收到 .borderless，从而不产生覆盖整个 translation
-//  rect 的 RoundedRectangle。
+//  【任何正常显示的翻译结果都必须有一个可遮挡原文的背景承载层。】
 //
-//  说明：这里测的是 policy 层而不是 SwiftUI 的 View tree——renderer 的 switch
-//  是直白的二分支。真正的视觉回归（背景是否真的没画、描边是否够清晰）最好
-//  以后补 snapshot / UI test。
+//  可靠 bubbleBox 只决定背景卡片的几何来源，不决定背景是否存在：
+//  - usableTranslationBubbleBounds != nil → .detectedBubble，背景沿用气泡范围；
+//  - usableTranslationBubbleBounds == nil → .syntheticBubble，仍绘制背景，
+//    但尺寸由译文实际排版结果决定，绝不继承病态 OCR / fallback 大矩形。
+//  病态 bubbleBox（整页、越界、与文字不匹配）被可靠性判定拒绝后，
+//  回退目标是 synthetic bubble，而不是"无背景裸字"。
+//
+//  说明：这里测的是 policy 层与布局层。渲染层的背景绘制由
+//  `TranslationSurfaceStyle.drawsBackground` 统一门控——renderer 只依据
+//  该属性决定是否画背景，因此约束 policy 即约束渲染行为；真正的视觉
+//  回归（描边是否清晰、卡片是否紧凑）最好以后补 snapshot / UI test。
 //
 
 import Testing
@@ -19,7 +25,10 @@ import CoreGraphics
 import UIKit
 @testable import mreader
 
-@Suite struct TranslationSurfacePolicyTests {
+// TextBlock 与布局引擎入口都是 MainActor 隔离的，套件整体运行在 MainActor 上。
+@Suite
+@MainActor
+struct TranslationSurfacePolicyTests {
 
     private static let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
 
@@ -38,18 +47,24 @@ import UIKit
         )
     }
 
-    // MARK: - P0: 气泡存在性决定表面样式
+    // MARK: - P0: 气泡可靠性决定背景卡片的几何来源
 
-    @Test func surfaceStylePolicyRequiresReliableBubble() {
-        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: true) == .bubble)
-        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: false) == .borderless)
-        #expect(TranslationSurfaceStyle.bubble.drawsBackground)
-        #expect(TranslationSurfaceStyle.borderless.drawsBackground == false)
+    @Test func surfaceStylePolicyMapsReliabilityToGeometrySource() {
+        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: true) == .detectedBubble)
+        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: false) == .syntheticBubble)
     }
 
-    /// 截图里“大白框”的根因回归：没有 bubbleBox 的普通对白仍然是 dialogue 语义，
-    /// 但绝不能凭空获得一张白色背景卡片。
-    @Test func dialogueWithoutBubbleBoxNeverDrawsBackground() {
+    /// 本次最重要的不变量：detected 与 synthetic 都必须有背景。
+    /// renderer 只依据 drawsBackground 决定是否绘制背景卡片。
+    @Test func syntheticBubbleStillDrawsBackground() {
+        #expect(TranslationSurfaceStyle.syntheticBubble.drawsBackground)
+        #expect(TranslationSurfaceStyle.detectedBubble.drawsBackground)
+        #expect(TranslationSurfaceStyle.allCases.allSatisfy { $0.drawsBackground })
+    }
+
+    /// 截图回归（borderless 时代）：没有 bubbleBox 的普通对白仍然是 dialogue 语义，
+    /// 并获得一个 synthetic bubble 背景，而不是裸字压在原文上。
+    @Test func dialogueWithoutReliableBubbleUsesSyntheticBubble() {
         let block = TextBlock(
             text: "城市熟女。",
             boundingBox: CGRect(x: 0.62, y: 0.18, width: 0.08, height: 0.34),
@@ -67,13 +82,6 @@ import UIKit
         #expect(block.layoutRole == .dialogue)
         #expect(OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) == false)
 
-        let surface = OCRBubbleLayoutEngine.translationSurfaceStyle(
-            for: block,
-            textRect: textRect,
-            using: Self.transform
-        )
-        #expect(surface == .borderless)
-        #expect(surface.drawsBackground == false)
         #expect(
             OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
                 for: block,
@@ -81,10 +89,17 @@ import UIKit
                 using: Self.transform
             ) == nil
         )
+        let surface = OCRBubbleLayoutEngine.translationSurfaceStyle(
+            for: block,
+            textRect: textRect,
+            using: Self.transform
+        )
+        #expect(surface == .syntheticBubble)
+        #expect(surface.drawsBackground == true)
     }
 
-    /// 旁白 / 音效这类本来就没有气泡的文字，同样必须是 borderless。
-    @Test func standaloneTextWithoutBubbleIsBorderless() {
+    /// 旁白 / 音效这类本来就没有气泡的文字，同样获得 synthetic bubble 背景。
+    @Test func standaloneTextWithoutBubbleUsesSyntheticBubble() {
         let block = TextBlock(
             text: "FIDGET",
             boundingBox: CGRect(x: 0.20, y: 0.22, width: 0.46, height: 0.20),
@@ -103,12 +118,13 @@ import UIKit
                 for: block,
                 textRect: textRect,
                 using: Self.transform
-            ) == .borderless
+            ) == .syntheticBubble
         )
     }
 
-    /// 病态气泡（覆盖整页）会被可靠性判定拒绝，此时也不能回退成“画一张大卡片”。
-    @Test func wholePageBubbleIsRejectedAndBecomesBorderless() {
+    /// 病态气泡（覆盖整页）会被可靠性判定拒绝，回退到 synthetic bubble，
+    /// 而不是恢复成"整页大卡片"或"无背景裸字"。
+    @Test func wholePageBubbleFallsBackToSyntheticBubble() {
         let block = TextBlock(
             text: "I knew it wouldn't be...",
             boundingBox: CGRect(x: 0.20, y: 0.30, width: 0.42, height: 0.08),
@@ -128,17 +144,17 @@ import UIKit
                 using: Self.transform
             ) == nil
         )
-        #expect(
-            OCRBubbleLayoutEngine.translationSurfaceStyle(
-                for: block,
-                textRect: textRect,
-                using: Self.transform
-            ) == .borderless
+        let surface = OCRBubbleLayoutEngine.translationSurfaceStyle(
+            for: block,
+            textRect: textRect,
+            using: Self.transform
         )
+        #expect(surface == .syntheticBubble)
+        #expect(surface.drawsBackground == true)
     }
 
-    /// 真正合格的气泡必须继续保留气泡背景，避免过度修复把正常漫画对白也变成裸字。
-    @Test func validBubbleKeepsBubbleSurface() {
+    /// 真正合格的气泡必须继续保留 detected bubble 背景。
+    @Test func validBubbleUsesDetectedBubble() {
         let block = TextBlock(
             text: "I knew it wouldn't be...",
             boundingBox: Self.normalized(CGRect(x: 150, y: 260, width: 70, height: 32)),
@@ -163,12 +179,14 @@ import UIKit
                 for: block,
                 textRect: textRect,
                 using: Self.transform
-            ) == .bubble
+            ) == .detectedBubble
         )
     }
 
-    /// 同一段文字：气泡存在性变化只应改变表面样式，不应改变语义角色。
-    @Test func surfaceStyleIsOrthogonalToLayoutRole() {
+    /// 同一段文字：气泡存在性变化只改变背景的几何来源，不改变语义角色。
+    /// dialogue + detectedBubble、dialogue + syntheticBubble、
+    /// standalone + syntheticBubble 都是合法组合。
+    @Test func surfaceStyleRemainsOrthogonalToLayoutRole() {
         let base = TextBlock(
             text: "I knew it wouldn't be...",
             boundingBox: Self.normalized(CGRect(x: 150, y: 260, width: 70, height: 32)),
@@ -194,27 +212,46 @@ import UIKit
                 for: base,
                 textRect: textRect,
                 using: Self.transform
-            ) == .borderless
+            ) == .syntheticBubble
         )
         #expect(
             OCRBubbleLayoutEngine.translationSurfaceStyle(
                 for: withBubble,
                 textRect: textRect,
                 using: Self.transform
-            ) == .bubble
+            ) == .detectedBubble
         )
         #expect(base.layoutRole == withBubble.layoutRole)
+
+        // 反方向同样正交：standalone 即使带有可靠 bubbleBox，也不因此变成 dialogue，
+        // 气泡存在性只影响背景来源。
+        let standaloneWithBubble = TextBlock(
+            text: base.text,
+            boundingBox: base.boundingBox,
+            ocrSource: "vision",
+            bubbleBox: Self.normalized(CGRect(x: 125, y: 220, width: 120, height: 100)),
+            textOrientation: .horizontal,
+            layoutRole: .standalone
+        )
+        #expect(OCRBubbleLayoutEngine.usesStandaloneLayout(for: standaloneWithBubble))
+        #expect(
+            OCRBubbleLayoutEngine.translationSurfaceStyle(
+                for: standaloneWithBubble,
+                textRect: textRect,
+                using: Self.transform
+            ) == .detectedBubble
+        )
     }
 
-    // MARK: - P1: 无气泡时的排版范围只由文字测量结果决定
+    // MARK: - P1: synthetic bubble 的排版范围只由文字测量结果决定
 
-    /// 又窄又高的竖排 OCR 框不能再把译文区域撑成巨大矩形。
-    @Test @MainActor func verticalBorderlessLayoutUsesMeasuredGlyphsNotOCRBox() {
+    /// 又窄又高的竖排 OCR 框不能再把 synthetic bubble 撑成巨大矩形。
+    @Test func verticalSyntheticBubbleIgnoresTallOCRBox() {
         let sourceRect = CGRect(x: 240, y: 120, width: 30, height: 400)
         let allowedBounds = CGRect(x: 200, y: 60, width: 110, height: 560)
         let text = "城市熟女。"
 
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let synthetic = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: text,
             sourceFontSize: 16,
             sourceRect: sourceRect,
@@ -223,7 +260,7 @@ import UIKit
             textOrientation: .vertical,
             useSourceRectAsMinimumExtent: false
         )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let detected = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: text,
             sourceFontSize: 16,
             sourceRect: sourceRect,
@@ -233,27 +270,28 @@ import UIKit
             useSourceRectAsMinimumExtent: true
         )
 
-        // 无气泡：排版范围只由文字测量结果决定，不继承 400pt 高的 OCR 框。
-        #expect(borderless.rect.height < sourceRect.height)
-        #expect(borderless.rect.height < bubble.rect.height)
+        // 无可靠气泡：synthetic bubble 高度只由文字测量结果决定，
+        // 不继承 400pt 高的 OCR 框。
+        #expect(synthetic.rect.height < sourceRect.height)
+        #expect(synthetic.rect.height < detected.rect.height)
         // 但仍必须装得下这五个字，不能把文字裁掉。
         let expectedMinimum = 5 * 16 * TranslationLayoutMetrics.verticalAdvanceMultiplier
-        #expect(borderless.rect.height >= expectedMinimum)
+        #expect(synthetic.rect.height >= expectedMinimum)
 
-        // 有气泡：保持原有行为，译文应当填满气泡范围。
-        #expect(bubble.rect.height >= sourceRect.height)
+        // 有可靠气泡：保持原有行为，译文应当填满气泡范围。
+        #expect(detected.rect.height >= sourceRect.height)
 
-        #expect(allowedBounds.contains(borderless.rect))
-        #expect(allowedBounds.contains(bubble.rect))
+        #expect(allowedBounds.contains(synthetic.rect))
+        #expect(allowedBounds.contains(detected.rect))
     }
 
-    /// 病态超宽的 OCR 框同样不能被继承。borderless 已经不画背景，但超宽的透明
-    /// translation rect 仍会参与避让计算，把附近的正常译文推走。
-    @Test @MainActor func horizontalBorderlessLayoutIgnoresWideOCRBox() {
+    /// 病态超宽的 OCR 框同样不能被继承。synthetic bubble 虽然仍画背景，
+    /// 但过大的排版矩形会参与避让计算，把附近的正常译文推走。
+    @Test func horizontalSyntheticBubbleIgnoresWideOCRBox() {
         let sourceRect = CGRect(x: 40, y: 300, width: 320, height: 40)
         let allowedBounds = CGRect(x: 20, y: 260, width: 360, height: 120)
 
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let synthetic = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Yes.",
             sourceFontSize: 16,
             sourceRect: sourceRect,
@@ -262,7 +300,7 @@ import UIKit
             textOrientation: .horizontal,
             useSourceRectAsMinimumExtent: false
         )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let detected = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Yes.",
             sourceFontSize: 16,
             sourceRect: sourceRect,
@@ -272,15 +310,15 @@ import UIKit
             useSourceRectAsMinimumExtent: true
         )
 
-        #expect(borderless.rect.width < sourceRect.width)
-        #expect(borderless.rect.width < bubble.rect.width)
-        // 有气泡时保持原有行为：译文宽度应当填满气泡。
-        #expect(bubble.rect.width >= sourceRect.width)
-        #expect(allowedBounds.contains(borderless.rect))
+        #expect(synthetic.rect.width < sourceRect.width)
+        #expect(synthetic.rect.width < detected.rect.width)
+        // 有可靠气泡时保持原有行为：译文宽度应当填满气泡。
+        #expect(detected.rect.width >= sourceRect.width)
+        #expect(allowedBounds.contains(synthetic.rect))
     }
 
     /// 文字自然宽度超过允许区域时必须被截断，而不是溢出到画面外。
-    @Test @MainActor func borderlessWidthNeverExceedsAllowedBounds() {
+    @Test func syntheticWidthNeverExceedsAllowedBounds() {
         let sourceRect = CGRect(x: 60, y: 300, width: 300, height: 40)
         let allowedBounds = CGRect(x: 20, y: 260, width: 140, height: 200)
 
@@ -298,11 +336,12 @@ import UIKit
         #expect(allowedBounds.contains(layout.rect))
     }
 
-    @Test @MainActor func horizontalBorderlessLayoutIgnoresTallOCRBox() {
+    /// 横排 synthetic bubble 也不能继承异常高的 OCR 框。
+    @Test func horizontalSyntheticBubbleIgnoresTallOCRBox() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
         let allowedBounds = CGRect(x: 120, y: 100, width: 200, height: 500)
 
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let synthetic = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",
             sourceFontSize: 14,
             sourceRect: sourceRect,
@@ -311,7 +350,7 @@ import UIKit
             textOrientation: .horizontal,
             useSourceRectAsMinimumExtent: false
         )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let detected = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",
             sourceFontSize: 14,
             sourceRect: sourceRect,
@@ -321,9 +360,9 @@ import UIKit
             useSourceRectAsMinimumExtent: true
         )
 
-        #expect(borderless.rect.height < sourceRect.height)
-        #expect(borderless.rect.height < bubble.rect.height)
-        #expect(bubble.rect.height >= sourceRect.height)
-        #expect(allowedBounds.contains(borderless.rect))
+        #expect(synthetic.rect.height < sourceRect.height)
+        #expect(synthetic.rect.height < detected.rect.height)
+        #expect(detected.rect.height >= sourceRect.height)
+        #expect(allowedBounds.contains(synthetic.rect))
     }
 }

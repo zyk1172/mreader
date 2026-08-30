@@ -2,36 +2,72 @@ import CoreGraphics
 import Foundation
 import UIKit
 
-/// 译文表面样式：决定渲染层能否绘制背景卡片。
+/// 译文表面样式：决定背景卡片的几何来源，而不是决定背景是否存在。
+///
+/// 背景卡片的产品职责是：遮住原文、在复杂漫画背景上保证译文可读性、
+/// 给译文一个稳定的视觉承载区域。因此不变量是：
+/// **任何正常显示的翻译结果都必须有一个可遮挡原文的背景承载层。**
 ///
 /// 这是与 `TranslationLayoutRole` 正交的维度。`layoutRole` 描述文字的语义类别
 /// （对白 / 旁白 / 音效），而 `surfaceStyle` 只回答一个问题：
-/// **译文下面存不存在一个真实的漫画气泡？**
+/// **背景卡片的矩形来自真实气泡，还是来自译文自身的测量结果？**
 ///
 /// 两者不能混用。没有 bubbleBox 的对白并不等于 standalone：纯 OCR 完全可能
-/// 识别不到气泡，此时若按 standalone 处理会丢失对白的排版语义；但它同样
-/// 不能凭空获得一张白色卡片，因为卡片会遮挡漫画原画。
+/// 识别不到气泡，此时若按 standalone 处理会丢失对白的排版语义；但它也
+/// 不需要为"看起来像气泡"复刻原漫画轮廓——没有可靠气泡时生成紧凑的
+/// synthetic bubble 即可，尺寸由译文实际排版结果决定，绝不继承病态
+/// OCR / fallback 大矩形。
 nonisolated enum TranslationSurfaceStyle: String, Sendable, Codable, CaseIterable {
-    /// 存在经过验证的漫画气泡，译文可以沿用气泡背景。
-    case bubble
-    /// 没有可靠气泡，译文必须直接贴合原画，禁止绘制任何背景或边框。
-    case borderless
+    /// 存在经过验证的真实漫画气泡，背景沿用气泡范围（较宽松）。
+    case detectedBubble
+    /// 没有可靠气泡：仍必须绘制背景以遮挡原文，但背景是紧凑的 synthetic
+    /// bubble——锚定原文字中心，宽高由译文实际排版结果决定。
+    case syntheticBubble
 
+    /// 所有 surface style 都绘制背景。该属性是"翻译必须有可遮挡原文的
+    /// 背景承载层"这条产品不变量的代码化：渲染层只依据它决定是否画背景，
+    /// 任何新增 case 都必须显式面对这条规则。
     var drawsBackground: Bool {
+        true
+    }
+
+    /// 背景中白色填充的浓度。synthetic bubble 略轻，避免显得像贴纸；
+    /// 但仍须足以压住其下的原文。
+    var backgroundOpacity: Double {
         switch self {
-        case .bubble: return true
-        case .borderless: return false
+        case .detectedBubble: return 0.50
+        case .syntheticBubble: return 0.44
+        }
+    }
+
+    /// 背景边框的浓度。
+    var borderOpacity: Double {
+        switch self {
+        case .detectedBubble: return 0.86
+        case .syntheticBubble: return 0.78
+        }
+    }
+
+    var cornerRadius: CGFloat {
+        switch self {
+        case .detectedBubble: return 7
+        case .syntheticBubble: return 6
         }
     }
 }
 
 nonisolated enum TranslationSurfacePolicy {
-    /// 唯一入口：可靠气泡存在时才允许绘制气泡背景。
+    /// 唯一入口：可靠气泡只决定背景卡片的几何来源。
     ///
     /// `hasReliableBubble` 必须来自 `OCRBubbleLayoutEngine.reliableTranslationBubbleBounds`
     /// 的判定结果——它已经排除了 bubbleBox 缺失、越界、覆盖整页等病态情况。
+    ///
+    /// 有可靠气泡 → `.detectedBubble`，背景沿用气泡范围。
+    /// 没有可靠气泡 → `.syntheticBubble`：不得把病态 OCR / fallback 大矩形直接
+    /// 当成可见背景，但仍必须生成基于译文实际排版尺寸的紧凑背景卡片，
+    /// 以遮挡原文并保证可读性。
     static func surfaceStyle(hasReliableBubble: Bool) -> TranslationSurfaceStyle {
-        hasReliableBubble ? .bubble : .borderless
+        hasReliableBubble ? .detectedBubble : .syntheticBubble
     }
 }
 
@@ -68,7 +104,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         min(max(sourceFontSize, 1), TranslationLayoutMetrics.absoluteFontSizeCap)
     }
 
-    /// 有可靠气泡时沿用 OCR 几何字号；没有可靠气泡时，OCR 框不再参与字号决策。
+    /// 有可靠气泡时沿用 OCR 几何字号；没有可靠气泡（synthetic bubble）时，
+    /// OCR 框不再参与字号决策，改用用户设置的无气泡字号。
     /// 后续布局仍会在 allowedBounds 内按实际文本测量结果缩小字号。
     static func requestedTranslationFontSize(
         hasReliableBubble: Bool,
@@ -150,10 +187,11 @@ nonisolated enum OCRBubbleLayoutEngine {
 
     /// 从 TextBlock 直接得出渲染层表面样式。
     ///
-    /// 这是"是否允许绘制气泡背景"的端到端判定入口：气泡存在性在布局层得到后，
-    /// 必须由渲染层消费，任何一条译文都不能在没有可靠气泡时凭空获得背景卡片。
-    /// ReaderView 已经算过 `usableTranslationBubbleBounds` 时会直接复用该结果再套
-    /// policy；本函数供尚未持有该结果（以及测试）的场景使用，判定组件完全相同。
+    /// 这是"背景卡片几何来源"的端到端判定入口：气泡存在性在布局层得到后，
+    /// 必须由渲染层消费。无论判定结果如何，译文都会获得背景卡片——真实气泡
+    /// 只决定背景沿用气泡范围还是改用译文测量出的紧凑 synthetic bubble。ReaderView
+    /// 已经算过 `usableTranslationBubbleBounds` 时会直接复用该结果再套 policy；
+    /// 本函数供尚未持有该结果（以及测试）的场景使用，判定组件完全相同。
     static func translationSurfaceStyle(
         for block: TextBlock,
         textRect: CGRect,
@@ -332,9 +370,9 @@ nonisolated enum OCRBubbleLayoutEngine {
 
     @MainActor
     /// - Parameter useSourceRectAsMinimumExtent: 有可靠气泡时，译文应当填满气泡，
-    ///   因此把 OCR textBox 当作最小排版范围；没有可靠气泡时译文直接贴在画面上，
-    ///   排版范围必须完全由文字测量结果决定，否则又窄又高的 OCR 框（例如竖排原文）
-    ///   会把译文区域撑成巨大矩形。
+    ///   因此把 OCR textBox 当作最小排版范围；没有可靠气泡时背景是 synthetic
+    ///   bubble，尺寸必须完全由文字测量结果决定，否则又窄又高的 OCR 框（例如
+    ///   竖排原文）会把译文区域撑成巨大矩形。
     static func anchoredTranslationLayout(
         text: String,
         sourceFontSize: CGFloat,
@@ -378,9 +416,9 @@ nonisolated enum OCRBubbleLayoutEngine {
         }
 
         // 有可靠气泡时从 OCR textBox 宽度起步，译文会填满气泡；没有可靠气泡时从文字
-        // 自身的测量宽度起步。后者不只是视觉问题：病态超宽的 OCR 框会产生超宽的
-        // 透明 translation rect，虽然 borderless 不画背景，它仍会参与避让计算，
-        // 把附近的正常译文推走。
+        // 自身的测量宽度起步。后者不只是视觉问题：病态超宽的 OCR 框若被继承，
+        // 会产生超宽的 translation rect，即使卡片再紧凑，过大的排版矩形仍会
+        // 参与避让计算，把附近的正常译文推走。
         let initialWidth = useSourceRectAsMinimumExtent
             ? min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
             : min(max(measuredNaturalWidth(fontSize: targetFontSize) + padding * 2, 1), safeBounds.width)
