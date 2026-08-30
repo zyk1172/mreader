@@ -70,21 +70,23 @@ nonisolated enum MangaTextSegmenter {
     }
 
     private static func canShareBubble(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
-        // 第一层：经过验证的视觉气泡身份。两端都携带视觉 bubbleBox 时，气泡身份
-        // 的优先级必须高于一切 OCR 排版启发式：同一真实气泡里行长短悬殊、字号估
-        // 计有波动、颜色采样有偏差、layoutRole 可能被偶发误分类，这些弱信号都不
-        // 允许把一个真实气泡拆成多个 translation unit。只保留两个非弱启发式护栏：
-        // 文字方向必须一致（混排合并会产生错误渲染），合并范围不得超过页面比例
-        // 上限（防止假阳性身份吞出超大单元）。
+        // 视觉 bubbleBox 有两个不同的语义：兼容性只负责否决“明确不同”的框，
+        // identity 才负责证明“明确是同一个”框。两端都有视觉框时，不能把宽松的
+        // compatible 结果直接提升为 same-bubble identity。
         if lhs.bubbleBox != nil, rhs.bubbleBox != nil {
             guard visualBubbleBoxesAreCompatible(lhs.bubbleBox, rhs.bubbleBox) else { return false }
-            guard isVertical(lhs) == isVertical(rhs) else { return false }
-            let union = lhs.boundingBox.union(rhs.boundingBox)
-            return union.width <= 0.65 && union.height <= 0.48
+
+            // 只有严格 identity 才能跳过字号、颜色、layoutRole、行距和文字位置
+            // 等 OCR 启发式；兼容但不确定的框继续走下面的既有 fallback。
+            if sameVisualBubbleIdentity(lhs, rhs) {
+                guard isVertical(lhs) == isVertical(rhs) else { return false }
+                let union = lhs.boundingBox.union(rhs.boundingBox)
+                return union.width <= 0.65 && union.height <= 0.48
+            }
         }
 
-        // 第二层：纯 OCR fallback（至少一端没有视觉 bubbleBox）。保留既有
-        // complete-link 启发式与间距约束，不因视觉链路的修复而放宽。
+        // OCR fallback：任一端没有视觉信息，或两端的视觉框只是“没有明显冲突”
+        // 但不足以证明同一气泡时，保留原 complete-link 启发式与间距约束。
         guard stylesAreCompatible(lhs, rhs) else { return false }
         let left = lhs.boundingBox
         let right = rhs.boundingBox
@@ -158,9 +160,79 @@ nonisolated enum MangaTextSegmenter {
         )
     }
 
+    /// 严格证明两个视觉框来自同一个气泡。这里故意不把“一个框包含另一个框”
+    /// 当作充分条件：外围误检框和内部真实气泡也会满足单向包含。
+    ///
+    /// 同一视觉检测结果通常会给出相同或只有轻微抖动的矩形，因此 identity 需要
+    /// 同时满足高 IoU、中心距离、宽高比和面积比。轻微平移时允许高 IoU 的抖动框；
+    /// 但显著的单向包含必须失败，只有小容差内的 mutual containment 才能直接确认。
+    private static func sameVisualBubbleIdentity(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
+        guard let lhsBox = lhs.bubbleBox?.standardized,
+              let rhsBox = rhs.bubbleBox?.standardized,
+              lhsBox.width > 0,
+              lhsBox.height > 0,
+              rhsBox.width > 0,
+              rhsBox.height > 0 else {
+            return false
+        }
+
+        let lhsArea = lhsBox.width * lhsBox.height
+        let rhsArea = rhsBox.width * rhsBox.height
+        let smallerArea = max(min(lhsArea, rhsArea), 0.000_001)
+        let areaRatio = max(lhsArea, rhsArea) / smallerArea
+        let widthRatio = max(lhsBox.width, rhsBox.width)
+            / max(min(lhsBox.width, rhsBox.width), 0.000_001)
+        let heightRatio = max(lhsBox.height, rhsBox.height)
+            / max(min(lhsBox.height, rhsBox.height), 0.000_001)
+        guard areaRatio <= 1.40,
+              widthRatio <= 1.30,
+              heightRatio <= 1.30 else {
+            return false
+        }
+
+        let intersection = lhsBox.intersection(rhsBox)
+        guard !intersection.isNull else { return false }
+        let intersectionArea = intersection.width * intersection.height
+        let unionArea = lhsArea + rhsArea - intersectionArea
+        let iou = unionArea > 0 ? intersectionArea / unionArea : 0
+        guard iou >= 0.72 else { return false }
+
+        let centerDistance = hypot(
+            lhsBox.midX - rhsBox.midX,
+            lhsBox.midY - rhsBox.midY
+        )
+        let minimumDimension = min(
+            min(lhsBox.width, rhsBox.width),
+            min(lhsBox.height, rhsBox.height)
+        )
+        guard centerDistance <= max(minimumDimension * 0.45, 0.012) else {
+            return false
+        }
+
+        let tolerance: CGFloat = 0.006
+        let lhsContainsRhs = lhsBox.insetBy(dx: -tolerance, dy: -tolerance).contains(rhsBox)
+        let rhsContainsLhs = rhsBox.insetBy(dx: -tolerance, dy: -tolerance).contains(lhsBox)
+
+        // 单向包含是外围框/内部框的典型形状；即使 IoU 偶然很高，也不能把它
+        // 直接视为同一身份。没有包含关系的轻微平移框则必须再满足更严格的指标。
+        if lhsContainsRhs != rhsContainsLhs {
+            return false
+        }
+        if lhsContainsRhs && rhsContainsLhs {
+            return true
+        }
+
+        let jitterCenterTolerance = max(minimumDimension * 0.30, 0.008)
+        return iou >= 0.82
+            && areaRatio <= 1.20
+            && widthRatio <= 1.18
+            && heightRatio <= 1.18
+            && centerDistance <= jitterCenterTolerance
+    }
+
     /// 两个视觉框没有可观重叠、也不在小容差下相互包含，说明它们已经是不同漫画气泡。
-    /// 这项比较同时承担两个职责：身份层判定“同一可靠气泡 / 明确不同气泡”，以及
-    /// 防止纯 OCR fallback 在两端都有框时仅凭文字距离合并相邻对白。
+    /// 该判断只承担宽松的 compatibility / veto 语义；它不能反过来证明两个框
+    /// 是同一个气泡，后者必须由 `sameVisualBubbleIdentity` 严格确认。
     private static func visualBubbleBoxesAreCompatible(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
         guard let lhs, let rhs else { return true }
         let tolerance: CGFloat = 0.006

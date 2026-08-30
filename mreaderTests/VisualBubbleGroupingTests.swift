@@ -235,6 +235,68 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "NEVER.")
     }
 
+    // MARK: - P1 identity 边界回归
+
+    /// 两个不同气泡的检测框有明显交叠（IoU > 0.18），但文字分别靠近各自气泡。
+    /// 它们不能因为“compatible”就跳过 OCR fallback 并被当成同一身份。
+    @Test func overlappingDistinctVisualBubblesDoNotMerge() {
+        let bubbleA = CGRect(x: 0.10, y: 0.18, width: 0.40, height: 0.24)
+        let bubbleB = CGRect(x: 0.32, y: 0.18, width: 0.40, height: 0.24)
+        let intersection = bubbleA.intersection(bubbleB)
+        let intersectionArea = intersection.width * intersection.height
+        let unionArea = bubbleA.width * bubbleA.height
+            + bubbleB.width * bubbleB.height
+            - intersectionArea
+        #expect(intersectionArea / unionArea > 0.18)
+
+        let left = Self.block(
+            text: "LEFT SPEAKER.",
+            boundingBox: CGRect(x: 0.19, y: 0.25, width: 0.10, height: 0.04),
+            bubbleBox: bubbleA,
+            estimatedFontScale: 0.040
+        )
+        let right = Self.block(
+            text: "RIGHT SPEAKER.",
+            boundingBox: CGRect(x: 0.52, y: 0.25, width: 0.10, height: 0.04),
+            bubbleBox: bubbleB,
+            estimatedFontScale: 0.040
+        )
+
+        let segmentation = MangaTextSegmenter.segment([left, right], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 2)
+        #expect(segmentation.bubbles[0].text == "LEFT SPEAKER.")
+        #expect(segmentation.bubbles[1].text == "RIGHT SPEAKER.")
+    }
+
+    /// 一个较大的外围框包含一个内部框时，单向 containment 只能说明两者
+    /// compatible，不能证明它们来自同一个视觉检测结果。
+    @Test func nestedButDifferentBubbleGeometryDoesNotAutomaticallyBecomeSameIdentity() {
+        let outerBubble = CGRect(x: 0.12, y: 0.15, width: 0.52, height: 0.34)
+        let innerBubble = CGRect(x: 0.24, y: 0.23, width: 0.28, height: 0.18)
+        #expect(outerBubble.insetBy(dx: -0.006, dy: -0.006).contains(innerBubble))
+        #expect(!innerBubble.insetBy(dx: -0.006, dy: -0.006).contains(outerBubble))
+
+        let outerText = Self.block(
+            text: "OUTER BUBBLE.",
+            boundingBox: CGRect(x: 0.27, y: 0.28, width: 0.08, height: 0.04),
+            bubbleBox: outerBubble,
+            estimatedFontScale: 0.040
+        )
+        let innerText = Self.block(
+            text: "INNER BUBBLE.",
+            boundingBox: CGRect(x: 0.40, y: 0.28, width: 0.08, height: 0.04),
+            bubbleBox: innerBubble,
+            estimatedFontScale: 0.040
+        )
+
+        let segmentation = MangaTextSegmenter.segment([outerText, innerText], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 2)
+        #expect(segmentation.bubbles[0].text == "OUTER BUBBLE.")
+        #expect(segmentation.bubbles[1].text == "INNER BUBBLE.")
+    }
+
     // MARK: - 测试 7：纯 OCR 多行对白保持既有合并能力
 
     /// 无 bubbleBox 的普通多行对白（紧凑行距、颜色一致）必须照旧合并——
