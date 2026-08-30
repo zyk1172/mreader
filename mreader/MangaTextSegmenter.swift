@@ -70,10 +70,22 @@ nonisolated enum MangaTextSegmenter {
     }
 
     private static func canShareBubble(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
+        // 第一层：经过验证的视觉气泡身份。两端都携带视觉 bubbleBox 时，气泡身份
+        // 的优先级必须高于一切 OCR 排版启发式：同一真实气泡里行长短悬殊、字号估
+        // 计有波动、颜色采样有偏差、layoutRole 可能被偶发误分类，这些弱信号都不
+        // 允许把一个真实气泡拆成多个 translation unit。只保留两个非弱启发式护栏：
+        // 文字方向必须一致（混排合并会产生错误渲染），合并范围不得超过页面比例
+        // 上限（防止假阳性身份吞出超大单元）。
+        if lhs.bubbleBox != nil, rhs.bubbleBox != nil {
+            guard visualBubbleBoxesAreCompatible(lhs.bubbleBox, rhs.bubbleBox) else { return false }
+            guard isVertical(lhs) == isVertical(rhs) else { return false }
+            let union = lhs.boundingBox.union(rhs.boundingBox)
+            return union.width <= 0.65 && union.height <= 0.48
+        }
+
+        // 第二层：纯 OCR fallback（至少一端没有视觉 bubbleBox）。保留既有
+        // complete-link 启发式与间距约束，不因视觉链路的修复而放宽。
         guard stylesAreCompatible(lhs, rhs) else { return false }
-        // 只有视觉链路才携带真实 bubbleBox。两端都有且明确指向不同气泡时，不能再仅凭
-        // 文字距离把相邻对白合并；任一端没有视觉信息则保留纯 OCR 的既有行为。
-        guard visualBubbleBoxesAreCompatible(lhs.bubbleBox, rhs.bubbleBox) else { return false }
         let left = lhs.boundingBox
         let right = rhs.boundingBox
         let union = left.union(right)
@@ -147,7 +159,8 @@ nonisolated enum MangaTextSegmenter {
     }
 
     /// 两个视觉框没有可观重叠、也不在小容差下相互包含，说明它们已经是不同漫画气泡。
-    /// 这项约束只在两端都有视觉结果时生效，不能改变纯 OCR 的距离分组策略。
+    /// 这项比较同时承担两个职责：身份层判定“同一可靠气泡 / 明确不同气泡”，以及
+    /// 防止纯 OCR fallback 在两端都有框时仅凭文字距离合并相邻对白。
     private static func visualBubbleBoxesAreCompatible(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
         guard let lhs, let rhs else { return true }
         let tolerance: CGFloat = 0.006
