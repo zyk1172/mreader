@@ -11,31 +11,25 @@
 
 ## 翻译气泡分组不变量
 
-`MangaTextSegmenter` 中必须区分两个概念：
+`MangaTextSegmenter` 必须先建立 canonical bubble region，再建立 translation unit：
 
-1. `visualBubbleBoxesAreCompatible(...)` 是宽松的兼容性检查，只能作为“明确不同的视觉框”否决条件。小容差 containment 或 IoU `>= 0.18` 不足以证明同一个气泡。
-2. `sameVisualBubbleIdentity(...)` 是严格的身份检查。只有高 IoU、接近的中心点、相近的 width/height、相近的面积，并且满足 mutual containment 或极严格的轻微抖动条件时，才可以跳过 OCR 弱启发式。
-
-分组决策必须遵循：
-
-- 明确是同一个气泡：允许跳过字号、颜色、`layoutRole`、行距和文字位置启发式，避免同气泡多行被拆开。
-- 只有兼容但无法确认身份：继续使用原有 OCR fallback。
-- 明确不同：禁止合并。
+- 只有通过验证的 bubbleBox 才能创建 region；相同物理气泡的轻微几何漂移要去重。
+- 每个 OCR line 先按 textBox 归属 region，再在 region 内按阅读顺序合并；行距、字号、颜色和 layoutRole 不能决定同一 region 的翻译次数。
+- region 外的 line 保持独立的 borderless translation unit；不能用 dialogue gap heuristic 凭空猜出漫画气泡。
+- 明确不同的 bubble region 禁止合并。
 
 变更 `bubbleBox` 分组逻辑时，至少保留以下回归场景：
 
-- `overlappingDistinctVisualBubblesDoNotMerge`：IoU 大于 `0.18` 但两个不同气泡不能合并。
-- `nestedButDifferentBubbleGeometryDoesNotAutomaticallyBecomeSameIdentity`：单向外围框包含内部框不能自动成为同一身份。
-- 同一气泡多行仍能在字号、颜色或 `layoutRole` 有 OCR 波动时合并。
-- 无 `bubbleBox` 的纯 OCR 多行仍保持原有 complete-link fallback 与防链式行为。
+- `overlappingDistinctVisualBubblesDoNotMerge`：重叠但不同的气泡不能合并。
+- `nestedButDifferentBubbleGeometryDoesNotAutomaticallyBecomeSameIdentity`：单向外围框包含内部框不能自动成为同一 region。
+- 同一气泡多行、混合 bubbleBox/nil line、行距不规则或视觉框轻微漂移时仍只产生一个 unit。
+- 无 `bubbleBox` 的纯 OCR 多行保持独立，不创建 synthetic bubble。
 
 ## 表面样式不变量
 
-- `detectedBubble` 和 `syntheticBubble` 的 `drawsBackground` 都必须为 `true`。
-- 可靠 `bubbleBox` 只决定背景几何来源：可靠时沿用真实气泡；不可靠或缺失时使用紧凑 synthetic bubble。
-- synthetic bubble 的排版矩形由译文实际测量结果决定，不能继承整页、超宽或超高的病态 OCR 框。
-- synthetic bubble 的原文最小覆盖范围必须经过 `validatedSourceCoverageRect(for:sourceRect:within:)` 的图片边界、页面范围和方向/glyph/源 line-aware 校验；又窄又高的竖排 OCR 框或异常横排多行 union 不能仅凭页面百分比成为 coverage。
-- `ReaderView` 的背景绘制统一通过 `surfaceStyle.drawsBackground` 门控，不能恢复 `.borderless -> content` 的裸字路径。
+- `detectedBubble` 的 `drawsBackground` 必须为 `true`，`borderless` 的 `drawsBackground` 必须为 `false`。
+- 可靠 `bubbleBox` 使用真实气泡背景；不可靠或缺失时必须使用 borderless，不能生成 synthetic bubble。
+- `ReaderView` 的背景绘制统一通过 surface style 门控；borderless 只允许文字描边/阴影，不能出现 RoundedRectangle。
 - `TranslationLayoutRole` 与 surface style 正交；没有 `bubbleBox` 的对白不能被降级成 standalone。
 
 ## 缓存与验证

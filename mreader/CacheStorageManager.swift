@@ -15,6 +15,7 @@ nonisolated struct CacheStorageSnapshot: Sendable {
 }
 
 nonisolated enum CacheStorageManager {
+    private static let fileManager = FileManager.default
 
     static func snapshot() -> CacheStorageSnapshot {
         CacheStorageSnapshot(
@@ -27,15 +28,15 @@ nonisolated enum CacheStorageManager {
     }
 
     static func clearReaderCaches() {
-        try? FileManager.default.removeItem(at: cacheURL("MReaderRemotePageCache"))
+        try? fileManager.removeItem(at: cacheURL("MReaderRemotePageCache"))
         for url in generatedCacheURLs {
-            try? FileManager.default.removeItem(at: url)
+            try? fileManager.removeItem(at: url)
         }
         ComicManager.clearTemporaryImportCache()
     }
 
     private static var generatedCacheURLs: [URL] {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return [
             cacheURL("AITranslationPages"),
             cacheURL("LocalOCR"),
@@ -48,17 +49,17 @@ nonisolated enum CacheStorageManager {
     }
 
     private static func cacheURL(_ component: String) -> URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(component, isDirectory: true)
     }
 
     private static var translationStoreURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MReaderTranslations", isDirectory: true)
     }
 
     private static func size(of url: URL) -> Int64 {
-        guard let enumerator = FileManager.default.enumerator(
+        guard let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
             options: [.skipsHiddenFiles]

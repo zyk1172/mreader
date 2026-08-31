@@ -5,14 +5,6 @@ nonisolated struct ResolvedURLLookup: Sendable {
     let shouldRefresh: Bool
 }
 
-/// 注入的系统依赖本身线程安全（FileManager / UserDefaults），用 @unchecked
-/// Sendable 盒子承载，actor init 只接收 Sendable 参数，避免在调用点把
-/// 非 Sendable 实例标记为跨隔离发送。
-nonisolated struct MediaSourceStorageDependencies: @unchecked Sendable {
-    let fileManager: FileManager
-    let userDefaults: UserDefaults
-}
-
 /// Serializes all mutable media-source state that can be touched by startup,
 /// refresh, reader and settings tasks at the same time.
 actor MediaSourceRepository {
@@ -28,21 +20,19 @@ actor MediaSourceRepository {
     private var resolvedURLCache: [UUID: ResolvedURLEntry] = [:]
     private var resolvedURLGenerations: [UUID: Int] = [:]
 
-    private let dependencies: MediaSourceStorageDependencies
-    private var fileManager: FileManager { dependencies.fileManager }
-    private var userDefaults: UserDefaults { dependencies.userDefaults }
+    private let fileManager: FileManager
+    private let userDefaults: UserDefaults
     private let sourcesURL: URL
     private let hiddenComicsURL: URL
 
     init(
+        fileManager: FileManager = .default,
         directoryURL: URL? = nil,
-        dependencies: MediaSourceStorageDependencies = MediaSourceStorageDependencies(
-            fileManager: .default,
-            userDefaults: .standard
-        )
+        userDefaults: UserDefaults = .standard
     ) {
-        self.dependencies = dependencies
-        let support = directoryURL ?? dependencies.fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        self.fileManager = fileManager
+        self.userDefaults = userDefaults
+        let support = directoryURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         sourcesURL = support.appendingPathComponent("media_sources.json")
         hiddenComicsURL = support.appendingPathComponent("hidden_komga_comics.json")
     }

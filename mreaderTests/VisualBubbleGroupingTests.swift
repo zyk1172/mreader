@@ -12,7 +12,8 @@
 //
 //  反向不变量同样被锁定：
 //  【两个可靠且明确不同的 bubble geometry，绝不因距离较近而被合并。】
-//  纯 OCR fallback（无 bubbleBox）使用相邻对白 cluster：只放宽跨行端点距离，保留字号、颜色、方向、布局角色与局部行距护栏，避免链式误合并。
+//  没有可靠 bubbleBox 的文字不会被猜成漫画气泡；每个已识别 OCR line
+//  保持为独立的 borderless translation unit。
 //
 
 import Testing
@@ -80,7 +81,7 @@ struct VisualBubbleGroupingTests {
     /// complete-link 要求新成员与组内所有成员配对满足关系；A↔C 的纯 OCR 几何
     /// 不满足（纵向间距 0.23 远超 scale*0.62）。同一可靠气泡身份必须压过这一
     /// every-pair 约束，避免三行气泡被拆开。
-    @Test func threeLinesWithDistantEndpointsShareOneReliableBubble() {
+    @Test func sameBubbleIrregularLineSpacingStillProducesOneTranslationUnit() {
         let bubble = CGRect(x: 0.30, y: 0.15, width: 0.40, height: 0.42)
         let lineA = Self.block(
             text: "IF YOU SAY",
@@ -105,6 +106,32 @@ struct VisualBubbleGroupingTests {
 
         #expect(segmentation.bubbles.count == 1)
         #expect(segmentation.bubbles[0].text == "IF YOU SAY SO LOUDLY AGAIN.")
+    }
+
+    /// 两次视觉复核对同一个气泡给出略有收缩的矩形时，canonical region 仍应
+    /// 去重并吸收两条 OCR line，而不能回退成两个 translation unit。
+    @Test func samePhysicalBubbleWithDriftingBoxesStillProducesOneUnit() {
+        let firstBubble = CGRect(x: 0.12, y: 0.18, width: 0.62, height: 0.30)
+        let secondBubble = CGRect(x: 0.14, y: 0.19, width: 0.58, height: 0.28)
+        let first = Self.block(
+            text: "REALLY?",
+            boundingBox: CGRect(x: 0.34, y: 0.22, width: 0.20, height: 0.045),
+            bubbleBox: firstBubble,
+            estimatedFontScale: 0.045
+        )
+        let second = Self.block(
+            text: "THAT'S TOO BAD...",
+            boundingBox: CGRect(x: 0.26, y: 0.32, width: 0.42, height: 0.045),
+            bubbleBox: secondBubble,
+            estimatedFontScale: 0.045
+        )
+
+        let segmentation = MangaTextSegmenter.segment([first, second], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].text == "REALLY? THAT'S TOO BAD...")
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
+        #expect(segmentation.bubbles[0].bubbleBox != nil)
     }
 
     // MARK: - 测试 3：同气泡字号尺度波动
@@ -298,11 +325,11 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "INNER BUBBLE.")
     }
 
-    // MARK: - P0：无 bubbleBox 的 Apple/native OCR dialogue cluster
+    // MARK: - P0：无 bubbleBox 不猜测漫画气泡
 
-    /// Apple/Vision 本地 OCR 通常没有 bubbleBox。真实白色气泡中的多行对白仍必须
-    /// 形成一个 translation unit，即使首行与末行之间已经超过旧 pairwise 行距阈值。
-    @Test func nativeOCRDialogueClusterMergesDistantRowsWithoutBubbleBox() {
+    /// Apple/native OCR 没有可靠 bubbleBox 时，不能因为相邻行距而制造一个
+    /// 漫画气泡区域；这些行仍然可以各自翻译并以 borderless surface 显示。
+    @Test func nativeOCRLinesWithoutBubbleRegionRemainSeparate() {
         let line1 = Self.block(
             text: "I'M SORRY... I CAN'T.",
             boundingBox: CGRect(x: 0.25, y: 0.20, width: 0.50, height: 0.045),
@@ -328,9 +355,8 @@ struct VisualBubbleGroupingTests {
         let segmentation = MangaTextSegmenter.segment([line1, line2, line3], isRightToLeft: false)
 
         #expect(segmentation.lines.count == 3)
-        #expect(segmentation.bubbles.count == 1)
-        #expect(segmentation.bubbles[0].text == "I'M SORRY... I CAN'T. ON THE SUBJECTS I MISSED. I DIDN'T KNOW.")
-        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+        #expect(segmentation.bubbles.count == 3)
+        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
     }
 
     // MARK: - P0：mixed visual/native OCR 必须按气泡区域合并
@@ -398,9 +424,9 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].sourceLineCount == 3)
     }
 
-    /// 纯 native OCR 的同一气泡不要求每一行都有完全相同的排版间距；这里第二
-    /// 个 gap 比第一个约大 43%，仍应维持一个三行对白 cluster。
-    @Test func threeLineBubbleAllowsModerateGapVariance() {
+    /// 没有可靠 bubbleBox 时，即使行距看起来像对白，也不应由启发式创建
+    /// translation bubble；这同时覆盖了过去的 baseline/gap 聚类回归路径。
+    @Test func nativeOCRLineSpacingDoesNotCreateBubbleRegion() {
         let line1 = Self.block(
             text: "WE'LL HAVE FUN",
             boundingBox: CGRect(x: 0.29, y: 0.20, width: 0.42, height: 0.045),
@@ -434,8 +460,8 @@ struct VisualBubbleGroupingTests {
             isRightToLeft: false
         )
 
-        #expect(segmentation.bubbles.count == 1)
-        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+        #expect(segmentation.bubbles.count == 3)
+        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
     }
 
     /// mixed geometry 的反向保护：nil bubbleBox 行如果明确落在已知视觉气泡外，
@@ -469,11 +495,10 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "SECOND BUBBLE.")
     }
 
-    // MARK: - 测试 7：纯 OCR 多行对白保持既有合并能力
+    // MARK: - 测试 7：无 bubble region 的纯 OCR 行保持独立
 
-    /// 无 bubbleBox 的普通多行对白（紧凑行距、颜色一致）必须照旧合并——
-    /// 视觉身份层的引入不得把纯 OCR 对白全部拆开。
-    @Test func pureOCRMultilineDialogueStillMerges() {
+    /// 无 bubbleBox 的普通多行对白不能因为紧凑行距被猜成同一个漫画气泡。
+    @Test func pureOCRMultilineDialogueStaysBorderlessPerLine() {
         let line1 = Self.block(
             text: "TOMORROW WE RIDE",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.34, height: 0.06),
@@ -491,16 +516,14 @@ struct VisualBubbleGroupingTests {
 
         let segmentation = MangaTextSegmenter.segment([line1, line2], isRightToLeft: false)
 
-        #expect(segmentation.bubbles.count == 1)
-        #expect(segmentation.bubbles[0].text == "TOMORROW WE RIDE AT DAWN.")
+        #expect(segmentation.bubbles.count == 2)
+        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
     }
 
-    // MARK: - 测试 8：纯 OCR cluster 在行距突变处断开
+    // MARK: - 测试 8：没有 bubble region 时不建立 dialogue cluster
 
-    /// A-B 是同一对白的相邻行；B-C 虽然仍未超过绝对最大行距，但行距相对
-    /// 当前 cluster 的局部基线出现突变。cluster 必须在这里断开，避免两个
-    /// 说话人的对白通过单条中间行链式吞并。
-    @Test func pureOCRDialogueClusterStopsAtAbruptLineGap() {
+    /// 任何 gap 都不能在没有可靠 bubbleBox 时决定 translation unit 的边界。
+    @Test func pureOCRLinesDoNotUseDialogueClusterHeuristics() {
         let lineA = Self.block(
             text: "GET DOWN!",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.30, height: 0.05),
@@ -525,9 +548,8 @@ struct VisualBubbleGroupingTests {
 
         let segmentation = MangaTextSegmenter.segment([lineA, lineB, lineC], isRightToLeft: false)
 
-        #expect(segmentation.bubbles.count == 2)
-        #expect(segmentation.bubbles[0].text == "GET DOWN! BEHIND YOU!")
-        #expect(segmentation.bubbles[1].text == "NOT YET.")
+        #expect(segmentation.bubbles.count == 3)
+        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
     }
 
     /// 两个没有 bubbleBox 的单行对白即使字号、颜色和横向投影都接近，

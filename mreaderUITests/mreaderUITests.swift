@@ -1,7 +1,5 @@
 import XCTest
 
-// XCUIApplication / XCUIElement 全部是 MainActor 隔离的，测试类整体运行在 MainActor 上。
-@MainActor
 final class mreaderUITests: XCTestCase {
     private let timeout: TimeInterval = 12
 

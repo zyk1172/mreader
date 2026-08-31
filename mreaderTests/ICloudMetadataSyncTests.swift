@@ -2,8 +2,6 @@ import Foundation
 import Testing
 @testable import mreader
 
-// ComicBook / ComicBookmark / SyncedComicMetadata 都是 MainActor 隔离的。
-@MainActor
 struct ICloudMetadataSyncTests {
     @Test
     func sourceIdentityIsStableAcrossURLEdits() {

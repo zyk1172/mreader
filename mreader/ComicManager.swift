@@ -18,7 +18,8 @@ nonisolated enum LocalResourceAccessPolicy {
         case external
     }
 
-    private static let loggedDecisions = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+    private static let logLock = NSLock()
+    private static var loggedDecisions: Set<String> = []
 
     static func location(for url: URL) -> Location {
         let standardized = url.standardizedFileURL.resolvingSymlinksInPath()
@@ -47,8 +48,10 @@ nonisolated enum LocalResourceAccessPolicy {
         let location = location(for: url)
         let shouldStart = location == .external
         #if DEBUG
+        logLock.lock()
         let logKey = "\(location.rawValue)|\(url.standardizedFileURL.path)"
-        let shouldLog = loggedDecisions.withLock { $0.insert(logKey).inserted }
+        let shouldLog = loggedDecisions.insert(logKey).inserted
+        logLock.unlock()
         if shouldLog {
             print("MReader resource-access location=\(location.rawValue) securityScope=\(shouldStart) path=\(url.standardizedFileURL.path)")
         }

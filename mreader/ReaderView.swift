@@ -4241,16 +4241,6 @@ struct LocalImageView: View {
         let surfaceStyle = TranslationSurfacePolicy.surfaceStyle(
             hasReliableBubble: hasReliableBubble
         )
-        // Synthetic bubble 仍须盖住可信的原文 textBox；但只有经过图片边界、
-        // 轴向尺寸与面积护栏验证的 union 才能成为最小排版范围。这样普通
-        // Apple/native OCR 的对白不会露出原文，病态整页/巨型 OCR 框也不会撑大卡片。
-        let minimumSourceCoverageRect = hasReliableBubble
-            ? nil
-            : OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                for: block,
-                sourceRect: textRect,
-                within: imageBounds
-            )
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
@@ -4263,14 +4253,7 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        // 让 validated coverage 参与 allowedBounds，而不是只把它作为布局中的
-        // 偏好宽高。否则 fallback 本身比 textBox 窄时，后续 intersection 会
-        // 把 coverage 截掉，卡片仍然可能露出原文边缘；boundedTranslationBounds
-        // 会再施加整页宽高/面积上限。
-        let coverageAwareFallbackBounds = minimumSourceCoverageRect.map {
-            fallbackBounds.union($0)
-        } ?? fallbackBounds
-        let allowedBounds = usableBubbleBounds ?? coverageAwareFallbackBounds
+        let allowedBounds = usableBubbleBounds ?? fallbackBounds
         let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
             around: textRect,
             within: allowedBounds,
@@ -4297,10 +4280,8 @@ struct LocalImageView: View {
             allowedBounds: layoutBounds,
             lineSpacing: 2,
             textOrientation: translationOrientation,
-            // detected bubble 沿用原有气泡范围；synthetic bubble 仅继承经过
-            // 验证的原文覆盖范围，异常 OCR 几何仍完全由文字测量决定。
-            useSourceRectAsMinimumExtent: hasReliableBubble,
-            minimumSourceCoverageRect: minimumSourceCoverageRect
+            // detected bubble 沿用真实气泡范围；borderless 只按译文测量结果排版。
+            useSourceRectAsMinimumExtent: hasReliableBubble
         )
         #if DEBUG
         print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
@@ -5180,8 +5161,8 @@ private struct TranslationLayoutItem: Identifiable {
     let displayText: String?
     let textOrientation: TextOrientation
     let layoutRole: TranslationLayoutRole
-    /// 背景卡片的几何来源：detectedBubble 沿用真实气泡范围，syntheticBubble
-    /// 使用译文测量出的紧凑矩形。两者都绘制背景以遮挡原文。
+    /// 有可靠漫画气泡时为 detectedBubble；否则为 borderless，渲染层不得绘制
+    /// RoundedRectangle 背景。
     let surfaceStyle: TranslationSurfaceStyle
 
     var id: UUID { blocks.first?.id ?? UUID() }
@@ -5253,21 +5234,16 @@ private struct TranslationTextRenderer: View {
     let surfaceStyle: TranslationSurfaceStyle
 
     var body: some View {
-        // 背景卡片的首要职责是遮住原文、保证可读性，detected 与 synthetic 两类
-        // 样式都必须绘制；是否画背景只由 surfaceStyle.drawsBackground 决定，
-        // 卡片矩形来自布局阶段选出的 choice.layout.rect（layoutSize），而不是
-        // allowedBounds / fallbackBounds——synthetic bubble 因此保持紧凑。
-        content
-            .background {
-                if surfaceStyle.drawsBackground {
-                    bubbleBackground
-                }
-            }
-            .overlay {
-                if surfaceStyle.drawsBackground {
-                    bubbleBorder
-                }
-            }
+        switch surfaceStyle {
+        case .detectedBubble:
+            content
+                .background { bubbleBackground }
+                .overlay { bubbleBorder }
+        case .borderless:
+            // 没有可靠漫画气泡时绝不能凭空生成背景卡片。译文直接压在原画上，
+            // 由文字描边/阴影保证可读性。
+            content
+        }
     }
 
     private var bubbleBackground: some View {
@@ -5292,7 +5268,8 @@ private struct TranslationTextRenderer: View {
                 CoreTextVerticalTranslationView(
                     text: segments.joined(separator: "\n"),
                     fontSize: fontSize,
-                    color: style.coreTextColor
+                    color: style.coreTextColor,
+                    outlined: surfaceStyle == .borderless
                 )
             } else {
                 VStack(spacing: segments.count > 1 ? 7 : 0) {
@@ -5308,16 +5285,24 @@ private struct TranslationTextRenderer: View {
 
     @ViewBuilder
     private func segmentLabel(_ segment: String, index: Int) -> some View {
-        // 背景卡片承担遮挡职责，描边只做辅助；不再用多层白描边替代背景。
-        Text(segment)
+        let label = Text(segment)
             .font(.system(size: fontSize, weight: .bold))
             .lineLimit(nil)
             .fixedSize(horizontal: false, vertical: true)
             .multilineTextAlignment(.center)
             .lineSpacing(2)
             .foregroundStyle(colorGradient(index: index))
-            .shadow(color: .white.opacity(0.78), radius: 0.7)
-            .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+
+        if surfaceStyle == .borderless {
+            label
+                .shadow(color: .white.opacity(0.95), radius: 1.8)
+                .shadow(color: .white.opacity(0.90), radius: 0.9)
+                .shadow(color: .black.opacity(0.55), radius: 1.4, y: 1)
+        } else {
+            label
+                .shadow(color: .white.opacity(0.78), radius: 0.7)
+                .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
+        }
     }
 
     private func colorGradient(index: Int) -> LinearGradient {
@@ -5349,6 +5334,8 @@ private struct CoreTextVerticalTranslationView: UIViewRepresentable {
     let text: String
     let fontSize: CGFloat
     let color: UIColor
+    /// 无气泡译文直接压在漫画原画上，需要描边来维持可读性。
+    let outlined: Bool
 
     func makeUIView(context: Context) -> VerticalTranslationUIView {
         VerticalTranslationUIView()
@@ -5358,6 +5345,7 @@ private struct CoreTextVerticalTranslationView: UIViewRepresentable {
         uiView.text = text
         uiView.fontSize = fontSize
         uiView.color = color
+        uiView.outlined = outlined
         uiView.setNeedsDisplay()
     }
 }
@@ -5366,6 +5354,7 @@ private final class VerticalTranslationUIView: UIView {
     var text = ""
     var fontSize: CGFloat = 16
     var color = UIColor.label
+    var outlined = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -5397,6 +5386,21 @@ private final class VerticalTranslationUIView: UIView {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
             NSAttributedString.Key(kCTVerticalFormsAttributeName as String): true
         ], range: range)
+
+        if outlined {
+            // 负值 strokeWidth 表示“描边并填充”，CoreText 会先描边再用前景色填充内部。
+            let strokeWidth = -max(fontSize * 0.14, 1.4)
+            attributed.addAttribute(
+                NSAttributedString.Key(kCTStrokeWidthAttributeName as String),
+                value: NSNumber(value: Double(strokeWidth)),
+                range: range
+            )
+            attributed.addAttribute(
+                NSAttributedString.Key(kCTStrokeColorAttributeName as String),
+                value: UIColor.white.withAlphaComponent(0.92).cgColor,
+                range: range
+            )
+        }
 
         let path = CGPath(
             rect: bounds.insetBy(dx: 2, dy: 2),

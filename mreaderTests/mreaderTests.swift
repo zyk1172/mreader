@@ -1724,7 +1724,7 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
-    @Test func mangaSegmenterKeepsPureOCRMergeBehaviorWithoutVisualBubbles() {
+    @Test func mangaSegmenterKeepsPureOCRLinesBorderlessWithoutVisualBubbles() {
         let result = MangaTextSegmenter.segment([
             TextBlock(
                 text: "第一行",
@@ -1738,8 +1738,8 @@ struct mreaderTests {
             )
         ], isRightToLeft: false)
 
-        #expect(result.bubbles.count == 1)
-        #expect(result.bubbles[0].bubbleBox == nil)
+        #expect(result.bubbles.count == 2)
+        #expect(result.bubbles.allSatisfy { $0.bubbleBox == nil })
     }
 
     @Test func ocrLanguagePassesSeparateJapaneseFromChineseKorean() {
@@ -2999,8 +2999,9 @@ struct mreaderTests {
         #expect(grouped[1].text == "广告")
     }
 
-    @Test func verticalMangaColumnsMergeIntoSingleDialogue() {
-        // 竖排日文：同一气泡里两列长度不同（顶端对齐），列宽≈字号
+    @Test func verticalMangaColumnsWithoutBubbleRegionStayBorderless() {
+        // 没有可靠 bubbleBox 时，不能仅凭竖排列距猜出一个漫画气泡。
+        // 两列仍各自保留为可翻译的 borderless unit。
         let rightColumn = TextBlock(
             text: "きみのことが",
             boundingBox: CGRect(x: 0.60, y: 0.10, width: 0.035, height: 0.20),
@@ -3017,8 +3018,9 @@ struct mreaderTests {
             isRightToLeft: true
         )
 
-        #expect(grouped.count == 1)
-        #expect(grouped[0].text == "きみのことがすきだ")
+        #expect(grouped.count == 2)
+        #expect(grouped.allSatisfy { $0.bubbleBox == nil })
+        #expect(grouped.map(\.text) == ["きみのことが", "すきだ"])
     }
 
     @Test func webtoonRowsSortByReadingOrderDespiteTinyNormalizedHeights() {

@@ -2,9 +2,6 @@ import Foundation
 import Testing
 @testable import mreader
 
-// makeRepository 返回的清理闭包与仓库使用都固定在 MainActor 区域内，
-// 避免 FileManager / UserDefaults 非 Sendable 值跨隔离域发送。
-@MainActor
 struct MediaSourceRepositoryTests {
     @Test
     func concurrentSourceUpdatesAreNotLost() async throws {
@@ -94,19 +91,15 @@ struct MediaSourceRepositoryTests {
         let suiteName = "mreader.media-source-tests.\(UUID().uuidString)"
         let userDefaults = try #require(UserDefaults(suiteName: suiteName))
         let repository = MediaSourceRepository(
+            fileManager: fileManager,
             directoryURL: directory,
-            dependencies: MediaSourceStorageDependencies(
-                fileManager: fileManager,
-                userDefaults: userDefaults
-            )
+            userDefaults: userDefaults
         )
-        // 清理闭包只捕获 Sendable 的字符串与 URL，避免把非 Sendable 的
-        // FileManager / UserDefaults 发送到调用方区域。
         return (
             repository,
             {
-                UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
-                try? FileManager.default.removeItem(at: directory)
+                userDefaults.removePersistentDomain(forName: suiteName)
+                try? fileManager.removeItem(at: directory)
             }
         )
     }
