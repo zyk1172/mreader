@@ -194,10 +194,19 @@ nonisolated enum MangaTextSegmenter {
         let lineAxisSize = isVertical(lhs)
             ? min(lhs.boundingBox.width, rhs.boundingBox.width)
             : min(lhs.boundingBox.height, rhs.boundingBox.height)
-        let maximumGap = min(
-            max(smallerScale * 2.2, lineAxisSize * 1.8, 0.020),
-            0.10
-        )
+        let maximumGap: CGFloat
+        if group.count == 1 {
+            // The first pair has no local cluster baseline yet. Keep its window
+            // close to one line height so two nearby single-line bubbles cannot
+            // seed a contaminated group. The screenshot regression gap (0.030
+            // for a 0.045 line) remains comfortably inside this limit.
+            maximumGap = max(smallerScale * 1.35, lineAxisSize * 1.25, 0.006)
+        } else {
+            maximumGap = min(
+                max(smallerScale * 2.2, lineAxisSize * 1.8, 0.020),
+                0.10
+            )
+        }
         guard lineGap <= maximumGap else { return false }
 
         let crossOverlap: CGFloat

@@ -392,6 +392,32 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "NOT YET.")
     }
 
+    /// 两个没有 bubbleBox 的单行对白即使字号、颜色和横向投影都接近，
+    /// 只要它们之间已经超过约一个 line height，就不能用尚未建立 baseline
+    /// 的首对宽窗口把两个独立气泡合并。
+    @Test func nearbySingleLineDialogueBubblesDoNotMergeWithoutBubbleBox() {
+        let first = Self.block(
+            text: "FIRST BUBBLE.",
+            boundingBox: CGRect(x: 0.30, y: 0.20, width: 0.30, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: "#111111"
+        )
+        let second = Self.block(
+            text: "SECOND BUBBLE.",
+            boundingBox: CGRect(x: 0.31, y: 0.315, width: 0.29, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: "#111111"
+        )
+
+        let segmentation = MangaTextSegmenter.segment([first, second], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 2)
+        #expect(segmentation.bubbles[0].text == "FIRST BUBBLE.")
+        #expect(segmentation.bubbles[1].text == "SECOND BUBBLE.")
+    }
+
     // MARK: - 端到端结构：segmenter → translation input
 
     /// 端到端结构测试：同一可靠 bubble 的两行 OCR，经 MangaTextSegmenter

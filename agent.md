@@ -34,6 +34,7 @@
 - `detectedBubble` 和 `syntheticBubble` 的 `drawsBackground` 都必须为 `true`。
 - 可靠 `bubbleBox` 只决定背景几何来源：可靠时沿用真实气泡；不可靠或缺失时使用紧凑 synthetic bubble。
 - synthetic bubble 的排版矩形由译文实际测量结果决定，不能继承整页、超宽或超高的病态 OCR 框。
+- synthetic bubble 的原文最小覆盖范围必须经过 `validatedSourceCoverageRect(for:sourceRect:within:)` 的图片边界、页面范围和方向/glyph-aware 校验；又窄又高的竖排 OCR 框不能仅凭页面百分比成为 coverage。
 - `ReaderView` 的背景绘制统一通过 `surfaceStyle.drawsBackground` 门控，不能恢复 `.borderless -> content` 的裸字路径。
 - `TranslationLayoutRole` 与 surface style 正交；没有 `bubbleBox` 的对白不能被降级成 standalone。
 

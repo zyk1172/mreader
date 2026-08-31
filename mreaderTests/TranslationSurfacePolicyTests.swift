@@ -47,6 +47,20 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
+    private static func displayBlock(
+        text: String,
+        rect: CGRect,
+        orientation: TextOrientation = .horizontal
+    ) -> TextBlock {
+        TextBlock(
+            text: text,
+            boundingBox: normalized(rect),
+            ocrSource: "vision",
+            textOrientation: orientation,
+            layoutRole: .dialogue
+        )
+    }
+
     // MARK: - P0: 气泡可靠性决定背景卡片的几何来源
 
     @Test func surfaceStylePolicyMapsReliabilityToGeometrySource() {
@@ -243,13 +257,42 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
-    // MARK: - P1: synthetic bubble 使用可信覆盖范围并拒绝病态几何
+    // MARK: - P0: synthetic bubble 使用可信覆盖范围并拒绝病态几何
+
+    /// 页面百分比护栏不能把“窄而高”的竖排 OCR 框识别为可信覆盖范围。
+    @Test func verticalPathologicalSourceCoverageIsRejected() {
+        let sourceRect = CGRect(x: 240, y: 120, width: 30, height: 400)
+        let block = Self.displayBlock(
+            text: "城市熟女。",
+            rect: sourceRect,
+            orientation: .vertical
+        )
+
+        let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+            for: block,
+            sourceRect: sourceRect,
+            within: Self.imageBounds
+        )
+
+        #expect(coverage == nil)
+    }
 
     /// 又窄又高的竖排 OCR 框不能再把 synthetic bubble 撑成巨大矩形。
     @Test func verticalSyntheticBubbleIgnoresTallOCRBox() {
         let sourceRect = CGRect(x: 240, y: 120, width: 30, height: 400)
         let allowedBounds = CGRect(x: 200, y: 60, width: 110, height: 560)
         let text = "城市熟女。"
+        let block = Self.displayBlock(
+            text: text,
+            rect: sourceRect,
+            orientation: .vertical
+        )
+        let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+            for: block,
+            sourceRect: sourceRect,
+            within: Self.imageBounds
+        )
+        #expect(coverage == nil)
 
         let synthetic = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: text,
@@ -258,7 +301,8 @@ struct TranslationSurfacePolicyTests {
             allowedBounds: allowedBounds,
             lineSpacing: 2,
             textOrientation: .vertical,
-            useSourceRectAsMinimumExtent: false
+            useSourceRectAsMinimumExtent: false,
+            minimumSourceCoverageRect: coverage
         )
         let detected = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: text,
@@ -338,9 +382,11 @@ struct TranslationSurfacePolicyTests {
 
     @Test func validatedSourceCoverageAcceptsNormalTextAndRejectsPathologicalGeometry() {
         let normal = CGRect(x: 145, y: 260, width: 100, height: 60)
+        let normalBlock = Self.displayBlock(text: "Normal text", rect: normal)
         #expect(
             OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                normal,
+                for: normalBlock,
+                sourceRect: normal,
                 within: Self.imageBounds
             ) == normal
         )
@@ -348,21 +394,27 @@ struct TranslationSurfacePolicyTests {
         let wholePage = CGRect(x: 0, y: 0, width: 390, height: 780)
         let tooWide = CGRect(x: 35, y: 300, width: 320, height: 40)
         let outside = CGRect(x: -20, y: 300, width: 80, height: 40)
+        let wholePageBlock = Self.displayBlock(text: "Whole page", rect: wholePage)
+        let tooWideBlock = Self.displayBlock(text: "Too wide", rect: tooWide)
+        let outsideBlock = Self.displayBlock(text: "Outside", rect: outside)
         #expect(
             OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                wholePage,
+                for: wholePageBlock,
+                sourceRect: wholePage,
                 within: Self.imageBounds
             ) == nil
         )
         #expect(
             OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                tooWide,
+                for: tooWideBlock,
+                sourceRect: tooWide,
                 within: Self.imageBounds
             ) == nil
         )
         #expect(
             OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                outside,
+                for: outsideBlock,
+                sourceRect: outside,
                 within: Self.imageBounds
             ) == nil
         )
@@ -371,8 +423,10 @@ struct TranslationSurfacePolicyTests {
     @Test @MainActor func syntheticBubbleCoversValidatedSourceWithoutInheritingGiantBox() {
         let sourceRect = CGRect(x: 145, y: 260, width: 100, height: 60)
         let imageBounds = Self.imageBounds
+        let sourceBlock = Self.displayBlock(text: "你好。", rect: sourceRect)
         let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-            sourceRect,
+            for: sourceBlock,
+            sourceRect: sourceRect,
             within: imageBounds
         )
         let covered = OCRBubbleLayoutEngine.anchoredTranslationLayout(
@@ -388,6 +442,7 @@ struct TranslationSurfacePolicyTests {
         #expect(covered.rect.contains(sourceRect))
 
         let pathological = CGRect(x: 35, y: 300, width: 320, height: 40)
+        let pathologicalBlock = Self.displayBlock(text: "Yes.", rect: pathological)
         let compact = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Yes.",
             sourceFontSize: 16,
@@ -397,7 +452,8 @@ struct TranslationSurfacePolicyTests {
             textOrientation: .horizontal,
             useSourceRectAsMinimumExtent: false,
             minimumSourceCoverageRect: OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                pathological,
+                for: pathologicalBlock,
+                sourceRect: pathological,
                 within: imageBounds
             )
         )

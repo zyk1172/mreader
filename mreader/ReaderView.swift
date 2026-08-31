@@ -4241,7 +4241,8 @@ struct LocalImageView: View {
         let minimumSourceCoverageRect = hasReliableBubble
             ? nil
             : OCRBubbleLayoutEngine.validatedSourceCoverageRect(
-                textRect,
+                for: block,
+                sourceRect: textRect,
                 within: imageBounds
             )
         let fallbackBounds: CGRect
