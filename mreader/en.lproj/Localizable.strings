@@ -157,9 +157,9 @@
 "ocr.filter" = "OCR Filter";
 "ocr.filterDescription" = "Web addresses, ads, and tiny text near edges will be ignored and not sent for OCR or AI translation.";
 "ocr.minTextSize" = "Ignore Small Text Below";
-"ocr.borderlessFontSize" = "Borderless Text Font Size";
-"ocr.borderlessFontSizeValue" = "Aa Current %d pt";
-"ocr.borderlessFontSizeDescription" = "Translations without a reliable bubble boundary use this size and shrink automatically when space is limited.";
+"ocr.measuredTextFontSize" = "Measured Text Font Size";
+"ocr.measuredTextFontSizeValue" = "Aa Current %d pt";
+"ocr.measuredTextFontSizeDescription" = "Translations without a reliable bubble boundary use this size and shrink automatically when space is limited.";
 "ocr.debug" = "OCR Debug";
 "ocr.debugDescription" = "Vision translation sends current page or slices to a third-party OpenAI-compatible API.";
 "ocr.showDebugBoxes" = "Show OCR Debug Boxes";

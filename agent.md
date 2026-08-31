@@ -15,7 +15,7 @@
 
 - 只有通过验证的 bubbleBox 才能创建 region；相同物理气泡的轻微几何漂移要去重。
 - 每个 OCR line 先按 textBox 归属 region，再在 region 内按阅读顺序合并；行距、字号、颜色和 layoutRole 不能决定同一 region 的翻译次数。
-- region 外的 line 保持独立的 borderless translation unit；不能用 dialogue gap heuristic 凭空猜出漫画气泡。
+- region 外的 line 保持独立的 measured-text translation unit；不能用 dialogue gap heuristic 凭空猜出漫画气泡。
 - 明确不同的 bubble region 禁止合并。
 
 变更 `bubbleBox` 分组逻辑时，至少保留以下回归场景：
@@ -23,13 +23,13 @@
 - `overlappingDistinctVisualBubblesDoNotMerge`：重叠但不同的气泡不能合并。
 - `nestedButDifferentBubbleGeometryDoesNotAutomaticallyBecomeSameIdentity`：单向外围框包含内部框不能自动成为同一 region。
 - 同一气泡多行、混合 bubbleBox/nil line、行距不规则或视觉框轻微漂移时仍只产生一个 unit。
-- 无 `bubbleBox` 的纯 OCR 多行保持独立，不创建 synthetic bubble。
+- 无 `bubbleBox` 的纯 OCR 多行保持独立；它们仍然使用紧贴最终译文测量范围的 measured-text 卡片。
 
 ## 表面样式不变量
 
-- `detectedBubble` 的 `drawsBackground` 必须为 `true`，`borderless` 的 `drawsBackground` 必须为 `false`。
-- 可靠 `bubbleBox` 使用真实气泡背景；不可靠或缺失时必须使用 borderless，不能生成 synthetic bubble。
-- `ReaderView` 的背景绘制统一通过 surface style 门控；borderless 只允许文字描边/阴影，不能出现 RoundedRectangle。
+- `detectedBubble` 和 `measuredText` 的 `drawsBackground` 都必须为 `true`。
+- 可靠 `bubbleBox` 使用真实气泡几何；不可靠或缺失时使用 measured-text 几何，卡片尺寸只能来自最终译文测量结果。
+- `ReaderView` 的背景和边框统一绘制 RoundedRectangle；两种 surface style 只区分几何来源，不能让 OCR `sourceRect` 成为 measured-text 卡片的最小宽高。
 - `TranslationLayoutRole` 与 surface style 正交；没有 `bubbleBox` 的对白不能被降级成 standalone。
 
 ## 缓存与验证

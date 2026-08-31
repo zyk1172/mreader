@@ -74,11 +74,11 @@ nonisolated enum MangaTextSegmenter {
     /// 1. deduplicate overlapping detections that describe the same physical bubble;
     /// 2. attach every local OCR line whose textBox is inside that region;
     /// 3. merge the region lines in reading order;
-    /// 4. leave lines without a region as independent borderless text units.
+    /// 4. leave lines without a region as independent measured-text units.
     ///
     /// The final fallback intentionally does not guess a bubble from line spacing.
     /// Without a reliable region, separate OCR lines may still be rendered and
-    /// translated, but they cannot acquire a synthetic bubble surface.
+    /// translated, but each uses a card sized from its final translated text.
     private static func canonicalBubbleBlocks(
         from lines: [TextBlock],
         isRightToLeft: Bool
@@ -118,7 +118,7 @@ nonisolated enum MangaTextSegmenter {
             }
         }
 
-        var borderlessLines: [TextBlock] = []
+        var measuredTextLines: [TextBlock] = []
         for line in unassignedLines {
             let candidates = regions.indices.filter {
                 bubbleContainsText(regions[$0].rect, line.boundingBox)
@@ -126,7 +126,7 @@ nonisolated enum MangaTextSegmenter {
             guard let selected = candidates.min(by: {
                 regionAssignmentPrecedes(regions[$0], regions[$1], for: line)
             }) else {
-                borderlessLines.append(line)
+                measuredTextLines.append(line)
                 continue
             }
             regions[selected].lines.append(line)
@@ -150,7 +150,7 @@ nonisolated enum MangaTextSegmenter {
                 )
             )
         }
-        units.append(contentsOf: borderlessLines)
+        units.append(contentsOf: measuredTextLines)
 
         return AITranslator.sortedTextBlocks(
             units,

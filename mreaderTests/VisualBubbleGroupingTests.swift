@@ -13,7 +13,7 @@
 //  反向不变量同样被锁定：
 //  【两个可靠且明确不同的 bubble geometry，绝不因距离较近而被合并。】
 //  没有可靠 bubbleBox 的文字不会被猜成漫画气泡；每个已识别 OCR line
-//  保持为独立的 borderless translation unit。
+//  保持为独立的 measured-text translation unit。
 //
 
 import Testing
@@ -328,7 +328,7 @@ struct VisualBubbleGroupingTests {
     // MARK: - P0：无 bubbleBox 不猜测漫画气泡
 
     /// Apple/native OCR 没有可靠 bubbleBox 时，不能因为相邻行距而制造一个
-    /// 漫画气泡区域；这些行仍然可以各自翻译并以 borderless surface 显示。
+    /// 漫画气泡区域；这些行仍然可以各自翻译并以 measured-text surface 显示。
     @Test func nativeOCRLinesWithoutBubbleRegionRemainSeparate() {
         let line1 = Self.block(
             text: "I'M SORRY... I CAN'T.",
@@ -498,7 +498,7 @@ struct VisualBubbleGroupingTests {
     // MARK: - 测试 7：无 bubble region 的纯 OCR 行保持独立
 
     /// 无 bubbleBox 的普通多行对白不能因为紧凑行距被猜成同一个漫画气泡。
-    @Test func pureOCRMultilineDialogueStaysBorderlessPerLine() {
+    @Test func pureOCRMultilineDialogueStaysSeparateMeasuredTextPerLine() {
         let line1 = Self.block(
             text: "TOMORROW WE RIDE",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.34, height: 0.06),

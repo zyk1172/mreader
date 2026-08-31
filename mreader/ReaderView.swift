@@ -1384,23 +1384,23 @@ struct ReaderView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("ocr.borderlessFontSize".localized)
+                            Text("ocr.measuredTextFontSize".localized)
                             Slider(value: Binding(
-                                get: { comic.borderlessTranslationFontSize },
+                                get: { comic.measuredTextTranslationFontSize },
                                 set: { newValue in
                                     updateComic {
-                                        $0.borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(newValue)
+                                        $0.measuredTextTranslationFontSize = ComicBook.clampedMeasuredTextTranslationFontSize(newValue)
                                     }
                                 }
-                            ), in: ComicBook.borderlessTranslationFontSizeRange, step: 1)
+                            ), in: ComicBook.measuredTextTranslationFontSizeRange, step: 1)
                         }
 
-                        Text("ocr.borderlessFontSizeValue".localizedFormat(
-                            Int(comic.borderlessTranslationFontSize.rounded())
+                        Text("ocr.measuredTextFontSizeValue".localizedFormat(
+                            Int(comic.measuredTextTranslationFontSize.rounded())
                         ))
                         .font(.caption.monospacedDigit())
 
-                        Text("ocr.borderlessFontSizeDescription".localized)
+                        Text("ocr.measuredTextFontSizeDescription".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -3977,6 +3977,7 @@ struct LocalImageView: View {
                     },
                     fontSize: item.fontSize,
                     layoutSize: item.rect.size,
+                    contentPadding: item.contentPadding,
                     style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
                     textOrientation: item.textOrientation,
                     surfaceStyle: item.surfaceStyle
@@ -4198,6 +4199,7 @@ struct LocalImageView: View {
             blocks: [block],
             rect: geometry.choice.layout.rect,
             fontSize: geometry.choice.layout.fontSize,
+            contentPadding: geometry.choice.layout.contentPadding,
             displayText: translation.isEmpty ? nil : geometry.choice.text,
             textOrientation: geometry.translationOrientation,
             layoutRole: block.layoutRole,
@@ -4270,7 +4272,7 @@ struct LocalImageView: View {
         let requestedFontSize = OCRBubbleLayoutEngine.requestedTranslationFontSize(
             hasReliableBubble: hasReliableBubble,
             automaticFontSize: automaticFontSize,
-            borderlessFontSize: borderlessTranslationFontSize
+            measuredTextFontSize: measuredTextTranslationFontSize
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: effectiveTranslation,
@@ -4280,11 +4282,11 @@ struct LocalImageView: View {
             allowedBounds: layoutBounds,
             lineSpacing: 2,
             textOrientation: translationOrientation,
-            // detected bubble 沿用真实气泡范围；borderless 只按译文测量结果排版。
-            useSourceRectAsMinimumExtent: hasReliableBubble
+            // detected bubble 沿用真实气泡范围；measuredText 只按译文测量结果排版。
+            geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText
         )
         #if DEBUG
-        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
+        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
         #endif
         return (
             sourceRect: textRect,
@@ -4367,6 +4369,7 @@ struct LocalImageView: View {
                 blocks: item.blocks,
                 rect: rect,
                 fontSize: item.fontSize,
+                contentPadding: item.contentPadding,
                 displayText: item.displayText,
                 textOrientation: item.textOrientation,
                 layoutRole: item.layoutRole,
@@ -4423,6 +4426,7 @@ struct LocalImageView: View {
                 blocks: [block],
                 rect: rect,
                 fontSize: uniformOCRFontSize,
+                contentPadding: TranslationLayoutMetrics.contentPadding,
                 displayText: nil,
                 textOrientation: block.textOrientation,
                 layoutRole: block.layoutRole,
@@ -4622,11 +4626,11 @@ struct LocalImageView: View {
         11 + CGFloat(normalizedOCRScale) * 8
     }
 
-    private var borderlessTranslationFontSize: CGFloat {
+    private var measuredTextTranslationFontSize: CGFloat {
         CGFloat(
-            ComicBook.clampedBorderlessTranslationFontSize(
-                comic?.borderlessTranslationFontSize
-                    ?? ComicBook.defaultBorderlessTranslationFontSize
+            ComicBook.clampedMeasuredTextTranslationFontSize(
+                comic?.measuredTextTranslationFontSize
+                    ?? ComicBook.defaultMeasuredTextTranslationFontSize
             )
         )
     }
@@ -5157,12 +5161,14 @@ private struct TranslationLayoutItem: Identifiable {
     let blocks: [TextBlock]
     let rect: CGRect
     let fontSize: CGFloat
+    /// 与 OCRBubbleLayoutEngine 测量时完全一致的卡片内边距。
+    let contentPadding: CGFloat
     /// 译文布局阶段选出的实际排版文本；OCR 放大气泡保持 nil。
     let displayText: String?
     let textOrientation: TextOrientation
     let layoutRole: TranslationLayoutRole
-    /// 有可靠漫画气泡时为 detectedBubble；否则为 borderless，渲染层不得绘制
-    /// RoundedRectangle 背景。
+    /// 有可靠漫画气泡时为 detectedBubble；否则为 measuredText。两种表面都绘制
+    /// RoundedRectangle 背景，只采用不同的卡片尺寸算法。
     let surfaceStyle: TranslationSurfaceStyle
 
     var id: UUID { blocks.first?.id ?? UUID() }
@@ -5229,21 +5235,15 @@ private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
     let layoutSize: CGSize
+    let contentPadding: CGFloat
     let style: TranslationColorStyle
     let textOrientation: TextOrientation
     let surfaceStyle: TranslationSurfaceStyle
 
     var body: some View {
-        switch surfaceStyle {
-        case .detectedBubble:
-            content
-                .background { bubbleBackground }
-                .overlay { bubbleBorder }
-        case .borderless:
-            // 没有可靠漫画气泡时绝不能凭空生成背景卡片。译文直接压在原画上，
-            // 由文字描边/阴影保证可读性。
-            content
-        }
+        content
+            .background { bubbleBackground }
+            .overlay { bubbleBorder }
     }
 
     private var bubbleBackground: some View {
@@ -5268,8 +5268,7 @@ private struct TranslationTextRenderer: View {
                 CoreTextVerticalTranslationView(
                     text: segments.joined(separator: "\n"),
                     fontSize: fontSize,
-                    color: style.coreTextColor,
-                    outlined: surfaceStyle == .borderless
+                    color: style.coreTextColor
                 )
             } else {
                 VStack(spacing: segments.count > 1 ? 7 : 0) {
@@ -5279,7 +5278,7 @@ private struct TranslationTextRenderer: View {
                 }
             }
         }
-        .padding(TranslationLayoutMetrics.contentPadding)
+        .padding(contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
     }
 
@@ -5293,16 +5292,9 @@ private struct TranslationTextRenderer: View {
             .lineSpacing(2)
             .foregroundStyle(colorGradient(index: index))
 
-        if surfaceStyle == .borderless {
-            label
-                .shadow(color: .white.opacity(0.95), radius: 1.8)
-                .shadow(color: .white.opacity(0.90), radius: 0.9)
-                .shadow(color: .black.opacity(0.55), radius: 1.4, y: 1)
-        } else {
-            label
-                .shadow(color: .white.opacity(0.78), radius: 0.7)
-                .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
-        }
+        label
+            .shadow(color: .white.opacity(0.78), radius: 0.7)
+            .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
     }
 
     private func colorGradient(index: Int) -> LinearGradient {
@@ -5334,8 +5326,6 @@ private struct CoreTextVerticalTranslationView: UIViewRepresentable {
     let text: String
     let fontSize: CGFloat
     let color: UIColor
-    /// 无气泡译文直接压在漫画原画上，需要描边来维持可读性。
-    let outlined: Bool
 
     func makeUIView(context: Context) -> VerticalTranslationUIView {
         VerticalTranslationUIView()
@@ -5345,7 +5335,6 @@ private struct CoreTextVerticalTranslationView: UIViewRepresentable {
         uiView.text = text
         uiView.fontSize = fontSize
         uiView.color = color
-        uiView.outlined = outlined
         uiView.setNeedsDisplay()
     }
 }
@@ -5354,7 +5343,6 @@ private final class VerticalTranslationUIView: UIView {
     var text = ""
     var fontSize: CGFloat = 16
     var color = UIColor.label
-    var outlined = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -5386,21 +5374,6 @@ private final class VerticalTranslationUIView: UIView {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
             NSAttributedString.Key(kCTVerticalFormsAttributeName as String): true
         ], range: range)
-
-        if outlined {
-            // 负值 strokeWidth 表示“描边并填充”，CoreText 会先描边再用前景色填充内部。
-            let strokeWidth = -max(fontSize * 0.14, 1.4)
-            attributed.addAttribute(
-                NSAttributedString.Key(kCTStrokeWidthAttributeName as String),
-                value: NSNumber(value: Double(strokeWidth)),
-                range: range
-            )
-            attributed.addAttribute(
-                NSAttributedString.Key(kCTStrokeColorAttributeName as String),
-                value: UIColor.white.withAlphaComponent(0.92).cgColor,
-                range: range
-            )
-        }
 
         let path = CGPath(
             rect: bounds.insetBy(dx: 2, dy: 2),

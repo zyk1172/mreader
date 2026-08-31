@@ -82,7 +82,7 @@ AI 翻译发送给大模型前会套用统一 Prompt 模板，目标是准确翻
 
 翻译结果按原文位置显示，并尽量避开重叠。可靠的 `bubbleBox` 会先被归一化为 canonical bubble region，再把区域内所有 OCR line 按阅读顺序合并成一个 sourceText，因此同一气泡无论被 OCR 拆成几行，都只产生一个翻译请求和一个译文表面。不同气泡区域不会因为行距或文字样式相近而合并。
 
-有可靠漫画气泡的译文使用 `detectedBubble`，沿用真实气泡范围并绘制背景；没有可靠气泡的文字使用 `borderless`，不绘制任何 RoundedRectangle，只用文字描边和阴影保证可读性。OCR 矩形不会被猜成 synthetic bubble，也不会因为异常高宽重新产生大白框。
+有可靠漫画气泡的译文使用 `detectedBubble`，沿用真实气泡范围并绘制背景；没有可靠气泡的文字使用 `measuredText`，先测量最终译文的实际排版范围，再按最终字号的 line/glyph height 每边外扩 0.5 倍绘制紧凑背景和边框。OCR 矩形只作为位置锚点，不决定卡片的最小宽高，也不会因为异常高宽重新产生大白框。
 
 ## 导入方式
 

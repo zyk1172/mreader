@@ -1724,7 +1724,7 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
-    @Test func mangaSegmenterKeepsPureOCRLinesBorderlessWithoutVisualBubbles() {
+    @Test func mangaSegmenterKeepsPureOCRLinesSeparateWithoutVisualBubbles() {
         let result = MangaTextSegmenter.segment([
             TextBlock(
                 text: "第一行",
@@ -1909,18 +1909,19 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
     }
 
-    @Test @MainActor func borderlessTranslationFontIgnoresPathologicalOCRGeometry() {
+    @Test @MainActor func measuredTextTranslationFontIgnoresPathologicalOCRGeometry() {
         let requested = OCRBubbleLayoutEngine.requestedTranslationFontSize(
             hasReliableBubble: false,
             automaticFontSize: 120,
-            borderlessFontSize: 14
+            measuredTextFontSize: 14
         )
         let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "In the stationary species",
             sourceFontSize: requested,
             sourceRect: CGRect(x: 100, y: 100, width: 40, height: 20),
             allowedBounds: CGRect(x: 80, y: 80, width: 80, height: 60),
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
         )
         #expect(layout.fontSize <= 14.001)
 
@@ -1928,28 +1929,28 @@ struct mreaderTests {
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 14
+                measuredTextFontSize: 14
             ) == 14
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 3
+                measuredTextFontSize: 3
             ) == 8
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 40
+                measuredTextFontSize: 40
             ) == 28
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: true,
                 automaticFontSize: 80,
-                borderlessFontSize: 14
+                measuredTextFontSize: 14
             ) == TranslationLayoutMetrics.absoluteFontSizeCap
         )
     }
@@ -2003,7 +2004,7 @@ struct mreaderTests {
         #expect(oversizedButNotWholePage == nil)
     }
 
-    @Test @MainActor func comicBookBorderlessTranslationFontDefaultsAndClampsAcrossCodable() throws {
+    @Test @MainActor func comicBookMeasuredTextFontDefaultsAndClampsAcrossLegacyCodable() throws {
         let clamped = ComicBook(
             title: "font-setting",
             bookmarkData: Data(),
@@ -2119,11 +2120,12 @@ struct mreaderTests {
             within: imageBounds
         )
         let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: "坐立不安的",
+            text: "这是一个需要在有限区域内自动缩小字号的独立文字翻译",
             sourceFontSize: fontSize,
             sourceRect: sourceRect,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
         )
 
         #expect(allowed.width <= sourceRect.width + 48)
@@ -2249,7 +2251,8 @@ struct mreaderTests {
             sourceFontSize: 16,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(abs(layout.rect.midX - source.midX) < 0.01)
@@ -2268,7 +2271,8 @@ struct mreaderTests {
             sourceFontSize: 20,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(abs(layout.fontSize - 20) < 0.01)
@@ -2284,7 +2288,8 @@ struct mreaderTests {
             sourceFontSize: 20,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(layout.fontSize < 12)
@@ -2299,7 +2304,8 @@ struct mreaderTests {
             sourceFontSize: 22,
             sourceRect: CGRect(x: 3, y: 3, width: 12, height: 8),
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(allowed.contains(layout.rect))
@@ -2317,14 +2323,16 @@ struct mreaderTests {
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
         let suggested = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: suggestedLines.joined(separator: "\n"),
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: translation,
@@ -2332,7 +2340,8 @@ struct mreaderTests {
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(natural.fontSize > suggested.fontSize)
@@ -2351,7 +2360,8 @@ struct mreaderTests {
             sourceRect: source,
             allowedBounds: allowed,
             lineSpacing: 2,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(choice.usesSuggestedLineBreaks == false)
@@ -2370,7 +2380,8 @@ struct mreaderTests {
             sourceRect: source,
             allowedBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
             lineSpacing: 2,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            geometryStrategy: .detectedBubble
         )
         let contentWidth = layout.rect.width - TranslationLayoutMetrics.contentPadding * 2
 
@@ -2999,9 +3010,9 @@ struct mreaderTests {
         #expect(grouped[1].text == "广告")
     }
 
-    @Test func verticalMangaColumnsWithoutBubbleRegionStayBorderless() {
+    @Test func verticalMangaColumnsWithoutBubbleRegionStaySeparateMeasuredTextUnits() {
         // 没有可靠 bubbleBox 时，不能仅凭竖排列距猜出一个漫画气泡。
-        // 两列仍各自保留为可翻译的 borderless unit。
+        // 两列仍各自保留为可翻译的 measured-text unit。
         let rightColumn = TextBlock(
             text: "きみのことが",
             boundingBox: CGRect(x: 0.60, y: 0.10, width: 0.035, height: 0.20),
