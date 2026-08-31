@@ -15,7 +15,7 @@
 
 - 只有通过验证的 bubbleBox 才能创建 region；相同物理气泡的轻微几何漂移要去重。
 - 每个 OCR line 先按 textBox 归属 region，再在 region 内按阅读顺序合并；行距、字号、颜色和 layoutRole 不能决定同一 region 的翻译次数。
-- region 外的 line 保持独立的 measured-text translation unit；不能用 dialogue gap heuristic 凭空猜出漫画气泡。
+- region 外的连续 OCR line 可以按保守的相邻行规则合并为一个 measured-text paragraph；不能凭空创建 bubbleBox 或漫画气泡区域。
 - 明确不同的 bubble region 禁止合并。
 
 变更 `bubbleBox` 分组逻辑时，至少保留以下回归场景：
@@ -23,7 +23,7 @@
 - `overlappingDistinctVisualBubblesDoNotMerge`：重叠但不同的气泡不能合并。
 - `nestedButDifferentBubbleGeometryDoesNotAutomaticallyBecomeSameIdentity`：单向外围框包含内部框不能自动成为同一 region。
 - 同一气泡多行、混合 bubbleBox/nil line、行距不规则或视觉框轻微漂移时仍只产生一个 unit。
-- 无 `bubbleBox` 的纯 OCR 多行保持独立；它们仍然使用紧贴最终译文测量范围的 measured-text 卡片。
+- 无 `bubbleBox` 的纯 OCR 多行按段落语义合并或分隔，但始终使用紧贴最终译文测量范围的 measured-text 卡片，不创建 synthetic bubbleBox。
 
 ## 表面样式不变量
 

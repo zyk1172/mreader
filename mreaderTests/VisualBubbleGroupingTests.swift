@@ -12,8 +12,8 @@
 //
 //  反向不变量同样被锁定：
 //  【两个可靠且明确不同的 bubble geometry，绝不因距离较近而被合并。】
-//  没有可靠 bubbleBox 的文字不会被猜成漫画气泡；每个已识别 OCR line
-//  保持为独立的 measured-text translation unit。
+//  没有可靠 bubbleBox 的文字不会被猜成漫画气泡；相邻 OCR line 可以合并成
+//  measured-text paragraph，但结果仍保持 bubbleBox == nil。
 //
 
 import Testing
@@ -325,11 +325,11 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "INNER BUBBLE.")
     }
 
-    // MARK: - P0：无 bubbleBox 不猜测漫画气泡
+    // MARK: - P0：无 bubbleBox 形成 measured paragraph，不猜测气泡
 
-    /// Apple/native OCR 没有可靠 bubbleBox 时，不能因为相邻行距而制造一个
-    /// 漫画气泡区域；这些行仍然可以各自翻译并以 measured-text surface 显示。
-    @Test func nativeOCRLinesWithoutBubbleRegionRemainSeparate() {
+    /// Apple/native OCR 没有可靠 bubbleBox 时，连续正文行应合并为一个
+    /// measured-text translation unit，但不能凭空制造 bubbleBox。
+    @Test func nativeOCRLinesWithoutBubbleRegionFormMeasuredParagraph() {
         let line1 = Self.block(
             text: "I'M SORRY... I CAN'T.",
             boundingBox: CGRect(x: 0.25, y: 0.20, width: 0.50, height: 0.045),
@@ -355,8 +355,10 @@ struct VisualBubbleGroupingTests {
         let segmentation = MangaTextSegmenter.segment([line1, line2, line3], isRightToLeft: false)
 
         #expect(segmentation.lines.count == 3)
-        #expect(segmentation.bubbles.count == 3)
-        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+        #expect(segmentation.bubbles[0].text == "I'M SORRY... I CAN'T. ON THE SUBJECTS I MISSED. I DIDN'T KNOW.")
     }
 
     // MARK: - P0：mixed visual/native OCR 必须按气泡区域合并
@@ -424,9 +426,9 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].sourceLineCount == 3)
     }
 
-    /// 没有可靠 bubbleBox 时，即使行距看起来像对白，也不应由启发式创建
-    /// translation bubble；这同时覆盖了过去的 baseline/gap 聚类回归路径。
-    @Test func nativeOCRLineSpacingDoesNotCreateBubbleRegion() {
+    /// 没有可靠 bubbleBox 时，行距只用于保守地识别连续 measured paragraph，
+    /// 不能创建 bubbleBox；相邻间距存在适度变化时仍应保持一个 translation unit。
+    @Test func threeLineMeasuredParagraphAllowsModerateGapVariance() {
         let line1 = Self.block(
             text: "WE'LL HAVE FUN",
             boundingBox: CGRect(x: 0.29, y: 0.20, width: 0.42, height: 0.045),
@@ -460,8 +462,10 @@ struct VisualBubbleGroupingTests {
             isRightToLeft: false
         )
 
-        #expect(segmentation.bubbles.count == 3)
-        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+        #expect(segmentation.bubbles[0].text == "WE'LL HAVE FUN SOME OTHER TIME, OKAY?")
     }
 
     /// mixed geometry 的反向保护：nil bubbleBox 行如果明确落在已知视觉气泡外，
@@ -495,10 +499,11 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "SECOND BUBBLE.")
     }
 
-    // MARK: - 测试 7：无 bubble region 的纯 OCR 行保持独立
+    // MARK: - 测试 7：无 bubble region 的纯 OCR 行形成 measured paragraph
 
-    /// 无 bubbleBox 的普通多行对白不能因为紧凑行距被猜成同一个漫画气泡。
-    @Test func pureOCRMultilineDialogueStaysSeparateMeasuredTextPerLine() {
+    /// 无 bubbleBox 的普通多行对白合并为一个 measured paragraph，但不产生
+    /// synthetic bubbleBox。
+    @Test func pureOCRMultilineDialogueFormsMeasuredTextParagraph() {
         let line1 = Self.block(
             text: "TOMORROW WE RIDE",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.34, height: 0.06),
@@ -516,14 +521,15 @@ struct VisualBubbleGroupingTests {
 
         let segmentation = MangaTextSegmenter.segment([line1, line2], isRightToLeft: false)
 
-        #expect(segmentation.bubbles.count == 2)
-        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
     }
 
-    // MARK: - 测试 8：没有 bubble region 时不建立 dialogue cluster
+    // MARK: - 测试 8：没有 bubble region 时只建立保守 measured paragraph
 
-    /// 任何 gap 都不能在没有可靠 bubbleBox 时决定 translation unit 的边界。
-    @Test func pureOCRLinesDoNotUseDialogueClusterHeuristics() {
+    /// 相邻正文行可以形成 measured paragraph，且不会创建 bubbleBox。
+    @Test func pureOCRLinesFormMeasuredParagraphWithoutBubbleRegion() {
         let lineA = Self.block(
             text: "GET DOWN!",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.30, height: 0.05),
@@ -548,8 +554,9 @@ struct VisualBubbleGroupingTests {
 
         let segmentation = MangaTextSegmenter.segment([lineA, lineB, lineC], isRightToLeft: false)
 
-        #expect(segmentation.bubbles.count == 3)
-        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
     }
 
     /// 两个没有 bubbleBox 的单行对白即使字号、颜色和横向投影都接近，

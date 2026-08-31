@@ -6,19 +6,25 @@ import Combine
 struct ReaderContainerView: View {
     @State private var comic: ComicBook
     let onComicUpdate: (ComicBook) -> Void
+    let onClose: () -> Void
     @State private var manager = ComicManager()
     @State private var isLoaded = false
     @State private var loadFailed = false
 
-    init(comic: ComicBook, onComicUpdate: @escaping (ComicBook) -> Void) {
+    init(
+        comic: ComicBook,
+        onClose: @escaping () -> Void,
+        onComicUpdate: @escaping (ComicBook) -> Void
+    ) {
         _comic = State(initialValue: comic)
+        self.onClose = onClose
         self.onComicUpdate = onComicUpdate
     }
     
     var body: some View {
         Group {
             if isLoaded {
-                ReaderView(manager: manager, comic: comic) { updatedComic in
+                ReaderView(manager: manager, comic: comic, onClose: onClose) { updatedComic in
                     comic = updatedComic
                     onComicUpdate(updatedComic)
                 }
@@ -674,7 +680,7 @@ struct ReaderView: View {
     var manager: ComicManager
     @State private var comic: ComicBook
     let onComicUpdate: (ComicBook) -> Void
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
@@ -783,8 +789,14 @@ struct ReaderView: View {
         )
     }
 
-    init(manager: ComicManager, comic: ComicBook, onComicUpdate: @escaping (ComicBook) -> Void) {
+    init(
+        manager: ComicManager,
+        comic: ComicBook,
+        onClose: @escaping () -> Void,
+        onComicUpdate: @escaping (ComicBook) -> Void
+    ) {
         self.manager = manager
+        self.onClose = onClose
         self.onComicUpdate = onComicUpdate
         _comic = State(initialValue: comic)
         let maxIndex = max(0, manager.pages.count - 1)
@@ -1035,6 +1047,7 @@ struct ReaderView: View {
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
         .accessibilityIdentifier("mreader.reader.root")
         .defersSystemGestures(on: .horizontal) // 将水平滑动优先级完全交给翻页
+        .background(ReaderNavigationGestureGuard())
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
@@ -1047,7 +1060,7 @@ struct ReaderView: View {
                 onBackground: {
                     showOfflineTranslationStart = false
                     showOfflineTranslationManager = false
-                    dismiss()
+                    onClose()
                 }
             )
         }
@@ -1057,7 +1070,7 @@ struct ReaderView: View {
                 onBackground: {
                     showOfflineTranslationStart = false
                     showOfflineTranslationManager = false
-                    dismiss()
+                    onClose()
                 }
             )
         }
@@ -1191,7 +1204,7 @@ struct ReaderView: View {
         HStack(spacing: 12) {
             Button {
                 HapticManager.shared.play(.light)
-                dismiss()
+                onClose()
             } label: {
                 Label("nav.back".localized, systemImage: "chevron.backward")
                     .font(.system(size: 16, weight: .semibold))
@@ -2030,7 +2043,7 @@ struct ReaderView: View {
             dismissGestureProgress = 1
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
-            dismiss()
+            onClose()
         }
     }
 
@@ -3494,6 +3507,7 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
         var onSwipe: () -> Void
         let recognizer = UIPanGestureRecognizer()
         private var hasTriggered = false
+        private var beganWithTwoTouches = false
 
         init(
             onProgress: @escaping (CGFloat) -> Void,
@@ -3518,7 +3532,16 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 hasTriggered = false
+                beganWithTwoTouches = recognizer.numberOfTouches == 2
+                guard beganWithTwoTouches else {
+                    onCancel()
+                    return
+                }
             case .changed:
+                guard beganWithTwoTouches else {
+                    onCancel()
+                    return
+                }
                 let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
                 onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
                 guard !hasTriggered else { return }
@@ -3528,6 +3551,11 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                     onSwipe()
                 }
             case .ended:
+                guard beganWithTwoTouches else {
+                    onCancel()
+                    beganWithTwoTouches = false
+                    return
+                }
                 guard !hasTriggered else { return }
                 let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
                 let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
@@ -3537,16 +3565,22 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                 } else {
                     onCancel()
                 }
+                beganWithTwoTouches = false
             case .cancelled, .failed:
                 hasTriggered = false
+                beganWithTwoTouches = false
                 onCancel()
             default:
                 break
             }
         }
 
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            gestureRecognizer.numberOfTouches == 2
+        }
+
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
+            false
         }
     }
 
@@ -3576,6 +3610,80 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                     recognizer.view?.removeGestureRecognizer(recognizer)
                 }
             }
+        }
+    }
+}
+
+/// SwiftUI's hidden navigation bar does not reliably disable UIKit's edge-pop
+/// recognizer on every navigation stack configuration. Keep that system exit
+/// path disabled only while a Reader is mounted, then restore its prior state.
+private struct ReaderNavigationGestureGuard: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller {
+        Controller()
+    }
+
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.disableInteractivePopIfAvailable()
+    }
+
+    static func dismantleUIViewController(_ uiViewController: Controller, coordinator: ()) {
+        uiViewController.restoreInteractivePop()
+    }
+
+    final class Controller: UIViewController {
+        private weak var guardedNavigationController: UINavigationController?
+        private var originalInteractivePopEnabled: Bool?
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            disableInteractivePopIfAvailable()
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            disableInteractivePopIfAvailable()
+        }
+
+        func disableInteractivePopIfAvailable() {
+            guard let navigationController = findNavigationController() else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.disableInteractivePopIfAvailable()
+                }
+                return
+            }
+
+            if guardedNavigationController !== navigationController {
+                restoreInteractivePop()
+                guardedNavigationController = navigationController
+                originalInteractivePopEnabled = navigationController.interactivePopGestureRecognizer?.isEnabled
+            }
+            navigationController.interactivePopGestureRecognizer?.isEnabled = false
+        }
+
+        func restoreInteractivePop() {
+            guard let navigationController = guardedNavigationController,
+                  let originalInteractivePopEnabled else {
+                guardedNavigationController = nil
+                self.originalInteractivePopEnabled = nil
+                return
+            }
+            navigationController.interactivePopGestureRecognizer?.isEnabled = originalInteractivePopEnabled
+            guardedNavigationController = nil
+            self.originalInteractivePopEnabled = nil
+        }
+
+        private func findNavigationController() -> UINavigationController? {
+            var current: UIViewController? = self
+            while let viewController = current {
+                if let navigationController = viewController as? UINavigationController {
+                    return navigationController
+                }
+                if let navigationController = viewController.navigationController {
+                    return navigationController
+                }
+                current = viewController.parent
+            }
+            return nil
         }
     }
 }

@@ -62,6 +62,23 @@ enum MainShelfPage: String, CaseIterable {
     case statistics
 }
 
+nonisolated enum ShelfRoute: Hashable {
+    case series(UUID)
+    case reader(UUID)
+}
+
+nonisolated enum ShelfNavigationPathPolicy {
+    static func removingReader(from path: [ShelfRoute]) -> [ShelfRoute] {
+        guard case .reader = path.last else { return path }
+        return Array(path.dropLast())
+    }
+
+    static func removingSeries(from path: [ShelfRoute]) -> [ShelfRoute] {
+        guard case .series = path.last else { return path }
+        return Array(path.dropLast())
+    }
+}
+
 enum ImportPickerMode {
     case files
     case folder
@@ -259,7 +276,7 @@ struct ContentView: View {
     @State private var isRefreshingLibraries = false
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
-    @State private var selectedReaderComic: ComicBook?
+    @State private var navigationPath: [ShelfRoute] = []
     @State private var offlineTranslationStartComic: ComicBook?
     @State private var offlineTranslationManagerComic: ComicBook?
     @State private var backgroundTaskDestination: BackgroundTaskDestination?
@@ -311,15 +328,11 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             shelfRootContent
             .navigationTitle(navigationTitle)
-            .navigationDestination(item: $selectedReaderComic) { comic in
-                readerDestination(for: comic)
-                    .transaction { transaction in
-                        transaction.animation = nil
-                        transaction.disablesAnimations = true
-                    }
+            .navigationDestination(for: ShelfRoute.self) { route in
+                shelfDestination(for: route)
             }
             .modifier(shelfToolbarModifiers)
             .onChange(of: selectedPage) { _, _ in
@@ -1259,29 +1272,11 @@ struct ContentView: View {
                     SeriesCard(series: series, comics: comics, isSelected: selectedSeriesIDs.contains(series.id), cardWidth: cardWidth)
                 }
             } else {
-                NavigationLink {
-                    SeriesDetailView(series: series, comics: comics, allComics: sortedComicsByTitle(visibleComics)) { comicID in
-                        _ = library.moveComicToSeries(comicID, toSeries: series.id)
-                    } onRemove: { comicID in
-                        _ = library.moveComicToSeries(comicID, toSeries: nil)
-                    } onImportFiles: {
-                        importingSeriesID = series.id
-                        beginImport(.files)
-                    } onImportFolder: {
-                        importingSeriesID = series.id
-                        beginImport(.folder)
-                    } onOpen: { comic in
-                        openReader(comic)
-                    } managementMenu: { comic in
-                        AnyView(Group {
-                            comicManagementMenu(for: comic)
-                        })
-                    }
-                    .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
-                } label: {
+                NavigationLink(value: ShelfRoute.series(series.id)) {
                     SeriesCard(series: series, comics: comics, cardWidth: cardWidth)
                         .matchedTransitionSource(id: series.id, in: seriesAnimationNamespace)
                 }
+                    .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
             }
         }
         .frame(width: cardWidth, height: ShelfCardMetrics.cardHeight(for: cardWidth), alignment: .top)
@@ -1374,29 +1369,11 @@ struct ContentView: View {
                     )
                 }
             } else {
-                NavigationLink {
-                    SeriesDetailView(series: series, comics: comics, allComics: sortedComicsByTitle(visibleComics)) { comicID in
-                        _ = library.moveComicToSeries(comicID, toSeries: series.id)
-                    } onRemove: { comicID in
-                        _ = library.moveComicToSeries(comicID, toSeries: nil)
-                    } onImportFiles: {
-                        importingSeriesID = series.id
-                        beginImport(.files)
-                    } onImportFolder: {
-                        importingSeriesID = series.id
-                        beginImport(.folder)
-                    } onOpen: { comic in
-                        openReader(comic)
-                    } managementMenu: { comic in
-                        AnyView(Group {
-                            comicManagementMenu(for: comic)
-                        })
-                    }
-                    .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
-                } label: {
+                NavigationLink(value: ShelfRoute.series(series.id)) {
                     SeriesListRow(series: series, comics: comics)
                         .matchedTransitionSource(id: series.id, in: seriesAnimationNamespace)
                 }
+                    .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
             }
         }
         .buttonStyle(.plain)
@@ -1681,8 +1658,62 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func shelfDestination(for route: ShelfRoute) -> some View {
+        switch route {
+        case .series(let seriesID):
+            if let series = library.series.first(where: { $0.id == seriesID }) {
+                seriesDestination(for: series)
+            } else {
+                ContentUnavailableView("series.empty".localized, systemImage: "folder")
+            }
+        case .reader(let comicID):
+            if let comic = library.comics.first(where: { $0.id == comicID }) {
+                readerDestination(for: comic)
+                    .transaction { transaction in
+                        transaction.animation = nil
+                        transaction.disablesAnimations = true
+                    }
+            } else {
+                ContentUnavailableView("reader.loadFailed".localized, systemImage: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    private func seriesDestination(for series: ComicSeries) -> some View {
+        SeriesDetailView(
+            series: series,
+            comics: sortedComicsByTitle(visibleComics.filter { $0.seriesID == series.id }),
+            allComics: sortedComicsByTitle(visibleComics),
+            onAdd: { comicID in
+                _ = library.moveComicToSeries(comicID, toSeries: series.id)
+            },
+            onRemove: { comicID in
+                _ = library.moveComicToSeries(comicID, toSeries: nil)
+            },
+            onImportFiles: {
+                importingSeriesID = series.id
+                beginImport(.files)
+            },
+            onImportFolder: {
+                importingSeriesID = series.id
+                beginImport(.folder)
+            },
+            onOpen: { comic in
+                openReader(comic)
+            },
+            onClose: closeSeries,
+            managementMenu: { comic in
+                AnyView(Group {
+                    comicManagementMenu(for: comic)
+                })
+            }
+        )
+        .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
+    }
+
     private func readerDestination(for comic: ComicBook) -> some View {
-        ReaderContainerView(comic: comic) { updatedComic in
+        ReaderContainerView(comic: comic, onClose: closeReader) { updatedComic in
             library.update(updatedComic)
         }
     }
@@ -1702,8 +1733,17 @@ struct ContentView: View {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            selectedReaderComic = comic
+            guard navigationPath.last != .reader(comic.id) else { return }
+            navigationPath.append(.reader(comic.id))
         }
+    }
+
+    private func closeReader() {
+        navigationPath = ShelfNavigationPathPolicy.removingReader(from: navigationPath)
+    }
+
+    private func closeSeries() {
+        navigationPath = ShelfNavigationPathPolicy.removingSeries(from: navigationPath)
     }
 
     private func authenticateLockedComic(_ comic: ComicBook, onSuccess: @escaping () -> Void) {
@@ -3802,9 +3842,9 @@ struct SeriesDetailView: View {
     let onImportFiles: () -> Void
     let onImportFolder: () -> Void
     let onOpen: (ComicBook) -> Void
+    let onClose: () -> Void
     let managementMenu: (ComicBook) -> AnyView
 
-    @Environment(\.dismiss) private var dismiss
     @State private var showAddSheet = false
     @State private var didSpreadChapters = false
     @State private var isClosing = false
@@ -3960,7 +4000,7 @@ struct SeriesDetailView: View {
             didSpreadChapters = false
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
-            dismiss()
+            onClose()
         }
     }
 }

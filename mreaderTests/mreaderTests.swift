@@ -1724,7 +1724,9 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
-    @Test func mangaSegmenterKeepsPureOCRLinesSeparateWithoutVisualBubbles() {
+    @Test func mangaSegmenterFormsMeasuredParagraphWithoutVisualBubbles() {
+        // 无可靠 bubbleBox 时，连续横排 OCR 行仍应作为一个翻译单元；
+        // 但结果保持 measured-text 语义，不凭空创建漫画气泡。
         let result = MangaTextSegmenter.segment([
             TextBlock(
                 text: "第一行",
@@ -1738,8 +1740,10 @@ struct mreaderTests {
             )
         ], isRightToLeft: false)
 
-        #expect(result.bubbles.count == 2)
-        #expect(result.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].text == "第一行第二行")
+        #expect(result.bubbles[0].sourceLineCount == 2)
+        #expect(result.bubbles[0].bubbleBox == nil)
     }
 
     @Test func ocrLanguagePassesSeparateJapaneseFromChineseKorean() {

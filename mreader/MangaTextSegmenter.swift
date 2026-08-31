@@ -67,18 +67,21 @@ nonisolated enum MangaTextSegmenter {
         return groups
     }
 
-    /// Builds translation units from canonical bubble regions.
+    /// Builds translation units from canonical bubble regions and measured
+    /// paragraphs.
     ///
     /// Reliable bubble geometry is the grouping boundary:
     ///
     /// 1. deduplicate overlapping detections that describe the same physical bubble;
     /// 2. attach every local OCR line whose textBox is inside that region;
     /// 3. merge the region lines in reading order;
-    /// 4. leave lines without a region as independent measured-text units.
+    /// 4. cluster the remaining OCR lines into conservative measured-text
+    ///    paragraphs without inventing a bubbleBox.
     ///
-    /// The final fallback intentionally does not guess a bubble from line spacing.
-    /// Without a reliable region, separate OCR lines may still be rendered and
-    /// translated, but each uses a card sized from its final translated text.
+    /// A measured paragraph is a translation unit, not a synthetic bubble. Its
+    /// lines may be merged when they are adjacent source text, but the result
+    /// keeps bubbleBox == nil and therefore continues to use measured-text
+    /// surface geometry.
     private static func canonicalBubbleBlocks(
         from lines: [TextBlock],
         isRightToLeft: Bool
@@ -150,12 +153,165 @@ nonisolated enum MangaTextSegmenter {
                 )
             )
         }
-        units.append(contentsOf: measuredTextLines)
+        units.append(contentsOf: clusterMeasuredParagraphs(
+            measuredTextLines,
+            isRightToLeft: isRightToLeft
+        ))
 
         return AITranslator.sortedTextBlocks(
             units,
             isRightToLeft: isRightToLeft
         )
+    }
+
+    /// Groups OCR lines that form one continuous paragraph while deliberately
+    /// avoiding any claim that the paragraph is a comic bubble. This is the
+    /// measured-text fallback for Apple/native OCR, whose line observations do
+    /// not carry reliable bubble geometry.
+    private static func clusterMeasuredParagraphs(
+        _ lines: [TextBlock],
+        isRightToLeft: Bool
+    ) -> [TextBlock] {
+        let ordered = AITranslator.sortedTextBlocks(
+            lines,
+            isRightToLeft: isRightToLeft
+        )
+        guard ordered.count > 1 else { return ordered }
+
+        var groups: [[TextBlock]] = []
+        for line in ordered {
+            guard var last = groups.last,
+                  let previous = last.last,
+                  canAppendMeasuredParagraphLine(
+                      previous,
+                      line,
+                      currentGroup: last,
+                      isRightToLeft: isRightToLeft
+                  ) else {
+                groups.append([line])
+                continue
+            }
+
+            last.append(line)
+            groups[groups.count - 1] = last
+        }
+
+        return groups.map { group in
+            guard group.count > 1 else { return group[0] }
+            let sourceLineCount = group.reduce(0) { total, line in
+                total + max(line.sourceLineCount, 1)
+            }
+            return mergedBlock(
+                from: group,
+                isRightToLeft: isRightToLeft,
+                sourceLineCount: sourceLineCount
+            )
+        }
+    }
+
+    /// Adjacent-line paragraph relation. The relation is intentionally based
+    /// on the previous accepted line instead of complete-linking against the
+    /// entire group: real bubbles and paragraphs often have modest line-gap
+    /// variation from one line to the next.
+    private static func canAppendMeasuredParagraphLine(
+        _ previous: TextBlock,
+        _ current: TextBlock,
+        currentGroup: [TextBlock],
+        isRightToLeft: Bool
+    ) -> Bool {
+        // Without a reliable bubble region, vertical OCR columns are
+        // ambiguous: adjacent columns share the same vertical projection and
+        // can look like one paragraph. Keep them as independent measured-text
+        // units rather than guessing across manga reading columns.
+        guard !isVertical(previous) else { return false }
+        guard stylesAreCompatible(previous, current),
+              previous.textOrientation == current.textOrientation,
+              followsReadingOrder(previous, current, isRightToLeft: isRightToLeft),
+              projectionsAreAligned(previous, current) else {
+            return false
+        }
+
+        let smallerScale = min(fontScale(previous), fontScale(current))
+        let lineGap: CGFloat
+        if isVertical(previous) {
+            lineGap = gap(
+                previous.boundingBox.minX,
+                previous.boundingBox.maxX,
+                current.boundingBox.minX,
+                current.boundingBox.maxX
+            )
+        } else {
+            lineGap = gap(
+                previous.boundingBox.minY,
+                previous.boundingBox.maxY,
+                current.boundingBox.minY,
+                current.boundingBox.maxY
+            )
+        }
+        // A gap around one line height is common in comic lettering. The
+        // slightly wider continuation window handles a third line whose
+        // spacing differs from the first pair, while 1.5x remains a useful
+        // guard against merging adjacent independent bubbles.
+        let maximumGap = max(smallerScale * 1.35, 0.006)
+        guard lineGap <= maximumGap else { return false }
+
+        let union = currentGroup.dropFirst().reduce(currentGroup[0].boundingBox) {
+            $0.union($1.boundingBox)
+        }.union(current.boundingBox)
+        guard union.width <= 0.82,
+              union.height <= 0.48 else {
+            return false
+        }
+        return true
+    }
+
+    private static func followsReadingOrder(
+        _ previous: TextBlock,
+        _ current: TextBlock,
+        isRightToLeft: Bool
+    ) -> Bool {
+        let tolerance: CGFloat = 0.006
+        if isVertical(previous) {
+            if isRightToLeft {
+                return current.boundingBox.maxX <= previous.boundingBox.minX + tolerance
+            }
+            return current.boundingBox.minX >= previous.boundingBox.maxX - tolerance
+        }
+        return current.boundingBox.minY >= previous.boundingBox.minY - tolerance
+    }
+
+    private static func projectionsAreAligned(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock
+    ) -> Bool {
+        let left = lhs.boundingBox
+        let right = rhs.boundingBox
+        let (first, second): (ClosedRange<CGFloat>, ClosedRange<CGFloat>)
+        if isVertical(lhs) {
+            first = left.minY...left.maxY
+            second = right.minY...right.maxY
+        } else {
+            first = left.minX...left.maxX
+            second = right.minX...right.maxX
+        }
+
+        let overlap = max(
+            0,
+            min(first.upperBound, second.upperBound)
+                - max(first.lowerBound, second.lowerBound)
+        )
+        let smallerExtent = max(
+            min(first.upperBound - first.lowerBound, second.upperBound - second.lowerBound),
+            0.000_001
+        )
+        if overlap / smallerExtent >= 0.20 {
+            return true
+        }
+
+        let firstCenter = (first.lowerBound + first.upperBound) * 0.5
+        let secondCenter = (second.lowerBound + second.upperBound) * 0.5
+        let smallerScale = min(fontScale(lhs), fontScale(rhs))
+        return abs(firstCenter - secondCenter) <= max(smallerScale * 3.0, 0.018)
     }
 
     private static func reliableBubbleGeometry(

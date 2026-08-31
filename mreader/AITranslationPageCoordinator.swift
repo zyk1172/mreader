@@ -20,11 +20,10 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向，也携带表面布局
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
-    /// v18：translation unit 改为 canonical bubble region；没有可靠 bubbleBox 的
-    /// OCR line 不再由 dialogue gap heuristic 猜成气泡，且 measured-text 表面按最终
-    /// 译文测量尺寸绘制，避免复用旧的 unit/layout 缓存。
-    static let translationCacheRevision = "translation-v18-canonical-bubble-region-measured-text"
-    static let ocrGeometryRevision = "physical-axis-v10-canonical-bubble-region-measured-text"
+    /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
+    /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
+    static let translationCacheRevision = "translation-v19-canonical-bubble-region-measured-paragraph"
+    static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
     let image: UIImage
