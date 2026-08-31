@@ -20,10 +20,10 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
     /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
-    /// v13：严格区分 visual bubble compatibility 与 identity，避免 v12 中被宽松
-    /// IoU / containment 错误合并的不同气泡继续命中旧 translation unit 缓存。
-    static let translationCacheRevision = "translation-v13-strict-visual-bubble-identity"
-    static let ocrGeometryRevision = "physical-axis-v5-target-orientation-bounded-card"
+    /// v14：加入无 bubbleBox 的 native-OCR dialogue cluster、可信 source coverage
+    /// 与更严格的响应/译文校验，避免继续命中旧的 translation unit / layout 缓存。
+    static let translationCacheRevision = "translation-v14-native-ocr-dialogue-coverage-validation"
+    static let ocrGeometryRevision = "physical-axis-v6-dialogue-cluster-source-coverage"
 
     let pageURL: URL
     let image: UIImage

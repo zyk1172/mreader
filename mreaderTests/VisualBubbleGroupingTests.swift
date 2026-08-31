@@ -12,7 +12,7 @@
 //
 //  反向不变量同样被锁定：
 //  【两个可靠且明确不同的 bubble geometry，绝不因距离较近而被合并。】
-//  纯 OCR fallback（无 bubbleBox）的 complete-link 启发式保持原样。
+//  纯 OCR fallback（无 bubbleBox）使用相邻对白 cluster：只放宽跨行端点距离，保留字号、颜色、方向、布局角色与局部行距护栏，避免链式误合并。
 //
 
 import Testing
@@ -297,6 +297,40 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[1].text == "INNER BUBBLE.")
     }
 
+    // MARK: - P0：无 bubbleBox 的 Apple/native OCR dialogue cluster
+
+    /// Apple/Vision 本地 OCR 通常没有 bubbleBox。真实白色气泡中的多行对白仍必须
+    /// 形成一个 translation unit，即使首行与末行之间已经超过旧 pairwise 行距阈值。
+    @Test func nativeOCRDialogueClusterMergesDistantRowsWithoutBubbleBox() {
+        let line1 = Self.block(
+            text: "I'M SORRY... I CAN'T.",
+            boundingBox: CGRect(x: 0.25, y: 0.20, width: 0.50, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+        let line2 = Self.block(
+            text: "ON THE SUBJECTS I MISSED.",
+            boundingBox: CGRect(x: 0.27, y: 0.275, width: 0.46, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+        let line3 = Self.block(
+            text: "I DIDN'T KNOW.",
+            boundingBox: CGRect(x: 0.30, y: 0.350, width: 0.34, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+
+        let segmentation = MangaTextSegmenter.segment([line1, line2, line3], isRightToLeft: false)
+
+        #expect(segmentation.lines.count == 3)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].text == "I'M SORRY... I CAN'T. ON THE SUBJECTS I MISSED. I DIDN'T KNOW.")
+    }
+
     // MARK: - 测试 7：纯 OCR 多行对白保持既有合并能力
 
     /// 无 bubbleBox 的普通多行对白（紧凑行距、颜色一致）必须照旧合并——
@@ -323,13 +357,12 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].text == "TOMORROW WE RIDE AT DAWN.")
     }
 
-    // MARK: - 测试 8：纯 OCR 邻近对白不因链式合并误并
+    // MARK: - 测试 8：纯 OCR cluster 在行距突变处断开
 
-    /// 无 bubbleBox 的三个邻近块：A-B 是同一气泡内相邻的两行，B-C 行距也
-    /// 在配对阈值内（single-link 会允许 C 链入），但 A-C 不满足几何条件。
-    /// complete-link 必须保持防链式语义：A-B 成组，C 不被拖入，不能退化成
-    /// single-link 把两个说话人的对白连成一片。
-    @Test func pureOCRCompleteLinkStillGuardsAgainstChainedMerging() {
+    /// A-B 是同一对白的相邻行；B-C 虽然仍未超过绝对最大行距，但行距相对
+    /// 当前 cluster 的局部基线出现突变。cluster 必须在这里断开，避免两个
+    /// 说话人的对白通过单条中间行链式吞并。
+    @Test func pureOCRDialogueClusterStopsAtAbruptLineGap() {
         let lineA = Self.block(
             text: "GET DOWN!",
             boundingBox: CGRect(x: 0.30, y: 0.30, width: 0.30, height: 0.05),

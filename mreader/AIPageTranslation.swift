@@ -479,12 +479,20 @@ nonisolated enum AIPageTranslationParser {
 
     private static func normalizedJSONData(from content: String) -> Data? {
         var payload = content
-            .replacingOccurrences(
-                of: #"<think>[\s\S]*?</think>"#,
+        for tag in ["think", "thinking", "analysis", "reasoning"] {
+            payload = payload.replacingOccurrences(
+                of: "<\(tag)(?:\\s[^>]*)?>[\\s\\S]*?</\(tag)>",
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard payload.range(
+            of: #"</?(?:think|thinking|analysis|reasoning)(?:\s[^>]*)?>"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil else {
+            return nil
+        }
+        payload = payload.trimmingCharacters(in: .whitespacesAndNewlines)
         if payload.hasPrefix("```") {
             payload = payload.replacingOccurrences(
                 of: #"^```(?:json)?\s*|\s*```$"#,
@@ -573,7 +581,11 @@ nonisolated enum TranslationOutputValidator {
         guard !value.isEmpty, !containsExplanatoryGarbage(value) else { return nil }
 
         let source = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !source.isEmpty, value == source {
+        if !source.isEmpty,
+           comparableForEcho(value, target: target) == comparableForEcho(source, target: target) {
+            // 比较时忽略空白/标点并先做繁简规范化，拦住“只加句号”以及
+            // 日文/繁体原文在目标中文中原样返回等漏译；短人名、产品名、型号
+            // 等稳定 token 仍按既有规则放行。
             return isStableUntranslatedToken(value, target: target) ? value : nil
         }
         return isCompatible(value, target: target) ? value : nil
@@ -654,11 +666,38 @@ nonisolated enum TranslationOutputValidator {
     static func containsExplanatoryGarbage(_ text: String) -> Bool {
         let suspiciousMarkers = [
             "system prompt", "user prompt", "analysis:", "reasoning:",
-            "_output", "输出要求", "提示词", "作为一个", "我不能",
-            "根据用户", "翻译过程"
+            "thinking:", "thought process:", "reasoning_content", "_output",
+            "输出要求", "提示词", "作为一个", "我不能", "根据用户", "翻译过程",
+            "<think", "</think>", "<thinking", "</thinking>", "<analysis", "</analysis>",
+            "<reasoning", "</reasoning>"
         ]
         let lowercased = text.lowercased()
-        return suspiciousMarkers.contains { lowercased.contains($0.lowercased()) }
+        guard !lowercased.contains("```") else { return true }
+        if suspiciousMarkers.contains(where: { lowercased.contains($0.lowercased()) }) {
+            return true
+        }
+        return text.range(
+            of: #"^\s*(?:answer|final answer|translation|translated text|译文|翻译(?:结果)?|以下是翻译(?:结果)?)\s*[:：]"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    /// 用于检测“原文原样返回”。它只忽略排版差异，不改变正常译文的实际内容；
+    /// 先做目标中文繁简规范化，以免繁体原文在简体目标中通过字符串不相等绕过检查。
+    private static func comparableForEcho(
+        _ text: String,
+        target: TranslationTargetLanguage
+    ) -> String {
+        normalize(text, for: target)
+            .lowercased()
+            .unicodeScalars
+            .filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                    && !CharacterSet.punctuationCharacters.contains(scalar)
+                    && !CharacterSet.symbols.contains(scalar)
+            }
+            .map(String.init)
+            .joined()
     }
 
     /// 只接受不含空白、由 ASCII 字母/数字及常见型号符号构成的短 token。
@@ -688,7 +727,7 @@ nonisolated enum TranslationOutputValidator {
             mayPreserveShortHan = false
         }
         return mayPreserveShortHan
-            && text.unicodeScalars.count <= 6
+            && text.unicodeScalars.count <= 3
             && counts.han == text.unicodeScalars.count
     }
 

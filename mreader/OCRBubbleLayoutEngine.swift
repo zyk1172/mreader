@@ -368,11 +368,60 @@ nonisolated enum OCRBubbleLayoutEngine {
             : bounds
     }
 
+    /// 验证可用于 synthetic bubble 的原文覆盖范围。
+    ///
+    /// `sourceRect` 是合并后的 OCR textBox union，而不是任意 fallback / bubble 框。
+    /// 正常对白必须保留在最终卡片的最小覆盖范围内；越界、整页、超宽、超高或
+    /// 面积异常的 OCR 几何则放弃这个覆盖约束，避免旧的大白框回归。
+    static func validatedSourceCoverageRect(
+        _ sourceRect: CGRect,
+        within imageBounds: CGRect
+    ) -> CGRect? {
+        let safeImage = imageBounds.standardized
+        let safeSource = sourceRect.standardized
+        guard rectIsFinite(safeImage),
+              rectIsFinite(safeSource),
+              safeImage.width > 0,
+              safeImage.height > 0,
+              safeSource.width > 0,
+              safeSource.height > 0 else {
+            return nil
+        }
+
+        let toleranceX = max(2, safeImage.width * 0.005)
+        let toleranceY = max(2, safeImage.height * 0.005)
+        guard safeImage.insetBy(dx: -toleranceX, dy: -toleranceY).contains(safeSource) else {
+            return nil
+        }
+
+        let clipped = safeSource.intersection(safeImage)
+        guard clipped.width > 0,
+              clipped.height > 0 else {
+            return nil
+        }
+
+        let pageArea = safeImage.width * safeImage.height
+        let sourceArea = clipped.width * clipped.height
+        guard clipped.width <= safeImage.width * TranslationLayoutMetrics.maximumCardWidthFraction,
+              clipped.height <= safeImage.height * TranslationLayoutMetrics.maximumCardHeightFraction,
+              sourceArea <= pageArea * TranslationLayoutMetrics.maximumCardAreaFraction else {
+            return nil
+        }
+        return clipped
+    }
+
+    private static func rectIsFinite(_ rect: CGRect) -> Bool {
+        rect.origin.x.isFinite
+            && rect.origin.y.isFinite
+            && rect.size.width.isFinite
+            && rect.size.height.isFinite
+    }
+
     @MainActor
-    /// - Parameter useSourceRectAsMinimumExtent: 有可靠气泡时，译文应当填满气泡，
-    ///   因此把 OCR textBox 当作最小排版范围；没有可靠气泡时背景是 synthetic
-    ///   bubble，尺寸必须完全由文字测量结果决定，否则又窄又高的 OCR 框（例如
-    ///   竖排原文）会把译文区域撑成巨大矩形。
+    /// - Parameter useSourceRectAsMinimumExtent: 有可靠气泡时，译文应当填满气泡,
+    ///   因此把 OCR textBox 当作最小排版范围；没有可靠气泡时，只有经过
+    ///   `validatedSourceCoverageRect` 验证的原文区域才会成为 synthetic bubble 的
+    ///   最小范围，病态 OCR 框不会把译文区域撑成巨大矩形。
     static func anchoredTranslationLayout(
         text: String,
         sourceFontSize: CGFloat,
@@ -381,7 +430,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         lineSpacing: CGFloat,
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal,
-        useSourceRectAsMinimumExtent: Bool = true
+        useSourceRectAsMinimumExtent: Bool = true,
+        minimumSourceCoverageRect: CGRect? = nil
     ) -> TranslationLayout {
         if textOrientation == .vertical {
             return anchoredVerticalTranslationLayout(
@@ -390,7 +440,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 sourceRect: sourceRect,
                 allowedBounds: allowedBounds,
                 padding: padding,
-                useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
+                useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent,
+                minimumSourceCoverageRect: minimumSourceCoverageRect
             )
         }
 
@@ -399,9 +450,17 @@ nonisolated enum OCRBubbleLayoutEngine {
             return TranslationLayout(rect: sourceRect, fontSize: max(sourceFontSize, 1))
         }
 
+        let coverageRect: CGRect?
+        if let minimumSourceCoverageRect {
+            let intersection = minimumSourceCoverageRect.standardized.intersection(safeBounds)
+            coverageRect = intersection.width > 0 && intersection.height > 0 ? intersection : nil
+        } else {
+            coverageRect = nil
+        }
+        let anchorRect = coverageRect ?? sourceRect
         let anchor = CGPoint(
-            x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
-            y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
+            x: min(max(anchorRect.midX, safeBounds.minX), safeBounds.maxX),
+            y: min(max(anchorRect.midY, safeBounds.minY), safeBounds.maxY)
         )
         let targetFontSize = preferredTranslationFontSize(sourceFontSize: sourceFontSize)
 
@@ -415,19 +474,32 @@ nonisolated enum OCRBubbleLayoutEngine {
             }
         }
 
-        // 有可靠气泡时从 OCR textBox 宽度起步，译文会填满气泡；没有可靠气泡时从文字
-        // 自身的测量宽度起步。后者不只是视觉问题：病态超宽的 OCR 框若被继承，
-        // 会产生超宽的 translation rect，即使卡片再紧凑，过大的排版矩形仍会
-        // 参与避让计算，把附近的正常译文推走。
-        let initialWidth = useSourceRectAsMinimumExtent
-            ? min(max(sourceRect.width + padding * 2, 1), safeBounds.width)
-            : min(max(measuredNaturalWidth(fontSize: targetFontSize) + padding * 2, 1), safeBounds.width)
+        // 有可靠气泡时从 OCR textBox 宽度起步；synthetic bubble 则从“可信原文
+        // 覆盖范围”和译文自然宽度两者中的较大值起步。病态 OCR 框不会进入
+        // minimumSourceCoverageRect，因此不会重新产生超宽的 translation rect。
+        let minimumCoverageWidth = coverageRect.map { max($0.width + padding * 2, 1) } ?? 0
+        let minimumCoverageHeight = coverageRect.map { max($0.height + padding * 2, 1) } ?? 0
+        let minimumWidth = useSourceRectAsMinimumExtent
+            ? max(sourceRect.width + padding * 2, 1)
+            : minimumCoverageWidth
+        let initialWidth: CGFloat
+        if useSourceRectAsMinimumExtent {
+            // detected bubble 沿用原有策略：先从 OCR textBox 宽度起步，
+            // 保持原文字中心；只有放不下时才扩展到允许范围。
+            initialWidth = min(minimumWidth, safeBounds.width)
+        } else {
+            initialWidth = min(
+                max(measuredNaturalWidth(fontSize: targetFontSize) + padding * 2, minimumWidth),
+                safeBounds.width
+            )
+        }
 
-        // 原 textBox 本身可能几乎占满模型给出的 bubbleBox。此时仍优先让实际文字测量结果决定高度，
-        // 不因为 padding 把本来可显示的译文错误判为无法容纳。
-        let minimumHeight = useSourceRectAsMinimumExtent
-            ? min(max(sourceRect.height + padding * 2, 1), safeBounds.height)
-            : 0
+        // 原 textBox / validated source coverage 本身可能几乎占满允许区域。此时仍优先
+        // 让实际文字测量结果决定额外高度，不因为 padding 把本来可显示的译文判为无法容纳。
+        let minimumHeightValue = useSourceRectAsMinimumExtent
+            ? max(sourceRect.height + padding * 2, 1)
+            : minimumCoverageHeight
+        let minimumHeight = min(minimumHeightValue, safeBounds.height)
 
         func measuredHeight(fontSize: CGFloat, contentWidth: CGFloat) -> CGFloat {
             let paragraphStyle = NSMutableParagraphStyle()
@@ -521,7 +593,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         lineSpacing: CGFloat,
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal,
-        useSourceRectAsMinimumExtent: Bool = true
+        useSourceRectAsMinimumExtent: Bool = true,
+        minimumSourceCoverageRect: CGRect? = nil
     ) -> TranslationLayoutChoice {
         let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         if textOrientation == .vertical {
@@ -536,7 +609,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                     lineSpacing: lineSpacing,
                     padding: padding,
                     textOrientation: .vertical,
-                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
+                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent,
+                    minimumSourceCoverageRect: minimumSourceCoverageRect
                 ),
                 usesSuggestedLineBreaks: false
             )
@@ -564,7 +638,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                     lineSpacing: lineSpacing,
                     padding: padding,
                     textOrientation: textOrientation,
-                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent
+                    useSourceRectAsMinimumExtent: useSourceRectAsMinimumExtent,
+                    minimumSourceCoverageRect: minimumSourceCoverageRect
                 ),
                 usesSuggestedLineBreaks: candidate.usesSuggestedLineBreaks
             )
@@ -771,16 +846,25 @@ nonisolated enum OCRBubbleLayoutEngine {
         sourceRect: CGRect,
         allowedBounds: CGRect,
         padding: CGFloat,
-        useSourceRectAsMinimumExtent: Bool
+        useSourceRectAsMinimumExtent: Bool,
+        minimumSourceCoverageRect: CGRect?
     ) -> TranslationLayout {
         let safeBounds = allowedBounds.standardized
         guard safeBounds.width > 0, safeBounds.height > 0 else {
             return TranslationLayout(rect: sourceRect, fontSize: max(sourceFontSize, 1))
         }
 
+        let coverageRect: CGRect?
+        if let minimumSourceCoverageRect {
+            let intersection = minimumSourceCoverageRect.standardized.intersection(safeBounds)
+            coverageRect = intersection.width > 0 && intersection.height > 0 ? intersection : nil
+        } else {
+            coverageRect = nil
+        }
+        let anchorRect = coverageRect ?? sourceRect
         let anchor = CGPoint(
-            x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
-            y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
+            x: min(max(anchorRect.midX, safeBounds.minX), safeBounds.maxX),
+            y: min(max(anchorRect.midY, safeBounds.minY), safeBounds.maxY)
         )
         let glyphCount = max(text.filter { !$0.isWhitespace && $0 != "\n" }.count, 1)
         let targetFontSize = max(sourceFontSize, 1)
@@ -792,19 +876,23 @@ nonisolated enum OCRBubbleLayoutEngine {
             let rows = max(Int(floor(availableHeight / advance)), 1)
             let columns = max(Int(ceil(Double(glyphCount) / Double(rows))), 1)
             let measuredColumnsWidth = CGFloat(columns) * columnWidth + padding * 2
+            let minimumCoverageWidth = coverageRect?.width ?? 0
+            let minimumWidth = useSourceRectAsMinimumExtent
+                ? max(sourceRect.width + padding * 2, 1)
+                : max(minimumCoverageWidth + padding * 2, 1)
             let width = min(
                 safeBounds.width,
-                useSourceRectAsMinimumExtent
-                    ? max(sourceRect.width + padding * 2, measuredColumnsWidth)
-                    : measuredColumnsWidth
+                max(minimumWidth, measuredColumnsWidth)
             )
             let usedRows = min(rows, Int(ceil(Double(glyphCount) / Double(columns))))
             let measuredRowsHeight = CGFloat(usedRows) * advance + padding * 2
+            let minimumCoverageHeight = coverageRect?.height ?? 0
+            let minimumHeight = useSourceRectAsMinimumExtent
+                ? max(sourceRect.height + padding * 2, 1)
+                : max(minimumCoverageHeight + padding * 2, 1)
             let height = min(
                 safeBounds.height,
-                useSourceRectAsMinimumExtent
-                    ? max(sourceRect.height + padding * 2, measuredRowsHeight)
-                    : measuredRowsHeight
+                max(minimumHeight, measuredRowsHeight)
             )
             guard width >= CGFloat(columns) * columnWidth + padding * 2 - 0.5,
                   height >= CGFloat(usedRows) * advance + padding * 2 - 0.5 else {

@@ -21,9 +21,9 @@ nonisolated enum MangaTextSegmenter {
 
         let lineGroups = completeLinkGroups(sorted, relation: canShareLine)
         let lines = lineGroups.map { mergedBlock(from: $0, isRightToLeft: isRightToLeft) }
-        let bubbleGroups = completeLinkGroups(
+        let bubbleGroups = dialogueClusterGroups(
             AITranslator.sortedTextBlocks(lines, isRightToLeft: isRightToLeft),
-            relation: canShareBubble
+            isRightToLeft: isRightToLeft
         )
         let bubbles = bubbleGroups.map { mergedBlock(from: $0, isRightToLeft: isRightToLeft) }
         return MangaTextSegmentation(
@@ -47,6 +47,222 @@ nonisolated enum MangaTextSegmenter {
             }
         }
         return groups
+    }
+
+    /// 将 line block 组合成最终 translation unit。这里明确分成三层：
+    ///
+    /// 1. 严格的 visual bubble identity 可以跨越行距直接合并；
+    /// 2. visual bubble 明确冲突时直接拆开；
+    /// 3. 没有 visual bubble 时按相邻对白行构建 cluster，而不是要求 cluster
+    ///    内每一对行都满足同一个 complete-link 的“相邻”阈值。
+    ///
+    /// 第 3 层仍保留连续行的字号、颜色、方向、投影和整体尺寸护栏；相邻行距
+    /// 出现突变时会断开，避免两个说话人的对白通过单条中间行链式吞并。
+    private static func dialogueClusterGroups(
+        _ blocks: [TextBlock],
+        isRightToLeft: Bool
+    ) -> [[TextBlock]] {
+        var groups: [[TextBlock]] = []
+        for block in blocks {
+            // 严格身份优先于排序距离和所有 OCR 弱信号。若同一视觉气泡跨过了
+            // 其它 group 的阅读位置，仍回到它自己的 identity group。
+            if let identityIndex = groups.firstIndex(where: { group in
+                groupSharesStrictVisualIdentity(group, with: block)
+            }) {
+                let expandedUnion = union(of: groups[identityIndex], adding: block)
+                if expandedUnion.width <= 0.65, expandedUnion.height <= 0.48 {
+                    groups[identityIndex].append(block)
+                } else {
+                    // 和 canShareBubble 的页面范围护栏保持一致：身份再强也不能
+                    // 让一个异常 span 变成遮挡大半页面的 translation unit。
+                    groups.append([block])
+                }
+                continue
+            }
+
+            if let lastIndex = groups.indices.last,
+               canAppendToDialogueCluster(
+                   block,
+                   group: groups[lastIndex],
+                   isRightToLeft: isRightToLeft
+               ) {
+                groups[lastIndex].append(block)
+            } else {
+                groups.append([block])
+            }
+        }
+        return groups
+    }
+
+    private static func groupSharesStrictVisualIdentity(
+        _ group: [TextBlock],
+        with block: TextBlock
+    ) -> Bool {
+        guard !group.isEmpty,
+              block.bubbleBox != nil,
+              group.allSatisfy({ $0.bubbleBox != nil }) else {
+            return false
+        }
+        return group.allSatisfy { member in
+            isVertical(member) == isVertical(block)
+                && visualBubbleBoxesAreCompatible(member.bubbleBox, block.bubbleBox)
+                && sameVisualBubbleIdentity(member, block)
+        }
+    }
+
+    private static func canAppendToDialogueCluster(
+        _ block: TextBlock,
+        group: [TextBlock],
+        isRightToLeft: Bool
+    ) -> Bool {
+        guard let previous = group.last,
+              !group.isEmpty else {
+            return false
+        }
+
+        // Compatibility remains a veto at group level. A compatible pair that does
+        // not meet strict identity is deliberately allowed to continue only through
+        // the ordinary fallback below.
+        for member in group {
+            if member.bubbleBox != nil,
+               block.bubbleBox != nil,
+               !visualBubbleBoxesAreCompatible(member.bubbleBox, block.bubbleBox) {
+                return false
+            }
+        }
+
+        let expandedUnion = union(of: group, adding: block)
+        guard expandedUnion.width <= 0.65, expandedUnion.height <= 0.48 else {
+            return false
+        }
+
+        // Any remaining visual geometry uses the old OCR fallback. Only the fully
+        // local-OCR case gets the dialogue-cluster relaxation below.
+        if group.contains(where: { $0.bubbleBox != nil }) || block.bubbleBox != nil {
+            // 保留旧 complete-link fallback：非严格 identity 的视觉信息，
+            // 以及 mixed (bubbleBox + nil) 组，必须与组内每个成员兼容，不能
+            // 通过最后一条 line 链式吞并其它对白。
+            return group.allSatisfy { canShareBubble($0, block) }
+        }
+        return canShareDialogueClusterLine(
+            previous,
+            block,
+            group: group,
+            isRightToLeft: isRightToLeft
+        )
+    }
+
+    private static func canShareDialogueClusterLine(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock,
+        group: [TextBlock],
+        isRightToLeft: Bool
+    ) -> Bool {
+        guard lhs.layoutRole == .dialogue,
+              rhs.layoutRole == .dialogue,
+              isVertical(lhs) == isVertical(rhs) else {
+            return false
+        }
+
+        let smallerScale = min(fontScale(lhs), fontScale(rhs))
+        let largerScale = max(fontScale(lhs), fontScale(rhs))
+        // Apple/native OCR 没有 bubbleBox 时只放宽“组内端点距离”，不放宽
+        // 原有的字号/颜色护栏；否则同几何但字号明显不同的两个说话人会被
+        // 新的 cluster 误合并。短句与长句的宽度不参与这个判断。
+        guard largerScale / max(smallerScale, 0.000_1) <= 1.25,
+              OCRCandidateResolver.colorsAreCompatible(
+                  lhs.textColorHex,
+                  rhs.textColorHex,
+                  maximumDistance: 72
+              ) else {
+            return false
+        }
+
+        let tolerance = max(smallerScale * 0.25, 0.004)
+        if isVertical(lhs) {
+            let forward = isRightToLeft
+                ? rhs.boundingBox.midX <= lhs.boundingBox.midX + tolerance
+                : rhs.boundingBox.midX >= lhs.boundingBox.midX - tolerance
+            guard forward else { return false }
+        } else {
+            guard rhs.boundingBox.midY >= lhs.boundingBox.midY - tolerance else {
+                return false
+            }
+        }
+
+        let lineGap = dialogueAxisGap(lhs, rhs)
+        let lineAxisSize = isVertical(lhs)
+            ? min(lhs.boundingBox.width, rhs.boundingBox.width)
+            : min(lhs.boundingBox.height, rhs.boundingBox.height)
+        let maximumGap = min(
+            max(smallerScale * 2.2, lineAxisSize * 1.8, 0.020),
+            0.10
+        )
+        guard lineGap <= maximumGap else { return false }
+
+        let crossOverlap: CGFloat
+        let crossCenterDistance: CGFloat
+        let crossSize: CGFloat
+        if isVertical(lhs) {
+            crossOverlap = overlapLength(
+                lhs.boundingBox.minY,
+                lhs.boundingBox.maxY,
+                rhs.boundingBox.minY,
+                rhs.boundingBox.maxY
+            )
+            crossCenterDistance = abs(lhs.boundingBox.midY - rhs.boundingBox.midY)
+            crossSize = min(lhs.boundingBox.height, rhs.boundingBox.height)
+        } else {
+            crossOverlap = overlapLength(
+                lhs.boundingBox.minX,
+                lhs.boundingBox.maxX,
+                rhs.boundingBox.minX,
+                rhs.boundingBox.maxX
+            )
+            crossCenterDistance = abs(lhs.boundingBox.midX - rhs.boundingBox.midX)
+            crossSize = min(lhs.boundingBox.width, rhs.boundingBox.width)
+        }
+        let crossOverlapRatio = crossOverlap / max(crossSize, 0.000_1)
+        let crossCenterTolerance = max(crossSize * 0.75, smallerScale * 2.5)
+        guard crossOverlapRatio >= 0.12 || crossCenterDistance <= crossCenterTolerance else {
+            return false
+        }
+
+        // Use the already accepted adjacent gaps as a local baseline. This keeps a
+        // normal 2–4 line dialogue cluster connected even when its first/last lines
+        // are far apart, while an abrupt larger gap starts a new speaker cluster.
+        guard group.count >= 2 else { return true }
+        let adjacentGaps = zip(group, group.dropFirst()).map {
+            dialogueAxisGap($0.0, $0.1)
+        }
+        guard !adjacentGaps.isEmpty else { return true }
+        let sortedGaps = adjacentGaps.sorted()
+        let baselineGap = sortedGaps[sortedGaps.count / 2]
+        let gapTolerance = max(baselineGap * 0.45, smallerScale * 0.10, 0.004)
+        return lineGap <= baselineGap + gapTolerance
+    }
+
+    private static func union(of group: [TextBlock], adding block: TextBlock) -> CGRect {
+        guard let first = group.first else { return block.boundingBox }
+        return group.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
+            .union(block.boundingBox)
+    }
+
+    private static func dialogueAxisGap(_ lhs: TextBlock, _ rhs: TextBlock) -> CGFloat {
+        if isVertical(lhs) {
+            return gap(
+                lhs.boundingBox.minX,
+                lhs.boundingBox.maxX,
+                rhs.boundingBox.minX,
+                rhs.boundingBox.maxX
+            )
+        }
+        return gap(
+            lhs.boundingBox.minY,
+            lhs.boundingBox.maxY,
+            rhs.boundingBox.minY,
+            rhs.boundingBox.maxY
+        )
     }
 
     private static func canShareLine(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {

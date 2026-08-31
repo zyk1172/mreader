@@ -4105,10 +4105,86 @@ private func makeTestPageRequest(
         #expect(decoded.finishReason == "length")
     }
 
+    @Test @MainActor func chatResponseDecoderFiltersTypedReasoningParts() {
+        let data = Data(#"{"choices":[{"message":{"content":[{"type":"thinking","text":"private thought"},{"type":"text","text":"最终译文"},{"type":"tool_result","text":"不要泄漏"}]}}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func responsesDecoderFiltersReasoningItems() {
+        let data = Data(#"{"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"private thought"}]},{"type":"message","content":[{"type":"output_text","text":"最终译文"}]}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func anthropicDecoderFiltersThinkingBlocks() {
+        let data = Data(#"{"content":[{"type":"thinking","thinking":"private thought"},{"type":"text","text":"最终译文"}],"stop_reason":"end_turn"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(decoded.finishReason == "end_turn")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func anthropicDecoderMarksThinkingOnlyResponse() {
+        let data = Data(#"{"content":[{"type":"thinking","thinking":"private thought"}],"stop_reason":"max_tokens"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == nil)
+        #expect(decoded.hasReasoningOnly)
+        #expect(decoded.finishReason == "max_tokens")
+    }
+
     @Test @MainActor func chatResponseDecoderMalformed() {
         let decoded = AIChatResponseDecoder.decode(Data("not json".utf8))
         #expect(decoded.content == nil)
         #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func responseDecoderStripsInlineThinkingMarkupWithoutLeakingIt() {
+        let data = Data(#"{"output_text":"<thinking>private thought</thinking>\n最终译文"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "\n最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test func pageParserStripsAllReasoningMarkupAroundJSON() throws {
+        let expected = [AIPageTranslationItem(id: "b0", sourceText: "こんにちは", order: 0)]
+        let content = #"<analysis>private thought</analysis>{"items":[{"id":"b0","translation":"你好","translationLines":[]}] }"#
+        let result = try AIPageTranslationParser.parseStrict(
+            content,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(result.items.first?.translation == "你好")
+    }
+
+    @Test func translationValidatorRejectsFormattedSourceEchoAndReasoningMarkup() {
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "こんにちは。",
+            sourceText: "こんにちは",
+            target: .japanese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "這是測試",
+            sourceText: "這是測試",
+            target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "```你好```",
+            sourceText: "こんにちは",
+            target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "<think>先分析</think>你好",
+            sourceText: "こんにちは",
+            target: .simplifiedChinese
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "NASA",
+            sourceText: "NASA",
+            target: .simplifiedChinese
+        ))
     }
 
     @Test @MainActor func singleBubblePromptAlwaysIncludesOcrTextAndTarget() {

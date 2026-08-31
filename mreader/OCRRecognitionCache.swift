@@ -19,7 +19,7 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             // OCR geometry, the Japanese vertical fallback and the bubble
             // grouping (visual bubble identity) changed; do not reuse pages
             // written before this pipeline revision.
-            "local-ocr-v6-visual-bubble-unit",
+            "local-ocr-v7-visual-bubble-dialogue-cluster",
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",

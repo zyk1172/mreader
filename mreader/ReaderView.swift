@@ -4235,6 +4235,15 @@ struct LocalImageView: View {
         let surfaceStyle = TranslationSurfacePolicy.surfaceStyle(
             hasReliableBubble: hasReliableBubble
         )
+        // Synthetic bubble 仍须盖住可信的原文 textBox；但只有经过图片边界、
+        // 轴向尺寸与面积护栏验证的 union 才能成为最小排版范围。这样普通
+        // Apple/native OCR 的对白不会露出原文，病态整页/巨型 OCR 框也不会撑大卡片。
+        let minimumSourceCoverageRect = hasReliableBubble
+            ? nil
+            : OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                textRect,
+                within: imageBounds
+            )
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
@@ -4247,7 +4256,14 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds = usableBubbleBounds ?? fallbackBounds
+        // 让 validated coverage 参与 allowedBounds，而不是只把它作为布局中的
+        // 偏好宽高。否则 fallback 本身比 textBox 窄时，后续 intersection 会
+        // 把 coverage 截掉，卡片仍然可能露出原文边缘；boundedTranslationBounds
+        // 会再施加整页宽高/面积上限。
+        let coverageAwareFallbackBounds = minimumSourceCoverageRect.map {
+            fallbackBounds.union($0)
+        } ?? fallbackBounds
+        let allowedBounds = usableBubbleBounds ?? coverageAwareFallbackBounds
         let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
             around: textRect,
             within: allowedBounds,
@@ -4274,9 +4290,10 @@ struct LocalImageView: View {
             allowedBounds: layoutBounds,
             lineSpacing: 2,
             textOrientation: translationOrientation,
-            // 没有可靠气泡时 synthetic bubble 的尺寸只由文字测量结果决定，
-            // 不能继承病态 OCR 框的高宽。
-            useSourceRectAsMinimumExtent: hasReliableBubble
+            // detected bubble 沿用原有气泡范围；synthetic bubble 仅继承经过
+            // 验证的原文覆盖范围，异常 OCR 几何仍完全由文字测量决定。
+            useSourceRectAsMinimumExtent: hasReliableBubble,
+            minimumSourceCoverageRect: minimumSourceCoverageRect
         )
         #if DEBUG
         print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")

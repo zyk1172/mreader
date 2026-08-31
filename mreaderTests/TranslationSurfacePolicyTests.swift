@@ -243,7 +243,7 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
-    // MARK: - P1: synthetic bubble 的排版范围只由文字测量结果决定
+    // MARK: - P1: synthetic bubble 使用可信覆盖范围并拒绝病态几何
 
     /// 又窄又高的竖排 OCR 框不能再把 synthetic bubble 撑成巨大矩形。
     @Test func verticalSyntheticBubbleIgnoresTallOCRBox() {
@@ -270,8 +270,8 @@ struct TranslationSurfacePolicyTests {
             useSourceRectAsMinimumExtent: true
         )
 
-        // 无可靠气泡：synthetic bubble 高度只由文字测量结果决定，
-        // 不继承 400pt 高的 OCR 框。
+        // 未传入 validated coverage 时，兼容旧调用仍只按文字测量；真实 Reader
+        // 路径会为合格 textBox 传入 coverage，而病态框会被验证器拒绝。
         #expect(synthetic.rect.height < sourceRect.height)
         #expect(synthetic.rect.height < detected.rect.height)
         // 但仍必须装得下这五个字，不能把文字裁掉。
@@ -334,6 +334,75 @@ struct TranslationSurfacePolicyTests {
 
         #expect(layout.rect.width <= allowedBounds.width + 0.5)
         #expect(allowedBounds.contains(layout.rect))
+    }
+
+    @Test func validatedSourceCoverageAcceptsNormalTextAndRejectsPathologicalGeometry() {
+        let normal = CGRect(x: 145, y: 260, width: 100, height: 60)
+        #expect(
+            OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                normal,
+                within: Self.imageBounds
+            ) == normal
+        )
+
+        let wholePage = CGRect(x: 0, y: 0, width: 390, height: 780)
+        let tooWide = CGRect(x: 35, y: 300, width: 320, height: 40)
+        let outside = CGRect(x: -20, y: 300, width: 80, height: 40)
+        #expect(
+            OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                wholePage,
+                within: Self.imageBounds
+            ) == nil
+        )
+        #expect(
+            OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                tooWide,
+                within: Self.imageBounds
+            ) == nil
+        )
+        #expect(
+            OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                outside,
+                within: Self.imageBounds
+            ) == nil
+        )
+    }
+
+    @Test @MainActor func syntheticBubbleCoversValidatedSourceWithoutInheritingGiantBox() {
+        let sourceRect = CGRect(x: 145, y: 260, width: 100, height: 60)
+        let imageBounds = Self.imageBounds
+        let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+            sourceRect,
+            within: imageBounds
+        )
+        let covered = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "你好。",
+            sourceFontSize: 16,
+            sourceRect: sourceRect,
+            allowedBounds: imageBounds,
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            useSourceRectAsMinimumExtent: false,
+            minimumSourceCoverageRect: coverage
+        )
+        #expect(covered.rect.contains(sourceRect))
+
+        let pathological = CGRect(x: 35, y: 300, width: 320, height: 40)
+        let compact = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "Yes.",
+            sourceFontSize: 16,
+            sourceRect: pathological,
+            allowedBounds: imageBounds,
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            useSourceRectAsMinimumExtent: false,
+            minimumSourceCoverageRect: OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+                pathological,
+                within: imageBounds
+            )
+        )
+        #expect(compact.rect.width < pathological.width)
+        #expect(imageBounds.contains(compact.rect))
     }
 
     /// 横排 synthetic bubble 也不能继承异常高的 OCR 框。
