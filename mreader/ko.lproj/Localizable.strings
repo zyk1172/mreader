@@ -561,3 +561,7 @@
 "offlineTranslation.changeModel" = "다른 모델 선택";
 "offlineTranslation.errorDetails" = "오류 세부 정보 보기";
 "nav.close" = "닫기";
+
+/* 시작 경험 */
+"launch.brandLine" = "MReader · 모든 페이지를 읽다";
+"launch.capabilitiesLine" = "로컬 서재 · AI 번역 · 몰입형 독서";

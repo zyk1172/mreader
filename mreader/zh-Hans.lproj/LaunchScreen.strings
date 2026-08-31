@@ -1,0 +1,4 @@
+/* Class = "UILabel"; text = "MReader · Read Every Page"; ObjectID = "mainLabel"; */
+"mainLabel.text" = "MReader · 读懂每一页";
+/* Class = "UILabel"; text = "Local Library · AI Translation · Immersive Reading"; ObjectID = "capabilitiesLabel"; */
+"capabilitiesLabel.text" = "本地书架 · AI 翻译 · 沉浸阅读";

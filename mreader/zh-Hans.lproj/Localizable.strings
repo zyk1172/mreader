@@ -568,3 +568,7 @@
 "offlineTranslation.changeModel" = "选择其他模型";
 "offlineTranslation.errorDetails" = "查看错误详情";
 "nav.close" = "关闭";
+
+/* 启动体验 */
+"launch.brandLine" = "MReader · 读懂每一页";
+"launch.capabilitiesLine" = "本地书架 · AI 翻译 · 沉浸阅读";

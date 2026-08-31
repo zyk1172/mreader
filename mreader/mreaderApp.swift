@@ -10,6 +10,8 @@ import SwiftUI
 @main
 struct mreaderApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var library = ComicLibraryStore()
+    @StateObject private var launchState = AppLaunchState()
 
     init() {
         Task { @MainActor in
@@ -73,7 +75,27 @@ struct mreaderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ZStack {
+                Color(LaunchExperienceMetrics.backgroundColorName)
+                    .ignoresSafeArea()
+
+                ContentView(library: library)
+
+                if launchState.isVisible {
+                    LaunchOverlayView()
+                        .transition(.opacity)
+                        .zIndex(1)
+                }
+            }
+            .animation(
+                .easeOut(duration: LaunchExperienceMetrics.fadeDuration),
+                value: launchState.isVisible
+            )
+            .task {
+                await launchState.start {
+                    await library.waitUntilLoaded()
+                }
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background else { return }

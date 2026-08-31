@@ -568,3 +568,7 @@
 "offlineTranslation.changeModel" = "Choose another model";
 "offlineTranslation.errorDetails" = "View error details";
 "nav.close" = "Close";
+
+/* Launch Experience */
+"launch.brandLine" = "MReader · Read Every Page";
+"launch.capabilitiesLine" = "Local Library · AI Translation · Immersive Reading";

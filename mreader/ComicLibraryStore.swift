@@ -212,6 +212,7 @@ final class ComicLibraryStore: ObservableObject {
     private let diskStore = ComicLibraryDiskStore()
     private let syncCoordinator = LibrarySyncCoordinator()
     private var pendingKomgaProgressTasks: [UUID: Task<Void, Never>] = [:]
+    private var loadWaiters: [CheckedContinuation<Void, Never>] = []
     private var comicsSaveRevision = 0
     private var lastKomgaSyncCount = 0
     private var lastOPDSSyncCount = 0
@@ -243,7 +244,32 @@ final class ComicLibraryStore: ObservableObject {
             await load()
             purgeNetworkLibraryState()
             restoreCachedRemoteCoverPaths()
-            isLoaded = true
+            finishInitialLoad()
+        }
+    }
+
+    /// Waits for the local shelf snapshot and its synchronous normalization to
+    /// be ready. This is intentionally narrower than remote synchronization so
+    /// the launch mask protects the first usable shelf without blocking on LAN
+    /// or internet work.
+    func waitUntilLoaded() async {
+        if isLoaded { return }
+
+        await withCheckedContinuation { continuation in
+            if isLoaded {
+                continuation.resume()
+            } else {
+                loadWaiters.append(continuation)
+            }
+        }
+    }
+
+    private func finishInitialLoad() {
+        isLoaded = true
+        let waiters = loadWaiters
+        loadWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
         }
     }
 
