@@ -7,6 +7,18 @@ nonisolated struct MangaTextSegmentation: Sendable {
 }
 
 nonisolated enum MangaTextSegmenter {
+    private enum BubbleRelation {
+        case same
+        case different
+        case unknown
+    }
+
+    private enum BubbleRegionMembership {
+        case inside
+        case outside
+        case unavailable
+    }
+
     static func segment(
         _ blocks: [TextBlock],
         isRightToLeft: Bool
@@ -70,8 +82,9 @@ nonisolated enum MangaTextSegmenter {
     ///
     /// 1. 严格的 visual bubble identity 可以跨越行距直接合并；
     /// 2. visual bubble 明确冲突时直接拆开；
-    /// 3. 没有 visual bubble 时按相邻对白行构建 cluster，而不是要求 cluster
-    ///    内每一对行都满足同一个 complete-link 的“相邻”阈值。
+    /// 3. 其余情况按 same / different / unknown 三态关系处理：unknown 仍然
+    ///    使用相邻对白行构建 cluster，而不是回退到旧的 complete-link bubble
+    ///    启发式；可靠 bubbleBox 则作为组级区域吸收其中的本地 OCR 行。
     ///
     /// 第 3 层仍保留连续行的字号、颜色、方向、投影和整体尺寸护栏；相邻行距
     /// 出现突变时会断开，避免两个说话人的对白通过单条中间行链式吞并。
@@ -137,34 +150,115 @@ nonisolated enum MangaTextSegmenter {
             return false
         }
 
-        // Compatibility remains a veto at group level. A compatible pair that does
-        // not meet strict identity is deliberately allowed to continue only through
-        // the ordinary fallback below.
-        for member in group {
-            if member.bubbleBox != nil,
-               block.bubbleBox != nil,
-               !visualBubbleBoxesAreCompatible(member.bubbleBox, block.bubbleBox) {
-                return false
-            }
-        }
-
         let expandedUnion = union(of: group, adding: block)
         guard expandedUnion.width <= 0.65, expandedUnion.height <= 0.48 else {
             return false
         }
 
-        // Any remaining visual geometry uses the old OCR fallback. Only the fully
-        // local-OCR case gets the dialogue-cluster relaxation below.
-        if group.contains(where: { $0.bubbleBox != nil }) || block.bubbleBox != nil {
-            // 保留旧 complete-link fallback：非严格 identity 的视觉信息，
-            // 以及 mixed (bubbleBox + nil) 组，必须与组内每个成员兼容，不能
-            // 通过最后一条 line 链式吞并其它对白。
-            return group.allSatisfy { canShareBubble($0, block) }
+        switch bubbleRelation(of: block, relativeTo: group) {
+        case .different:
+            // 两个可靠框明确冲突：不能被行距或其它 OCR 弱信号重新合并。
+            return false
+        case .same:
+            // 已确认是同一视觉气泡时，允许跨越不规则行距、字号和颜色采样
+            // 波动；仍保留方向和阅读顺序硬护栏。
+            return canJoinBubbleRegion(
+                block,
+                group: group,
+                isRightToLeft: isRightToLeft
+            )
+        case .unknown:
+            switch bubbleRegionMembership(of: block, in: group) {
+            case .inside:
+                // 一个可靠气泡框已经提供了 group-level 几何证据。位于该区域
+                // 内的 nil bubbleBox 行不应再受旧的逐行行距阈值影响。
+                return canJoinBubbleRegion(
+                    block,
+                    group: group,
+                    isRightToLeft: isRightToLeft
+                )
+            case .outside:
+                // 对已知气泡区域而言，明确位于区域外的无框行不能被 adjacent
+                // clustering 吞回去；nil 只表示未知，不表示可以跨越已知边界。
+                return false
+            case .unavailable:
+                // 两边都没有可用区域，或只有候选行携带 bubbleBox 时，仍按
+                // dialogue adjacency 处理，不把 unknown 误判成 different。
+                return canShareDialogueClusterLine(
+                    previous,
+                    block,
+                    group: group,
+                    isRightToLeft: isRightToLeft
+                )
+            }
         }
-        return canShareDialogueClusterLine(
+    }
+
+    /// 返回 block 相对于当前 group 的三态 bubble 关系。
+    ///
+    /// `nil` 是 unknown：它只代表这一行没有独立的视觉气泡证据，不能被当成
+    /// “不同气泡”。只有两个可靠 bubbleBox 明确不兼容时才返回 different；
+    /// 只有已知框满足严格 identity 时才返回 same。
+    private static func bubbleRelation(
+        of block: TextBlock,
+        relativeTo group: [TextBlock]
+    ) -> BubbleRelation {
+        guard let blockBubble = block.bubbleBox else { return .unknown }
+        let groupBubbles = group.compactMap(\.bubbleBox)
+        guard !groupBubbles.isEmpty else { return .unknown }
+
+        guard groupBubbles.allSatisfy({
+            visualBubbleBoxesAreCompatible($0, blockBubble)
+        }) else {
+            return .different
+        }
+
+        let everyKnownMemberHasSameIdentity = group.allSatisfy { member in
+            guard member.bubbleBox != nil else { return true }
+            return sameVisualBubbleIdentity(member, block)
+        }
+        return everyKnownMemberHasSameIdentity ? .same : .unknown
+    }
+
+    /// 判断 block 是否落在当前 group 的可靠 bubble 区域内。
+    ///
+    /// 已有 group bubble 时，只允许没有 bubbleBox 的本地 OCR 行通过区域吸收；
+    /// 一个新的显式 bubbleBox 即使看起来嵌套在旧框里，也必须继续走 unknown 的
+    /// 对白相邻规则，避免把“外围框 + 内部真实框”错误提升为同一气泡。
+    private static func bubbleRegionMembership(
+        of block: TextBlock,
+        in group: [TextBlock]
+    ) -> BubbleRegionMembership {
+        let groupBubbles = group.compactMap(\.bubbleBox)
+        if !groupBubbles.isEmpty {
+            guard block.bubbleBox == nil else { return .unavailable }
+            return groupBubbles.contains(where: {
+                bubbleContainsText($0, block.boundingBox)
+            }) ? .inside : .outside
+        }
+
+        guard let blockBubble = block.bubbleBox,
+              !group.isEmpty,
+              group.allSatisfy({ bubbleContainsText(blockBubble, $0.boundingBox) }) else {
+            return .unavailable
+        }
+        return .inside
+    }
+
+    /// same/区域内的加入只保留文本方向和阅读顺序硬护栏，不再使用字号、颜色或
+    /// 行距推断。视觉气泡是区域级对象，这些弱信号不能否决区域内的本地 OCR 行。
+    private static func canJoinBubbleRegion(
+        _ block: TextBlock,
+        group: [TextBlock],
+        isRightToLeft: Bool
+    ) -> Bool {
+        guard let previous = group.last,
+              group.allSatisfy({ isVertical($0) == isVertical(block) }) else {
+            return false
+        }
+        return followsReadingOrder(
             previous,
             block,
-            group: group,
             isRightToLeft: isRightToLeft
         )
     }
@@ -195,16 +289,8 @@ nonisolated enum MangaTextSegmenter {
             return false
         }
 
-        let tolerance = max(smallerScale * 0.25, 0.004)
-        if isVertical(lhs) {
-            let forward = isRightToLeft
-                ? rhs.boundingBox.midX <= lhs.boundingBox.midX + tolerance
-                : rhs.boundingBox.midX >= lhs.boundingBox.midX - tolerance
-            guard forward else { return false }
-        } else {
-            guard rhs.boundingBox.midY >= lhs.boundingBox.midY - tolerance else {
-                return false
-            }
+        guard followsReadingOrder(lhs, rhs, isRightToLeft: isRightToLeft) else {
+            return false
         }
 
         let lineGap = dialogueAxisGap(lhs, rhs)
@@ -309,49 +395,6 @@ nonisolated enum MangaTextSegmenter {
         let horizontalGap = gap(left.minX, left.maxX, right.minX, right.maxX)
         return abs(left.midY - right.midY) <= scale * 0.55
             && horizontalGap <= scale * 0.45
-    }
-
-    private static func canShareBubble(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
-        // 视觉 bubbleBox 有两个不同的语义：兼容性只负责否决“明确不同”的框，
-        // identity 才负责证明“明确是同一个”框。两端都有视觉框时，不能把宽松的
-        // compatible 结果直接提升为 same-bubble identity。
-        if lhs.bubbleBox != nil, rhs.bubbleBox != nil {
-            guard visualBubbleBoxesAreCompatible(lhs.bubbleBox, rhs.bubbleBox) else { return false }
-
-            // 只有严格 identity 才能跳过字号、颜色、layoutRole、行距和文字位置
-            // 等 OCR 启发式；兼容但不确定的框继续走下面的既有 fallback。
-            if sameVisualBubbleIdentity(lhs, rhs) {
-                guard isVertical(lhs) == isVertical(rhs) else { return false }
-                let union = lhs.boundingBox.union(rhs.boundingBox)
-                return union.width <= 0.65 && union.height <= 0.48
-            }
-        }
-
-        // OCR fallback：任一端没有视觉信息，或两端的视觉框只是“没有明显冲突”
-        // 但不足以证明同一气泡时，保留原 complete-link 启发式与间距约束。
-        guard stylesAreCompatible(lhs, rhs) else { return false }
-        let left = lhs.boundingBox
-        let right = rhs.boundingBox
-        let union = left.union(right)
-        guard union.width <= 0.65, union.height <= 0.48 else { return false }
-        let scale = min(fontScale(lhs), fontScale(rhs))
-        let leftVertical = isVertical(lhs)
-        let rightVertical = isVertical(rhs)
-        guard leftVertical == rightVertical else { return false }
-
-        if leftVertical {
-            let horizontalGap = gap(left.minX, left.maxX, right.minX, right.maxX)
-            let overlap = overlapLength(left.minY, left.maxY, right.minY, right.maxY)
-            let overlapRatio = overlap / max(min(left.height, right.height), 0.000_1)
-            return horizontalGap <= scale * 0.72 && overlapRatio >= 0.35
-        }
-
-        let verticalGap = gap(left.minY, left.maxY, right.minY, right.maxY)
-        let overlap = overlapLength(left.minX, left.maxX, right.minX, right.maxX)
-        let overlapRatio = overlap / max(min(left.width, right.width), 0.000_1)
-        let centerTolerance = max(min(left.width, right.width) * 0.55, scale * 1.2)
-        return verticalGap <= scale * 0.62
-            && (overlapRatio >= 0.2 || abs(left.midX - right.midX) <= centerTolerance)
     }
 
     private static func stylesAreCompatible(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
@@ -518,6 +561,40 @@ nonisolated enum MangaTextSegmenter {
 
     private static func isVertical(_ block: TextBlock) -> Bool {
         block.textOrientation == .vertical
+    }
+
+    private static func followsReadingOrder(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock,
+        isRightToLeft: Bool
+    ) -> Bool {
+        let tolerance = max(min(fontScale(lhs), fontScale(rhs)) * 0.25, 0.004)
+        if isVertical(lhs) {
+            return isRightToLeft
+                ? rhs.boundingBox.midX <= lhs.boundingBox.midX + tolerance
+                : rhs.boundingBox.midX >= lhs.boundingBox.midX - tolerance
+        }
+        return rhs.boundingBox.midY >= lhs.boundingBox.midY - tolerance
+    }
+
+    private static func bubbleContainsText(_ bubble: CGRect, _ text: CGRect) -> Bool {
+        let normalizedBubble = bubble.standardized
+        let normalizedText = text.standardized
+        guard normalizedBubble.width > 0,
+              normalizedBubble.height > 0,
+              normalizedText.width > 0,
+              normalizedText.height > 0 else {
+            return false
+        }
+        // bubbleBox 已经过视觉复核，但坐标映射和 OCR textBox 仍可能有少量边缘
+        // 抖动；只给有限的归一化容差，不把邻近框的整段文字吸进来。
+        let tolerance = max(
+            0.006,
+            min(0.020, min(normalizedBubble.width, normalizedBubble.height) * 0.08)
+        )
+        return normalizedBubble
+            .insetBy(dx: -tolerance, dy: -tolerance)
+            .contains(normalizedText)
     }
 
     private static func fontScale(_ block: TextBlock) -> CGFloat {

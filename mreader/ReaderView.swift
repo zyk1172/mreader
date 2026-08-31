@@ -3753,7 +3753,13 @@ struct LocalImageView: View {
                         let cacheKey = AppleTranslationPageCache.key(
                             pageURL: self.url,
                             sourceLanguage: sourceCode,
-                            targetLanguage: bridgeTarget
+                            targetLanguage: bridgeTarget,
+                            segmentationRevision: AITranslationPageRequest.ocrGeometryRevision,
+                            ocrRecognitionMode: OCRRecognitionMode(rawValue: self.ocrRecognitionModeRaw) ?? .adaptive,
+                            usesVisualOCRVerification: self.ocrVisualVerificationEnabled,
+                            isRightToLeft: self.isRightToLeftReading,
+                            minimumTextHeight: self.ocrMinimumTextHeight,
+                            safeAreaInset: self.ocrSafeAreaInset
                         )
                         Task {
                             await AppleTranslationPageCache.shared.store(self.textBlocks, key: cacheKey)
@@ -4841,7 +4847,13 @@ struct LocalImageView: View {
             let cacheKey = AppleTranslationPageCache.key(
                 pageURL: pageURL,
                 sourceLanguage: decision.languageCode,
-                targetLanguage: targetCode
+                targetLanguage: targetCode,
+                segmentationRevision: AITranslationPageRequest.ocrGeometryRevision,
+                ocrRecognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive,
+                usesVisualOCRVerification: ocrVisualVerificationEnabled,
+                isRightToLeft: isRightToLeftReading,
+                minimumTextHeight: ocrMinimumTextHeight,
+                safeAreaInset: ocrSafeAreaInset
             )
             if let cached = await AppleTranslationPageCache.shared.cachedBlocks(key: cacheKey) {
                 await MainActor.run {

@@ -17,6 +17,7 @@
 
 import Testing
 import CoreGraphics
+import Foundation
 @testable import mreader
 
 @Suite(.serialized)
@@ -332,6 +333,142 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].sourceLineCount == 3)
     }
 
+    // MARK: - P0：mixed visual/native OCR 必须按气泡区域合并
+
+    /// 视觉复核可能只命中其中一条 OCR line。另一条 line 的 nil bubbleBox
+    /// 表示 unknown，而不是 different；只要它位于可靠 bubbleBox 内，就必须
+    /// 与视觉行共用一个 translation unit。
+    @Test func mixedVisualAndNativeLinesInsideSameBubbleMerge() {
+        let bubble = CGRect(x: 0.16, y: 0.16, width: 0.68, height: 0.24)
+        let visualLine = Self.block(
+            text: "REALLY?",
+            boundingBox: CGRect(x: 0.34, y: 0.20, width: 0.24, height: 0.045),
+            bubbleBox: bubble,
+            estimatedFontScale: 0.045
+        )
+        let nativeLine = Self.block(
+            text: "THAT'S TOO BAD...",
+            boundingBox: CGRect(x: 0.26, y: 0.275, width: 0.40, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045
+        )
+
+        let segmentation = MangaTextSegmenter.segment(
+            [visualLine, nativeLine],
+            isRightToLeft: false
+        )
+
+        #expect(segmentation.lines.count == 2)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].text == "REALLY? THAT'S TOO BAD...")
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
+    }
+
+    /// 直接覆盖真机截图中的三行气泡：只让首行携带视觉 bubbleBox，后两行
+    /// 保持 Apple/native OCR 的 nil geometry，最终仍只能产生一个 bubble。
+    @Test func mixedVisualAndNativeThreeLineBubbleMerge() {
+        let bubble = CGRect(x: 0.14, y: 0.15, width: 0.72, height: 0.32)
+        let line1 = Self.block(
+            text: "WE'LL HAVE FUN",
+            boundingBox: CGRect(x: 0.29, y: 0.20, width: 0.42, height: 0.045),
+            bubbleBox: bubble,
+            estimatedFontScale: 0.045
+        )
+        let line2 = Self.block(
+            text: "SOME OTHER TIME,",
+            boundingBox: CGRect(x: 0.25, y: 0.275, width: 0.50, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045
+        )
+        let line3 = Self.block(
+            text: "OKAY?",
+            boundingBox: CGRect(x: 0.40, y: 0.350, width: 0.20, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045
+        )
+
+        let segmentation = MangaTextSegmenter.segment(
+            [line1, line2, line3],
+            isRightToLeft: false
+        )
+
+        #expect(segmentation.lines.count == 3)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].text == "WE'LL HAVE FUN SOME OTHER TIME, OKAY?")
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+    }
+
+    /// 纯 native OCR 的同一气泡不要求每一行都有完全相同的排版间距；这里第二
+    /// 个 gap 比第一个约大 43%，仍应维持一个三行对白 cluster。
+    @Test func threeLineBubbleAllowsModerateGapVariance() {
+        let line1 = Self.block(
+            text: "WE'LL HAVE FUN",
+            boundingBox: CGRect(x: 0.29, y: 0.20, width: 0.42, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+        let line2 = Self.block(
+            text: "SOME OTHER TIME,",
+            boundingBox: CGRect(x: 0.25, y: 0.2765, width: 0.50, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+        let line3 = Self.block(
+            text: "OKAY?",
+            boundingBox: CGRect(x: 0.40, y: 0.3665, width: 0.20, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.045,
+            textColorHex: nil
+        )
+
+        let firstGap = line2.boundingBox.minY - line1.boundingBox.maxY
+        let secondGap = line3.boundingBox.minY - line2.boundingBox.maxY
+        #expect(firstGap > 0.7 * line1.boundingBox.height)
+        #expect(secondGap > firstGap)
+        #expect(secondGap < 1.1 * line1.boundingBox.height)
+
+        let segmentation = MangaTextSegmenter.segment(
+            [line1, line2, line3],
+            isRightToLeft: false
+        )
+
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+    }
+
+    /// mixed geometry 的反向保护：nil bubbleBox 行如果明确落在已知视觉气泡外，
+    /// 不能因为相邻对白阈值而被吸回第一个 bubble。
+    @Test func mixedVisualDifferentBubbleDoesNotMerge() {
+        let bubbleA = CGRect(x: 0.20, y: 0.18, width: 0.40, height: 0.12)
+        let visualLine = Self.block(
+            text: "FIRST BUBBLE.",
+            boundingBox: CGRect(x: 0.30, y: 0.21, width: 0.20, height: 0.060),
+            bubbleBox: bubbleA,
+            estimatedFontScale: 0.060
+        )
+        let nativeLine = Self.block(
+            text: "SECOND BUBBLE.",
+            boundingBox: CGRect(x: 0.30, y: 0.330, width: 0.20, height: 0.060),
+            bubbleBox: nil,
+            estimatedFontScale: 0.060
+        )
+
+        let lineGap = nativeLine.boundingBox.minY - visualLine.boundingBox.maxY
+        #expect(lineGap <= visualLine.estimatedFontScale * 1.35)
+        #expect(!bubbleA.insetBy(dx: -0.020, dy: -0.020).contains(nativeLine.boundingBox))
+
+        let segmentation = MangaTextSegmenter.segment(
+            [visualLine, nativeLine],
+            isRightToLeft: false
+        )
+
+        #expect(segmentation.bubbles.count == 2)
+        #expect(segmentation.bubbles[0].text == "FIRST BUBBLE.")
+        #expect(segmentation.bubbles[1].text == "SECOND BUBBLE.")
+    }
+
     // MARK: - 测试 7：纯 OCR 多行对白保持既有合并能力
 
     /// 无 bubbleBox 的普通多行对白（紧凑行距、颜色一致）必须照旧合并——
@@ -455,5 +592,47 @@ struct VisualBubbleGroupingTests {
         // 发送给模型的 items 决定最终 TextBlock / TranslationLayoutItem /
         // TranslationTextRenderer 的数量：一个 item = 一个译文覆盖区域。
         #expect(items.map(\.id).count == 1)
+    }
+
+    // MARK: - Apple 页缓存版本隔离
+
+    @Test func appleTranslationCacheKeyIncludesOCRSegmentationInputs() {
+        let pageURL = URL(string: "https://example.com/manga/page-1.jpg")!
+        let base = AppleTranslationPageCache.key(
+            pageURL: pageURL,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            segmentationRevision: "dialogue-v1",
+            ocrRecognitionMode: .adaptive,
+            usesVisualOCRVerification: false,
+            isRightToLeft: false,
+            minimumTextHeight: 0.012,
+            safeAreaInset: 0.02
+        )
+        let changedRevision = AppleTranslationPageCache.key(
+            pageURL: pageURL,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            segmentationRevision: "dialogue-v2",
+            ocrRecognitionMode: .adaptive,
+            usesVisualOCRVerification: false,
+            isRightToLeft: false,
+            minimumTextHeight: 0.012,
+            safeAreaInset: 0.02
+        )
+        let changedVisualMode = AppleTranslationPageCache.key(
+            pageURL: pageURL,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            segmentationRevision: "dialogue-v1",
+            ocrRecognitionMode: .adaptive,
+            usesVisualOCRVerification: true,
+            isRightToLeft: false,
+            minimumTextHeight: 0.012,
+            safeAreaInset: 0.02
+        )
+
+        #expect(base != changedRevision)
+        #expect(base != changedVisualMode)
     }
 }
