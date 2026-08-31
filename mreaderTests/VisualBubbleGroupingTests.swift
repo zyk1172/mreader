@@ -329,6 +329,7 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.lines.count == 3)
         #expect(segmentation.bubbles.count == 1)
         #expect(segmentation.bubbles[0].text == "I'M SORRY... I CAN'T. ON THE SUBJECTS I MISSED. I DIDN'T KNOW.")
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
     }
 
     // MARK: - 测试 7：纯 OCR 多行对白保持既有合并能力

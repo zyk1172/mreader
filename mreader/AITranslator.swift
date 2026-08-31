@@ -163,6 +163,9 @@ struct TextBlock: Identifiable, Sendable {
     var polygon: [CGPoint]
     var bubblePolygon: [CGPoint]
     var translationLines: [String]
+    /// 组成当前 translation unit 的原文横排 line 数；竖排通常仍为一列。
+    /// line/bubble 合并时必须显式传递，不能从最终 union 的高度反推。
+    var sourceLineCount: Int
     /// 在最初 OCR observation 阶段确定的文字方向；合并成 line/bubble 后必须继承。
     var textOrientation: TextOrientation
     /// 布局语义不能从 bubbleBox 是否存在反推；纯 OCR 对白同样可能没有 bubbleBox。
@@ -172,7 +175,7 @@ struct TextBlock: Identifiable, Sendable {
         layoutRole == .standalone
     }
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil, layoutRole: TranslationLayoutRole? = nil) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil, layoutRole: TranslationLayoutRole? = nil, sourceLineCount: Int = 1) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -188,6 +191,7 @@ struct TextBlock: Identifiable, Sendable {
         self.polygon = polygon
         self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
+        self.sourceLineCount = max(sourceLineCount, 1)
         let resolvedOrientation = textOrientation ?? .inferred(from: boundingBox)
         self.textOrientation = resolvedOrientation
         self.layoutRole = layoutRole ?? .inferred(
@@ -1379,7 +1383,8 @@ class AITranslator {
                     textOrientation: best.textOrientation,
                     layoutRole: original.layoutRole == .standalone || best.layoutRole == .standalone
                         ? .standalone
-                        : .dialogue
+                        : .dialogue,
+                    sourceLineCount: original.sourceLineCount
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
             } catch is CancellationError {
@@ -1439,7 +1444,8 @@ class AITranslator {
                         bubblePolygon: block.bubblePolygon,
                         translationLines: block.translationLines,
                         textOrientation: block.textOrientation,
-                        layoutRole: block.layoutRole
+                        layoutRole: block.layoutRole,
+                        sourceLineCount: block.sourceLineCount
                     )
                 }
                 corrected = mergeVisualPageRecoveryBlocks(

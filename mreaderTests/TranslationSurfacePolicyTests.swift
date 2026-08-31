@@ -462,9 +462,39 @@ struct TranslationSurfacePolicyTests {
     }
 
     /// 横排 synthetic bubble 也不能继承异常高的 OCR 框。
+    @Test func horizontalPathologicalSourceCoverageIsRejected() {
+        let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
+        let block = Self.displayBlock(
+            text: "Hello there",
+            rect: sourceRect,
+            orientation: .horizontal
+        )
+
+        let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+            for: block,
+            sourceRect: sourceRect,
+            within: Self.imageBounds
+        )
+
+        #expect(coverage == nil)
+    }
+
+    /// 横排 synthetic bubble 也不能继承异常高的 OCR 框；这里先走 validator，
+    /// 再把结果传进 layout，保持测试与 Reader 的 production path 一致。
     @Test func horizontalSyntheticBubbleIgnoresTallOCRBox() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
         let allowedBounds = CGRect(x: 120, y: 100, width: 200, height: 500)
+        let block = Self.displayBlock(
+            text: "Hello there",
+            rect: sourceRect,
+            orientation: .horizontal
+        )
+        let coverage = OCRBubbleLayoutEngine.validatedSourceCoverageRect(
+            for: block,
+            sourceRect: sourceRect,
+            within: Self.imageBounds
+        )
+        #expect(coverage == nil)
 
         let synthetic = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",
@@ -473,7 +503,8 @@ struct TranslationSurfacePolicyTests {
             allowedBounds: allowedBounds,
             lineSpacing: 2,
             textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: false
+            useSourceRectAsMinimumExtent: false,
+            minimumSourceCoverageRect: coverage
         )
         let detected = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",

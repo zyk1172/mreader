@@ -373,8 +373,9 @@ nonisolated enum OCRBubbleLayoutEngine {
     /// `sourceRect` 是合并后的 OCR textBox union，而不是任意 fallback / bubble 框。
     /// 正常对白必须保留在最终卡片的最小覆盖范围内；越界、整页、超宽、超高或
     /// 面积异常的 OCR 几何则放弃这个覆盖约束，避免旧的大白框回归。验证还必须
-    /// 结合 block 的文字方向、字号尺度和 glyph 数量：单个竖排短句不能仅因为
-    /// 轴向比例没有超过页面百分比阈值，就把病态的长框传给 synthetic bubble。
+    /// 结合 block 的文字方向、字号尺度、glyph 数量和横排源 line 数：单个短句或
+    /// 少量横排对白不能仅因为轴向比例没有超过页面百分比阈值，就把病态的长框传给
+    /// synthetic bubble。
     static func validatedSourceCoverageRect(
         for block: TextBlock,
         sourceRect: CGRect,
@@ -422,10 +423,11 @@ nonisolated enum OCRBubbleLayoutEngine {
     }
 
     /// Page fractions reject obvious full-page boxes, but they cannot distinguish a
-    /// five-glyph vertical sentence from a narrow OCR crop that spans hundreds of
-    /// points. The short display axis is the most stable glyph-size estimate for a
-    /// vertical block; the estimated scale is capped by that axis so a bad scale
-    /// cannot make the long-axis check permissive.
+    /// short sentence from a narrow OCR crop that spans hundreds of points. The short
+    /// display axis is the most stable glyph-size estimate for a vertical block. For
+    /// horizontal merged blocks, sourceLineCount supplies the missing line structure;
+    /// the estimated scale is additionally bounded by average glyph advance so a bad
+    /// union cannot make the cross-line check permissive.
     private static func glyphAwareSourceCoverageIsPlausible(
         for block: TextBlock,
         sourceRect: CGRect,
@@ -453,11 +455,21 @@ nonisolated enum OCRBubbleLayoutEngine {
             let maximumGlyphSpan = expectedGlyphSpan * 1.35 + glyphSize * 2
             return sourceRect.height <= maximumGlyphSpan
         case .horizontal:
-            // Horizontal merged blocks can contain several OCR lines, but the
-            // current TextBlock contract does not retain line geometry. Keep the
-            // established page-fraction checks for that axis until such geometry
-            // is available; the regression here is the vertical long-axis case.
-            return true
+            let lineCount = CGFloat(max(block.sourceLineCount, 1))
+            let averageGlyphAdvance = sourceRect.width / CGFloat(glyphCount)
+            let glyphBasedLineHeight = max(averageGlyphAdvance * 5, 1)
+            let widthBoundedLineHeight = max(sourceRect.width * 1.5, 1)
+            // A malformed union can make estimatedFontSize come from the bad
+            // cross-axis extent. Keep a broad glyph-advance tolerance, but bound
+            // that inflated estimate by the source width so it cannot authorize a
+            // 200-300pt single line or a similarly tall small-line union.
+            let lineHeight = min(
+                estimatedFontSize,
+                min(glyphBasedLineHeight, widthBoundedLineHeight)
+            )
+            let interLineTolerance = max(lineHeight * 0.5, 2)
+            let maximumLineSpan = lineCount * lineHeight * 1.6 + interLineTolerance
+            return sourceRect.height <= maximumLineSpan
         }
     }
 

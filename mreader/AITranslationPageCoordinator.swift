@@ -20,10 +20,10 @@ nonisolated enum AITranslationPrefetchPolicy {
 nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 外层实时译文缓存包含 OCR 的 boundingBox、字号尺度和文字方向；几何算法升级时必须
     /// 与 OCR cache 一起失效，不能继续命中早期按归一化轴推断方向的结果。
-    /// v14：加入无 bubbleBox 的 native-OCR dialogue cluster、可信 source coverage
+    /// v15：加入横排 source line count 的 coverage 校验；保留无 bubbleBox 的 native-OCR dialogue cluster、可信 source coverage
     /// 与更严格的响应/译文校验，避免继续命中旧的 translation unit / layout 缓存。
-    static let translationCacheRevision = "translation-v14-native-ocr-dialogue-coverage-validation"
-    static let ocrGeometryRevision = "physical-axis-v6-dialogue-cluster-source-coverage"
+    static let translationCacheRevision = "translation-v15-native-ocr-dialogue-line-coverage-validation"
+    static let ocrGeometryRevision = "physical-axis-v7-dialogue-cluster-source-line-coverage"
 
     let pageURL: URL
     let image: UIImage
@@ -107,6 +107,7 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let textColorHex: String?
     let textOrientation: TextOrientation?
     let layoutRole: TranslationLayoutRole?
+    let sourceLineCount: Int?
     let polygon: [CachedPoint]
     let translationLines: [String]
 
@@ -128,6 +129,7 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
         textColorHex = block.textColorHex
         textOrientation = block.textOrientation
         layoutRole = block.layoutRole
+        sourceLineCount = block.sourceLineCount
         polygon = block.polygon.map(CachedPoint.init)
         translationLines = block.translationLines
     }
@@ -152,7 +154,8 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
             polygon: polygon.map(\.point),
             translationLines: translationLines,
             textOrientation: textOrientation,
-            layoutRole: layoutRole
+            layoutRole: layoutRole,
+            sourceLineCount: sourceLineCount ?? 1
         )
     }
 }

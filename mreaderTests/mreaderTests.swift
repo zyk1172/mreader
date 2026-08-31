@@ -2462,6 +2462,7 @@ struct mreaderTests {
         #expect(refined[0].boundingBox == CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.12))
         #expect(refined[0].textOrientation == .horizontal)
         #expect(refined[0].estimatedFontScale == 0.05)
+        #expect(refined[0].sourceLineCount == 2)
     }
 
     @Test func translationGeometryRefinerRejectsAdjacentRepeatedShortText() {

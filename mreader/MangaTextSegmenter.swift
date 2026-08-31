@@ -20,12 +20,29 @@ nonisolated enum MangaTextSegmenter {
         }
 
         let lineGroups = completeLinkGroups(sorted, relation: canShareLine)
-        let lines = lineGroups.map { mergedBlock(from: $0, isRightToLeft: isRightToLeft) }
+        let lines = lineGroups.map { group in
+            // complete-link 分组在这里已经把 observation 合成一条源 line；
+            // 不要把其中的候选数量误记成 line 数。
+            mergedBlock(
+                from: group,
+                isRightToLeft: isRightToLeft,
+                sourceLineCount: 1
+            )
+        }
         let bubbleGroups = dialogueClusterGroups(
             AITranslator.sortedTextBlocks(lines, isRightToLeft: isRightToLeft),
             isRightToLeft: isRightToLeft
         )
-        let bubbles = bubbleGroups.map { mergedBlock(from: $0, isRightToLeft: isRightToLeft) }
+        let bubbles = bubbleGroups.map { group in
+            let sourceLineCount = group.reduce(0) { total, block in
+                total + max(block.sourceLineCount, 1)
+            }
+            return mergedBlock(
+                from: group,
+                isRightToLeft: isRightToLeft,
+                sourceLineCount: sourceLineCount
+            )
+        }
         return MangaTextSegmentation(
             lines: AITranslator.sortedTextBlocks(lines, isRightToLeft: isRightToLeft),
             bubbles: AITranslator.sortedTextBlocks(bubbles, isRightToLeft: isRightToLeft)
@@ -345,7 +362,11 @@ nonisolated enum MangaTextSegmenter {
         return OCRCandidateResolver.colorsAreCompatible(lhs.textColorHex, rhs.textColorHex)
     }
 
-    private static func mergedBlock(from blocks: [TextBlock], isRightToLeft: Bool) -> TextBlock {
+    private static func mergedBlock(
+        from blocks: [TextBlock],
+        isRightToLeft: Bool,
+        sourceLineCount: Int
+    ) -> TextBlock {
         guard blocks.count > 1 else { return blocks[0] }
         let ordered = AITranslator.sortedTextBlocks(blocks, isRightToLeft: isRightToLeft)
         let bounds = ordered.dropFirst().reduce(ordered[0].boundingBox) { $0.union($1.boundingBox) }
@@ -369,7 +390,8 @@ nonisolated enum MangaTextSegmenter {
             polygon: ordered.flatMap(\.polygon),
             bubblePolygon: selectedBubble?.polygon ?? [],
             textOrientation: ordered[0].textOrientation,
-            layoutRole: ordered[0].layoutRole
+            layoutRole: ordered[0].layoutRole,
+            sourceLineCount: sourceLineCount
         )
     }
 
