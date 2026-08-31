@@ -3508,6 +3508,8 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
         let recognizer = UIPanGestureRecognizer()
         private var hasTriggered = false
         private var beganWithTwoTouches = false
+        private var initialTouchDistance: CGFloat?
+        private var isPinching = false
 
         init(
             onProgress: @escaping (CGFloat) -> Void,
@@ -3533,6 +3535,8 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
             case .began:
                 hasTriggered = false
                 beganWithTwoTouches = recognizer.numberOfTouches == 2
+                initialTouchDistance = twoTouchDistance(in: view, recognizer: recognizer)
+                isPinching = false
                 guard beganWithTwoTouches else {
                     onCancel()
                     return
@@ -3542,6 +3546,14 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                     onCancel()
                     return
                 }
+                if !isPinching,
+                   let initialTouchDistance,
+                   let currentTouchDistance = twoTouchDistance(in: view, recognizer: recognizer),
+                   abs(currentTouchDistance - initialTouchDistance) / max(initialTouchDistance, 1) >= 0.045 {
+                    isPinching = true
+                    onCancel()
+                }
+                guard !isPinching else { return }
                 let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
                 onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
                 guard !hasTriggered else { return }
@@ -3554,9 +3566,22 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                 guard beganWithTwoTouches else {
                     onCancel()
                     beganWithTwoTouches = false
+                    initialTouchDistance = nil
+                    isPinching = false
                     return
                 }
-                guard !hasTriggered else { return }
+                guard !isPinching else {
+                    beganWithTwoTouches = false
+                    initialTouchDistance = nil
+                    isPinching = false
+                    return
+                }
+                guard !hasTriggered else {
+                    beganWithTwoTouches = false
+                    initialTouchDistance = nil
+                    isPinching = false
+                    return
+                }
                 let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
                 let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
                 if shouldDismiss {
@@ -3566,9 +3591,13 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                     onCancel()
                 }
                 beganWithTwoTouches = false
+                initialTouchDistance = nil
+                isPinching = false
             case .cancelled, .failed:
                 hasTriggered = false
                 beganWithTwoTouches = false
+                initialTouchDistance = nil
+                isPinching = false
                 onCancel()
             default:
                 break
@@ -3580,7 +3609,18 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            false
+            otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
+                || otherGestureRecognizer is ReaderZoomPanGestureRecognizer
+        }
+
+        private func twoTouchDistance(
+            in view: UIView,
+            recognizer: UIPanGestureRecognizer
+        ) -> CGFloat? {
+            guard recognizer.numberOfTouches == 2 else { return nil }
+            let first = recognizer.location(ofTouch: 0, in: view)
+            let second = recognizer.location(ofTouch: 1, in: view)
+            return hypot(second.x - first.x, second.y - first.y)
         }
     }
 
@@ -3723,7 +3763,6 @@ struct LocalImageView: View {
     @State private var isLoadingImage = true
     @State private var loadFailed = false
     @State private var scale: CGFloat = 1
-    @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var pendingSingleTapWorkItem: DispatchWorkItem?
     @State private var lastDoubleTapTime = Date.distantPast
@@ -3801,9 +3840,21 @@ struct LocalImageView: View {
                             }
                         }
                     )
+                    .overlay {
+                        ReaderZoomGestureView(
+                            scale: scale,
+                            offset: offset,
+                            viewportSize: viewportSize,
+                            contentSize: zoomContentSize,
+                            maximumScale: ReaderZoomMath.defaultMaximumScale,
+                            onTransformChanged: applyZoomTransform,
+                            onGestureEnded: settleZoomTransform
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                    }
                     .scaleEffect(scale)
                     .offset(offset)
-                    .gesture(zoomGesture)
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
@@ -4077,21 +4128,38 @@ struct LocalImageView: View {
     private func translationOverlay(in size: CGSize) -> some View {
         if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
+
+            // Draw every card's background/border first and every translated
+            // glyph second. A later overlapping card must never cover an
+            // earlier card's text.
+            ForEach(items) { item in
+                TranslationSurfaceRenderer(
+                    layoutSize: item.rect.size,
+                    surfaceStyle: item.surfaceStyle
+                )
+                .position(x: item.rect.midX, y: item.rect.midY)
+                .zIndex(TranslationSurfaceLayering.surfaceZIndex)
+            }
+
             ForEach(items) { item in
                 TranslationTextRenderer(
-                    segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
-                        let value = displayTranslation(for: $0)
-                        return value.isEmpty ? nil : value
-                    },
+                    segments: translationSegments(for: item),
                     fontSize: item.fontSize,
                     layoutSize: item.rect.size,
                     contentPadding: item.contentPadding,
                     style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
-                    textOrientation: item.textOrientation,
-                    surfaceStyle: item.surfaceStyle
+                    textOrientation: item.textOrientation
                 )
                 .position(x: item.rect.midX, y: item.rect.midY)
+                .zIndex(TranslationSurfaceLayering.textZIndex)
             }
+        }
+    }
+
+    private func translationSegments(for item: TranslationLayoutItem) -> [String] {
+        item.displayText.map { [$0] } ?? item.blocks.compactMap {
+            let value = displayTranslation(for: $0)
+            return value.isEmpty ? nil : value
         }
     }
 
@@ -4580,7 +4648,6 @@ struct LocalImageView: View {
                 recognizedPipelineCache = nil
                 recognizedPipelineCacheKey = nil
                 scale = 1
-                lastScale = 1
                 offset = .zero
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
@@ -4613,7 +4680,6 @@ struct LocalImageView: View {
             recognizedPipelineCache = nil
             recognizedPipelineCacheKey = nil
             scale = 1
-            lastScale = 1
             offset = .zero
             pendingSingleTapWorkItem?.cancel()
             pendingSingleTapWorkItem = nil
@@ -4679,21 +4745,57 @@ struct LocalImageView: View {
         }
     }
 
-    private var zoomGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { value in
-                scale = min(max(lastScale * value, 1), 5)
+    private var zoomContentSize: CGSize {
+        guard let image = uiImage,
+              viewportSize.width > 0,
+              viewportSize.height > 0,
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return viewportSize
+        }
+
+        let imageAspect = image.size.width / image.size.height
+        let viewportAspect = viewportSize.width / viewportSize.height
+        switch imageFitMode {
+        case .fitScreen:
+            if imageAspect > viewportAspect {
+                return CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             }
-            .onEnded { _ in
-                lastScale = scale
-                if scale <= 1.02 {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                        scale = 1
-                        lastScale = 1
-                        offset = .zero
-                    }
-                }
-            }
+            return CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+        case .fitWidth:
+            return CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
+        case .fitHeight:
+            return CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+        case .original:
+            let nativeSize = CGSize(
+                width: max(image.size.width * image.scale, 1),
+                height: max(image.size.height * image.scale, 1)
+            )
+            let factor = min(
+                1,
+                min(viewportSize.width / nativeSize.width, viewportSize.height / nativeSize.height)
+            )
+            return CGSize(width: nativeSize.width * factor, height: nativeSize.height * factor)
+        }
+    }
+
+    private func applyZoomTransform(_ transform: ReaderZoomTransform) {
+        scale = transform.scale
+        offset = transform.offset
+    }
+
+    private func settleZoomTransform() {
+        let settled = ReaderZoomMath.settledTransform(
+            ReaderZoomTransform(scale: scale, offset: offset),
+            viewportSize: viewportSize,
+            contentSize: zoomContentSize,
+            maximumScale: ReaderZoomMath.defaultMaximumScale
+        )
+        guard settled != ReaderZoomTransform(scale: scale, offset: offset) else { return }
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+            scale = settled.scale
+            offset = settled.offset
+        }
     }
 
     private var tapPageGesture: some Gesture {
@@ -5339,6 +5441,29 @@ private enum TranslationColorStyle: String, CaseIterable {
     }
 }
 
+private struct TranslationSurfaceRenderer: View {
+    let layoutSize: CGSize
+    let surfaceStyle: TranslationSurfaceStyle
+
+    @ViewBuilder
+    var body: some View {
+        if surfaceStyle.drawsBackground {
+            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                }
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        }
+    }
+}
+
 private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
@@ -5346,27 +5471,9 @@ private struct TranslationTextRenderer: View {
     let contentPadding: CGFloat
     let style: TranslationColorStyle
     let textOrientation: TextOrientation
-    let surfaceStyle: TranslationSurfaceStyle
 
     var body: some View {
         content
-            .background { bubbleBackground }
-            .overlay { bubbleBorder }
-    }
-
-    private var bubbleBackground: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-            }
-    }
-
-    private var bubbleBorder: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
     }
 
     @ViewBuilder

@@ -18,12 +18,12 @@
                             <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchGlyph" translatesAutoresizingMaskIntoConstraints="NO" id="launchGlyph">
                                 <rect key="frame" x="142.5" y="372.6" width="108" height="108"/>
                             </imageView>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="MReader · Read Every Page" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.78" translatesAutoresizingMaskIntoConstraints="NO" id="mainLabel">
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="MReader · 读懂每一页" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.78" translatesAutoresizingMaskIntoConstraints="NO" id="mainLabel">
                                 <rect key="frame" x="24" y="765" width="345" height="24"/>
                                 <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
                                 <color key="textColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                             </label>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Local Library · AI Translation · Immersive Reading" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.62" translatesAutoresizingMaskIntoConstraints="NO" id="capabilitiesLabel">
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="本地书架 · AI 翻译 · 沉浸阅读" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.62" translatesAutoresizingMaskIntoConstraints="NO" id="capabilitiesLabel">
                                 <rect key="frame" x="24" y="794" width="345" height="17"/>
                                 <fontDescription key="fontDescription" type="system" weight="medium" pointSize="14"/>
                                 <color key="textColor" red="1" green="1" blue="1" alpha="0.72" colorSpace="custom" customColorSpace="sRGB"/>

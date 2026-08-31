@@ -22,6 +22,13 @@ nonisolated enum LaunchPhase: Equatable {
     case ready
 }
 
+/// 启动体验是品牌识别的一部分，固定使用中文，避免系统语言或 storyboard
+/// 本地化选择让用户在启动过程中看到不同语言的两套文案。
+nonisolated enum LaunchExperienceCopy {
+    static let brandLine = "MReader · 读懂每一页"
+    static let capabilitiesLine = "本地书架 · AI 翻译 · 沉浸阅读"
+}
+
 /// Coordinates the minimum brand exposure with the local state required for
 /// the first usable shelf frame. Network maintenance and other background
 /// work remain outside this gate.
@@ -81,13 +88,13 @@ struct LaunchOverlayView: View {
                     )
 
                 VStack(spacing: LaunchExperienceMetrics.labelSpacing) {
-                    Text("launch.brandLine".localized)
+                    Text(verbatim: LaunchExperienceCopy.brandLine)
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
 
-                    Text("launch.capabilitiesLine".localized)
+                    Text(verbatim: LaunchExperienceCopy.capabilitiesLine)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.72))
                         .lineLimit(1)

@@ -1,6 +1,34 @@
 import Foundation
 import Combine
 
+nonisolated enum StartupRemoteSyncOutcome: Equatable {
+    case noRemoteSources
+    case success
+    case partialFailure
+    case failure
+
+    static func resolve(expectedSourceCount: Int, failedSourceCount: Int) -> Self {
+        let expected = max(expectedSourceCount, 0)
+        let failed = min(max(failedSourceCount, 0), expected)
+        guard expected > 0 else { return .noRemoteSources }
+        guard failed == 0 else { return failed == expected ? .failure : .partialFailure }
+        return .success
+    }
+
+    var hapticLevel: HapticLevel? {
+        switch self {
+        case .noRemoteSources:
+            return nil
+        case .success:
+            return .success
+        case .partialFailure:
+            return .warning
+        case .failure:
+            return .error
+        }
+    }
+}
+
 nonisolated private enum ComicLibraryLoadIssue: Sendable {
     /// library.json 解码/读取失败，未能从轮换备份恢复，当前以空书架启动。
     case comicsCorrupted
@@ -216,6 +244,10 @@ final class ComicLibraryStore: ObservableObject {
     private var comicsSaveRevision = 0
     private var lastKomgaSyncCount = 0
     private var lastOPDSSyncCount = 0
+    private var lastKomgaStartupSourceCount = 0
+    private var lastKomgaStartupFailureCount = 0
+    private var lastOPDSStartupSourceCount = 0
+    private var lastOPDSStartupFailureCount = 0
     private var didStartStartupRemoteMaintenance = false
 
     static func shouldPublishRemoteComicUpdate(
@@ -541,12 +573,25 @@ final class ComicLibraryStore: ObservableObject {
         HapticManager.shared.play(.success)
     }
 
-    /// 启动时只恢复远程媒体源，不重新扫描本地漫画目录，也不产生刷新成功震动。
+    /// 启动时只恢复远程媒体源，不重新扫描本地漫画目录；所有远程源完成后
+    /// 只产生一次与整体结果一致的反馈，不在每个服务器完成时分别震动。
     /// 本地库仍然先使用磁盘快照显示；Komga/OPDS 同步在后台增量更新书架。
     func syncStartupRemoteLibrariesAsync() async {
+        lastKomgaStartupSourceCount = 0
+        lastKomgaStartupFailureCount = 0
+        lastOPDSStartupSourceCount = 0
+        lastOPDSStartupFailureCount = 0
         await syncCoordinator.perform(scope: .startupRemote) { [weak self] requestedScope in
             guard let self else { return }
             await self.performLibrarySync(scope: requestedScope)
+        }
+
+        let outcome = StartupRemoteSyncOutcome.resolve(
+            expectedSourceCount: lastKomgaStartupSourceCount + lastOPDSStartupSourceCount,
+            failedSourceCount: lastKomgaStartupFailureCount + lastOPDSStartupFailureCount
+        )
+        if let hapticLevel = outcome.hapticLevel {
+            HapticManager.shared.play(hapticLevel)
         }
     }
 
@@ -585,6 +630,14 @@ final class ComicLibraryStore: ObservableObject {
 
     private func performKomgaSourcesSync(sourceIDs: Set<UUID>? = nil) async -> Int {
         let loadedSources = await KomgaProvider.loadSources().filter { $0.type == .komga }
+        let enabledSourceIDs = Set(
+            loadedSources
+                .filter { source in
+                    source.isEnabled && (sourceIDs?.contains(source.id) ?? true)
+                }
+                .map(\.id)
+        )
+        lastKomgaStartupSourceCount = enabledSourceIDs.count
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
         comics.removeAll { comic in
@@ -615,6 +668,8 @@ final class ComicLibraryStore: ObservableObject {
                 print("Komga 同步结果不完整，跳过缺失项清理: \(result.source.name)")
             }
         }
+        let successfulSourceCount = results.filter { $0.error == nil && $0.isAuthoritative }.count
+        lastKomgaStartupFailureCount = max(enabledSourceIDs.count - successfulSourceCount, 0)
         if changed {
             sortAndSave()
         }
@@ -655,6 +710,14 @@ final class ComicLibraryStore: ObservableObject {
 
     private func performOPDSSourcesSync(sourceIDs: Set<UUID>? = nil) async -> Int {
         let loadedSources = await KomgaProvider.loadSources().filter { $0.type == .opds }
+        let enabledSourceIDs = Set(
+            loadedSources
+                .filter { source in
+                    source.isEnabled && (sourceIDs?.contains(source.id) ?? true)
+                }
+                .map(\.id)
+        )
+        lastOPDSStartupSourceCount = enabledSourceIDs.count
         let disabledSourceIDs = Set(loadedSources.filter { !$0.isEnabled }.map(\.id))
         let oldDisabledCount = comics.count
         comics.removeAll { comic in
@@ -681,6 +744,8 @@ final class ComicLibraryStore: ObservableObject {
                 changed = true
             }
         }
+        let successfulSourceCount = results.filter { $0.error == nil && $0.isAuthoritative }.count
+        lastOPDSStartupFailureCount = max(enabledSourceIDs.count - successfulSourceCount, 0)
         if changed {
             sortAndSave()
         }

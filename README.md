@@ -14,7 +14,7 @@ MReader 的本地库以 iOS 文件 App 中用户选择的目录为唯一漫画�
 
 ## 启动体验
 
-MReader 使用静态 `LaunchScreen.storyboard` 与首帧 SwiftUI `LaunchOverlayView` 两阶段启动体验。两阶段共享 `LaunchBackground` 与从实际 AppIcon 提取的透明 `LaunchGlyph`，避免系统 launch screen 到应用首帧之间出现背景、比例或位置跳变。遮罩会保持至少 2 秒，并与本地书架快照加载并行；远程媒体库同步、封面维护和其它网络工作不阻塞首帧。启动完成后以约 0.2 秒淡出，并从视图层级移除。
+MReader 使用静态 `LaunchScreen.storyboard` 与首帧 SwiftUI `LaunchOverlayView` 两阶段启动体验。两阶段共享 `LaunchBackground` 与从实际 AppIcon 提取的透明 `LaunchGlyph`，避免系统 launch screen 到应用首帧之间出现背景、比例或位置跳变。启动文案固定为中文，不随系统语言切换。遮罩会保持至少 2 秒，并与本地书架快照加载并行；远程媒体库同步、封面维护和其它网络工作不阻塞首帧，启动远程刷新全部结束后只给一次与整体结果一致的触觉反馈。启动完成后以约 0.2 秒淡出，并从视图层级移除。
 
 ## 书架
 

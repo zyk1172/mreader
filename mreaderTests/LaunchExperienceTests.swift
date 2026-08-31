@@ -61,4 +61,27 @@ struct LaunchExperienceTests {
         #expect(LaunchExperienceMetrics.labelSpacing == 5)
         #expect(LaunchExperienceMetrics.fadeDuration == 0.20)
     }
+
+    @Test func launchCopyIsFixedChineseAcrossLaunchStages() {
+        #expect(LaunchExperienceCopy.brandLine == "MReader · 读懂每一页")
+        #expect(LaunchExperienceCopy.capabilitiesLine == "本地书架 · AI 翻译 · 沉浸阅读")
+    }
+
+    @Test(arguments: [
+        (0, 0, StartupRemoteSyncOutcome.noRemoteSources),
+        (2, 0, StartupRemoteSyncOutcome.success),
+        (2, 1, StartupRemoteSyncOutcome.partialFailure),
+        (2, 2, StartupRemoteSyncOutcome.failure),
+        (2, 9, StartupRemoteSyncOutcome.failure)
+    ])
+    func startupRemoteSyncFeedbackMatchesAggregateResult(
+        _ input: (Int, Int, StartupRemoteSyncOutcome)
+    ) {
+        #expect(
+            StartupRemoteSyncOutcome.resolve(
+                expectedSourceCount: input.0,
+                failedSourceCount: input.1
+            ) == input.2
+        )
+    }
 }
