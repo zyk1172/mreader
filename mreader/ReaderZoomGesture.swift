@@ -291,7 +291,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             panRecognizer.maximumNumberOfTouches = 1
             panRecognizer.delegate = self
             panRecognizer.cancelsTouchesInView = true
-            panRecognizer.require(toFail: pinchRecognizer)
+            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
             panRecognizer.addTarget(self, action: #selector(handlePan(_:)))
         }
 
@@ -311,6 +311,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
+            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
         }
 
         func install(on view: ReaderPageInteractionHostView) {
@@ -350,6 +351,14 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             return hypot(velocity.x, velocity.y) > 4
         }
 
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            (gestureRecognizer === pinchRecognizer && otherGestureRecognizer === panRecognizer)
+                || (gestureRecognizer === panRecognizer && otherGestureRecognizer === pinchRecognizer)
+        }
+
         @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
             guard let view = recognizer.view else { return }
             let viewport = effectiveViewportSize(for: view)
@@ -369,6 +378,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 )
                 currentScale = transform.scale
                 currentOffset = transform.offset
+                updatePanAvailability()
                 onTransformChanged(transform)
             case .ended:
                 finishPinch()
@@ -391,7 +401,11 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 guard let panBase, pinchRecognizer.state != .began, pinchRecognizer.state != .changed else {
                     return
                 }
-                let translationPoint = recognizer.translation(in: view)
+                // The host lives in the unscaled viewport subtree, but a
+                // containing reader transition can still transform that
+                // subtree. Window coordinates keep the pan delta in screen
+                // points instead of returning a compressed local delta.
+                let translationPoint = recognizer.translation(in: view.window ?? view)
                 let translation = CGSize(
                     width: translationPoint.x,
                     height: translationPoint.y
@@ -435,6 +449,10 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             return view.bounds.size
         }
 
+        private func updatePanAvailability() {
+            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
+        }
+
         private func connectDismissRecognizer(to view: UIView) {
             guard let window = view.window,
                   let dismissRecognizer = window.gestureRecognizers?.first(where: {
@@ -443,7 +461,6 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 return
             }
             dismissRecognizer.require(toFail: pinchRecognizer)
-            dismissRecognizer.require(toFail: panRecognizer)
         }
 
     }

@@ -41,6 +41,17 @@ struct ReaderZoomGestureTests {
         #expect(result.offset == CGSize(width: 200, height: 600))
     }
 
+    @Test func zoomedPanUsesViewportCoordinates() {
+        let result = ReaderZoomMath.pannedTransform(
+            from: ReaderZoomTransform(scale: 3, offset: .zero),
+            translation: CGSize(width: 100, height: 100),
+            viewportSize: CGSize(width: 400, height: 400),
+            contentSize: CGSize(width: 400, height: 800)
+        )
+
+        #expect(result.offset == CGSize(width: 100, height: 100))
+    }
+
     @Test func settlingNearOneXResetsScaleAndOffset() {
         let result = ReaderZoomMath.settledTransform(
             ReaderZoomTransform(scale: 1.015, offset: CGSize(width: 20, height: -20)),
@@ -104,5 +115,122 @@ struct ReaderZoomGestureTests {
         #expect(host.isMultipleTouchEnabled)
         #expect(host.gestureRecognizers?.contains(where: { $0 === coordinator.pinchRecognizer }) == true)
         #expect(host.gestureRecognizers?.contains(where: { $0 === coordinator.panRecognizer }) == true)
+    }
+
+    @MainActor
+    @Test func zoomPanIsEnabledOnlyWhenPageIsZoomedAndDismissDoesNotWaitForIt() {
+        let zoomCoordinator = ReaderZoomGestureView.Coordinator(
+            scale: 1,
+            offset: .zero,
+            viewportSize: CGSize(width: 400, height: 800),
+            contentSize: CGSize(width: 400, height: 800),
+            maximumScale: ReaderZoomMath.defaultMaximumScale,
+            onTransformChanged: { _ in },
+            onGestureEnded: {}
+        )
+        #expect(!zoomCoordinator.panRecognizer.isEnabled)
+
+        zoomCoordinator.update(
+            scale: 3,
+            offset: .zero,
+            viewportSize: CGSize(width: 400, height: 800),
+            contentSize: CGSize(width: 400, height: 800),
+            maximumScale: ReaderZoomMath.defaultMaximumScale,
+            onTransformChanged: { _ in },
+            onGestureEnded: {}
+        )
+        #expect(zoomCoordinator.panRecognizer.isEnabled)
+
+        zoomCoordinator.update(
+            scale: 1,
+            offset: .zero,
+            viewportSize: CGSize(width: 400, height: 800),
+            contentSize: CGSize(width: 400, height: 800),
+            maximumScale: ReaderZoomMath.defaultMaximumScale,
+            onTransformChanged: { _ in },
+            onGestureEnded: {}
+        )
+        #expect(!zoomCoordinator.panRecognizer.isEnabled)
+
+        let dismissCoordinator = ReaderDismissGestureView.Coordinator(
+            isEnabled: true,
+            canBeginDismiss: { true },
+            onProgress: { _ in },
+            onCancel: {},
+            onCommit: {}
+        )
+        #expect(dismissCoordinator.gestureRecognizer(
+            dismissCoordinator.recognizer,
+            shouldRequireFailureOf: zoomCoordinator.pinchRecognizer
+        ))
+        #expect(!dismissCoordinator.gestureRecognizer(
+            dismissCoordinator.recognizer,
+            shouldRequireFailureOf: zoomCoordinator.panRecognizer
+        ))
+
+        let scrollView = UIScrollView()
+        #expect(dismissCoordinator.gestureRecognizer(
+            dismissCoordinator.recognizer,
+            shouldRecognizeSimultaneouslyWith: scrollView.panGestureRecognizer
+        ))
+
+        let disabledDismissCoordinator = ReaderDismissGestureView.Coordinator(
+            isEnabled: false,
+            canBeginDismiss: { true },
+            onProgress: { _ in },
+            onCancel: {},
+            onCommit: {}
+        )
+        #expect(!disabledDismissCoordinator.recognizer.isEnabled)
+    }
+
+    @MainActor
+    @Test func readerGestureWiringAttachesToThePageHost() {
+        let windowScene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first
+        #expect(windowScene != nil)
+        guard let windowScene else { return }
+        let window = UIWindow(windowScene: windowScene)
+        window.frame = CGRect(x: 0, y: 0, width: 400, height: 800)
+        let host = ReaderZoomGestureView.ReaderPageInteractionHostView(
+            frame: window.bounds
+        )
+        window.addSubview(host)
+
+        let zoomCoordinator = ReaderZoomGestureView.Coordinator(
+            scale: 1,
+            offset: .zero,
+            viewportSize: window.bounds.size,
+            contentSize: window.bounds.size,
+            maximumScale: ReaderZoomMath.defaultMaximumScale,
+            onTransformChanged: { _ in },
+            onGestureEnded: {}
+        )
+        let dismissCoordinator = ReaderDismissGestureView.Coordinator(
+            isEnabled: true,
+            canBeginDismiss: { true },
+            onProgress: { _ in },
+            onCancel: {},
+            onCommit: {}
+        )
+
+        dismissCoordinator.attach(to: window)
+        zoomCoordinator.install(on: host)
+
+        #expect(window.gestureRecognizers?.contains(where: { $0 === dismissCoordinator.recognizer }) == true)
+        #expect(host.gestureRecognizers?.contains(where: { $0 === zoomCoordinator.pinchRecognizer }) == true)
+        #expect(host.gestureRecognizers?.contains(where: { $0 === zoomCoordinator.panRecognizer }) == true)
+        #expect(dismissCoordinator.gestureRecognizer(
+            dismissCoordinator.recognizer,
+            shouldRequireFailureOf: zoomCoordinator.pinchRecognizer
+        ))
+        #expect(!dismissCoordinator.gestureRecognizer(
+            dismissCoordinator.recognizer,
+            shouldRequireFailureOf: zoomCoordinator.panRecognizer
+        ))
+
+        zoomCoordinator.uninstall()
+        dismissCoordinator.detach()
     }
 }

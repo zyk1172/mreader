@@ -709,6 +709,7 @@ struct ReaderView: View {
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
     @State private var activeTranslationCount = 0
+    @State private var isReaderZoomed = false
     private var isAITranslationInProgress: Bool { activeTranslationCount > 0 }
     @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
@@ -728,7 +729,11 @@ struct ReaderView: View {
     }
 
     private var isReaderDismissEnabled: Bool {
-        !showControls && !showComicSettings && !isBurnInProtectionLocked && !isDismissAnimating
+        !showControls
+            && !showComicSettings
+            && !isBurnInProtectionLocked
+            && !isDismissAnimating
+            && !isReaderZoomed
     }
 
     private var canBeginReaderDismiss: Bool {
@@ -841,6 +846,9 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -861,6 +869,9 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -881,6 +892,9 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -902,6 +916,9 @@ struct ReaderView: View {
                     scrollJumpRequestID: scrollJumpRequestID,
                     scrollProgress: comic.scrollProgress,
                     scrollPageProgress: comic.scrollPageProgress,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
                     onScrollPositionChange: saveScrollPosition,
                     onScrollAtTopChange: { isAtTop in
                         isContinuousReaderAtTop = isAtTop
@@ -1147,6 +1164,7 @@ struct ReaderView: View {
                 return
             }
             if newValue != oldValue {
+                isReaderZoomed = false
                 pageTurnDirection = newValue > oldValue ? 1 : -1
                 recordReadingActivity()
                 recordReaderInteraction()
@@ -2573,6 +2591,7 @@ struct ContinuousScrollReader: View {
     let scrollJumpRequestID: UUID
     let scrollProgress: Double
     let scrollPageProgress: Double
+    let onZoomStateChange: (Bool) -> Void
     let onScrollPositionChange: (Int, Double, Double) -> Void
     let onScrollAtTopChange: (Bool) -> Void
     let onTranslationStateChange: (Bool) -> Void
@@ -2622,6 +2641,7 @@ struct ContinuousScrollReader: View {
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
+                                onZoomStateChange: page.index == currentPageIndex ? onZoomStateChange : { _ in },
                                 onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                                 onPreviousPage: { stepScroll(-1) },
                                 onNextPage: { stepScroll(1) },
@@ -2889,6 +2909,7 @@ struct GuidedPanelReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2929,6 +2950,7 @@ struct GuidedPanelReader: View {
                         imageFitMode: .fitScreen,
                         isPageTapGestureEnabled: false,
                         isLongPressTranslationEnabled: areControlsVisible,
+                        onZoomStateChange: onZoomStateChange,
                         onTranslationStateChange: onTranslationStateChange,
                         onPreviousPage: previousPanel,
                         onNextPage: nextPanel,
@@ -3059,6 +3081,7 @@ struct AnimatedPageReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -3215,6 +3238,7 @@ struct AnimatedPageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: previousPage,
             onNextPage: nextPage,
@@ -3257,6 +3281,7 @@ struct DoublePageReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -3331,6 +3356,7 @@ struct DoublePageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: {},
             onNextPage: {},
@@ -3612,6 +3638,7 @@ struct LocalImageView: View {
     var showsLoadingIndicator: Bool = true
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
+    var onZoomStateChange: (Bool) -> Void = { _ in }
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
@@ -3687,35 +3714,38 @@ struct LocalImageView: View {
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if let uiImage = uiImage {
-                // 1. 底图与翻译文本覆盖层
-                fittedImage(uiImage)
-                    // 核心逻辑：直接在图片上层按比例渲染文本气泡
-                    .overlay(
-                        GeometryReader { geo in
-                            ZStack {
-                                translationOverlay(in: geo.size)
-                                ocrMagnificationOverlay(in: geo.size)
-                                ocrDebugOverlay(in: geo.size)
+                ZStack {
+                    // Keep the image and its OCR/translation overlays in the
+                    // zoomed content subtree. The interaction host below is
+                    // deliberately a sibling so its gesture coordinates stay
+                    // in the unscaled viewport space.
+                    fittedImage(uiImage)
+                        .overlay(
+                            GeometryReader { geo in
+                                ZStack {
+                                    translationOverlay(in: geo.size)
+                                    ocrMagnificationOverlay(in: geo.size)
+                                    ocrDebugOverlay(in: geo.size)
+                                }
                             }
-                        }
-                    )
-                    .overlay {
-                        ReaderZoomGestureView(
-                            scale: scale,
-                            offset: offset,
-                            viewportSize: viewportSize,
-                            contentSize: zoomContentSize,
-                            maximumScale: ReaderZoomMath.defaultMaximumScale,
-                            onTransformChanged: applyZoomTransform,
-                            onGestureEnded: settleZoomTransform
                         )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                    .scaleEffect(scale)
-                    .offset(offset)
-                    .simultaneousGesture(tapPageGesture)
-                    .simultaneousGesture(longPressTranslationGesture)
-                    .frame(height: displayHeight(for: uiImage))
+                        .scaleEffect(scale)
+                        .offset(offset)
+
+                    ReaderZoomGestureView(
+                        scale: scale,
+                        offset: offset,
+                        viewportSize: viewportSize,
+                        contentSize: zoomContentSize,
+                        maximumScale: ReaderZoomMath.defaultMaximumScale,
+                        onTransformChanged: applyZoomTransform,
+                        onGestureEnded: settleZoomTransform
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .simultaneousGesture(tapPageGesture)
+                .simultaneousGesture(longPressTranslationGesture)
+                .frame(height: displayHeight(for: uiImage))
 
             } else if isLoadingImage {
                 if showsLoadingIndicator {
@@ -4505,6 +4535,7 @@ struct LocalImageView: View {
                 translationErrorMessage = nil
                 recognizedPipelineCache = nil
                 recognizedPipelineCacheKey = nil
+                onZoomStateChange(false)
                 scale = 1
                 offset = .zero
                 pendingSingleTapWorkItem?.cancel()
@@ -4537,6 +4568,7 @@ struct LocalImageView: View {
             translationErrorMessage = nil
             recognizedPipelineCache = nil
             recognizedPipelineCacheKey = nil
+            onZoomStateChange(false)
             scale = 1
             offset = .zero
             pendingSingleTapWorkItem?.cancel()
@@ -4638,6 +4670,7 @@ struct LocalImageView: View {
     }
 
     private func applyZoomTransform(_ transform: ReaderZoomTransform) {
+        publishZoomStateIfNeeded(for: transform.scale)
         scale = transform.scale
         offset = transform.offset
     }
@@ -4650,10 +4683,18 @@ struct LocalImageView: View {
             maximumScale: ReaderZoomMath.defaultMaximumScale
         )
         guard settled != ReaderZoomTransform(scale: scale, offset: offset) else { return }
+        publishZoomStateIfNeeded(for: settled.scale)
         withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
             scale = settled.scale
             offset = settled.offset
         }
+    }
+
+    private func publishZoomStateIfNeeded(for newScale: CGFloat) {
+        let wasZoomed = scale > ReaderZoomMath.settleThreshold
+        let isZoomed = newScale > ReaderZoomMath.settleThreshold
+        guard wasZoomed != isZoomed else { return }
+        onZoomStateChange(isZoomed)
     }
 
     private var tapPageGesture: some Gesture {

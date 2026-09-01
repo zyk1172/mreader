@@ -333,6 +333,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
 
     func updateUIView(_ uiView: InstallView, context: Context) {
         context.coordinator.isEnabled = isEnabled
+        context.coordinator.recognizer.isEnabled = isEnabled
         context.coordinator.canBeginDismiss = canBeginDismiss
         context.coordinator.onProgress = onProgress
         context.coordinator.onCancel = onCancel
@@ -370,6 +371,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             super.init()
 
             recognizer.cancelsTouchesInView = true
+            recognizer.isEnabled = isEnabled
             recognizer.delegate = self
             recognizer.addTarget(self, action: #selector(handleDismiss(_:)))
         }
@@ -408,8 +410,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
             gestureRecognizer === recognizer
-                && (otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
-                    || otherGestureRecognizer is ReaderZoomPanGestureRecognizer)
+                && otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
         }
 
         func gestureRecognizer(
@@ -422,6 +423,22 @@ struct ReaderDismissGestureView: UIViewRepresentable {
                 return false
             }
             return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            guard gestureRecognizer === recognizer,
+                  let scrollView = otherGestureRecognizer.view as? UIScrollView else {
+                return false
+            }
+            // In continuous reading, UIScrollView's pan begins before the
+            // window-level dismiss recognizer reaches its 28pt activation
+            // distance. Let both recognizers observe the same touch sequence;
+            // the dismiss state machine still only takes ownership at the
+            // explicit downward activation threshold.
+            return otherGestureRecognizer === scrollView.panGestureRecognizer
         }
 
         @objc private func handleDismiss(_ recognizer: UIGestureRecognizer) {
@@ -497,8 +514,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
 
         private func connectZoomFailureRelationships(in view: UIView) {
             for zoomRecognizer in view.gestureRecognizers ?? [] {
-                if zoomRecognizer is ReaderZoomPinchGestureRecognizer
-                    || zoomRecognizer is ReaderZoomPanGestureRecognizer {
+                if zoomRecognizer is ReaderZoomPinchGestureRecognizer {
                     recognizer.require(toFail: zoomRecognizer)
                 }
             }
