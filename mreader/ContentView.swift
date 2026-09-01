@@ -235,7 +235,7 @@ private struct BackupPasswordRequest: Identifiable {
 }
 
 struct ContentView: View {
-    @StateObject private var library = ComicLibraryStore()
+    @StateObject private var library: ComicLibraryStore
     @StateObject private var webServer = LocalWebServer()
     @ObservedObject private var readingActivity = ReadingActivityStore.shared
     @ObservedObject private var backgroundTasks = BackgroundTaskCenter.shared
@@ -299,6 +299,10 @@ struct ContentView: View {
     @Namespace private var seriesAnimationNamespace
 
     @State private var renamingSeries: ComicSeries?
+
+    init(library: ComicLibraryStore? = nil) {
+        _library = StateObject(wrappedValue: library ?? ComicLibraryStore())
+    }
 
     private var hasAnyLibrarySource: Bool {
         hasLibraryRoot || mediaSources.contains { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }

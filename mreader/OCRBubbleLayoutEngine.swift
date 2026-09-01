@@ -47,6 +47,14 @@ nonisolated enum TranslationSurfacePolicy {
     }
 }
 
+/// The translation overlay deliberately renders every surface before every
+/// glyph. This remains true even when two layout items overlap (for example
+/// while an offline result is being shown).
+nonisolated enum TranslationSurfaceLayering {
+    static let surfaceZIndex: Double = 0
+    static let textZIndex: Double = 1
+}
+
 /// 可见译文卡片的几何来源。显式传入它，避免调用方漏传参数而意外把
 /// measured-text 译文当成需要填满 OCR 框的 detected bubble。
 nonisolated enum TranslationLayoutStrategy: Sendable, Equatable {

@@ -235,6 +235,10 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
+    @Test func translationTextPassIsAboveEverySurfacePass() {
+        #expect(TranslationSurfaceLayering.surfaceZIndex < TranslationSurfaceLayering.textZIndex)
+    }
+
     @Test func measuredTextCardPaddingEqualsHalfFinalLineHeight() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
         let text = "Hello there"

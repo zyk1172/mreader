@@ -709,6 +709,7 @@ struct ReaderView: View {
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
     @State private var activeTranslationCount = 0
+    @State private var isReaderZoomed = false
     private var isAITranslationInProgress: Bool { activeTranslationCount > 0 }
     @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
@@ -724,6 +725,14 @@ struct ReaderView: View {
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
+    }
+
+    private var isReaderDismissEnabled: Bool {
+        !showControls
+            && !showComicSettings
+            && !isBurnInProtectionLocked
+            && !isDismissAnimating
+            && !isReaderZoomed
     }
 
     private var readingDirection: ReadingDirection {
@@ -824,6 +833,19 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -844,6 +866,19 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -864,6 +899,19 @@ struct ReaderView: View {
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -885,7 +933,20 @@ struct ReaderView: View {
                     scrollJumpRequestID: scrollJumpRequestID,
                     scrollProgress: comic.scrollProgress,
                     scrollPageProgress: comic.scrollPageProgress,
+                    onZoomStateChange: { isZoomed in
+                        isReaderZoomed = isZoomed
+                    },
                     onScrollPositionChange: saveScrollPosition,
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -907,23 +968,9 @@ struct ReaderView: View {
                     .transition(.opacity)
             }
 
-            TwoFingerSwipeDownDismissView(
-                onProgress: { progress in
-                    guard !isDismissAnimating else { return }
-                    dismissGestureProgress = progress
-                    recordReaderInteraction()
-                },
-                onCancel: {
-                    guard !isDismissAnimating else { return }
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                        dismissGestureProgress = 0
-                    }
-                },
-                onSwipe: completeTwoFingerDismiss
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea()
-            .background(ScrollsToTopDisabledView())
+            ScrollsToTopDisabledView()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
 
             ReaderControlsDoubleTapOverlay(isEnabled: !showComicSettings) {
                 toggleControls()
@@ -1039,9 +1086,9 @@ struct ReaderView: View {
                     .zIndex(100)
             }
         }
-        .scaleEffect(max(0.72, 1 - dismissGestureProgress * 0.22))
-        .offset(y: dismissGestureProgress * 190)
-        .opacity(max(0.08, 1 - dismissGestureProgress * 0.88))
+        .scaleEffect(max(ReaderDismissGestureMetrics.minimumScale, 1 - dismissGestureProgress * (1 - ReaderDismissGestureMetrics.minimumScale)))
+        .offset(y: dismissGestureProgress * ReaderDismissGestureMetrics.maximumOffset)
+        .opacity(max(ReaderDismissGestureMetrics.minimumOpacity, 1 - dismissGestureProgress * (1 - ReaderDismissGestureMetrics.minimumOpacity)))
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle("")
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
@@ -1125,6 +1172,7 @@ struct ReaderView: View {
                 return
             }
             if newValue != oldValue {
+                isReaderZoomed = false
                 pageTurnDirection = newValue > oldValue ? 1 : -1
                 recordReadingActivity()
                 recordReaderInteraction()
@@ -2022,6 +2070,19 @@ struct ReaderView: View {
         lastReaderInteractionAt = Date()
     }
 
+    private func updateReaderDismissProgress(_ progress: CGFloat) {
+        guard !isDismissAnimating else { return }
+        dismissGestureProgress = min(max(progress, 0), 1)
+        recordReaderInteraction()
+    }
+
+    private func cancelReaderDismiss() {
+        guard !isDismissAnimating else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            dismissGestureProgress = 0
+        }
+    }
+
     private func checkBurnInProtection(now: Date = Date()) {
         guard isBurnInProtectionEnabled,
               !isBurnInProtectionLocked,
@@ -2033,17 +2094,17 @@ struct ReaderView: View {
         isBurnInProtectionLocked = true
     }
 
-    private func completeTwoFingerDismiss() {
+    private func completeDismiss() {
         guard !isDismissAnimating else { return }
         isDismissAnimating = true
-        HapticManager.shared.play(.medium)
         recordReadingActivity()
-        persistReadingProgress(pageIndex: currentPageIndex, reason: "twoFingerDismiss", force: true)
-        withAnimation(.easeIn(duration: 0.24)) {
+        persistReadingProgress(pageIndex: currentPageIndex, reason: "singleFingerDismiss", force: true)
+        withAnimation(.easeIn(duration: 0.20)) {
             dismissGestureProgress = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
             onClose()
+            HapticManager.shared.play(.medium)
         }
     }
 
@@ -2320,7 +2381,7 @@ private struct ReaderPageTapRecognizer: UIViewRepresentable {
     }
 }
 
-private enum ReaderGestureTouchFilter {
+enum ReaderGestureTouchFilter {
     static func isInteractiveTouch(_ touch: UITouch) -> Bool {
         var view = touch.view
         while let current = view {
@@ -2397,7 +2458,7 @@ private struct ScrollViewportSizePreferenceKey: PreferenceKey {
 
 private struct ScrollViewAccessor: UIViewRepresentable {
     let onResolve: (UIScrollView) -> Void
-    let onScroll: () -> Void
+    let onScroll: (UIScrollView) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onScroll: onScroll)
@@ -2406,9 +2467,9 @@ private struct ScrollViewAccessor: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         DispatchQueue.main.async {
-                if let scrollView = view.enclosingScrollView {
-                    context.coordinator.attach(to: scrollView)
-                    onResolve(scrollView)
+            if let scrollView = view.enclosingScrollView {
+                context.coordinator.attach(to: scrollView)
+                onResolve(scrollView)
             }
         }
         return view
@@ -2424,33 +2485,61 @@ private struct ScrollViewAccessor: UIViewRepresentable {
         }
     }
 
-    final class Coordinator {
-        var onScroll: () -> Void
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject {
+        var onScroll: (UIScrollView) -> Void
         weak var scrollView: UIScrollView?
         private var contentOffsetObservation: NSKeyValueObservation?
 
-        init(onScroll: @escaping () -> Void) {
+        init(onScroll: @escaping (UIScrollView) -> Void) {
             self.onScroll = onScroll
         }
 
         func attach(to scrollView: UIScrollView) {
             scrollView.scrollsToTop = false
             guard self.scrollView !== scrollView else { return }
+            detach()
             self.scrollView = scrollView
+            scrollView.panGestureRecognizer.addTarget(self, action: #selector(handlePan(_:)))
             contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
                 guard let self else { return }
                 // UIScrollView 的 contentOffset 变化只发生在主线程；
                 // assumeIsolated 让编译器认可这条路径并保留运行时校验。
                 if Thread.isMainThread {
                     MainActor.assumeIsolated {
-                        self.onScroll()
+                        self.onScroll(scrollView)
                     }
                 } else {
                     DispatchQueue.main.async {
-                        self.onScroll()
+                        self.onScroll(scrollView)
                     }
                 }
             }
+        }
+
+        @objc private func handlePan(_ gestureRecognizer: UIPanGestureRecognizer) {
+            guard let scrollView = gestureRecognizer.view as? UIScrollView else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    onScroll(scrollView)
+                }
+            } else {
+                DispatchQueue.main.async { [weak self, weak scrollView] in
+                    guard let self, let scrollView else { return }
+                    self.onScroll(scrollView)
+                }
+            }
+        }
+
+        fileprivate func detach() {
+            if let scrollView {
+                scrollView.panGestureRecognizer.removeTarget(self, action: #selector(handlePan(_:)))
+            }
+            contentOffsetObservation = nil
+            scrollView = nil
         }
     }
 }
@@ -2551,7 +2640,12 @@ struct ContinuousScrollReader: View {
     let scrollJumpRequestID: UUID
     let scrollProgress: Double
     let scrollPageProgress: Double
+    let onZoomStateChange: (Bool) -> Void
     let onScrollPositionChange: (Int, Double, Double) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2568,6 +2662,8 @@ struct ContinuousScrollReader: View {
     @State private var lastStableContentOffsetY: CGFloat = 0
     @State private var allowTopOffsetUntil = Date.distantPast
     @State private var lastPageFrameCommitDate = Date.distantPast
+    @State private var continuousDismissState = ReaderContinuousDismissStateMachine()
+    @State private var lastUserPanInteractionDate = Date.distantPast
 
     var body: some View {
         GeometryReader { viewportProxy in
@@ -2599,6 +2695,7 @@ struct ContinuousScrollReader: View {
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
+                                onZoomStateChange: page.index == currentPageIndex ? onZoomStateChange : { _ in },
                                 onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                                 onPreviousPage: { stepScroll(-1) },
                                 onNextPage: { stepScroll(1) },
@@ -2636,7 +2733,8 @@ struct ContinuousScrollReader: View {
                             scrollView = resolvedScrollView
                         }
                     },
-                    onScroll: {
+                    onScroll: { resolvedScrollView in
+                        handleContinuousScrollEvent(using: resolvedScrollView)
                         scheduleVisiblePageUpdate(delay: 0.04)
                     }
                 ))
@@ -2672,6 +2770,10 @@ struct ContinuousScrollReader: View {
                 .onDisappear {
                     visiblePageUpdateWorkItem?.cancel()
                     visiblePageUpdateWorkItem = nil
+                    if continuousDismissState.state == .dismissing {
+                        onDismissCancel()
+                    }
+                    continuousDismissState.reset()
                     updateCurrentPageFromVisibleFrames()
                 }
             }
@@ -2695,6 +2797,75 @@ struct ContinuousScrollReader: View {
             scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: false)
         } completion: { _ in
             updateCurrentPageFromVisibleFrames()
+        }
+    }
+
+    private func handleContinuousScrollEvent(using scrollView: UIScrollView) {
+        let panState = scrollView.panGestureRecognizer.state
+        let minimumOffsetY = -scrollView.adjustedContentInset.top
+        let overscroll = max(minimumOffsetY - scrollView.contentOffset.y, 0)
+        let height = max(viewportSize.height, scrollView.bounds.height, 1)
+
+        switch panState {
+        case .began:
+            continuousDismissState.beginPan()
+            lastUserPanInteractionDate = Date()
+            applyContinuousDismissOverscroll(
+                overscroll,
+                viewportHeight: height,
+                previousState: continuousDismissState.state
+            )
+        case .changed:
+            lastUserPanInteractionDate = Date()
+            let previousState = continuousDismissState.state
+            applyContinuousDismissOverscroll(
+                overscroll,
+                viewportHeight: height,
+                previousState: previousState
+            )
+        case .ended:
+            let previousState = continuousDismissState.state
+            let shouldCommit = continuousDismissState.finish(
+                overscroll: overscroll,
+                viewportHeight: height
+            )
+            lastUserPanInteractionDate = Date()
+            guard previousState == .dismissing else { return }
+            if shouldCommit {
+                onDismissCommit()
+            } else {
+                onDismissCancel()
+            }
+        case .cancelled, .failed:
+            let previousState = continuousDismissState.state
+            continuousDismissState.reset()
+            lastUserPanInteractionDate = Date()
+            if previousState == .dismissing {
+                onDismissCancel()
+            }
+        default:
+            break
+        }
+    }
+
+    private func applyContinuousDismissOverscroll(
+        _ overscroll: CGFloat,
+        viewportHeight: CGFloat,
+        previousState: ReaderContinuousDismissState
+    ) {
+        let state = continuousDismissState.receiveOverscroll(
+            overscroll,
+            isDismissEnabled: isDismissEnabled
+        )
+        if state == .dismissing {
+            onDismissProgress(
+                ReaderDismissMath.progress(
+                    for: overscroll,
+                    viewportHeight: viewportHeight
+                )
+            )
+        } else if previousState == .dismissing, state == .cancelled {
+            onDismissCancel()
         }
     }
 
@@ -2830,6 +3001,9 @@ struct ContinuousScrollReader: View {
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
         guard let scrollView, currentPageIndex > 0 else { return false }
         guard Date() > allowTopOffsetUntil else { return false }
+        // A user drag is allowed to reach the real top and continue into
+        // bounce overscroll; only restore top jumps that were not user-driven.
+        guard Date().timeIntervalSince(lastUserPanInteractionDate) >= 0.4 else { return false }
         let minOffsetY = -scrollView.adjustedContentInset.top
         let currentY = scrollView.contentOffset.y
         let hadMeaningfulPosition = lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
@@ -2854,6 +3028,11 @@ struct GuidedPanelReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2894,6 +3073,19 @@ struct GuidedPanelReader: View {
                         imageFitMode: .fitScreen,
                         isPageTapGestureEnabled: false,
                         isLongPressTranslationEnabled: areControlsVisible,
+                        pagePanConfiguration: ReaderPagePanConfiguration(
+                            mode: .dismissOnly,
+                            isDismissEnabled: isDismissEnabled,
+                            pageExtent: proxy.size.width,
+                            viewportHeight: proxy.size.height,
+                            isRTL: false,
+                            onPageDragChanged: { _ in },
+                            onPageTurn: { _ in },
+                            onDismissProgress: onDismissProgress,
+                            onDismissCancel: onDismissCancel,
+                            onDismissCommit: onDismissCommit
+                        ),
+                        onZoomStateChange: onZoomStateChange,
                         onTranslationStateChange: onTranslationStateChange,
                         onPreviousPage: previousPanel,
                         onNextPage: nextPanel,
@@ -2912,19 +3104,19 @@ struct GuidedPanelReader: View {
                     ProgressView().tint(.white).allowsHitTesting(false)
                 }
 
-                if !areControlsVisible {
-                    HStack(spacing: 0) {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { previousPanel() }
-                        Color.clear.frame(width: proxy.size.width * 0.30).allowsHitTesting(false)
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { nextPanel() }
-                    }
-                }
             }
             .clipped()
+            .simultaneousGesture(
+                SpatialTapGesture(count: 1, coordinateSpace: .local)
+                    .onEnded { value in
+                        guard !areControlsVisible else { return }
+                        if value.location.x < proxy.size.width * 0.35 {
+                            previousPanel()
+                        } else if value.location.x > proxy.size.width * 0.65 {
+                            nextPanel()
+                        }
+                    }
+            )
         }
     }
 
@@ -3024,12 +3216,17 @@ struct AnimatedPageReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @GestureState private var dragOffset: CGFloat = 0
+    @State private var pageDragOffset: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
@@ -3039,17 +3236,17 @@ struct AnimatedPageReader: View {
                 if pageTurnAnimation == .curl,
                    let revealedPageIndex = revealedPageIndex(isRTL: isRTL),
                    pages.indices.contains(revealedPageIndex) {
-                    pageView(index: revealedPageIndex)
+                    pageView(index: revealedPageIndex, viewportSize: geo.size, isInteractive: false)
                         .id("revealed-\(pages[revealedPageIndex].id)")
                 }
 
                 if pages.indices.contains(currentPageIndex) {
-                    pageView(index: currentPageIndex)
+                    pageView(index: currentPageIndex, viewportSize: geo.size, isInteractive: true)
                         .id(pages[currentPageIndex].id)
                         .transition(transition)
                         .modifier(
                             InteractiveBookPageCurlModifier(
-                                dragOffset: pageTurnAnimation == .curl ? dragOffset : 0,
+                                dragOffset: pageTurnAnimation == .curl ? pageDragOffset : 0,
                                 pageExtent: readingMode == .verticalPage ? geo.size.height : geo.size.width,
                                 isVertical: readingMode == .verticalPage
                             )
@@ -3058,24 +3255,6 @@ struct AnimatedPageReader: View {
                         .animation(pageChangeAnimation, value: currentPageIndex)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 28)
-                    .updating($dragOffset) { value, state, _ in
-                        state = readingMode == .verticalPage ? value.translation.height : value.translation.width
-                    }
-                    .onEnded { value in
-                        let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
-                        let threshold = max(axisLength * 0.2, 72)
-                        let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
-                        let logicalDelta = readingMode == .verticalPage ? rawDelta : (isRTL ? rawDelta : -rawDelta)
-                        if logicalDelta > threshold {
-                            nextPage()
-                        } else if logicalDelta < -threshold {
-                            previousPage()
-                        }
-                    }
-            )
         }
     }
 
@@ -3142,21 +3321,25 @@ struct AnimatedPageReader: View {
     private var pageOffset: CGSize {
         guard pageTurnAnimation == .slide else { return .zero }
         if readingMode == .verticalPage {
-            return CGSize(width: 0, height: dragOffset * 0.18)
+            return CGSize(width: 0, height: pageDragOffset * 0.18)
         }
-        return CGSize(width: dragOffset * 0.18, height: 0)
+        return CGSize(width: pageDragOffset * 0.18, height: 0)
     }
 
     private func revealedPageIndex(isRTL: Bool) -> Int? {
-        guard abs(dragOffset) > 2 else { return nil }
+        guard abs(pageDragOffset) > 2 else { return nil }
         if readingMode == .verticalPage {
-            return currentPageIndex + (dragOffset < 0 ? 1 : -1)
+            return currentPageIndex + (pageDragOffset < 0 ? 1 : -1)
         }
-        let isForwardDrag = isRTL ? dragOffset > 0 : dragOffset < 0
+        let isForwardDrag = isRTL ? pageDragOffset > 0 : pageDragOffset < 0
         return currentPageIndex + (isForwardDrag ? 1 : -1)
     }
 
-    private func pageView(index: Int) -> some View {
+    private func pageView(
+        index: Int,
+        viewportSize: CGSize,
+        isInteractive: Bool
+    ) -> some View {
         LocalImageView(
             url: pages[index].url,
             comic: comic,
@@ -3180,6 +3363,37 @@ struct AnimatedPageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            pagePanConfiguration: isInteractive
+                ? ReaderPagePanConfiguration(
+                    mode: readingMode == .verticalPage
+                        ? .verticalPage(isFirstPage: currentPageIndex == 0)
+                        : .horizontalPage,
+                    isDismissEnabled: isDismissEnabled,
+                    pageExtent: readingMode == .verticalPage ? viewportSize.height : viewportSize.width,
+                    viewportHeight: viewportSize.height,
+                    isRTL: readingDirection == .rightToLeft,
+                    onPageDragChanged: { pageDragOffset = $0 },
+                    onPageTurn: { direction in
+                        pageDragOffset = 0
+                        switch direction {
+                        case .previous:
+                            previousPage()
+                        case .next:
+                            nextPage()
+                        }
+                    },
+                    onDismissProgress: onDismissProgress,
+                    onDismissCancel: {
+                        pageDragOffset = 0
+                        onDismissCancel()
+                    },
+                    onDismissCommit: {
+                        pageDragOffset = 0
+                        onDismissCommit()
+                    }
+                )
+                : nil,
+            onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: previousPage,
             onNextPage: nextPage,
@@ -3222,12 +3436,17 @@ struct DoublePageReader: View {
     let ocrMagnifyRequestID: UUID
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
+    let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @GestureState private var dragOffset: CGFloat = 0
+    @State private var pageDragOffset: CGFloat = 0
 
     private var leftPageIndex: Int {
         currentPageIndex - currentPageIndex % 2
@@ -3244,7 +3463,7 @@ struct DoublePageReader: View {
                 let pair = isRTL ? [rightPageIndex, leftPageIndex] : [leftPageIndex, rightPageIndex]
                 ForEach(pair, id: \.self) { index in
                     if pages.indices.contains(index) {
-                        pageView(index: index)
+                        pageView(index: index, viewportSize: geo.size)
                             .frame(width: geo.size.width / 2, height: geo.size.height)
                     } else {
                         Color.black.frame(width: geo.size.width / 2, height: geo.size.height)
@@ -3253,28 +3472,12 @@ struct DoublePageReader: View {
             }
             .id(leftPageIndex)
             .transition(doublePageTransition)
-            .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? dragOffset * 0.16 : 0)
+            .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? pageDragOffset * 0.16 : 0)
             .animation(pageChangeAnimation, value: leftPageIndex)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 28)
-                    .updating($dragOffset) { value, state, _ in
-                        state = value.translation.width
-                    }
-                    .onEnded { value in
-                        let threshold = max(geo.size.width * 0.2, 72)
-                        let logicalDelta = isRTL ? value.translation.width : -value.translation.width
-                        if logicalDelta > threshold {
-                            nextSpread()
-                        } else if logicalDelta < -threshold {
-                            previousSpread()
-                        }
-                    }
-            )
         }
     }
 
-    private func pageView(index: Int) -> some View {
+    private func pageView(index: Int, viewportSize: CGSize) -> some View {
         LocalImageView(
             url: pages[index].url,
             comic: comic,
@@ -3296,6 +3499,33 @@ struct DoublePageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            pagePanConfiguration: ReaderPagePanConfiguration(
+                mode: .horizontalPage,
+                isDismissEnabled: isDismissEnabled,
+                pageExtent: viewportSize.width,
+                viewportHeight: viewportSize.height,
+                isRTL: readingDirection == .rightToLeft,
+                onPageDragChanged: { pageDragOffset = $0 },
+                onPageTurn: { direction in
+                    pageDragOffset = 0
+                    switch direction {
+                    case .previous:
+                        previousSpread()
+                    case .next:
+                        nextSpread()
+                    }
+                },
+                onDismissProgress: onDismissProgress,
+                onDismissCancel: {
+                    pageDragOffset = 0
+                    onDismissCancel()
+                },
+                onDismissCommit: {
+                    pageDragOffset = 0
+                    onDismissCommit()
+                }
+            ),
+            onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: {},
             onNextPage: {},
@@ -3478,142 +3708,6 @@ private struct InteractiveBookPageCurlModifier: ViewModifier {
     }
 }
 
-struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
-    let onProgress: (CGFloat) -> Void
-    let onCancel: () -> Void
-    let onSwipe: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onProgress: onProgress, onCancel: onCancel, onSwipe: onSwipe)
-    }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = WindowGestureInstallView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        view.coordinator = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.onProgress = onProgress
-        context.coordinator.onCancel = onCancel
-        context.coordinator.onSwipe = onSwipe
-        (uiView as? WindowGestureInstallView)?.coordinator = context.coordinator
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onProgress: (CGFloat) -> Void
-        var onCancel: () -> Void
-        var onSwipe: () -> Void
-        let recognizer = UIPanGestureRecognizer()
-        private var hasTriggered = false
-        private var beganWithTwoTouches = false
-
-        init(
-            onProgress: @escaping (CGFloat) -> Void,
-            onCancel: @escaping () -> Void,
-            onSwipe: @escaping () -> Void
-        ) {
-            self.onProgress = onProgress
-            self.onCancel = onCancel
-            self.onSwipe = onSwipe
-            super.init()
-            recognizer.minimumNumberOfTouches = 2
-            recognizer.maximumNumberOfTouches = 2
-            recognizer.cancelsTouchesInView = false
-            recognizer.delegate = self
-            recognizer.addTarget(self, action: #selector(handlePan(_:)))
-        }
-
-        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
-            guard let view = recognizer.view else { return }
-            let translation = recognizer.translation(in: view)
-            let velocity = recognizer.velocity(in: view)
-            switch recognizer.state {
-            case .began:
-                hasTriggered = false
-                beganWithTwoTouches = recognizer.numberOfTouches == 2
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    return
-                }
-            case .changed:
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    return
-                }
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
-                onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
-                guard !hasTriggered else { return }
-                let isDownward = translation.y > 110 && velocity.y > 220
-                if isDownward && isMostlyVertical {
-                    hasTriggered = true
-                    onSwipe()
-                }
-            case .ended:
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    beganWithTwoTouches = false
-                    return
-                }
-                guard !hasTriggered else { return }
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
-                let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
-                if shouldDismiss {
-                    hasTriggered = true
-                    onSwipe()
-                } else {
-                    onCancel()
-                }
-                beganWithTwoTouches = false
-            case .cancelled, .failed:
-                hasTriggered = false
-                beganWithTwoTouches = false
-                onCancel()
-            default:
-                break
-            }
-        }
-
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            gestureRecognizer.numberOfTouches == 2
-        }
-
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            false
-        }
-    }
-
-    final class WindowGestureInstallView: UIView {
-        weak var coordinator: Coordinator? {
-            didSet {
-                installRecognizerIfNeeded()
-            }
-        }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            installRecognizerIfNeeded()
-        }
-
-        private func installRecognizerIfNeeded() {
-            guard let window, let coordinator else { return }
-            if coordinator.recognizer.view !== window {
-                coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
-                window.addGestureRecognizer(coordinator.recognizer)
-            }
-        }
-
-        deinit {
-            MainActor.assumeIsolated {
-                if let recognizer = coordinator?.recognizer {
-                    recognizer.view?.removeGestureRecognizer(recognizer)
-                }
-            }
-        }
-    }
-}
-
 /// SwiftUI's hidden navigation bar does not reliably disable UIKit's edge-pop
 /// recognizer on every navigation stack configuration. Keep that system exit
 /// path disabled only while a Reader is mounted, then restore its prior state.
@@ -3713,6 +3807,8 @@ struct LocalImageView: View {
     var showsLoadingIndicator: Bool = true
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
+    var pagePanConfiguration: ReaderPagePanConfiguration? = nil
+    var onZoomStateChange: (Bool) -> Void = { _ in }
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
@@ -3723,7 +3819,6 @@ struct LocalImageView: View {
     @State private var isLoadingImage = true
     @State private var loadFailed = false
     @State private var scale: CGFloat = 1
-    @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var pendingSingleTapWorkItem: DispatchWorkItem?
     @State private var lastDoubleTapTime = Date.distantPast
@@ -3789,24 +3884,39 @@ struct LocalImageView: View {
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if let uiImage = uiImage {
-                // 1. 底图与翻译文本覆盖层
-                fittedImage(uiImage)
-                    // 核心逻辑：直接在图片上层按比例渲染文本气泡
-                    .overlay(
-                        GeometryReader { geo in
-                            ZStack {
-                                translationOverlay(in: geo.size)
-                                ocrMagnificationOverlay(in: geo.size)
-                                ocrDebugOverlay(in: geo.size)
+                ZStack {
+                    // Keep the image and its OCR/translation overlays in the
+                    // zoomed content subtree. The interaction host below is
+                    // deliberately a sibling so its gesture coordinates stay
+                    // in the unscaled viewport space.
+                    fittedImage(uiImage)
+                        .overlay(
+                            GeometryReader { geo in
+                                ZStack {
+                                    translationOverlay(in: geo.size)
+                                    ocrMagnificationOverlay(in: geo.size)
+                                    ocrDebugOverlay(in: geo.size)
+                                }
                             }
-                        }
+                        )
+                        .scaleEffect(scale)
+                        .offset(offset)
+
+                    ReaderZoomGestureView(
+                        scale: scale,
+                        offset: offset,
+                        viewportSize: viewportSize,
+                        contentSize: zoomContentSize,
+                        maximumScale: ReaderZoomMath.defaultMaximumScale,
+                        onTransformChanged: applyZoomTransform,
+                        onGestureEnded: settleZoomTransform,
+                        pagePanConfiguration: pagePanConfiguration
                     )
-                    .scaleEffect(scale)
-                    .offset(offset)
-                    .gesture(zoomGesture)
-                    .simultaneousGesture(tapPageGesture)
-                    .simultaneousGesture(longPressTranslationGesture)
-                    .frame(height: displayHeight(for: uiImage))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .simultaneousGesture(tapPageGesture)
+                .simultaneousGesture(longPressTranslationGesture)
+                .frame(height: displayHeight(for: uiImage))
 
             } else if isLoadingImage {
                 if showsLoadingIndicator {
@@ -4077,21 +4187,38 @@ struct LocalImageView: View {
     private func translationOverlay(in size: CGSize) -> some View {
         if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
+
+            // Draw every card's background/border first and every translated
+            // glyph second. A later overlapping card must never cover an
+            // earlier card's text.
+            ForEach(items) { item in
+                TranslationSurfaceRenderer(
+                    layoutSize: item.rect.size,
+                    surfaceStyle: item.surfaceStyle
+                )
+                .position(x: item.rect.midX, y: item.rect.midY)
+                .zIndex(TranslationSurfaceLayering.surfaceZIndex)
+            }
+
             ForEach(items) { item in
                 TranslationTextRenderer(
-                    segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
-                        let value = displayTranslation(for: $0)
-                        return value.isEmpty ? nil : value
-                    },
+                    segments: translationSegments(for: item),
                     fontSize: item.fontSize,
                     layoutSize: item.rect.size,
                     contentPadding: item.contentPadding,
                     style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
-                    textOrientation: item.textOrientation,
-                    surfaceStyle: item.surfaceStyle
+                    textOrientation: item.textOrientation
                 )
                 .position(x: item.rect.midX, y: item.rect.midY)
+                .zIndex(TranslationSurfaceLayering.textZIndex)
             }
+        }
+    }
+
+    private func translationSegments(for item: TranslationLayoutItem) -> [String] {
+        item.displayText.map { [$0] } ?? item.blocks.compactMap {
+            let value = displayTranslation(for: $0)
+            return value.isEmpty ? nil : value
         }
     }
 
@@ -4579,8 +4706,8 @@ struct LocalImageView: View {
                 translationErrorMessage = nil
                 recognizedPipelineCache = nil
                 recognizedPipelineCacheKey = nil
+                onZoomStateChange(false)
                 scale = 1
-                lastScale = 1
                 offset = .zero
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
@@ -4612,8 +4739,8 @@ struct LocalImageView: View {
             translationErrorMessage = nil
             recognizedPipelineCache = nil
             recognizedPipelineCacheKey = nil
+            onZoomStateChange(false)
             scale = 1
-            lastScale = 1
             offset = .zero
             pendingSingleTapWorkItem?.cancel()
             pendingSingleTapWorkItem = nil
@@ -4679,21 +4806,66 @@ struct LocalImageView: View {
         }
     }
 
-    private var zoomGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { value in
-                scale = min(max(lastScale * value, 1), 5)
+    private var zoomContentSize: CGSize {
+        guard let image = uiImage,
+              viewportSize.width > 0,
+              viewportSize.height > 0,
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return viewportSize
+        }
+
+        let imageAspect = image.size.width / image.size.height
+        let viewportAspect = viewportSize.width / viewportSize.height
+        switch imageFitMode {
+        case .fitScreen:
+            if imageAspect > viewportAspect {
+                return CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             }
-            .onEnded { _ in
-                lastScale = scale
-                if scale <= 1.02 {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                        scale = 1
-                        lastScale = 1
-                        offset = .zero
-                    }
-                }
-            }
+            return CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+        case .fitWidth:
+            return CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
+        case .fitHeight:
+            return CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+        case .original:
+            let nativeSize = CGSize(
+                width: max(image.size.width * image.scale, 1),
+                height: max(image.size.height * image.scale, 1)
+            )
+            let factor = min(
+                1,
+                min(viewportSize.width / nativeSize.width, viewportSize.height / nativeSize.height)
+            )
+            return CGSize(width: nativeSize.width * factor, height: nativeSize.height * factor)
+        }
+    }
+
+    private func applyZoomTransform(_ transform: ReaderZoomTransform) {
+        publishZoomStateIfNeeded(for: transform.scale)
+        scale = transform.scale
+        offset = transform.offset
+    }
+
+    private func settleZoomTransform() {
+        let settled = ReaderZoomMath.settledTransform(
+            ReaderZoomTransform(scale: scale, offset: offset),
+            viewportSize: viewportSize,
+            contentSize: zoomContentSize,
+            maximumScale: ReaderZoomMath.defaultMaximumScale
+        )
+        guard settled != ReaderZoomTransform(scale: scale, offset: offset) else { return }
+        publishZoomStateIfNeeded(for: settled.scale)
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+            scale = settled.scale
+            offset = settled.offset
+        }
+    }
+
+    private func publishZoomStateIfNeeded(for newScale: CGFloat) {
+        let wasZoomed = scale > ReaderZoomMath.settleThreshold
+        let isZoomed = newScale > ReaderZoomMath.settleThreshold
+        guard wasZoomed != isZoomed else { return }
+        onZoomStateChange(isZoomed)
     }
 
     private var tapPageGesture: some Gesture {
@@ -5339,6 +5511,29 @@ private enum TranslationColorStyle: String, CaseIterable {
     }
 }
 
+private struct TranslationSurfaceRenderer: View {
+    let layoutSize: CGSize
+    let surfaceStyle: TranslationSurfaceStyle
+
+    @ViewBuilder
+    var body: some View {
+        if surfaceStyle.drawsBackground {
+            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                }
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        }
+    }
+}
+
 private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
@@ -5346,27 +5541,9 @@ private struct TranslationTextRenderer: View {
     let contentPadding: CGFloat
     let style: TranslationColorStyle
     let textOrientation: TextOrientation
-    let surfaceStyle: TranslationSurfaceStyle
 
     var body: some View {
         content
-            .background { bubbleBackground }
-            .overlay { bubbleBorder }
-    }
-
-    private var bubbleBackground: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-            }
-    }
-
-    private var bubbleBorder: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
     }
 
     @ViewBuilder
