@@ -1,13 +1,101 @@
 import SwiftUI
 import UIKit
 
-final class ReaderZoomPinchGestureRecognizer: UIPinchGestureRecognizer {}
+nonisolated struct ReaderPinchTouchGate {
+    private(set) var hasFailedForSingleTouch = false
+    private var primaryTouchStart: CGPoint?
 
-final class ReaderZoomPanGestureRecognizer: UIPanGestureRecognizer {
-    /// Exposed to the reader-dismiss coordinator so a one-finger downward
-    /// drag can never steal a touch from an already zoomed page.
-    var isZoomActive = false
+    mutating func receiveTouchBegan(
+        activeTouchCount: Int,
+        primaryLocation: CGPoint?
+    ) {
+        guard !hasFailedForSingleTouch else { return }
+        if activeTouchCount >= 2 {
+            primaryTouchStart = nil
+        } else if activeTouchCount == 1 {
+            primaryTouchStart = primaryLocation
+        }
+    }
+
+    mutating func receiveMove(
+        activeTouchCount: Int,
+        primaryLocation: CGPoint
+    ) -> Bool {
+        guard !hasFailedForSingleTouch,
+              activeTouchCount == 1,
+              let primaryTouchStart else {
+            return false
+        }
+        let movement = hypot(
+            primaryLocation.x - primaryTouchStart.x,
+            primaryLocation.y - primaryTouchStart.y
+        )
+        guard movement >= ReaderDismissGestureMetrics.activationDistance else {
+            return false
+        }
+        hasFailedForSingleTouch = true
+        self.primaryTouchStart = nil
+        return true
+    }
+
+    mutating func reset() {
+        hasFailedForSingleTouch = false
+        primaryTouchStart = nil
+    }
 }
+
+/// Keeps a one-finger touch available for the reader-dismiss recognizer until
+/// the pinch has had a chance to receive a second finger. Once that distance
+/// is reached, the touch is already a committed one-finger gesture and pinch
+/// must fail for this sequence.
+final class ReaderZoomPinchGestureRecognizer: UIPinchGestureRecognizer {
+    private var touchGate = ReaderPinchTouchGate()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if state == .possible {
+            let activeTouchCount = activeTouchCount(from: event, fallback: touches.count)
+            let primaryLocation = activeTouchCount == 1
+                ? touches.first.flatMap { touch in
+                    view.map { touch.location(in: $0) }
+                }
+                : nil
+            touchGate.receiveTouchBegan(
+                activeTouchCount: activeTouchCount,
+                primaryLocation: primaryLocation
+            )
+        }
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        if state == .possible,
+           let touch = touches.first,
+           let view {
+            let currentLocation = touch.location(in: view)
+            if touchGate.receiveMove(
+                activeTouchCount: activeTouchCount(from: event, fallback: touches.count),
+                primaryLocation: currentLocation
+            ) {
+                state = .failed
+                return
+            }
+        }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func reset() {
+        touchGate.reset()
+        super.reset()
+    }
+
+    private func activeTouchCount(from event: UIEvent?, fallback: Int) -> Int {
+        event?.allTouches?.filter { touch in
+            touch.phase != .ended && touch.phase != .cancelled
+        }.count ?? fallback
+    }
+}
+
+final class ReaderZoomPanGestureRecognizer: UIPanGestureRecognizer {}
 
 nonisolated struct ReaderZoomTransform: Equatable {
     let scale: CGFloat
@@ -141,14 +229,13 @@ struct ReaderZoomGestureView: UIViewRepresentable {
         )
     }
 
-    func makeUIView(context: Context) -> InstallView {
-        let view = InstallView(frame: .zero)
-        view.isUserInteractionEnabled = false
+    func makeUIView(context: Context) -> ReaderPageInteractionHostView {
+        let view = ReaderPageInteractionHostView(frame: .zero)
         view.coordinator = context.coordinator
         return view
     }
 
-    func updateUIView(_ uiView: InstallView, context: Context) {
+    func updateUIView(_ uiView: ReaderPageInteractionHostView, context: Context) {
         context.coordinator.update(
             scale: scale,
             offset: offset,
@@ -170,7 +257,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
         private(set) var viewportSize: CGSize
         private(set) var contentSize: CGSize
         private(set) var maximumScale: CGFloat
-        private weak var installedView: UIView?
+        private weak var installedView: ReaderPageInteractionHostView?
         private var pinchBase: ReaderZoomTransform?
         private var panBase: ReaderZoomTransform?
         private var isPanEnding = false
@@ -194,7 +281,6 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
-            panRecognizer.isZoomActive = scale > ReaderZoomMath.settleThreshold
             super.init()
 
             pinchRecognizer.delegate = self
@@ -205,6 +291,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             panRecognizer.maximumNumberOfTouches = 1
             panRecognizer.delegate = self
             panRecognizer.cancelsTouchesInView = true
+            panRecognizer.require(toFail: pinchRecognizer)
             panRecognizer.addTarget(self, action: #selector(handlePan(_:)))
         }
 
@@ -224,15 +311,18 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
-            panRecognizer.isZoomActive = scale > ReaderZoomMath.settleThreshold
         }
 
-        func install(on view: UIView) {
-            guard installedView !== view else { return }
+        func install(on view: ReaderPageInteractionHostView) {
+            guard installedView !== view else {
+                connectDismissRecognizer(to: view)
+                return
+            }
             uninstall()
             view.addGestureRecognizer(pinchRecognizer)
             view.addGestureRecognizer(panRecognizer)
             installedView = view
+            connectDismissRecognizer(to: view)
         }
 
         func uninstall() {
@@ -345,23 +435,51 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             return view.bounds.size
         }
 
+        private func connectDismissRecognizer(to view: UIView) {
+            guard let window = view.window,
+                  let dismissRecognizer = window.gestureRecognizers?.first(where: {
+                      $0 is ReaderDismissGestureRecognizer
+                  }) else {
+                return
+            }
+            dismissRecognizer.require(toFail: pinchRecognizer)
+            dismissRecognizer.require(toFail: panRecognizer)
+        }
+
     }
 
-    final class InstallView: UIView {
+    final class ReaderPageInteractionHostView: UIView {
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            configureInteractionHost()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            configureInteractionHost()
+        }
+
         weak var coordinator: Coordinator? {
             didSet {
-                installRecognizerIfNeeded()
+                coordinator?.install(on: self)
             }
         }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            installRecognizerIfNeeded()
+            coordinator?.install(on: self)
         }
 
-        private func installRecognizerIfNeeded() {
-            guard let coordinator, let superview else { return }
-            coordinator.install(on: superview)
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            coordinator?.install(on: self)
+        }
+
+        private func configureInteractionHost() {
+            backgroundColor = .clear
+            isOpaque = false
+            isMultipleTouchEnabled = true
+            isUserInteractionEnabled = true
         }
 
     }

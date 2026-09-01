@@ -3710,7 +3710,6 @@ struct LocalImageView: View {
                             onGestureEnded: settleZoomTransform
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .allowsHitTesting(false)
                     }
                     .scaleEffect(scale)
                     .offset(offset)

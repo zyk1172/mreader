@@ -83,4 +83,45 @@ struct ReaderDismissGestureTests {
             wasCancelled: false
         ))
     }
+
+    @Test func firstFingerMovesBeforeSecondFingerStillAllowsPinch() {
+        var dismiss = ReaderDismissTouchStateMachine()
+
+        #expect(dismiss.receiveTouchBegan(activeTouchCount: 1) == .possible)
+        #expect(dismiss.receiveMove(
+            translation: CGSize(width: 0, height: 10),
+            activeTouchCount: 1
+        ) == .possible)
+        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .failed)
+        #expect(dismiss.state == .failed)
+    }
+
+    @Test func secondFingerBeforeDismissActivationCancelsDismissCandidate() {
+        var dismiss = ReaderDismissTouchStateMachine()
+
+        _ = dismiss.receiveTouchBegan(activeTouchCount: 1)
+        _ = dismiss.receiveMove(
+            translation: CGSize(width: 4, height: 20),
+            activeTouchCount: 1
+        )
+
+        #expect(dismiss.state == .possible)
+        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .failed)
+    }
+
+    @Test func singleFingerBeyondActivationLocksDismissAgainstLaterSecondFinger() {
+        var dismiss = ReaderDismissTouchStateMachine()
+
+        _ = dismiss.receiveTouchBegan(activeTouchCount: 1)
+        #expect(dismiss.receiveMove(
+            translation: CGSize(width: 0, height: 28),
+            activeTouchCount: 1
+        ) == .began)
+
+        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .began)
+        #expect(dismiss.receiveMove(
+            translation: CGSize(width: 0, height: 40),
+            activeTouchCount: 2
+        ) == .began)
+    }
 }

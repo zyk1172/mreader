@@ -94,7 +94,215 @@ nonisolated enum ReaderDismissMath {
     }
 }
 
-final class ReaderDismissPanGestureRecognizer: UIPanGestureRecognizer {}
+nonisolated enum ReaderDismissTouchState: Equatable {
+    case possible
+    case began
+    case changed
+    case failed
+    case cancelled
+    case ended
+}
+
+/// The touch-level arbitration contract is kept independent from UIKit so it
+/// can be regression-tested with the same transitions used by the recognizer.
+nonisolated struct ReaderDismissTouchStateMachine {
+    private(set) var state: ReaderDismissTouchState = .possible
+    private var peakTranslationY: CGFloat = 0
+
+    mutating func receiveTouchBegan(activeTouchCount: Int) -> ReaderDismissTouchState {
+        guard state == .possible else { return state }
+        guard activeTouchCount == 1 else {
+            state = .failed
+            return state
+        }
+        return state
+    }
+
+    mutating func receiveMove(
+        translation: CGSize,
+        activeTouchCount: Int
+    ) -> ReaderDismissTouchState {
+        switch state {
+        case .possible:
+            guard activeTouchCount == 1 else {
+                state = .failed
+                return state
+            }
+
+            let movement = max(abs(translation.width), abs(translation.height))
+            guard movement >= ReaderDismissGestureMetrics.directionLockDistance else {
+                return state
+            }
+            guard ReaderDismissMath.isDownwardDirection(
+                translation,
+                minimumDistance: ReaderDismissGestureMetrics.directionLockDistance
+            ) else {
+                state = .failed
+                return state
+            }
+            guard translation.height >= ReaderDismissGestureMetrics.activationDistance else {
+                return state
+            }
+            peakTranslationY = translation.height
+            state = .began
+            return state
+        case .began, .changed:
+            // Once dismissal has activated, a later finger cannot turn the
+            // already-owned sequence into a pinch.
+            guard activeTouchCount == 1 else { return state }
+            if ReaderDismissMath.shouldCancelForReverse(
+                peakTranslationY: peakTranslationY,
+                currentTranslationY: translation.height
+            ) {
+                state = .cancelled
+                return state
+            }
+            peakTranslationY = max(peakTranslationY, translation.height)
+            state = .changed
+            return state
+        default:
+            return state
+        }
+    }
+
+    mutating func receiveTouchEnded() -> ReaderDismissTouchState {
+        switch state {
+        case .possible:
+            state = .failed
+        case .began, .changed:
+            state = .ended
+        default:
+            break
+        }
+        return state
+    }
+
+    mutating func receiveTouchCancelled() -> ReaderDismissTouchState {
+        switch state {
+        case .possible:
+            state = .failed
+        case .began, .changed:
+            state = .cancelled
+        default:
+            break
+        }
+        return state
+    }
+
+    mutating func reset() {
+        state = .possible
+        peakTranslationY = 0
+    }
+}
+
+/// A one-finger recognizer that does not begin until dismissal is actually
+/// eligible. Keeping the recognizer in `.possible` below the activation
+/// distance is important: UIKit only cancels the underlying page touches once
+/// this recognizer reaches `.began`.
+final class ReaderDismissGestureRecognizer: UIGestureRecognizer {
+    private var trackedTouch: UITouch?
+    private var startLocation: CGPoint = .zero
+    private var touchStateMachine = ReaderDismissTouchStateMachine()
+
+    func translation(in view: UIView?) -> CGPoint {
+        guard let gestureView = self.view,
+              let trackedTouch else {
+            return .zero
+        }
+        let destinationView = view ?? gestureView
+        let currentLocation = trackedTouch.location(in: destinationView)
+        let initialLocation = gestureView.convert(startLocation, to: destinationView)
+        return CGPoint(
+            x: currentLocation.x - initialLocation.x,
+            y: currentLocation.y - initialLocation.y
+        )
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard state == .possible else { return }
+        guard trackedTouch == nil else {
+            // UIKit normally supplies an event containing both touches. Keep
+            // the identity check as a defensive fallback so a second touch
+            // cannot replace the first when the event is incomplete.
+            state = .failed
+            return
+        }
+        let activeTouchCount = activeTouchCount(from: event, fallback: touches.count)
+        let touchState = touchStateMachine.receiveTouchBegan(
+            activeTouchCount: activeTouchCount
+        )
+        guard touchState == .possible,
+              touches.count == 1,
+              activeTouchCount == 1,
+              let touch = touches.first,
+              let view else {
+            state = .failed
+            return
+        }
+        trackedTouch = touch
+        startLocation = touch.location(in: view)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let view, let trackedTouch else { return }
+
+        let activeTouchCount = activeTouchCount(from: event, fallback: touches.count)
+        guard touches.contains(trackedTouch) || state == .began || state == .changed else {
+            return
+        }
+
+        let location = trackedTouch.location(in: view)
+        let translation = CGSize(
+            width: location.x - startLocation.x,
+            height: location.y - startLocation.y
+        )
+
+        apply(touchStateMachine.receiveMove(
+            translation: translation,
+            activeTouchCount: activeTouchCount
+        ))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let trackedTouch, touches.contains(trackedTouch) else { return }
+        apply(touchStateMachine.receiveTouchEnded())
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let trackedTouch, touches.contains(trackedTouch) else { return }
+        apply(touchStateMachine.receiveTouchCancelled())
+    }
+
+    override func reset() {
+        trackedTouch = nil
+        startLocation = .zero
+        touchStateMachine.reset()
+        super.reset()
+    }
+
+    private func apply(_ touchState: ReaderDismissTouchState) {
+        switch touchState {
+        case .possible:
+            break
+        case .began:
+            state = .began
+        case .changed:
+            state = .changed
+        case .failed:
+            state = .failed
+        case .cancelled:
+            state = .cancelled
+        case .ended:
+            state = .ended
+        }
+    }
+
+    private func activeTouchCount(from event: UIEvent?, fallback: Int) -> Int {
+        event?.allTouches?.filter { touch in
+            touch.phase != .ended && touch.phase != .cancelled
+        }.count ?? fallback
+    }
+}
 
 /// Installs the one-finger reader-dismiss recognizer on the window while the
 /// SwiftUI view itself remains hit-test transparent. Pinch and image panning
@@ -139,7 +347,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
         var onCancel: () -> Void
         var onCommit: () -> Void
 
-        let recognizer = ReaderDismissPanGestureRecognizer()
+        let recognizer = ReaderDismissGestureRecognizer()
 
         private weak var hostWindow: UIWindow?
         private var intent: ReaderDragIntent = .undecided
@@ -161,11 +369,9 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             self.onCommit = onCommit
             super.init()
 
-            recognizer.minimumNumberOfTouches = 1
-            recognizer.maximumNumberOfTouches = 1
             recognizer.cancelsTouchesInView = true
             recognizer.delegate = self
-            recognizer.addTarget(self, action: #selector(handlePan(_:)))
+            recognizer.addTarget(self, action: #selector(handleDismiss(_:)))
         }
 
         func attach(to window: UIWindow?) {
@@ -174,6 +380,7 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             guard let window else { return }
             window.addGestureRecognizer(recognizer)
             hostWindow = window
+            connectZoomFailureRelationships(in: window)
         }
 
         func detach() {
@@ -190,24 +397,19 @@ struct ReaderDismissGestureView: UIViewRepresentable {
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard gestureRecognizer === recognizer,
                   isEnabled,
-                  canBeginDismiss(),
-                  let pan = gestureRecognizer as? UIPanGestureRecognizer,
-                  let view = gestureRecognizer.view,
-                  let window = view as? UIWindow,
-                  !hasActiveZoom(in: window) else {
+                  canBeginDismiss() else {
                 return false
             }
+            return true
+        }
 
-            let translationPoint = pan.translation(in: view)
-            let translation = CGSize(width: translationPoint.x, height: translationPoint.y)
-            let velocity = pan.velocity(in: view)
-            let directionVector = max(abs(translation.width), abs(translation.height)) >= 8
-                ? translation
-                : CGSize(width: velocity.x, height: velocity.y)
-            return ReaderDismissMath.isDownwardDirection(
-                directionVector,
-                minimumDistance: 8
-            )
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            gestureRecognizer === recognizer
+                && (otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
+                    || otherGestureRecognizer is ReaderZoomPanGestureRecognizer)
         }
 
         func gestureRecognizer(
@@ -216,50 +418,33 @@ struct ReaderDismissGestureView: UIViewRepresentable {
         ) -> Bool {
             guard gestureRecognizer === recognizer,
                   isEnabled,
-                  !ReaderGestureTouchFilter.isInteractiveTouch(touch),
-                  let window = gestureRecognizer.view as? UIWindow,
-                  !hasActiveZoom(in: window) else {
+                  !ReaderGestureTouchFilter.isInteractiveTouch(touch) else {
                 return false
             }
             return true
         }
 
-        @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        @objc private func handleDismiss(_ recognizer: UIGestureRecognizer) {
             guard let view = recognizer.view else { return }
-            let translationPoint = recognizer.translation(in: view)
+            guard let dismissRecognizer = recognizer as? ReaderDismissGestureRecognizer else { return }
+            let translationPoint = dismissRecognizer.translation(in: view)
             let translation = CGSize(width: translationPoint.x, height: translationPoint.y)
             let viewportHeight = max(view.bounds.height, 1)
 
             switch recognizer.state {
             case .began:
-                intent = .undecided
-                peakTranslationY = 0
+                intent = .dismissing
+                peakTranslationY = translation.height
                 dismissWasCancelled = false
                 gestureIsActive = true
+                onProgress(
+                    ReaderDismissMath.progress(
+                        for: translation.height,
+                        viewportHeight: viewportHeight
+                    )
+                )
             case .changed:
-                guard gestureIsActive, !dismissWasCancelled else { return }
-
-                if intent == .undecided {
-                    let movement = max(abs(translation.width), abs(translation.height))
-                    guard movement >= ReaderDismissGestureMetrics.directionLockDistance else {
-                        return
-                    }
-                    guard ReaderDismissMath.isDownwardDirection(
-                        translation,
-                        minimumDistance: ReaderDismissGestureMetrics.directionLockDistance
-                    ) else {
-                        // The page's own horizontal/vertical gesture owns this
-                        // sequence once it is not a downward-dismiss intent.
-                        intent = ReaderDismissMath.isHorizontalPageTurn(translation)
-                            ? .pageTurning
-                            : .cancelled
-                        abandonDismissGesture(with: intent)
-                        return
-                    }
-                    intent = .dismissing
-                }
-
-                guard intent == .dismissing else { return }
+                guard gestureIsActive, !dismissWasCancelled, intent == .dismissing else { return }
                 if ReaderDismissMath.shouldCancelForReverse(
                     peakTranslationY: peakTranslationY,
                     currentTranslationY: translation.height
@@ -288,8 +473,9 @@ struct ReaderDismissGestureView: UIViewRepresentable {
                 }
                 resetGesture()
             case .cancelled, .failed:
-                guard gestureIsActive else { return }
-                abandonDismissGesture(with: .cancelled)
+                if gestureIsActive {
+                    abandonDismissGesture(with: .cancelled)
+                }
                 resetGesture()
             default:
                 break
@@ -309,17 +495,16 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             onCancel()
         }
 
-        private func hasActiveZoom(in window: UIWindow) -> Bool {
-            hasActiveZoom(in: window as UIView)
-        }
-
-        private func hasActiveZoom(in view: UIView) -> Bool {
-            if view.gestureRecognizers?.contains(where: { recognizer in
-                (recognizer as? ReaderZoomPanGestureRecognizer)?.isZoomActive == true
-            }) == true {
-                return true
+        private func connectZoomFailureRelationships(in view: UIView) {
+            for zoomRecognizer in view.gestureRecognizers ?? [] {
+                if zoomRecognizer is ReaderZoomPinchGestureRecognizer
+                    || zoomRecognizer is ReaderZoomPanGestureRecognizer {
+                    recognizer.require(toFail: zoomRecognizer)
+                }
             }
-            return view.subviews.contains(where: hasActiveZoom(in:))
+            for subview in view.subviews {
+                connectZoomFailureRelationships(in: subview)
+            }
         }
     }
 

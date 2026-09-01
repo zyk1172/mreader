@@ -1,5 +1,6 @@
 import CoreGraphics
 import Testing
+import UIKit
 @testable import mreader
 
 @Suite
@@ -48,5 +49,60 @@ struct ReaderZoomGestureTests {
         )
 
         #expect(result == ReaderZoomTransform(scale: 1, offset: .zero))
+    }
+
+    @Test func pinchGateKeepsOneFingerPossibleUntilSecondFingerArrives() {
+        var gate = ReaderPinchTouchGate()
+
+        gate.receiveTouchBegan(activeTouchCount: 1, primaryLocation: .zero)
+        let smallMove = gate.receiveMove(
+            activeTouchCount: 1,
+            primaryLocation: CGPoint(x: 0, y: 10)
+        )
+        #expect(!smallMove)
+
+        gate.receiveTouchBegan(activeTouchCount: 2, primaryLocation: nil)
+
+        #expect(!gate.hasFailedForSingleTouch)
+    }
+
+    @Test func pinchGateFailsOnlyAfterSingleFingerActivationDistance() {
+        var gate = ReaderPinchTouchGate()
+
+        gate.receiveTouchBegan(activeTouchCount: 1, primaryLocation: .zero)
+        let beforeActivation = gate.receiveMove(
+            activeTouchCount: 1,
+            primaryLocation: CGPoint(x: 0, y: 27)
+        )
+        #expect(!beforeActivation)
+        let atActivation = gate.receiveMove(
+            activeTouchCount: 1,
+            primaryLocation: CGPoint(x: 0, y: 28)
+        )
+        #expect(atActivation)
+        #expect(gate.hasFailedForSingleTouch)
+    }
+
+    @MainActor
+    @Test func pageInteractionHostOwnsPinchAndPanRecognizers() {
+        let coordinator = ReaderZoomGestureView.Coordinator(
+            scale: 1,
+            offset: .zero,
+            viewportSize: CGSize(width: 400, height: 800),
+            contentSize: CGSize(width: 400, height: 800),
+            maximumScale: ReaderZoomMath.defaultMaximumScale,
+            onTransformChanged: { _ in },
+            onGestureEnded: {}
+        )
+        let host = ReaderZoomGestureView.ReaderPageInteractionHostView(
+            frame: CGRect(x: 0, y: 0, width: 400, height: 800)
+        )
+
+        coordinator.install(on: host)
+
+        #expect(host.isUserInteractionEnabled)
+        #expect(host.isMultipleTouchEnabled)
+        #expect(host.gestureRecognizers?.contains(where: { $0 === coordinator.pinchRecognizer }) == true)
+        #expect(host.gestureRecognizers?.contains(where: { $0 === coordinator.panRecognizer }) == true)
     }
 }
