@@ -44,10 +44,10 @@ nonisolated struct ReaderPinchTouchGate {
     }
 }
 
-/// Keeps a one-finger touch available for the reader-dismiss recognizer until
-/// the pinch has had a chance to receive a second finger. Once that distance
-/// is reached, the touch is already a committed one-finger gesture and pinch
-/// must fail for this sequence.
+/// Keeps a one-finger touch available for the page pan until the pinch has had
+/// a chance to receive a second finger. Once that distance is reached, the
+/// touch is already a committed one-finger gesture and pinch must fail for
+/// this sequence.
 final class ReaderZoomPinchGestureRecognizer: UIPinchGestureRecognizer {
     private var touchGate = ReaderPinchTouchGate()
 
@@ -95,7 +95,104 @@ final class ReaderZoomPinchGestureRecognizer: UIPinchGestureRecognizer {
     }
 }
 
-final class ReaderZoomPanGestureRecognizer: UIPanGestureRecognizer {}
+/// The one-finger recognizer that owns both zoom panning and page-level
+/// navigation. Keeping it on the same UIKit host as pinch avoids a
+/// SwiftUI/UIKit recognizer race at the activation distance.
+nonisolated struct ReaderPagePanTouchGate {
+    private(set) var hasRejectedMultipleTouch = false
+
+    mutating func receiveTouch(activeTouchCount: Int) -> Bool {
+        guard !hasRejectedMultipleTouch else { return true }
+        guard activeTouchCount <= 1 else {
+            hasRejectedMultipleTouch = true
+            return true
+        }
+        return false
+    }
+
+    mutating func reset() {
+        hasRejectedMultipleTouch = false
+    }
+}
+
+final class ReaderPagePanGestureRecognizer: UIPanGestureRecognizer {
+    private var touchGate = ReaderPagePanTouchGate()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard !touchGate.receiveTouch(
+            activeTouchCount: activeTouchCount(from: event, fallback: touches.count)
+        ) else {
+            state = state == .possible ? .failed : .cancelled
+            return
+        }
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard !touchGate.receiveTouch(
+            activeTouchCount: activeTouchCount(from: event, fallback: touches.count)
+        ) else {
+            state = state == .possible ? .failed : .cancelled
+            return
+        }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func reset() {
+        touchGate.reset()
+        super.reset()
+    }
+
+    private func activeTouchCount(from event: UIEvent, fallback: Int) -> Int {
+        event.allTouches?.filter { touch in
+            touch.phase != .ended && touch.phase != .cancelled
+        }.count ?? fallback
+    }
+}
+
+nonisolated enum ReaderPageTurnDirection: Equatable {
+    case previous
+    case next
+}
+
+/// Configuration for the page host's single-finger pan. The callbacks are
+/// deliberately result-oriented: SwiftUI renders the current page offset or
+/// dismissal transform, while UIKit owns touch recognition and arbitration.
+struct ReaderPagePanConfiguration {
+    let mode: ReaderPageDragMode
+    let isDismissEnabled: Bool
+    let pageExtent: CGFloat
+    let viewportHeight: CGFloat
+    let isRTL: Bool
+    let onPageDragChanged: (CGFloat) -> Void
+    let onPageTurn: (ReaderPageTurnDirection) -> Void
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
+
+    func pageTranslation(for translation: CGSize) -> CGFloat {
+        switch mode {
+        case .verticalPage:
+            return translation.height
+        case .horizontalPage, .dismissOnly:
+            return translation.width
+        }
+    }
+
+    func logicalPageDelta(for translation: CGSize) -> CGFloat {
+        let rawDelta = pageTranslation(for: translation)
+        switch mode {
+        case .verticalPage, .dismissOnly:
+            return rawDelta
+        case .horizontalPage:
+            return isRTL ? rawDelta : -rawDelta
+        }
+    }
+
+    var pageTurnThreshold: CGFloat {
+        max(pageExtent * 0.2, 72)
+    }
+}
 
 nonisolated struct ReaderZoomTransform: Equatable {
     let scale: CGFloat
@@ -216,6 +313,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
     let maximumScale: CGFloat
     let onTransformChanged: (ReaderZoomTransform) -> Void
     let onGestureEnded: () -> Void
+    var pagePanConfiguration: ReaderPagePanConfiguration? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -225,7 +323,8 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             contentSize: contentSize,
             maximumScale: maximumScale,
             onTransformChanged: onTransformChanged,
-            onGestureEnded: onGestureEnded
+            onGestureEnded: onGestureEnded,
+            pagePanConfiguration: pagePanConfiguration
         )
     }
 
@@ -243,14 +342,15 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             contentSize: contentSize,
             maximumScale: maximumScale,
             onTransformChanged: onTransformChanged,
-            onGestureEnded: onGestureEnded
+            onGestureEnded: onGestureEnded,
+            pagePanConfiguration: pagePanConfiguration
         )
         uiView.coordinator = context.coordinator
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let pinchRecognizer = ReaderZoomPinchGestureRecognizer()
-        let panRecognizer = ReaderZoomPanGestureRecognizer()
+        let panRecognizer = ReaderPagePanGestureRecognizer()
 
         private(set) var currentScale: CGFloat
         private(set) var currentOffset: CGSize
@@ -261,6 +361,9 @@ struct ReaderZoomGestureView: UIViewRepresentable {
         private var pinchBase: ReaderZoomTransform?
         private var panBase: ReaderZoomTransform?
         private var isPanEnding = false
+        private var pagePanConfiguration: ReaderPagePanConfiguration?
+        private var pageDragState = ReaderPageDragStateMachine()
+        private(set) var panIntent: ReaderPanIntent = .undecided
 
         var onTransformChanged: (ReaderZoomTransform) -> Void
         var onGestureEnded: () -> Void
@@ -272,7 +375,8 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             contentSize: CGSize,
             maximumScale: CGFloat,
             onTransformChanged: @escaping (ReaderZoomTransform) -> Void,
-            onGestureEnded: @escaping () -> Void
+            onGestureEnded: @escaping () -> Void,
+            pagePanConfiguration: ReaderPagePanConfiguration? = nil
         ) {
             self.currentScale = scale
             self.currentOffset = offset
@@ -281,6 +385,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
+            self.pagePanConfiguration = pagePanConfiguration
             super.init()
 
             pinchRecognizer.delegate = self
@@ -291,7 +396,8 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             panRecognizer.maximumNumberOfTouches = 1
             panRecognizer.delegate = self
             panRecognizer.cancelsTouchesInView = true
-            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
+            panRecognizer.isEnabled = pagePanConfiguration != nil
+                || currentScale > ReaderZoomMath.settleThreshold
             panRecognizer.addTarget(self, action: #selector(handlePan(_:)))
         }
 
@@ -302,7 +408,8 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             contentSize: CGSize,
             maximumScale: CGFloat,
             onTransformChanged: @escaping (ReaderZoomTransform) -> Void,
-            onGestureEnded: @escaping () -> Void
+            onGestureEnded: @escaping () -> Void,
+            pagePanConfiguration: ReaderPagePanConfiguration? = nil
         ) {
             currentScale = scale
             currentOffset = offset
@@ -311,7 +418,9 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
-            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
+            self.pagePanConfiguration = pagePanConfiguration
+            panRecognizer.isEnabled = pagePanConfiguration != nil
+                || currentScale > ReaderZoomMath.settleThreshold
         }
 
         func install(on view: ReaderPageInteractionHostView) {
@@ -341,8 +450,11 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 return true
             }
             guard gestureRecognizer === panRecognizer,
-                  currentScale > ReaderZoomMath.settleThreshold,
                   let pan = gestureRecognizer as? UIPanGestureRecognizer else {
+                return false
+            }
+            guard pagePanConfiguration != nil
+                || currentScale > ReaderZoomMath.settleThreshold else {
                 return false
             }
             let velocity = pan.velocity(in: pan.view)
@@ -362,6 +474,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             let viewport = effectiveViewportSize(for: view)
             switch recognizer.state {
             case .began:
+                cancelPagePanForPinch()
                 pinchBase = ReaderZoomTransform(scale: currentScale, offset: currentOffset)
             case .changed:
                 guard let pinchBase else { return }
@@ -389,25 +502,80 @@ struct ReaderZoomGestureView: UIViewRepresentable {
 
         @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
             guard let view = recognizer.view else { return }
-            let viewport = effectiveViewportSize(for: view)
-            switch recognizer.state {
+            let translationPoint = recognizer.translation(in: view.window ?? view)
+            processPan(
+                state: recognizer.state,
+                translation: CGSize(width: translationPoint.x, height: translationPoint.y),
+                viewport: effectiveViewportSize(for: view)
+            )
+        }
+
+        /// Drives the same routing path as the UIKit recognizer action. It is
+        /// internal so host-level tests can exercise callback ownership without
+        /// fabricating private UIKit touch events.
+        func receivePanEventForTesting(
+            state: UIGestureRecognizer.State,
+            translation: CGSize
+        ) {
+            processPan(state: state, translation: translation, viewport: viewportSize)
+        }
+
+        private func processPan(
+            state: UIGestureRecognizer.State,
+            translation: CGSize,
+            viewport: CGSize
+        ) {
+            switch state {
             case .began:
-                guard currentScale > ReaderZoomMath.settleThreshold else { return }
-                panBase = ReaderZoomTransform(scale: currentScale, offset: currentOffset)
-                isPanEnding = false
+                beginPan()
             case .changed:
-                guard let panBase, pinchRecognizer.state != .began, pinchRecognizer.state != .changed else {
-                    return
+                updatePan(translation: translation, viewport: viewport)
+            case .ended:
+                if panIntent != .zoomPanning {
+                    updatePan(translation: translation, viewport: viewport)
                 }
-                // The host lives in the unscaled viewport subtree, but a
-                // containing reader transition can still transform that
-                // subtree. Window coordinates keep the pan delta in screen
-                // points instead of returning a compressed local delta.
-                let translationPoint = recognizer.translation(in: view.window ?? view)
-                let translation = CGSize(
-                    width: translationPoint.x,
-                    height: translationPoint.y
-                )
+                finishPan(translation: translation, viewport: viewport)
+            case .cancelled, .failed:
+                cancelPan()
+            default:
+                break
+            }
+        }
+
+        private func beginPan() {
+            isPanEnding = false
+            panBase = nil
+            pageDragState.reset()
+
+            guard pinchRecognizer.state != .began,
+                  pinchRecognizer.state != .changed else {
+                panIntent = .cancelled
+                isPanEnding = true
+                return
+            }
+
+            if currentScale > ReaderZoomMath.settleThreshold {
+                panIntent = .zoomPanning
+                panBase = ReaderZoomTransform(scale: currentScale, offset: currentOffset)
+            } else if pagePanConfiguration != nil {
+                panIntent = .undecided
+            } else {
+                panIntent = .cancelled
+                isPanEnding = true
+            }
+        }
+
+        private func updatePan(translation: CGSize, viewport: CGSize) {
+            guard !isPanEnding else { return }
+
+            if pinchRecognizer.state == .began || pinchRecognizer.state == .changed {
+                cancelPagePanForPinch()
+                return
+            }
+
+            switch panIntent {
+            case .zoomPanning:
+                guard let panBase else { return }
                 let transform = ReaderZoomMath.pannedTransform(
                     from: panBase,
                     translation: translation,
@@ -416,12 +584,46 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 )
                 currentOffset = transform.offset
                 onTransformChanged(transform)
-            case .ended:
-                finishPan(notify: true)
-            case .cancelled, .failed:
-                finishPan(notify: true)
-            default:
+            case .undecided, .pageTurning, .dismissing:
+                updatePagePan(translation: translation, viewport: viewport)
+            case .cancelled:
                 break
+            }
+        }
+
+        private func updatePagePan(translation: CGSize, viewport: CGSize) {
+            guard let configuration = pagePanConfiguration else { return }
+            let previousIntent = pageDragState.intent
+            let intent = pageDragState.receiveMove(
+                translation: translation,
+                mode: configuration.mode,
+                isDismissEnabled: configuration.isDismissEnabled
+            )
+
+            switch intent {
+            case .zoomPanning:
+                break
+            case .undecided:
+                panIntent = .undecided
+            case .pageTurning:
+                panIntent = .pageTurning
+                configuration.onPageDragChanged(
+                    configuration.pageTranslation(for: translation)
+                )
+            case .dismissing:
+                panIntent = .dismissing
+                configuration.onDismissProgress(
+                    ReaderDismissMath.progress(
+                        for: translation.height,
+                        viewportHeight: max(viewport.height, configuration.viewportHeight)
+                    )
+                )
+            case .cancelled:
+                panIntent = .cancelled
+                if previousIntent == .dismissing {
+                    configuration.onDismissCancel()
+                }
+                configuration.onPageDragChanged(0)
             }
         }
 
@@ -431,13 +633,84 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             pinchBase = nil
         }
 
-        private func finishPan(notify: Bool) {
+        private func finishPan(translation: CGSize, viewport: CGSize) {
             guard !isPanEnding else { return }
             isPanEnding = true
-            if notify, panBase != nil {
+
+            let finalIntent = panIntent
+            let wasDismissCancelled = pageDragState.wasDismissCancelled
+            let configuration = pagePanConfiguration
+            panBase = nil
+            pageDragState.reset()
+            panIntent = .undecided
+
+            switch finalIntent {
+            case .zoomPanning:
                 onGestureEnded()
+            case .pageTurning:
+                guard let configuration else { return }
+                configuration.onPageDragChanged(0)
+                let logicalDelta = configuration.logicalPageDelta(for: translation)
+                if logicalDelta > configuration.pageTurnThreshold {
+                    configuration.onPageTurn(.next)
+                } else if logicalDelta < -configuration.pageTurnThreshold {
+                    configuration.onPageTurn(.previous)
+                }
+            case .dismissing:
+                guard let configuration else { return }
+                if ReaderDismissMath.shouldCommit(
+                    intent: .dismissing,
+                    translationY: translation.height,
+                    viewportHeight: max(viewport.height, configuration.viewportHeight),
+                    wasCancelled: wasDismissCancelled
+                ) {
+                    configuration.onDismissCommit()
+                } else {
+                    configuration.onDismissCancel()
+                }
+            case .undecided, .cancelled:
+                break
+            }
+        }
+
+        private func cancelPan() {
+            guard !isPanEnding else { return }
+            isPanEnding = true
+
+            let finalIntent = panIntent
+            let configuration = pagePanConfiguration
+            panBase = nil
+            pageDragState.reset()
+            panIntent = .undecided
+
+            switch finalIntent {
+            case .zoomPanning:
+                onGestureEnded()
+            case .pageTurning:
+                configuration?.onPageDragChanged(0)
+            case .dismissing:
+                configuration?.onDismissCancel()
+            case .undecided, .cancelled:
+                break
+            }
+        }
+
+        private func cancelPagePanForPinch() {
+            guard !isPanEnding else { return }
+
+            let configuration = pagePanConfiguration
+            switch panIntent {
+            case .pageTurning:
+                configuration?.onPageDragChanged(0)
+            case .dismissing:
+                configuration?.onDismissCancel()
+            case .zoomPanning, .undecided, .cancelled:
+                break
             }
             panBase = nil
+            pageDragState.reset()
+            panIntent = .cancelled
+            isPanEnding = true
         }
 
         private func effectiveViewportSize(for view: UIView) -> CGSize {
@@ -448,7 +721,8 @@ struct ReaderZoomGestureView: UIViewRepresentable {
         }
 
         private func updatePanAvailability() {
-            panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
+            panRecognizer.isEnabled = pagePanConfiguration != nil
+                || currentScale > ReaderZoomMath.settleThreshold
         }
 
     }

@@ -1,7 +1,8 @@
 import CoreGraphics
 
-nonisolated enum ReaderPageDragIntent: Equatable {
+nonisolated enum ReaderPanIntent: Equatable {
     case undecided
+    case zoomPanning
     case dismissing
     case pageTurning
     case cancelled
@@ -89,7 +90,7 @@ nonisolated enum ReaderDismissMath {
     }
 
     static func shouldCommit(
-        intent: ReaderPageDragIntent,
+        intent: ReaderPanIntent,
         translationY: CGFloat,
         viewportHeight: CGFloat,
         wasCancelled: Bool
@@ -112,7 +113,7 @@ nonisolated enum ReaderPageDragMode: Equatable {
 /// the direction is still ambiguous. A downward dismiss is only selected once
 /// the same drag reaches the explicit activation distance.
 nonisolated struct ReaderPageDragStateMachine {
-    private(set) var intent: ReaderPageDragIntent = .undecided
+    private(set) var intent: ReaderPanIntent = .undecided
     private(set) var peakTranslationY: CGFloat = 0
     private(set) var wasDismissCancelled = false
 
@@ -120,7 +121,7 @@ nonisolated struct ReaderPageDragStateMachine {
         translation: CGSize,
         mode: ReaderPageDragMode,
         isDismissEnabled: Bool
-    ) -> ReaderPageDragIntent {
+    ) -> ReaderPanIntent {
         switch intent {
         case .undecided:
             let movement = max(abs(translation.width), abs(translation.height))
@@ -171,6 +172,9 @@ nonisolated struct ReaderPageDragStateMachine {
             } else {
                 peakTranslationY = max(peakTranslationY, translation.height)
             }
+            return intent
+
+        case .zoomPanning:
             return intent
 
         case .pageTurning, .cancelled:

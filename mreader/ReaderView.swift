@@ -3042,7 +3042,6 @@ struct GuidedPanelReader: View {
     @State private var sourceSize: CGSize = .zero
     @State private var panelIndex = 0
     @State private var isDetecting = false
-    @State private var dragState = ReaderPageDragStateMachine()
 
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
@@ -3074,6 +3073,18 @@ struct GuidedPanelReader: View {
                         imageFitMode: .fitScreen,
                         isPageTapGestureEnabled: false,
                         isLongPressTranslationEnabled: areControlsVisible,
+                        pagePanConfiguration: ReaderPagePanConfiguration(
+                            mode: .dismissOnly,
+                            isDismissEnabled: isDismissEnabled,
+                            pageExtent: proxy.size.width,
+                            viewportHeight: proxy.size.height,
+                            isRTL: false,
+                            onPageDragChanged: { _ in },
+                            onPageTurn: { _ in },
+                            onDismissProgress: onDismissProgress,
+                            onDismissCancel: onDismissCancel,
+                            onDismissCommit: onDismissCommit
+                        ),
                         onZoomStateChange: onZoomStateChange,
                         onTranslationStateChange: onTranslationStateChange,
                         onPreviousPage: previousPanel,
@@ -3093,56 +3104,17 @@ struct GuidedPanelReader: View {
                     ProgressView().tint(.white).allowsHitTesting(false)
                 }
 
-                if !areControlsVisible {
-                    HStack(spacing: 0) {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { previousPanel() }
-                        Color.clear.frame(width: proxy.size.width * 0.30).allowsHitTesting(false)
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { nextPanel() }
-                    }
-                }
             }
             .clipped()
-            .gesture(
-                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
-                    .onChanged { value in
-                        let previousIntent = dragState.intent
-                        let intent = dragState.receiveMove(
-                            translation: value.translation,
-                            mode: .dismissOnly,
-                            isDismissEnabled: isDismissEnabled
-                        )
-                        if intent == .dismissing {
-                            onDismissProgress(
-                                ReaderDismissMath.progress(
-                                    for: value.translation.height,
-                                    viewportHeight: proxy.size.height
-                                )
-                            )
-                        } else if previousIntent == .dismissing, intent == .cancelled {
-                            onDismissCancel()
-                        }
-                    }
+            .simultaneousGesture(
+                SpatialTapGesture(count: 1, coordinateSpace: .local)
                     .onEnded { value in
-                        switch dragState.intent {
-                        case .dismissing:
-                            if ReaderDismissMath.shouldCommit(
-                                intent: dragState.intent,
-                                translationY: value.translation.height,
-                                viewportHeight: proxy.size.height,
-                                wasCancelled: dragState.wasDismissCancelled
-                            ) {
-                                onDismissCommit()
-                            } else {
-                                onDismissCancel()
-                            }
-                        default:
-                            break
+                        guard !areControlsVisible else { return }
+                        if value.location.x < proxy.size.width * 0.35 {
+                            previousPanel()
+                        } else if value.location.x > proxy.size.width * 0.65 {
+                            nextPanel()
                         }
-                        dragState.reset()
                     }
             )
         }
@@ -3254,26 +3226,22 @@ struct AnimatedPageReader: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @GestureState private var dragOffset: CGFloat = 0
-    @State private var dragState = ReaderPageDragStateMachine()
+    @State private var pageDragOffset: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
             let isRTL = readingDirection == .rightToLeft
-            let dragMode: ReaderPageDragMode = readingMode == .verticalPage
-                ? .verticalPage(isFirstPage: currentPageIndex == 0)
-                : .horizontalPage
 
             ZStack {
                 if pageTurnAnimation == .curl,
                    let revealedPageIndex = revealedPageIndex(isRTL: isRTL),
                    pages.indices.contains(revealedPageIndex) {
-                    pageView(index: revealedPageIndex)
+                    pageView(index: revealedPageIndex, viewportSize: geo.size, isInteractive: false)
                         .id("revealed-\(pages[revealedPageIndex].id)")
                 }
 
                 if pages.indices.contains(currentPageIndex) {
-                    pageView(index: currentPageIndex)
+                    pageView(index: currentPageIndex, viewportSize: geo.size, isInteractive: true)
                         .id(pages[currentPageIndex].id)
                         .transition(transition)
                         .modifier(
@@ -3287,59 +3255,6 @@ struct AnimatedPageReader: View {
                         .animation(pageChangeAnimation, value: currentPageIndex)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
-                    .updating($dragOffset) { value, state, _ in
-                        state = readingMode == .verticalPage ? value.translation.height : value.translation.width
-                    }
-                    .onChanged { value in
-                        let previousIntent = dragState.intent
-                        let intent = dragState.receiveMove(
-                            translation: value.translation,
-                            mode: dragMode,
-                            isDismissEnabled: isDismissEnabled
-                        )
-                        if intent == .dismissing {
-                            onDismissProgress(
-                                ReaderDismissMath.progress(
-                                    for: value.translation.height,
-                                    viewportHeight: geo.size.height
-                                )
-                            )
-                        } else if previousIntent == .dismissing, intent == .cancelled {
-                            onDismissCancel()
-                        }
-                    }
-                    .onEnded { value in
-                        switch dragState.intent {
-                        case .dismissing:
-                            if ReaderDismissMath.shouldCommit(
-                                intent: dragState.intent,
-                                translationY: value.translation.height,
-                                viewportHeight: geo.size.height,
-                                wasCancelled: dragState.wasDismissCancelled
-                            ) {
-                                onDismissCommit()
-                            } else {
-                                onDismissCancel()
-                            }
-                        case .pageTurning:
-                            let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
-                            let threshold = max(axisLength * 0.2, 72)
-                            let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
-                            let logicalDelta = readingMode == .verticalPage ? rawDelta : (isRTL ? rawDelta : -rawDelta)
-                            if logicalDelta > threshold {
-                                nextPage()
-                            } else if logicalDelta < -threshold {
-                                previousPage()
-                            }
-                        default:
-                            break
-                        }
-                        dragState.reset()
-                    }
-            )
         }
     }
 
@@ -3420,11 +3335,11 @@ struct AnimatedPageReader: View {
         return currentPageIndex + (isForwardDrag ? 1 : -1)
     }
 
-    private var pageDragOffset: CGFloat {
-        dragState.intent == .pageTurning ? dragOffset : 0
-    }
-
-    private func pageView(index: Int) -> some View {
+    private func pageView(
+        index: Int,
+        viewportSize: CGSize,
+        isInteractive: Bool
+    ) -> some View {
         LocalImageView(
             url: pages[index].url,
             comic: comic,
@@ -3448,6 +3363,36 @@ struct AnimatedPageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            pagePanConfiguration: isInteractive
+                ? ReaderPagePanConfiguration(
+                    mode: readingMode == .verticalPage
+                        ? .verticalPage(isFirstPage: currentPageIndex == 0)
+                        : .horizontalPage,
+                    isDismissEnabled: isDismissEnabled,
+                    pageExtent: readingMode == .verticalPage ? viewportSize.height : viewportSize.width,
+                    viewportHeight: viewportSize.height,
+                    isRTL: readingDirection == .rightToLeft,
+                    onPageDragChanged: { pageDragOffset = $0 },
+                    onPageTurn: { direction in
+                        pageDragOffset = 0
+                        switch direction {
+                        case .previous:
+                            previousPage()
+                        case .next:
+                            nextPage()
+                        }
+                    },
+                    onDismissProgress: onDismissProgress,
+                    onDismissCancel: {
+                        pageDragOffset = 0
+                        onDismissCancel()
+                    },
+                    onDismissCommit: {
+                        pageDragOffset = 0
+                        onDismissCommit()
+                    }
+                )
+                : nil,
             onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: previousPage,
@@ -3501,8 +3446,7 @@ struct DoublePageReader: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @GestureState private var dragOffset: CGFloat = 0
-    @State private var dragState = ReaderPageDragStateMachine()
+    @State private var pageDragOffset: CGFloat = 0
 
     private var leftPageIndex: Int {
         currentPageIndex - currentPageIndex % 2
@@ -3519,7 +3463,7 @@ struct DoublePageReader: View {
                 let pair = isRTL ? [rightPageIndex, leftPageIndex] : [leftPageIndex, rightPageIndex]
                 ForEach(pair, id: \.self) { index in
                     if pages.indices.contains(index) {
-                        pageView(index: index)
+                        pageView(index: index, viewportSize: geo.size)
                             .frame(width: geo.size.width / 2, height: geo.size.height)
                     } else {
                         Color.black.frame(width: geo.size.width / 2, height: geo.size.height)
@@ -3530,65 +3474,10 @@ struct DoublePageReader: View {
             .transition(doublePageTransition)
             .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? pageDragOffset * 0.16 : 0)
             .animation(pageChangeAnimation, value: leftPageIndex)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
-                    .updating($dragOffset) { value, state, _ in
-                        state = value.translation.width
-                    }
-                    .onChanged { value in
-                        let previousIntent = dragState.intent
-                        let intent = dragState.receiveMove(
-                            translation: value.translation,
-                            mode: .horizontalPage,
-                            isDismissEnabled: isDismissEnabled
-                        )
-                        if intent == .dismissing {
-                            onDismissProgress(
-                                ReaderDismissMath.progress(
-                                    for: value.translation.height,
-                                    viewportHeight: geo.size.height
-                                )
-                            )
-                        } else if previousIntent == .dismissing, intent == .cancelled {
-                            onDismissCancel()
-                        }
-                    }
-                    .onEnded { value in
-                        switch dragState.intent {
-                        case .dismissing:
-                            if ReaderDismissMath.shouldCommit(
-                                intent: dragState.intent,
-                                translationY: value.translation.height,
-                                viewportHeight: geo.size.height,
-                                wasCancelled: dragState.wasDismissCancelled
-                            ) {
-                                onDismissCommit()
-                            } else {
-                                onDismissCancel()
-                            }
-                        case .pageTurning:
-                            let threshold = max(geo.size.width * 0.2, 72)
-                            let logicalDelta = isRTL ? value.translation.width : -value.translation.width
-                            if logicalDelta > threshold {
-                                nextSpread()
-                            } else if logicalDelta < -threshold {
-                                previousSpread()
-                            }
-                        default:
-                            break
-                        }
-                        dragState.reset()
-                    }
-            )
         }
     }
 
-    private var pageDragOffset: CGFloat {
-        dragState.intent == .pageTurning ? dragOffset : 0
-    }
-
-    private func pageView(index: Int) -> some View {
+    private func pageView(index: Int, viewportSize: CGSize) -> some View {
         LocalImageView(
             url: pages[index].url,
             comic: comic,
@@ -3610,6 +3499,32 @@ struct DoublePageReader: View {
             imageFitMode: imageFitMode,
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
+            pagePanConfiguration: ReaderPagePanConfiguration(
+                mode: .horizontalPage,
+                isDismissEnabled: isDismissEnabled,
+                pageExtent: viewportSize.width,
+                viewportHeight: viewportSize.height,
+                isRTL: readingDirection == .rightToLeft,
+                onPageDragChanged: { pageDragOffset = $0 },
+                onPageTurn: { direction in
+                    pageDragOffset = 0
+                    switch direction {
+                    case .previous:
+                        previousSpread()
+                    case .next:
+                        nextSpread()
+                    }
+                },
+                onDismissProgress: onDismissProgress,
+                onDismissCancel: {
+                    pageDragOffset = 0
+                    onDismissCancel()
+                },
+                onDismissCommit: {
+                    pageDragOffset = 0
+                    onDismissCommit()
+                }
+            ),
             onZoomStateChange: index == currentPageIndex ? onZoomStateChange : { _ in },
             onTranslationStateChange: onTranslationStateChange,
             onPreviousPage: {},
@@ -3892,6 +3807,7 @@ struct LocalImageView: View {
     var showsLoadingIndicator: Bool = true
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
+    var pagePanConfiguration: ReaderPagePanConfiguration? = nil
     var onZoomStateChange: (Bool) -> Void = { _ in }
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
@@ -3993,7 +3909,8 @@ struct LocalImageView: View {
                         contentSize: zoomContentSize,
                         maximumScale: ReaderZoomMath.defaultMaximumScale,
                         onTransformChanged: applyZoomTransform,
-                        onGestureEnded: settleZoomTransform
+                        onGestureEnded: settleZoomTransform,
+                        pagePanConfiguration: pagePanConfiguration
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
