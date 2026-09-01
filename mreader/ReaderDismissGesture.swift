@@ -382,7 +382,6 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             guard let window else { return }
             window.addGestureRecognizer(recognizer)
             hostWindow = window
-            connectZoomFailureRelationships(in: window)
         }
 
         func detach() {
@@ -403,14 +402,6 @@ struct ReaderDismissGestureView: UIViewRepresentable {
                 return false
             }
             return true
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            gestureRecognizer === recognizer
-                && otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
         }
 
         func gestureRecognizer(
@@ -512,16 +503,6 @@ struct ReaderDismissGestureView: UIViewRepresentable {
             onCancel()
         }
 
-        private func connectZoomFailureRelationships(in view: UIView) {
-            for zoomRecognizer in view.gestureRecognizers ?? [] {
-                if zoomRecognizer is ReaderZoomPinchGestureRecognizer {
-                    recognizer.require(toFail: zoomRecognizer)
-                }
-            }
-            for subview in view.subviews {
-                connectZoomFailureRelationships(in: subview)
-            }
-        }
     }
 
     final class InstallView: UIView {

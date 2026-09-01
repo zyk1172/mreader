@@ -159,15 +159,6 @@ struct ReaderZoomGestureTests {
             onCancel: {},
             onCommit: {}
         )
-        #expect(dismissCoordinator.gestureRecognizer(
-            dismissCoordinator.recognizer,
-            shouldRequireFailureOf: zoomCoordinator.pinchRecognizer
-        ))
-        #expect(!dismissCoordinator.gestureRecognizer(
-            dismissCoordinator.recognizer,
-            shouldRequireFailureOf: zoomCoordinator.panRecognizer
-        ))
-
         let scrollView = UIScrollView()
         #expect(dismissCoordinator.gestureRecognizer(
             dismissCoordinator.recognizer,
@@ -221,16 +212,63 @@ struct ReaderZoomGestureTests {
         #expect(window.gestureRecognizers?.contains(where: { $0 === dismissCoordinator.recognizer }) == true)
         #expect(host.gestureRecognizers?.contains(where: { $0 === zoomCoordinator.pinchRecognizer }) == true)
         #expect(host.gestureRecognizers?.contains(where: { $0 === zoomCoordinator.panRecognizer }) == true)
-        #expect(dismissCoordinator.gestureRecognizer(
-            dismissCoordinator.recognizer,
-            shouldRequireFailureOf: zoomCoordinator.pinchRecognizer
-        ))
-        #expect(!dismissCoordinator.gestureRecognizer(
-            dismissCoordinator.recognizer,
-            shouldRequireFailureOf: zoomCoordinator.panRecognizer
-        ))
-
         zoomCoordinator.uninstall()
         dismissCoordinator.detach()
+    }
+
+    @MainActor
+    @Test func multiplePagePinchesDoNotBlockDismiss() {
+        let windowScene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first
+        #expect(windowScene != nil)
+        guard let windowScene else { return }
+        let window = UIWindow(windowScene: windowScene)
+        window.frame = CGRect(x: 0, y: 0, width: 400, height: 800)
+
+        let dismissCoordinator = ReaderDismissGestureView.Coordinator(
+            isEnabled: true,
+            canBeginDismiss: { true },
+            onProgress: { _ in },
+            onCancel: {},
+            onCommit: {}
+        )
+        dismissCoordinator.attach(to: window)
+
+        var zoomCoordinators: [ReaderZoomGestureView.Coordinator] = []
+        for index in 0..<3 {
+            let host = ReaderZoomGestureView.ReaderPageInteractionHostView(
+                frame: CGRect(x: 0, y: CGFloat(index) * 260, width: 400, height: 260)
+            )
+            window.addSubview(host)
+            let coordinator = ReaderZoomGestureView.Coordinator(
+                scale: 1,
+                offset: .zero,
+                viewportSize: host.bounds.size,
+                contentSize: host.bounds.size,
+                maximumScale: ReaderZoomMath.defaultMaximumScale,
+                onTransformChanged: { _ in },
+                onGestureEnded: {}
+            )
+            coordinator.install(on: host)
+            zoomCoordinators.append(coordinator)
+        }
+
+        var dismissState = ReaderDismissTouchStateMachine()
+        #expect(dismissState.receiveTouchBegan(activeTouchCount: 1) == .possible)
+        #expect(dismissState.receiveMove(
+            translation: CGSize(width: 0, height: ReaderDismissGestureMetrics.activationDistance),
+            activeTouchCount: 1
+        ) == .began)
+        #expect(dismissCoordinator.recognizer.isEnabled)
+        #expect(window.gestureRecognizers?.contains(where: { $0 === dismissCoordinator.recognizer }) == true)
+        #expect(zoomCoordinators.allSatisfy { coordinator in
+            window.subviews.contains { host in
+                host.gestureRecognizers?.contains(where: { $0 === coordinator.pinchRecognizer }) == true
+            }
+        })
+
+        dismissCoordinator.detach()
+        zoomCoordinators.forEach { $0.uninstall() }
     }
 }

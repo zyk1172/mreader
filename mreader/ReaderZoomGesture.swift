@@ -316,14 +316,12 @@ struct ReaderZoomGestureView: UIViewRepresentable {
 
         func install(on view: ReaderPageInteractionHostView) {
             guard installedView !== view else {
-                connectDismissRecognizer(to: view)
                 return
             }
             uninstall()
             view.addGestureRecognizer(pinchRecognizer)
             view.addGestureRecognizer(panRecognizer)
             installedView = view
-            connectDismissRecognizer(to: view)
         }
 
         func uninstall() {
@@ -451,16 +449,6 @@ struct ReaderZoomGestureView: UIViewRepresentable {
 
         private func updatePanAvailability() {
             panRecognizer.isEnabled = currentScale > ReaderZoomMath.settleThreshold
-        }
-
-        private func connectDismissRecognizer(to view: UIView) {
-            guard let window = view.window,
-                  let dismissRecognizer = window.gestureRecognizers?.first(where: {
-                      $0 is ReaderDismissGestureRecognizer
-                  }) else {
-                return
-            }
-            dismissRecognizer.require(toFail: pinchRecognizer)
         }
 
     }

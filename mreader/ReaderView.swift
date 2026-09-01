@@ -2076,7 +2076,6 @@ struct ReaderView: View {
     private func completeDismiss() {
         guard !isDismissAnimating else { return }
         isDismissAnimating = true
-        HapticManager.shared.play(.medium)
         recordReadingActivity()
         persistReadingProgress(pageIndex: currentPageIndex, reason: "singleFingerDismiss", force: true)
         withAnimation(.easeIn(duration: 0.20)) {
@@ -2084,6 +2083,7 @@ struct ReaderView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
             onClose()
+            HapticManager.shared.play(.medium)
         }
     }
 
