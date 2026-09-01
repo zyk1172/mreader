@@ -2,14 +2,11 @@ import SwiftUI
 import UIKit
 
 final class ReaderZoomPinchGestureRecognizer: UIPinchGestureRecognizer {}
-final class ReaderZoomPanGestureRecognizer: UIPanGestureRecognizer {}
 
-nonisolated enum ReaderTouchMode: Equatable {
-    case idle
-    case zooming
-    case panning
-    case dismissing
-    case ignored
+final class ReaderZoomPanGestureRecognizer: UIPanGestureRecognizer {
+    /// Exposed to the reader-dismiss coordinator so a one-finger downward
+    /// drag can never steal a touch from an already zoomed page.
+    var isZoomActive = false
 }
 
 nonisolated struct ReaderZoomTransform: Equatable {
@@ -175,8 +172,6 @@ struct ReaderZoomGestureView: UIViewRepresentable {
         private(set) var maximumScale: CGFloat
         private weak var installedView: UIView?
         private var pinchBase: ReaderZoomTransform?
-        private var pinchBaseFocalPoint: CGPoint = .zero
-        private var pinchMode: ReaderTouchMode = .idle
         private var panBase: ReaderZoomTransform?
         private var isPanEnding = false
 
@@ -199,6 +194,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
+            panRecognizer.isZoomActive = scale > ReaderZoomMath.settleThreshold
             super.init()
 
             pinchRecognizer.delegate = self
@@ -228,6 +224,7 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             self.maximumScale = maximumScale
             self.onTransformChanged = onTransformChanged
             self.onGestureEnded = onGestureEnded
+            panRecognizer.isZoomActive = scale > ReaderZoomMath.settleThreshold
         }
 
         func install(on view: UIView) {
@@ -263,48 +260,15 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             return hypot(velocity.x, velocity.y) > 4
         }
 
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            // The reader-level two-finger dismiss recognizer may observe the
-            // same two touches. It classifies the gesture independently; the
-            // image zoom recognizer must be allowed to cancel its own scale
-            // updates when the gesture is a dismiss.
-            if isTwoFingerPan(otherGestureRecognizer) {
-                return true
-            }
-            return false
-        }
-
         @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
             guard let view = recognizer.view else { return }
             let viewport = effectiveViewportSize(for: view)
             switch recognizer.state {
             case .began:
                 pinchBase = ReaderZoomTransform(scale: currentScale, offset: currentOffset)
-                pinchBaseFocalPoint = recognizer.location(in: view)
-                pinchMode = .idle
             case .changed:
                 guard let pinchBase else { return }
                 let focalPoint = recognizer.location(in: view)
-                let centerTranslation = CGSize(
-                    width: focalPoint.x - pinchBaseFocalPoint.x,
-                    height: focalPoint.y - pinchBaseFocalPoint.y
-                )
-                if pinchMode == .idle {
-                    let scaleDelta = abs(log(max(recognizer.scale, 0.01)))
-                    if scaleDelta >= 0.045 {
-                        pinchMode = .zooming
-                    } else if isDownwardStableTwoFingerMovement(
-                        centerTranslation: centerTranslation,
-                        recognizer: recognizer
-                    ) {
-                        pinchMode = .dismissing
-                    }
-                }
-
-                guard pinchMode == .zooming else { return }
                 let transform = ReaderZoomMath.pinchTransform(
                     from: pinchBase,
                     magnification: recognizer.scale,
@@ -317,9 +281,9 @@ struct ReaderZoomGestureView: UIViewRepresentable {
                 currentOffset = transform.offset
                 onTransformChanged(transform)
             case .ended:
-                finishPinch(notify: pinchMode == .zooming)
+                finishPinch()
             case .cancelled, .failed:
-                finishPinch(notify: pinchMode == .zooming)
+                finishPinch()
             default:
                 break
             }
@@ -353,24 +317,22 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             case .ended:
                 finishPan(notify: true)
             case .cancelled, .failed:
-                finishPan(notify: !isPanEnding)
+                finishPan(notify: true)
             default:
                 break
             }
         }
 
-        private func finishPinch(notify: Bool) {
-            if notify {
-                onGestureEnded()
-            }
+        private func finishPinch() {
+            guard pinchBase != nil else { return }
+            onGestureEnded()
             pinchBase = nil
-            pinchMode = .idle
         }
 
         private func finishPan(notify: Bool) {
             guard !isPanEnding else { return }
             isPanEnding = true
-            if notify {
+            if notify, panBase != nil {
                 onGestureEnded()
             }
             panBase = nil
@@ -383,20 +345,6 @@ struct ReaderZoomGestureView: UIViewRepresentable {
             return view.bounds.size
         }
 
-        private func isDownwardStableTwoFingerMovement(
-            centerTranslation: CGSize,
-            recognizer: UIPinchGestureRecognizer
-        ) -> Bool {
-            let distanceDelta = abs(log(max(recognizer.scale, 0.01)))
-            let isMostlyVertical = centerTranslation.height > 10
-                && abs(centerTranslation.width) < max(centerTranslation.height * 0.8, 40)
-            return isMostlyVertical && distanceDelta < 0.045
-        }
-
-        private func isTwoFingerPan(_ recognizer: UIGestureRecognizer) -> Bool {
-            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
-            return pan.minimumNumberOfTouches == 2 && pan.maximumNumberOfTouches == 2
-        }
     }
 
     final class InstallView: UIView {

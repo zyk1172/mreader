@@ -715,6 +715,7 @@ struct ReaderView: View {
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
     @State private var isDismissAnimating = false
+    @State private var isContinuousReaderAtTop = false
     @State private var lastReaderInteractionAt = Date()
     @State private var isBurnInProtectionLocked = false
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
@@ -724,6 +725,22 @@ struct ReaderView: View {
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
+    }
+
+    private var isReaderDismissEnabled: Bool {
+        !showControls && !showComicSettings && !isBurnInProtectionLocked && !isDismissAnimating
+    }
+
+    private var canBeginReaderDismiss: Bool {
+        guard isReaderDismissEnabled, !manager.pages.isEmpty else { return false }
+        switch readingMode {
+        case .continuousScroll, .infiniteScroll:
+            return isContinuousReaderAtTop
+        case .verticalPage:
+            return currentPageIndex == 0
+        case .horizontalPage, .doublePage, .guidedPanel:
+            return true
+        }
     }
 
     private var readingDirection: ReadingDirection {
@@ -886,6 +903,9 @@ struct ReaderView: View {
                     scrollProgress: comic.scrollProgress,
                     scrollPageProgress: comic.scrollPageProgress,
                     onScrollPositionChange: saveScrollPosition,
+                    onScrollAtTopChange: { isAtTop in
+                        isContinuousReaderAtTop = isAtTop
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -907,7 +927,9 @@ struct ReaderView: View {
                     .transition(.opacity)
             }
 
-            TwoFingerSwipeDownDismissView(
+            ReaderDismissGestureView(
+                isEnabled: isReaderDismissEnabled,
+                canBeginDismiss: { canBeginReaderDismiss },
                 onProgress: { progress in
                     guard !isDismissAnimating else { return }
                     dismissGestureProgress = progress
@@ -919,7 +941,7 @@ struct ReaderView: View {
                         dismissGestureProgress = 0
                     }
                 },
-                onSwipe: completeTwoFingerDismiss
+                onCommit: completeDismiss
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
@@ -1039,9 +1061,9 @@ struct ReaderView: View {
                     .zIndex(100)
             }
         }
-        .scaleEffect(max(0.72, 1 - dismissGestureProgress * 0.22))
-        .offset(y: dismissGestureProgress * 190)
-        .opacity(max(0.08, 1 - dismissGestureProgress * 0.88))
+        .scaleEffect(max(ReaderDismissGestureMetrics.minimumScale, 1 - dismissGestureProgress * (1 - ReaderDismissGestureMetrics.minimumScale)))
+        .offset(y: dismissGestureProgress * ReaderDismissGestureMetrics.maximumOffset)
+        .opacity(max(ReaderDismissGestureMetrics.minimumOpacity, 1 - dismissGestureProgress * (1 - ReaderDismissGestureMetrics.minimumOpacity)))
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle("")
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
@@ -2033,16 +2055,16 @@ struct ReaderView: View {
         isBurnInProtectionLocked = true
     }
 
-    private func completeTwoFingerDismiss() {
+    private func completeDismiss() {
         guard !isDismissAnimating else { return }
         isDismissAnimating = true
         HapticManager.shared.play(.medium)
         recordReadingActivity()
-        persistReadingProgress(pageIndex: currentPageIndex, reason: "twoFingerDismiss", force: true)
-        withAnimation(.easeIn(duration: 0.24)) {
+        persistReadingProgress(pageIndex: currentPageIndex, reason: "singleFingerDismiss", force: true)
+        withAnimation(.easeIn(duration: 0.20)) {
             dismissGestureProgress = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
             onClose()
         }
     }
@@ -2320,7 +2342,7 @@ private struct ReaderPageTapRecognizer: UIViewRepresentable {
     }
 }
 
-private enum ReaderGestureTouchFilter {
+enum ReaderGestureTouchFilter {
     static func isInteractiveTouch(_ touch: UITouch) -> Bool {
         var view = touch.view
         while let current = view {
@@ -2552,6 +2574,7 @@ struct ContinuousScrollReader: View {
     let scrollProgress: Double
     let scrollPageProgress: Double
     let onScrollPositionChange: (Int, Double, Double) -> Void
+    let onScrollAtTopChange: (Bool) -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2635,8 +2658,10 @@ struct ContinuousScrollReader: View {
                         if scrollView !== resolvedScrollView {
                             scrollView = resolvedScrollView
                         }
+                        publishScrollTopState(using: resolvedScrollView)
                     },
                     onScroll: {
+                        publishScrollTopState()
                         scheduleVisiblePageUpdate(delay: 0.04)
                     }
                 ))
@@ -2672,6 +2697,7 @@ struct ContinuousScrollReader: View {
                 .onDisappear {
                     visiblePageUpdateWorkItem?.cancel()
                     visiblePageUpdateWorkItem = nil
+                    onScrollAtTopChange(false)
                     updateCurrentPageFromVisibleFrames()
                 }
             }
@@ -2696,6 +2722,15 @@ struct ContinuousScrollReader: View {
         } completion: { _ in
             updateCurrentPageFromVisibleFrames()
         }
+    }
+
+    private func publishScrollTopState(using resolvedScrollView: UIScrollView? = nil) {
+        guard let scrollView = resolvedScrollView ?? scrollView else {
+            onScrollAtTopChange(false)
+            return
+        }
+        let topOffset = -scrollView.adjustedContentInset.top
+        onScrollAtTopChange(scrollView.contentOffset.y <= topOffset + 1)
     }
 
     private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -3475,182 +3510,6 @@ private struct InteractiveBookPageCurlModifier: ViewModifier {
             return direction < 0 ? .top : .bottom
         }
         return direction < 0 ? .leading : .trailing
-    }
-}
-
-struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
-    let onProgress: (CGFloat) -> Void
-    let onCancel: () -> Void
-    let onSwipe: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onProgress: onProgress, onCancel: onCancel, onSwipe: onSwipe)
-    }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = WindowGestureInstallView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        view.coordinator = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.onProgress = onProgress
-        context.coordinator.onCancel = onCancel
-        context.coordinator.onSwipe = onSwipe
-        (uiView as? WindowGestureInstallView)?.coordinator = context.coordinator
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onProgress: (CGFloat) -> Void
-        var onCancel: () -> Void
-        var onSwipe: () -> Void
-        let recognizer = UIPanGestureRecognizer()
-        private var hasTriggered = false
-        private var beganWithTwoTouches = false
-        private var initialTouchDistance: CGFloat?
-        private var isPinching = false
-
-        init(
-            onProgress: @escaping (CGFloat) -> Void,
-            onCancel: @escaping () -> Void,
-            onSwipe: @escaping () -> Void
-        ) {
-            self.onProgress = onProgress
-            self.onCancel = onCancel
-            self.onSwipe = onSwipe
-            super.init()
-            recognizer.minimumNumberOfTouches = 2
-            recognizer.maximumNumberOfTouches = 2
-            recognizer.cancelsTouchesInView = false
-            recognizer.delegate = self
-            recognizer.addTarget(self, action: #selector(handlePan(_:)))
-        }
-
-        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
-            guard let view = recognizer.view else { return }
-            let translation = recognizer.translation(in: view)
-            let velocity = recognizer.velocity(in: view)
-            switch recognizer.state {
-            case .began:
-                hasTriggered = false
-                beganWithTwoTouches = recognizer.numberOfTouches == 2
-                initialTouchDistance = twoTouchDistance(in: view, recognizer: recognizer)
-                isPinching = false
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    return
-                }
-            case .changed:
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    return
-                }
-                if !isPinching,
-                   let initialTouchDistance,
-                   let currentTouchDistance = twoTouchDistance(in: view, recognizer: recognizer),
-                   abs(currentTouchDistance - initialTouchDistance) / max(initialTouchDistance, 1) >= 0.045 {
-                    isPinching = true
-                    onCancel()
-                }
-                guard !isPinching else { return }
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
-                onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
-                guard !hasTriggered else { return }
-                let isDownward = translation.y > 110 && velocity.y > 220
-                if isDownward && isMostlyVertical {
-                    hasTriggered = true
-                    onSwipe()
-                }
-            case .ended:
-                guard beganWithTwoTouches else {
-                    onCancel()
-                    beganWithTwoTouches = false
-                    initialTouchDistance = nil
-                    isPinching = false
-                    return
-                }
-                guard !isPinching else {
-                    beganWithTwoTouches = false
-                    initialTouchDistance = nil
-                    isPinching = false
-                    return
-                }
-                guard !hasTriggered else {
-                    beganWithTwoTouches = false
-                    initialTouchDistance = nil
-                    isPinching = false
-                    return
-                }
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
-                let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
-                if shouldDismiss {
-                    hasTriggered = true
-                    onSwipe()
-                } else {
-                    onCancel()
-                }
-                beganWithTwoTouches = false
-                initialTouchDistance = nil
-                isPinching = false
-            case .cancelled, .failed:
-                hasTriggered = false
-                beganWithTwoTouches = false
-                initialTouchDistance = nil
-                isPinching = false
-                onCancel()
-            default:
-                break
-            }
-        }
-
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            gestureRecognizer.numberOfTouches == 2
-        }
-
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            otherGestureRecognizer is ReaderZoomPinchGestureRecognizer
-                || otherGestureRecognizer is ReaderZoomPanGestureRecognizer
-        }
-
-        private func twoTouchDistance(
-            in view: UIView,
-            recognizer: UIPanGestureRecognizer
-        ) -> CGFloat? {
-            guard recognizer.numberOfTouches == 2 else { return nil }
-            let first = recognizer.location(ofTouch: 0, in: view)
-            let second = recognizer.location(ofTouch: 1, in: view)
-            return hypot(second.x - first.x, second.y - first.y)
-        }
-    }
-
-    final class WindowGestureInstallView: UIView {
-        weak var coordinator: Coordinator? {
-            didSet {
-                installRecognizerIfNeeded()
-            }
-        }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            installRecognizerIfNeeded()
-        }
-
-        private func installRecognizerIfNeeded() {
-            guard let window, let coordinator else { return }
-            if coordinator.recognizer.view !== window {
-                coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
-                window.addGestureRecognizer(coordinator.recognizer)
-            }
-        }
-
-        deinit {
-            MainActor.assumeIsolated {
-                if let recognizer = coordinator?.recognizer {
-                    recognizer.view?.removeGestureRecognizer(recognizer)
-                }
-            }
-        }
     }
 }
 
