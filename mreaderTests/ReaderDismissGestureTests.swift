@@ -38,90 +38,135 @@ struct ReaderDismissGestureTests {
         #expect(visualState.opacity == 0.75)
     }
 
-    @Test func directionLockSeparatesDismissFromPageTurn() {
+    @Test func directionMathSeparatesPageAxes() {
         #expect(ReaderDismissMath.isDownwardDirection(CGSize(width: 40, height: 100)))
         #expect(!ReaderDismissMath.isDownwardDirection(CGSize(width: 70, height: 100)))
         #expect(!ReaderDismissMath.isDownwardDirection(CGSize(width: 40, height: -100)))
         #expect(ReaderDismissMath.isHorizontalPageTurn(CGSize(width: 100, height: 40)))
-        #expect(!ReaderDismissMath.isHorizontalPageTurn(CGSize(width: 100, height: 80)))
+        #expect(ReaderDismissMath.isVerticalPageTurn(CGSize(width: 40, height: 100)))
     }
 
-    @Test func reverseMovementCancelsAfterSixteenPoints() {
-        #expect(!ReaderDismissMath.shouldCancelForReverse(
-            peakTranslationY: 100,
-            currentTranslationY: 85
-        ))
-        #expect(ReaderDismissMath.shouldCancelForReverse(
-            peakTranslationY: 100,
-            currentTranslationY: 84
-        ))
-    }
+    @Test func horizontalPageDownwardDragUsesThePageDragForDismissal() {
+        var drag = ReaderPageDragStateMachine()
 
-    @Test func commitRequiresDistanceAndNeverVelocity() {
-        #expect(!ReaderDismissMath.shouldCommit(
-            intent: .dismissing,
-            translationY: 50,
-            viewportHeight: 800,
-            wasCancelled: false
-        ))
-        #expect(ReaderDismissMath.shouldCommit(
-            intent: .dismissing,
-            translationY: 144,
-            viewportHeight: 800,
-            wasCancelled: false
-        ))
-        #expect(!ReaderDismissMath.shouldCommit(
-            intent: .dismissing,
-            translationY: 200,
-            viewportHeight: 800,
-            wasCancelled: true
-        ))
-        #expect(!ReaderDismissMath.shouldCommit(
-            intent: .pageTurning,
-            translationY: 200,
-            viewportHeight: 800,
-            wasCancelled: false
-        ))
-    }
-
-    @Test func firstFingerMovesBeforeSecondFingerStillAllowsPinch() {
-        var dismiss = ReaderDismissTouchStateMachine()
-
-        #expect(dismiss.receiveTouchBegan(activeTouchCount: 1) == .possible)
-        #expect(dismiss.receiveMove(
-            translation: CGSize(width: 0, height: 10),
-            activeTouchCount: 1
-        ) == .possible)
-        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .failed)
-        #expect(dismiss.state == .failed)
-    }
-
-    @Test func secondFingerBeforeDismissActivationCancelsDismissCandidate() {
-        var dismiss = ReaderDismissTouchStateMachine()
-
-        _ = dismiss.receiveTouchBegan(activeTouchCount: 1)
-        _ = dismiss.receiveMove(
-            translation: CGSize(width: 4, height: 20),
-            activeTouchCount: 1
-        )
-
-        #expect(dismiss.state == .possible)
-        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .failed)
-    }
-
-    @Test func singleFingerBeyondActivationLocksDismissAgainstLaterSecondFinger() {
-        var dismiss = ReaderDismissTouchStateMachine()
-
-        _ = dismiss.receiveTouchBegan(activeTouchCount: 1)
-        #expect(dismiss.receiveMove(
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 0, height: 27),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .undecided)
+        #expect(drag.receiveMove(
             translation: CGSize(width: 0, height: 28),
-            activeTouchCount: 1
-        ) == .began)
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .dismissing)
+        #expect(drag.intent == .dismissing)
+        #expect(ReaderDismissMath.progress(for: 60, viewportHeight: 800) > 0)
+    }
 
-        #expect(dismiss.receiveTouchBegan(activeTouchCount: 2) == .began)
-        #expect(dismiss.receiveMove(
-            translation: CGSize(width: 0, height: 40),
-            activeTouchCount: 2
-        ) == .began)
+    @Test func horizontalPageDragUsesPageTurnIntentWithoutDismissal() {
+        var drag = ReaderPageDragStateMachine()
+
+        #expect(drag.receiveMove(
+            translation: CGSize(width: -120, height: 8),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .pageTurning)
+        #expect(drag.intent != .dismissing)
+    }
+
+    @Test func verticalFirstPageDownwardDragDismisses() {
+        var drag = ReaderPageDragStateMachine()
+
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 4, height: 28),
+            mode: .verticalPage(isFirstPage: true),
+            isDismissEnabled: true
+        ) == .dismissing)
+    }
+
+    @Test func verticalFirstPageUpwardDragTurnsPage() {
+        var drag = ReaderPageDragStateMachine()
+
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 4, height: -40),
+            mode: .verticalPage(isFirstPage: true),
+            isDismissEnabled: true
+        ) == .pageTurning)
+    }
+
+    @Test func verticalNonFirstPageDownwardDragTurnsPageInsteadOfDismissing() {
+        var drag = ReaderPageDragStateMachine()
+
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 4, height: 40),
+            mode: .verticalPage(isFirstPage: false),
+            isDismissEnabled: true
+        ) == .pageTurning)
+    }
+
+    @Test func ambiguousDirectionCanBecomeDismissalLater() {
+        var drag = ReaderPageDragStateMachine()
+
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 14, height: 12),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .undecided)
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 11, height: 150),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .dismissing)
+    }
+
+    @Test func reverseMovementCancelsPageDismissalAndCannotReenter() {
+        var drag = ReaderPageDragStateMachine()
+
+        _ = drag.receiveMove(
+            translation: CGSize(width: 0, height: 80),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        )
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 0, height: 63),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .cancelled)
+        #expect(drag.wasDismissCancelled)
+        #expect(drag.receiveMove(
+            translation: CGSize(width: 0, height: 180),
+            mode: .horizontalPage,
+            isDismissEnabled: true
+        ) == .cancelled)
+    }
+
+    @Test func continuousOverscrollStartsOnlyAfterActivation() {
+        var dismiss = ReaderContinuousDismissStateMachine()
+
+        #expect(dismiss.receiveOverscroll(27, isDismissEnabled: true) == .possible)
+        #expect(dismiss.receiveOverscroll(28, isDismissEnabled: true) == .dismissing)
+        #expect(ReaderDismissMath.progress(for: 60, viewportHeight: 800) > 0)
+    }
+
+    @Test func continuousOverscrollCommitsOnlyAtCommitDistance() {
+        var dismiss = ReaderContinuousDismissStateMachine()
+
+        _ = dismiss.receiveOverscroll(144, isDismissEnabled: true)
+        let belowCommit = dismiss.finish(overscroll: 143, viewportHeight: 800)
+        #expect(!belowCommit)
+
+        _ = dismiss.receiveOverscroll(144, isDismissEnabled: true)
+        let atCommit = dismiss.finish(overscroll: 144, viewportHeight: 800)
+        #expect(atCommit)
+    }
+
+    @Test func continuousReverseMovementCancelsAndCannotReenter() {
+        var dismiss = ReaderContinuousDismissStateMachine()
+
+        _ = dismiss.receiveOverscroll(80, isDismissEnabled: true)
+        #expect(dismiss.receiveOverscroll(63, isDismissEnabled: true) == .cancelled)
+        #expect(dismiss.receiveOverscroll(180, isDismissEnabled: true) == .cancelled)
+        let didCommit = dismiss.finish(overscroll: 180, viewportHeight: 800)
+        #expect(!didCommit)
     }
 }

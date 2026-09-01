@@ -716,7 +716,6 @@ struct ReaderView: View {
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
     @State private var isDismissAnimating = false
-    @State private var isContinuousReaderAtTop = false
     @State private var lastReaderInteractionAt = Date()
     @State private var isBurnInProtectionLocked = false
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
@@ -734,18 +733,6 @@ struct ReaderView: View {
             && !isBurnInProtectionLocked
             && !isDismissAnimating
             && !isReaderZoomed
-    }
-
-    private var canBeginReaderDismiss: Bool {
-        guard isReaderDismissEnabled, !manager.pages.isEmpty else { return false }
-        switch readingMode {
-        case .continuousScroll, .infiniteScroll:
-            return isContinuousReaderAtTop
-        case .verticalPage:
-            return currentPageIndex == 0
-        case .horizontalPage, .doublePage, .guidedPanel:
-            return true
-        }
     }
 
     private var readingDirection: ReadingDirection {
@@ -849,6 +836,16 @@ struct ReaderView: View {
                     onZoomStateChange: { isZoomed in
                         isReaderZoomed = isZoomed
                     },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -872,6 +869,16 @@ struct ReaderView: View {
                     onZoomStateChange: { isZoomed in
                         isReaderZoomed = isZoomed
                     },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
+                    },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
                     onShowControls: showControlsIfNeeded,
@@ -894,6 +901,16 @@ struct ReaderView: View {
                     targetLanguage: selectedTranslationTarget.rawValue,
                     onZoomStateChange: { isZoomed in
                         isReaderZoomed = isZoomed
+                    },
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
                     },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
@@ -920,8 +937,15 @@ struct ReaderView: View {
                         isReaderZoomed = isZoomed
                     },
                     onScrollPositionChange: saveScrollPosition,
-                    onScrollAtTopChange: { isAtTop in
-                        isContinuousReaderAtTop = isAtTop
+                    isDismissEnabled: isReaderDismissEnabled,
+                    onDismissProgress: { progress in
+                        updateReaderDismissProgress(progress)
+                    },
+                    onDismissCancel: {
+                        cancelReaderDismiss()
+                    },
+                    onDismissCommit: {
+                        completeDismiss()
                     },
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: showControls,
@@ -944,25 +968,9 @@ struct ReaderView: View {
                     .transition(.opacity)
             }
 
-            ReaderDismissGestureView(
-                isEnabled: isReaderDismissEnabled,
-                canBeginDismiss: { canBeginReaderDismiss },
-                onProgress: { progress in
-                    guard !isDismissAnimating else { return }
-                    dismissGestureProgress = progress
-                    recordReaderInteraction()
-                },
-                onCancel: {
-                    guard !isDismissAnimating else { return }
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                        dismissGestureProgress = 0
-                    }
-                },
-                onCommit: completeDismiss
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea()
-            .background(ScrollsToTopDisabledView())
+            ScrollsToTopDisabledView()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
 
             ReaderControlsDoubleTapOverlay(isEnabled: !showComicSettings) {
                 toggleControls()
@@ -2062,6 +2070,19 @@ struct ReaderView: View {
         lastReaderInteractionAt = Date()
     }
 
+    private func updateReaderDismissProgress(_ progress: CGFloat) {
+        guard !isDismissAnimating else { return }
+        dismissGestureProgress = min(max(progress, 0), 1)
+        recordReaderInteraction()
+    }
+
+    private func cancelReaderDismiss() {
+        guard !isDismissAnimating else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            dismissGestureProgress = 0
+        }
+    }
+
     private func checkBurnInProtection(now: Date = Date()) {
         guard isBurnInProtectionEnabled,
               !isBurnInProtectionLocked,
@@ -2437,7 +2458,7 @@ private struct ScrollViewportSizePreferenceKey: PreferenceKey {
 
 private struct ScrollViewAccessor: UIViewRepresentable {
     let onResolve: (UIScrollView) -> Void
-    let onScroll: () -> Void
+    let onScroll: (UIScrollView) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onScroll: onScroll)
@@ -2446,9 +2467,9 @@ private struct ScrollViewAccessor: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         DispatchQueue.main.async {
-                if let scrollView = view.enclosingScrollView {
-                    context.coordinator.attach(to: scrollView)
-                    onResolve(scrollView)
+            if let scrollView = view.enclosingScrollView {
+                context.coordinator.attach(to: scrollView)
+                onResolve(scrollView)
             }
         }
         return view
@@ -2464,33 +2485,61 @@ private struct ScrollViewAccessor: UIViewRepresentable {
         }
     }
 
-    final class Coordinator {
-        var onScroll: () -> Void
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject {
+        var onScroll: (UIScrollView) -> Void
         weak var scrollView: UIScrollView?
         private var contentOffsetObservation: NSKeyValueObservation?
 
-        init(onScroll: @escaping () -> Void) {
+        init(onScroll: @escaping (UIScrollView) -> Void) {
             self.onScroll = onScroll
         }
 
         func attach(to scrollView: UIScrollView) {
             scrollView.scrollsToTop = false
             guard self.scrollView !== scrollView else { return }
+            detach()
             self.scrollView = scrollView
+            scrollView.panGestureRecognizer.addTarget(self, action: #selector(handlePan(_:)))
             contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
                 guard let self else { return }
                 // UIScrollView 的 contentOffset 变化只发生在主线程；
                 // assumeIsolated 让编译器认可这条路径并保留运行时校验。
                 if Thread.isMainThread {
                     MainActor.assumeIsolated {
-                        self.onScroll()
+                        self.onScroll(scrollView)
                     }
                 } else {
                     DispatchQueue.main.async {
-                        self.onScroll()
+                        self.onScroll(scrollView)
                     }
                 }
             }
+        }
+
+        @objc private func handlePan(_ gestureRecognizer: UIPanGestureRecognizer) {
+            guard let scrollView = gestureRecognizer.view as? UIScrollView else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    onScroll(scrollView)
+                }
+            } else {
+                DispatchQueue.main.async { [weak self, weak scrollView] in
+                    guard let self, let scrollView else { return }
+                    self.onScroll(scrollView)
+                }
+            }
+        }
+
+        fileprivate func detach() {
+            if let scrollView {
+                scrollView.panGestureRecognizer.removeTarget(self, action: #selector(handlePan(_:)))
+            }
+            contentOffsetObservation = nil
+            scrollView = nil
         }
     }
 }
@@ -2593,7 +2642,10 @@ struct ContinuousScrollReader: View {
     let scrollPageProgress: Double
     let onZoomStateChange: (Bool) -> Void
     let onScrollPositionChange: (Int, Double, Double) -> Void
-    let onScrollAtTopChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2610,6 +2662,8 @@ struct ContinuousScrollReader: View {
     @State private var lastStableContentOffsetY: CGFloat = 0
     @State private var allowTopOffsetUntil = Date.distantPast
     @State private var lastPageFrameCommitDate = Date.distantPast
+    @State private var continuousDismissState = ReaderContinuousDismissStateMachine()
+    @State private var lastUserPanInteractionDate = Date.distantPast
 
     var body: some View {
         GeometryReader { viewportProxy in
@@ -2678,10 +2732,9 @@ struct ContinuousScrollReader: View {
                         if scrollView !== resolvedScrollView {
                             scrollView = resolvedScrollView
                         }
-                        publishScrollTopState(using: resolvedScrollView)
                     },
-                    onScroll: {
-                        publishScrollTopState()
+                    onScroll: { resolvedScrollView in
+                        handleContinuousScrollEvent(using: resolvedScrollView)
                         scheduleVisiblePageUpdate(delay: 0.04)
                     }
                 ))
@@ -2717,7 +2770,10 @@ struct ContinuousScrollReader: View {
                 .onDisappear {
                     visiblePageUpdateWorkItem?.cancel()
                     visiblePageUpdateWorkItem = nil
-                    onScrollAtTopChange(false)
+                    if continuousDismissState.state == .dismissing {
+                        onDismissCancel()
+                    }
+                    continuousDismissState.reset()
                     updateCurrentPageFromVisibleFrames()
                 }
             }
@@ -2744,13 +2800,73 @@ struct ContinuousScrollReader: View {
         }
     }
 
-    private func publishScrollTopState(using resolvedScrollView: UIScrollView? = nil) {
-        guard let scrollView = resolvedScrollView ?? scrollView else {
-            onScrollAtTopChange(false)
-            return
+    private func handleContinuousScrollEvent(using scrollView: UIScrollView) {
+        let panState = scrollView.panGestureRecognizer.state
+        let minimumOffsetY = -scrollView.adjustedContentInset.top
+        let overscroll = max(minimumOffsetY - scrollView.contentOffset.y, 0)
+        let height = max(viewportSize.height, scrollView.bounds.height, 1)
+
+        switch panState {
+        case .began:
+            continuousDismissState.beginPan()
+            lastUserPanInteractionDate = Date()
+            applyContinuousDismissOverscroll(
+                overscroll,
+                viewportHeight: height,
+                previousState: continuousDismissState.state
+            )
+        case .changed:
+            lastUserPanInteractionDate = Date()
+            let previousState = continuousDismissState.state
+            applyContinuousDismissOverscroll(
+                overscroll,
+                viewportHeight: height,
+                previousState: previousState
+            )
+        case .ended:
+            let previousState = continuousDismissState.state
+            let shouldCommit = continuousDismissState.finish(
+                overscroll: overscroll,
+                viewportHeight: height
+            )
+            lastUserPanInteractionDate = Date()
+            guard previousState == .dismissing else { return }
+            if shouldCommit {
+                onDismissCommit()
+            } else {
+                onDismissCancel()
+            }
+        case .cancelled, .failed:
+            let previousState = continuousDismissState.state
+            continuousDismissState.reset()
+            lastUserPanInteractionDate = Date()
+            if previousState == .dismissing {
+                onDismissCancel()
+            }
+        default:
+            break
         }
-        let topOffset = -scrollView.adjustedContentInset.top
-        onScrollAtTopChange(scrollView.contentOffset.y <= topOffset + 1)
+    }
+
+    private func applyContinuousDismissOverscroll(
+        _ overscroll: CGFloat,
+        viewportHeight: CGFloat,
+        previousState: ReaderContinuousDismissState
+    ) {
+        let state = continuousDismissState.receiveOverscroll(
+            overscroll,
+            isDismissEnabled: isDismissEnabled
+        )
+        if state == .dismissing {
+            onDismissProgress(
+                ReaderDismissMath.progress(
+                    for: overscroll,
+                    viewportHeight: viewportHeight
+                )
+            )
+        } else if previousState == .dismissing, state == .cancelled {
+            onDismissCancel()
+        }
     }
 
     private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -2885,6 +3001,9 @@ struct ContinuousScrollReader: View {
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
         guard let scrollView, currentPageIndex > 0 else { return false }
         guard Date() > allowTopOffsetUntil else { return false }
+        // A user drag is allowed to reach the real top and continue into
+        // bounce overscroll; only restore top jumps that were not user-driven.
+        guard Date().timeIntervalSince(lastUserPanInteractionDate) >= 0.4 else { return false }
         let minOffsetY = -scrollView.adjustedContentInset.top
         let currentY = scrollView.contentOffset.y
         let hadMeaningfulPosition = lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
@@ -2910,6 +3029,10 @@ struct GuidedPanelReader: View {
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
@@ -2919,6 +3042,7 @@ struct GuidedPanelReader: View {
     @State private var sourceSize: CGSize = .zero
     @State private var panelIndex = 0
     @State private var isDetecting = false
+    @State private var dragState = ReaderPageDragStateMachine()
 
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
@@ -2982,6 +3106,45 @@ struct GuidedPanelReader: View {
                 }
             }
             .clipped()
+            .gesture(
+                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
+                    .onChanged { value in
+                        let previousIntent = dragState.intent
+                        let intent = dragState.receiveMove(
+                            translation: value.translation,
+                            mode: .dismissOnly,
+                            isDismissEnabled: isDismissEnabled
+                        )
+                        if intent == .dismissing {
+                            onDismissProgress(
+                                ReaderDismissMath.progress(
+                                    for: value.translation.height,
+                                    viewportHeight: proxy.size.height
+                                )
+                            )
+                        } else if previousIntent == .dismissing, intent == .cancelled {
+                            onDismissCancel()
+                        }
+                    }
+                    .onEnded { value in
+                        switch dragState.intent {
+                        case .dismissing:
+                            if ReaderDismissMath.shouldCommit(
+                                intent: dragState.intent,
+                                translationY: value.translation.height,
+                                viewportHeight: proxy.size.height,
+                                wasCancelled: dragState.wasDismissCancelled
+                            ) {
+                                onDismissCommit()
+                            } else {
+                                onDismissCancel()
+                            }
+                        default:
+                            break
+                        }
+                        dragState.reset()
+                    }
+            )
         }
     }
 
@@ -3082,16 +3245,24 @@ struct AnimatedPageReader: View {
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
+    @State private var dragState = ReaderPageDragStateMachine()
 
     var body: some View {
         GeometryReader { geo in
             let isRTL = readingDirection == .rightToLeft
+            let dragMode: ReaderPageDragMode = readingMode == .verticalPage
+                ? .verticalPage(isFirstPage: currentPageIndex == 0)
+                : .horizontalPage
 
             ZStack {
                 if pageTurnAnimation == .curl,
@@ -3107,7 +3278,7 @@ struct AnimatedPageReader: View {
                         .transition(transition)
                         .modifier(
                             InteractiveBookPageCurlModifier(
-                                dragOffset: pageTurnAnimation == .curl ? dragOffset : 0,
+                                dragOffset: pageTurnAnimation == .curl ? pageDragOffset : 0,
                                 pageExtent: readingMode == .verticalPage ? geo.size.height : geo.size.width,
                                 isVertical: readingMode == .verticalPage
                             )
@@ -3118,20 +3289,55 @@ struct AnimatedPageReader: View {
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 28)
+                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
                     .updating($dragOffset) { value, state, _ in
                         state = readingMode == .verticalPage ? value.translation.height : value.translation.width
                     }
-                    .onEnded { value in
-                        let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
-                        let threshold = max(axisLength * 0.2, 72)
-                        let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
-                        let logicalDelta = readingMode == .verticalPage ? rawDelta : (isRTL ? rawDelta : -rawDelta)
-                        if logicalDelta > threshold {
-                            nextPage()
-                        } else if logicalDelta < -threshold {
-                            previousPage()
+                    .onChanged { value in
+                        let previousIntent = dragState.intent
+                        let intent = dragState.receiveMove(
+                            translation: value.translation,
+                            mode: dragMode,
+                            isDismissEnabled: isDismissEnabled
+                        )
+                        if intent == .dismissing {
+                            onDismissProgress(
+                                ReaderDismissMath.progress(
+                                    for: value.translation.height,
+                                    viewportHeight: geo.size.height
+                                )
+                            )
+                        } else if previousIntent == .dismissing, intent == .cancelled {
+                            onDismissCancel()
                         }
+                    }
+                    .onEnded { value in
+                        switch dragState.intent {
+                        case .dismissing:
+                            if ReaderDismissMath.shouldCommit(
+                                intent: dragState.intent,
+                                translationY: value.translation.height,
+                                viewportHeight: geo.size.height,
+                                wasCancelled: dragState.wasDismissCancelled
+                            ) {
+                                onDismissCommit()
+                            } else {
+                                onDismissCancel()
+                            }
+                        case .pageTurning:
+                            let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
+                            let threshold = max(axisLength * 0.2, 72)
+                            let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
+                            let logicalDelta = readingMode == .verticalPage ? rawDelta : (isRTL ? rawDelta : -rawDelta)
+                            if logicalDelta > threshold {
+                                nextPage()
+                            } else if logicalDelta < -threshold {
+                                previousPage()
+                            }
+                        default:
+                            break
+                        }
+                        dragState.reset()
                     }
             )
         }
@@ -3200,18 +3406,22 @@ struct AnimatedPageReader: View {
     private var pageOffset: CGSize {
         guard pageTurnAnimation == .slide else { return .zero }
         if readingMode == .verticalPage {
-            return CGSize(width: 0, height: dragOffset * 0.18)
+            return CGSize(width: 0, height: pageDragOffset * 0.18)
         }
-        return CGSize(width: dragOffset * 0.18, height: 0)
+        return CGSize(width: pageDragOffset * 0.18, height: 0)
     }
 
     private func revealedPageIndex(isRTL: Bool) -> Int? {
-        guard abs(dragOffset) > 2 else { return nil }
+        guard abs(pageDragOffset) > 2 else { return nil }
         if readingMode == .verticalPage {
-            return currentPageIndex + (dragOffset < 0 ? 1 : -1)
+            return currentPageIndex + (pageDragOffset < 0 ? 1 : -1)
         }
-        let isForwardDrag = isRTL ? dragOffset > 0 : dragOffset < 0
+        let isForwardDrag = isRTL ? pageDragOffset > 0 : pageDragOffset < 0
         return currentPageIndex + (isForwardDrag ? 1 : -1)
+    }
+
+    private var pageDragOffset: CGFloat {
+        dragState.intent == .pageTurning ? dragOffset : 0
     }
 
     private func pageView(index: Int) -> some View {
@@ -3282,12 +3492,17 @@ struct DoublePageReader: View {
     let isOCRMagnificationVisible: Bool
     let targetLanguage: String
     let onZoomStateChange: (Bool) -> Void
+    let isDismissEnabled: Bool
+    let onDismissProgress: (CGFloat) -> Void
+    let onDismissCancel: () -> Void
+    let onDismissCommit: () -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
+    @State private var dragState = ReaderPageDragStateMachine()
 
     private var leftPageIndex: Int {
         currentPageIndex - currentPageIndex % 2
@@ -3313,25 +3528,64 @@ struct DoublePageReader: View {
             }
             .id(leftPageIndex)
             .transition(doublePageTransition)
-            .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? dragOffset * 0.16 : 0)
+            .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? pageDragOffset * 0.16 : 0)
             .animation(pageChangeAnimation, value: leftPageIndex)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 28)
+                DragGesture(minimumDistance: ReaderDismissGestureMetrics.activationDistance)
                     .updating($dragOffset) { value, state, _ in
                         state = value.translation.width
                     }
-                    .onEnded { value in
-                        let threshold = max(geo.size.width * 0.2, 72)
-                        let logicalDelta = isRTL ? value.translation.width : -value.translation.width
-                        if logicalDelta > threshold {
-                            nextSpread()
-                        } else if logicalDelta < -threshold {
-                            previousSpread()
+                    .onChanged { value in
+                        let previousIntent = dragState.intent
+                        let intent = dragState.receiveMove(
+                            translation: value.translation,
+                            mode: .horizontalPage,
+                            isDismissEnabled: isDismissEnabled
+                        )
+                        if intent == .dismissing {
+                            onDismissProgress(
+                                ReaderDismissMath.progress(
+                                    for: value.translation.height,
+                                    viewportHeight: geo.size.height
+                                )
+                            )
+                        } else if previousIntent == .dismissing, intent == .cancelled {
+                            onDismissCancel()
                         }
+                    }
+                    .onEnded { value in
+                        switch dragState.intent {
+                        case .dismissing:
+                            if ReaderDismissMath.shouldCommit(
+                                intent: dragState.intent,
+                                translationY: value.translation.height,
+                                viewportHeight: geo.size.height,
+                                wasCancelled: dragState.wasDismissCancelled
+                            ) {
+                                onDismissCommit()
+                            } else {
+                                onDismissCancel()
+                            }
+                        case .pageTurning:
+                            let threshold = max(geo.size.width * 0.2, 72)
+                            let logicalDelta = isRTL ? value.translation.width : -value.translation.width
+                            if logicalDelta > threshold {
+                                nextSpread()
+                            } else if logicalDelta < -threshold {
+                                previousSpread()
+                            }
+                        default:
+                            break
+                        }
+                        dragState.reset()
                     }
             )
         }
+    }
+
+    private var pageDragOffset: CGFloat {
+        dragState.intent == .pageTurning ? dragOffset : 0
     }
 
     private func pageView(index: Int) -> some View {
