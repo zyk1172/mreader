@@ -3,8 +3,8 @@ import Foundation
 /// A single-pass partition of the currently visible shelf comics.
 ///
 /// Building this once per shelf render avoids scanning the entire comic array
-/// again for every visible series. Order within each bucket is preserved so the
-/// caller can apply the existing title sort exactly once per bucket.
+/// again for every visible series. Buckets intentionally remain unsorted so the
+/// LazyVGrid/LazyVStack caller can preserve the existing on-demand title sorting.
 nonisolated struct ShelfComicIndex: Sendable {
     let rootComics: [ComicBook]
     let comicsBySeriesID: [UUID: [ComicBook]]
