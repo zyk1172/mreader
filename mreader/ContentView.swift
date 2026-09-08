@@ -1164,14 +1164,13 @@ struct ContentView: View {
                 : library.series.filter { comicIndex.visibleSeriesIDs.contains($0.id) }
             let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
             let rootComics = sortedComicsByTitle(comicIndex.rootComics)
-            let sortedComicsBySeriesID = comicIndex.comicsBySeriesID.mapValues { sortedComicsByTitle($0) }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if shelfDisplayMode == .grid {
                         LazyVGrid(columns: gridLayout.columns, spacing: 24) {
                             ForEach(sortedSeriesItems) { series in
-                                seriesGridItem(series, comics: sortedComicsBySeriesID[series.id] ?? [], cardWidth: cardWidth)
+                                seriesGridItem(series, comics: sortedComicsByTitle(comicIndex.comicsBySeriesID[series.id] ?? []), cardWidth: cardWidth)
                             }
                             ForEach(rootComics) { comic in
                                 comicGridItem(comic, cardWidth: cardWidth)
@@ -1181,7 +1180,7 @@ struct ContentView: View {
                     } else {
                         LazyVStack(spacing: 12) {
                             ForEach(sortedSeriesItems) { series in
-                                seriesListItem(series, comics: sortedComicsBySeriesID[series.id] ?? [])
+                                seriesListItem(series, comics: sortedComicsByTitle(comicIndex.comicsBySeriesID[series.id] ?? []))
                             }
                             ForEach(rootComics) { comic in
                                 comicListItem(comic)
