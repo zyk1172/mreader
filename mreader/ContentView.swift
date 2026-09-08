@@ -1158,19 +1158,19 @@ struct ContentView: View {
             let gridLayout = ShelfCardMetrics.gridLayout(for: geometry.size.width)
             let cardWidth = gridLayout.cardWidth
             let displayComics = visibleComics
-            let visibleSeriesIDs = Set(displayComics.compactMap(\.seriesID))
+            let comicIndex = ShelfComicIndex(comics: displayComics)
             let seriesItems = shelfFilter == .all
                 ? library.series
-                : library.series.filter { visibleSeriesIDs.contains($0.id) }
+                : library.series.filter { comicIndex.visibleSeriesIDs.contains($0.id) }
             let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
-            let rootComics = sortedComicsByTitle(displayComics.filter { $0.seriesID == nil })
+            let rootComics = sortedComicsByTitle(comicIndex.rootComics)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if shelfDisplayMode == .grid {
                         LazyVGrid(columns: gridLayout.columns, spacing: 24) {
                             ForEach(sortedSeriesItems) { series in
-                                seriesGridItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }), cardWidth: cardWidth)
+                                seriesGridItem(series, comics: sortedComicsByTitle(comicIndex.comicsBySeriesID[series.id] ?? []), cardWidth: cardWidth)
                             }
                             ForEach(rootComics) { comic in
                                 comicGridItem(comic, cardWidth: cardWidth)
@@ -1180,7 +1180,7 @@ struct ContentView: View {
                     } else {
                         LazyVStack(spacing: 12) {
                             ForEach(sortedSeriesItems) { series in
-                                seriesListItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }))
+                                seriesListItem(series, comics: sortedComicsByTitle(comicIndex.comicsBySeriesID[series.id] ?? []))
                             }
                             ForEach(rootComics) { comic in
                                 comicListItem(comic)
