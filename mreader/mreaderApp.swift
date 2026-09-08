@@ -19,7 +19,12 @@ struct mreaderApp: App {
         Task { @MainActor in
             await OfflineTranslationBackgroundScheduler.shared.resumePendingJobIfNeeded()
         }
-        RemoteImageLoader.migrateLegacyCoversIfNeeded()
+        // Legacy cover migration can touch a whole cache directory. Do not make
+        // first-frame presentation wait for filesystem work; cover lookup already
+        // understands both the legacy and current cache roots during migration.
+        Task.detached(priority: .utility) {
+            RemoteImageLoader.migrateLegacyCoversIfNeeded()
+        }
         migrateLegacyTranslationPromptIfNeeded()
         let defaults = UserDefaults.standard
         let legacyAPIKey = defaults.string(forKey: "openai_api_key") ?? ""
@@ -73,7 +78,7 @@ struct mreaderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            StartupRootView()
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background else { return }
