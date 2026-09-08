@@ -2,6 +2,10 @@
 
 MReader 是一个面向 iPhone 与 iPad 的漫画阅读 App。它的目标不是做一个简单的图片浏览器，而是把“本地漫画库、远程媒体库、长条漫画阅读、OCR 放大、AI 翻译、封面书架、阅读进度、触感反馈”这些日常阅读漫画时真正会用到的能力整合在一起。第一版重点解决三个问题：漫画文件必须可由用户自己管理；阅读器必须适合普通漫画与长条漫画；AI 功能不能打断阅读。
 
+## 许可证
+
+MReader 的项目源代码按 [GNU General Public License version 3](LICENSE)（GPL-3.0）发布。项目依赖、Apple 系统框架及其他第三方内容仍受其各自许可证约束。
+
 ![MReader Hero](docs/images/01-hero.png)
 
 ## 设计目标
