@@ -1,0 +1,21 @@
+/* Main navigation */
+"tab.continueReading" = "继续阅读";
+"shelf.filterCategory" = "筛选";
+
+/* Series */
+"series.addChapters" = "添加章节后会显示在这里";
+
+/* Local library */
+"settings.selectLibraryDescription" = "请选择「文件」App 中的漫画根目录。后续扫描、导入和删除仅在该目录内进行。";
+
+/* Remote libraries */
+"mediaSources.title" = "远程漫画库";
+"mediaSources.noServers" = "尚未添加远程漫画库";
+"mediaSources.add" = "添加远程漫画库";
+
+/* Import */
+"import.webServer" = "局域网上传";
+"import.webServerDescription" = "开启后，可在同一局域网内通过浏览器向本设备上传漫画文件。";
+
+/* OCR Settings */
+"ocr.appleTranslation" = "Apple 原生翻译";

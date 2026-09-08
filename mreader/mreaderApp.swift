@@ -73,7 +73,7 @@ struct mreaderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            StartupRootView()
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background else { return }
