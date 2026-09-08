@@ -5,14 +5,11 @@ import Foundation
 /// The shelf renders both series and root-level comics. Building this index in one
 /// pass avoids filtering the complete comic list once for every visible series.
 struct ShelfLibraryIndex {
-    let sortedComics: [ComicBook]
     let rootComics: [ComicBook]
     let comicsBySeriesID: [UUID: [ComicBook]]
     let visibleSeriesIDs: Set<UUID>
 
     init(sortedComics: [ComicBook]) {
-        self.sortedComics = sortedComics
-
         var rootComics: [ComicBook] = []
         rootComics.reserveCapacity(sortedComics.count)
 
