@@ -26,22 +26,24 @@ jobs:
           path = Path('mreader/ContentView.swift')
           text = path.read_text()
 
-          old_setup = '''            let displayComics = visibleComics
-            let visibleSeriesIDs = Set(displayComics.compactMap(\\.seriesID))
-            let seriesItems = shelfFilter == .all
-                ? library.series
-                : library.series.filter { visibleSeriesIDs.contains($0.id) }
-            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
-            let rootComics = sortedComicsByTitle(displayComics.filter { $0.seriesID == nil })
-'''
-          new_setup = '''            let displayComics = visibleComics
-            let libraryIndex = ShelfLibraryIndex(sortedComics: sortedComicsByTitle(displayComics))
-            let seriesItems = shelfFilter == .all
-                ? library.series
-                : library.series.filter { libraryIndex.visibleSeriesIDs.contains($0.id) }
-            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
-            let rootComics = libraryIndex.rootComics
-'''
+          old_setup = "\n".join([
+              '            let displayComics = visibleComics',
+              '            let visibleSeriesIDs = Set(displayComics.compactMap(\\.seriesID))',
+              '            let seriesItems = shelfFilter == .all',
+              '                ? library.series',
+              '                : library.series.filter { visibleSeriesIDs.contains($0.id) }',
+              '            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)',
+              '            let rootComics = sortedComicsByTitle(displayComics.filter { $0.seriesID == nil })',
+          ]) + "\n"
+          new_setup = "\n".join([
+              '            let displayComics = visibleComics',
+              '            let libraryIndex = ShelfLibraryIndex(sortedComics: sortedComicsByTitle(displayComics))',
+              '            let seriesItems = shelfFilter == .all',
+              '                ? library.series',
+              '                : library.series.filter { libraryIndex.visibleSeriesIDs.contains($0.id) }',
+              '            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)',
+              '            let rootComics = libraryIndex.rootComics',
+          ]) + "\n"
 
           if old_setup not in text:
               raise SystemExit('Expected libraryPage setup block not found')
