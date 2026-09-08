@@ -12,6 +12,16 @@ struct StartupRootView: View {
     var body: some View {
         ZStack {
             ContentView()
+                // Initial library snapshot / iCloud / remote-source updates can all
+                // change the shelf in quick succession. Suppress those hidden spring
+                // animations so NavigationStack's large title is never revealed in
+                // an intermediate layout state.
+                .transaction { transaction in
+                    if isCoverVisible {
+                        transaction.animation = nil
+                        transaction.disablesAnimations = true
+                    }
+                }
                 .allowsHitTesting(!isCoverVisible)
                 .accessibilityHidden(isCoverVisible)
 
