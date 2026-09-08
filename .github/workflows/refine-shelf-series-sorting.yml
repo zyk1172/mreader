@@ -1,0 +1,28 @@
+name: Refine shelf series sorting
+
+on:
+  push:
+    branches:
+      - codex/shelf-series-performance
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/shelf-series-performance
+      - run: python3 scripts/refine_shelf_series_sorting.py
+      - run: |
+          git diff --check
+          if grep -q 'sortedComicsBySeriesID' mreader/ContentView.swift; then exit 1; fi
+          grep -q 'sortedComicsByTitle(comicIndex.comicsBySeriesID\[series.id\] ?? \[\])' mreader/ContentView.swift
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "perf: preserve lazy series sorting"
+          git push origin HEAD:codex/shelf-series-performance
