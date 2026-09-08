@@ -16,3 +16,6 @@
 /* Import */
 "import.webServer" = "局域网上传";
 "import.webServerDescription" = "开启后，可在同一局域网内通过浏览器向本设备上传漫画文件。";
+
+/* OCR Settings */
+"ocr.appleTranslation" = "Apple 原生翻译";
