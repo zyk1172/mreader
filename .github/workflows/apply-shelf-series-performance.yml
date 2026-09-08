@@ -1,0 +1,115 @@
+name: Apply shelf series performance patch
+
+on:
+  push:
+    branches:
+      - codex/shelf-series-performance
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          ref: codex/shelf-series-performance
+
+      - name: Replace repeated series scans with shelf index
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("mreader/ContentView.swift")
+          text = path.read_text()
+
+          old = '''            let displayComics = visibleComics
+            let visibleSeriesIDs = Set(displayComics.compactMap(\\.seriesID))
+            let seriesItems = shelfFilter == .all
+                ? library.series
+                : library.series.filter { visibleSeriesIDs.contains($0.id) }
+            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
+            let rootComics = sortedComicsByTitle(displayComics.filter { $0.seriesID == nil })
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if shelfDisplayMode == .grid {
+                        LazyVGrid(columns: gridLayout.columns, spacing: 24) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesGridItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }), cardWidth: cardWidth)
+                            }
+                            ForEach(rootComics) { comic in
+                                comicGridItem(comic, cardWidth: cardWidth)
+                            }
+                        }
+                        .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesListItem(series, comics: sortedComicsByTitle(displayComics.filter { $0.seriesID == series.id }))
+                            }
+                            ForEach(rootComics) { comic in
+                                comicListItem(comic)
+                            }
+                        }
+'''
+
+          new = '''            let displayComics = visibleComics
+            let comicIndex = ShelfComicIndex(comics: displayComics)
+            let seriesItems = shelfFilter == .all
+                ? library.series
+                : library.series.filter { comicIndex.visibleSeriesIDs.contains($0.id) }
+            let sortedSeriesItems = sortedSeriesByTitle(seriesItems)
+            let rootComics = sortedComicsByTitle(comicIndex.rootComics)
+            let sortedComicsBySeriesID = comicIndex.comicsBySeriesID.mapValues { sortedComicsByTitle($0) }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if shelfDisplayMode == .grid {
+                        LazyVGrid(columns: gridLayout.columns, spacing: 24) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesGridItem(series, comics: sortedComicsBySeriesID[series.id] ?? [], cardWidth: cardWidth)
+                            }
+                            ForEach(rootComics) { comic in
+                                comicGridItem(comic, cardWidth: cardWidth)
+                            }
+                        }
+                        .padding(.horizontal, ShelfCardMetrics.horizontalPadding)
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(sortedSeriesItems) { series in
+                                seriesListItem(series, comics: sortedComicsBySeriesID[series.id] ?? [])
+                            }
+                            ForEach(rootComics) { comic in
+                                comicListItem(comic)
+                            }
+                        }
+'''
+
+          if old not in text:
+              if "let comicIndex = ShelfComicIndex(comics: displayComics)" in text:
+                  print("Performance patch already applied")
+              else:
+                  raise SystemExit("Expected libraryPage block was not found; refusing a partial edit")
+          else:
+              text = text.replace(old, new, 1)
+              path.write_text(text)
+
+          Path(".github/workflows/apply-shelf-series-performance.yml").unlink()
+          PY
+
+      - name: Validate patch
+        run: |
+          git diff --check
+          grep -q 'let comicIndex = ShelfComicIndex(comics: displayComics)' mreader/ContentView.swift
+          ! grep -q 'displayComics.filter { $0.seriesID == series.id }' mreader/ContentView.swift
+
+      - name: Commit optimized shelf rendering
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "perf: index shelf comics by series once"
+          git push origin HEAD:codex/shelf-series-performance
