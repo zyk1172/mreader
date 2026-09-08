@@ -301,7 +301,7 @@ actor RemotePageCache {
         registerMemoryWarningObserver()
     }
 
-    private func registerMemoryWarningObserver() {
+    private nonisolated func registerMemoryWarningObserver() {
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
