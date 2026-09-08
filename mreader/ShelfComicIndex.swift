@@ -13,9 +13,6 @@ nonisolated struct ShelfComicIndex: Sendable {
     init(comics: [ComicBook]) {
         var rootComics: [ComicBook] = []
         var comicsBySeriesID: [UUID: [ComicBook]] = [:]
-        var visibleSeriesIDs: Set<UUID> = []
-
-        rootComics.reserveCapacity(comics.count)
 
         for comic in comics {
             guard let seriesID = comic.seriesID else {
@@ -24,11 +21,10 @@ nonisolated struct ShelfComicIndex: Sendable {
             }
 
             comicsBySeriesID[seriesID, default: []].append(comic)
-            visibleSeriesIDs.insert(seriesID)
         }
 
         self.rootComics = rootComics
         self.comicsBySeriesID = comicsBySeriesID
-        self.visibleSeriesIDs = visibleSeriesIDs
+        self.visibleSeriesIDs = Set(comicsBySeriesID.keys)
     }
 }
