@@ -1,6 +1,6 @@
 import Foundation
 
-private func mreaderLocalizedString(_ key: String) -> String {
+nonisolated private func mreaderLocalizedString(_ key: String) -> String {
     // Keep small wording corrections in a separate table so copy can be polished
     // without rewriting the much larger legacy localization files. Missing keys
     // fall through to the existing Localizable.strings table.
