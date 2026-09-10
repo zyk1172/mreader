@@ -163,6 +163,9 @@ struct TextBlock: Identifiable, Sendable {
     var polygon: [CGPoint]
     var bubblePolygon: [CGPoint]
     var translationLines: [String]
+    /// 组成当前 translation unit 的原文横排 line 数；竖排通常仍为一列。
+    /// line/bubble 合并时必须显式传递，不能从最终 union 的高度反推。
+    var sourceLineCount: Int
     /// 在最初 OCR observation 阶段确定的文字方向；合并成 line/bubble 后必须继承。
     var textOrientation: TextOrientation
     /// 布局语义不能从 bubbleBox 是否存在反推；纯 OCR 对白同样可能没有 bubbleBox。
@@ -172,7 +175,7 @@ struct TextBlock: Identifiable, Sendable {
         layoutRole == .standalone
     }
 
-    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil, layoutRole: TranslationLayoutRole? = nil) {
+    nonisolated init(id: UUID = UUID(), text: String, boundingBox: CGRect, translation: String? = nil, confidence: Double = 0, ocrSource: String = "vision", isFiltered: Bool = false, filterReason: String? = nil, estimatedFontScale: Double? = nil, textColorHex: String? = nil, bubbleBox: CGRect? = nil, polygon: [CGPoint] = [], bubblePolygon: [CGPoint] = [], translationLines: [String] = [], textOrientation: TextOrientation? = nil, layoutRole: TranslationLayoutRole? = nil, sourceLineCount: Int = 1) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
@@ -188,6 +191,7 @@ struct TextBlock: Identifiable, Sendable {
         self.polygon = polygon
         self.bubblePolygon = bubblePolygon
         self.translationLines = translationLines
+        self.sourceLineCount = max(sourceLineCount, 1)
         let resolvedOrientation = textOrientation ?? .inferred(from: boundingBox)
         self.textOrientation = resolvedOrientation
         self.layoutRole = layoutRole ?? .inferred(
@@ -323,11 +327,16 @@ nonisolated enum AIEndpointResolver {
     }
 }
 
-/// 统一解析 OpenAI 兼容接口的响应包，支持：
-/// - Chat Completions: choices[].message.content (String / Array)
+/// 统一解析各家文本接口的响应包，支持：
+/// - Chat Completions: choices[].message.content (String / typed array)
 /// - legacy: choices[].text
 /// - Responses: 顶层 output_text / output[].content[].text
-/// - reasoning_content（只标记，不当作译文）
+/// - Anthropic Messages: content[].text
+///
+/// 不同 provider 都可能把 reasoning/thinking 放在同一个 content 数组中。只有
+/// 明确的 text/output_text part 才能成为译文；未知类型不再通过“只要有 text
+/// 字段”这个宽松 fallback 混入结果。只有 reasoning/thinking 而没有最终文本时，
+/// `hasReasoningOnly` 才为 true，供上层决定是否重试。
 nonisolated enum AIChatResponseDecoder {
     struct Decoded: Sendable {
         let content: String?
@@ -335,93 +344,263 @@ nonisolated enum AIChatResponseDecoder {
         let hasReasoningOnly: Bool
     }
 
+    private struct ExtractedParts {
+        let text: String?
+        let hasReasoning: Bool
+    }
+
+    private static let finalPartTypes: Set<String> = ["text", "output_text"]
+    private static let responseItemTextTypes: Set<String> = ["message", "text", "output_text"]
+
     static func decode(_ data: Data) -> Decoded {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return Decoded(content: nil, finishReason: nil, hasReasoningOnly: false)
         }
-        let topFinish = (json["finish_reason"] as? String) ?? (json["finishReason"] as? String)
+        let topFinish = (json["finish_reason"] as? String)
+            ?? (json["finishReason"] as? String)
+            ?? (json["status"] as? String)
 
-        // Responses 顶层 output_text
-        if let outputText = json["output_text"] as? String,
-           !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return Decoded(content: outputText, finishReason: topFinish, hasReasoningOnly: false)
-        }
-
-        // Responses 嵌套 output[].content[].text / output[].text
-        if let output = json["output"] as? [[String: Any]] {
-            let texts = output.compactMap { item -> String? in
-                if let contentArray = item["content"] as? [[String: Any]] {
-                    let joined = contentArray.compactMap { part -> String? in
-                        if let type = part["type"] as? String, type == "output_text",
-                           let t = part["text"] as? String {
-                            return t
-                        }
-                        if let t = part["text"] as? String { return t }
-                        return nil
-                    }.joined(separator: "\n")
-                    return joined.isEmpty ? nil : joined
-                }
-                if let t = item["text"] as? String, !t.isEmpty { return t }
-                return nil
-            }.joined(separator: "\n")
-            if !texts.isEmpty {
-                return Decoded(content: texts, finishReason: topFinish, hasReasoningOnly: false)
+        // Responses 顶层 output_text 是 API 已经聚合好的最终文本，不把它和
+        // output[].content 的 reasoning part 再次拼接；但兼容某些 provider 把
+        // <think>...</think> 直接包在这个字符串里的情况。
+        var topOutputHadReasoning = false
+        if let outputText = nonEmptyString(json["output_text"]) {
+            let cleaned = cleanedFinalText(outputText)
+            topOutputHadReasoning = cleaned.removedReasoning
+            if let text = cleaned.text {
+                return Decoded(content: text, finishReason: topFinish, hasReasoningOnly: false)
             }
         }
 
-        // Anthropic Messages: content[].text
-        if let content = json["content"] as? [[String: Any]] {
-            let texts = content.compactMap { part -> String? in
-                guard let text = part["text"] as? String else { return nil }
-                return text.isEmpty ? nil : text
-            }.joined(separator: "\n")
+        // Responses: output[].content[].text / output[].text。reasoning item 即使
+        // 携带 text（或 summary text）也必须被跳过。
+        if let output = json["output"] as? [[String: Any]] {
+            var texts: [String] = []
+            var hasReasoning = false
+            for item in output {
+                if isReasoningPart(item) {
+                    hasReasoning = true
+                    continue
+                }
+                if let type = normalizedType(item["type"]),
+                   !responseItemTextTypes.contains(type) {
+                    // Responses 的 function/tool/unknown item 不是译文。
+                    continue
+                }
+                if let contentArray = item["content"] as? [[String: Any]] {
+                    let extracted = extractTextParts(contentArray)
+                    if let text = extracted.text { texts.append(text) }
+                    hasReasoning = hasReasoning || extracted.hasReasoning
+                } else if let rawText = nonEmptyString(item["text"]) {
+                    let cleaned = cleanedFinalText(rawText)
+                    if let text = cleaned.text {
+                        texts.append(text)
+                    }
+                    hasReasoning = hasReasoning || cleaned.removedReasoning
+                }
+            }
             if !texts.isEmpty {
                 return Decoded(
-                    content: texts,
+                    content: texts.joined(separator: "\n"),
+                    finishReason: topFinish,
+                    hasReasoningOnly: false
+                )
+            }
+            if hasReasoning || topOutputHadReasoning {
+                return Decoded(content: nil, finishReason: topFinish, hasReasoningOnly: true)
+            }
+        } else if topOutputHadReasoning {
+            return Decoded(content: nil, finishReason: topFinish, hasReasoningOnly: true)
+        }
+
+        // Anthropic Messages: thinking/redacted_thinking 不是译文；只能读取 type=text。
+        if let content = json["content"] as? [[String: Any]] {
+            let extracted = extractTextParts(content)
+            if let text = extracted.text {
+                return Decoded(
+                    content: text,
                     finishReason: (json["stop_reason"] as? String) ?? topFinish,
                     hasReasoningOnly: false
+                )
+            }
+            if extracted.hasReasoning {
+                return Decoded(
+                    content: nil,
+                    finishReason: (json["stop_reason"] as? String) ?? topFinish,
+                    hasReasoningOnly: true
                 )
             }
         }
 
         guard let choices = json["choices"] as? [[String: Any]], let choice = choices.first else {
-            return Decoded(content: nil, finishReason: topFinish, hasReasoningOnly: false)
+            let topHasReasoning = isReasoningValue(json["reasoning_content"])
+                || isReasoningValue(json["reasoning"])
+                || isReasoningValue(json["thinking"])
+            return Decoded(content: nil, finishReason: topFinish, hasReasoningOnly: topHasReasoning)
         }
         let finishReason = (choice["finish_reason"] as? String) ?? topFinish
+        let choiceHasReasoning = isReasoningValue(choice["reasoning_content"])
+            || isReasoningValue(choice["reasoning"])
+            || isReasoningValue(choice["thinking"])
 
-        if let text = choice["text"] as? String,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return Decoded(content: text, finishReason: finishReason, hasReasoningOnly: false)
+        if let rawText = nonEmptyString(choice["text"]) {
+            let cleaned = cleanedFinalText(rawText)
+            if let text = cleaned.text {
+                return Decoded(content: text, finishReason: finishReason, hasReasoningOnly: false)
+            }
+            if cleaned.removedReasoning {
+                return Decoded(content: nil, finishReason: finishReason, hasReasoningOnly: true)
+            }
         }
 
         if let message = choice["message"] as? [String: Any] {
-            if let content = message["content"] as? String, !content.isEmpty {
-                return Decoded(content: content, finishReason: finishReason, hasReasoningOnly: false)
-            }
-            if let content = message["content"] as? [[String: Any]] {
-                let joined = content.compactMap { part -> String? in
-                    if let text = part["text"] as? String { return text }
-                    if let content = part["content"] as? String { return content }
-                    if let value = part["value"] as? String { return value }
-                    return nil
-                }.joined(separator: "\n")
-                if !joined.isEmpty {
-                    return Decoded(content: joined, finishReason: finishReason, hasReasoningOnly: false)
+            var messageHadReasoning = false
+            if let rawContent = nonEmptyString(message["content"]) {
+                let cleaned = cleanedFinalText(rawContent)
+                messageHadReasoning = cleaned.removedReasoning
+                if let text = cleaned.text {
+                    return Decoded(content: text, finishReason: finishReason, hasReasoningOnly: false)
                 }
             }
-            if let content = message["content"],
-               JSONSerialization.isValidJSONObject(content),
-               let data = try? JSONSerialization.data(withJSONObject: content),
-               let value = String(data: data, encoding: .utf8) {
-                return Decoded(content: value, finishReason: finishReason, hasReasoningOnly: false)
+            if let content = message["content"] as? [[String: Any]] {
+                let extracted = extractTextParts(content)
+                if let text = extracted.text {
+                    return Decoded(content: text, finishReason: finishReason, hasReasoningOnly: false)
+                }
+                let hasReasoning = extracted.hasReasoning
+                    || isReasoningValue(message["reasoning_content"])
+                    || isReasoningValue(message["reasoning"])
+                    || isReasoningValue(message["thinking"])
+                    || messageHadReasoning
+                    || choiceHasReasoning
+                return Decoded(
+                    content: nil,
+                    finishReason: finishReason,
+                    hasReasoningOnly: hasReasoning
+                )
             }
-            let hasReasoning = ((message["reasoning_content"] as? String)?.isEmpty == false)
-                || ((message["reasoning"] as? String)?.isEmpty == false)
+
+            // 不再把任意 dictionary/array 序列化成“译文”。这会把 provider 的
+            // reasoning/tool payload 原样交给翻译 parser，既污染结果也绕过类型过滤。
+            let hasReasoning = isReasoningValue(message["reasoning_content"])
+                || isReasoningValue(message["reasoning"])
+                || isReasoningValue(message["thinking"])
+                || messageHadReasoning
+                || choiceHasReasoning
             if hasReasoning {
                 return Decoded(content: nil, finishReason: finishReason, hasReasoningOnly: true)
             }
         }
-        return Decoded(content: nil, finishReason: finishReason, hasReasoningOnly: false)
+        return Decoded(
+            content: nil,
+            finishReason: finishReason,
+            hasReasoningOnly: choiceHasReasoning
+        )
+    }
+
+    private static func extractTextParts(_ parts: [[String: Any]]) -> ExtractedParts {
+        var texts: [String] = []
+        var hasReasoning = false
+        for part in parts {
+            if isReasoningPart(part) {
+                hasReasoning = true
+                continue
+            }
+            if let type = normalizedType(part["type"]), !finalPartTypes.contains(type) {
+                // 不接受 tool/function/unknown part，即使它恰好含有 text/content。
+                continue
+            }
+            if let rawText = nonEmptyString(part["text"]) {
+                let cleaned = cleanedFinalText(rawText)
+                if let text = cleaned.text {
+                    texts.append(text)
+                }
+                hasReasoning = hasReasoning || cleaned.removedReasoning
+            } else if normalizedType(part["type"]) == nil,
+                      let rawContent = nonEmptyString(part["content"]) {
+                // 保留部分 OpenAI-compatible provider 的无 type 兼容形态，
+                // 但只有无 type 才允许 content/value fallback。
+                let cleaned = cleanedFinalText(rawContent)
+                if let content = cleaned.text {
+                    texts.append(content)
+                }
+                hasReasoning = hasReasoning || cleaned.removedReasoning
+            } else if normalizedType(part["type"]) == nil,
+                      let rawValue = nonEmptyString(part["value"]) {
+                let cleaned = cleanedFinalText(rawValue)
+                if let value = cleaned.text {
+                    texts.append(value)
+                }
+                hasReasoning = hasReasoning || cleaned.removedReasoning
+            }
+        }
+        return ExtractedParts(
+            text: texts.isEmpty ? nil : texts.joined(separator: "\n"),
+            hasReasoning: hasReasoning
+        )
+    }
+
+    private static func isReasoningPart(_ part: [String: Any]) -> Bool {
+        if let type = normalizedType(part["type"]), isReasoningType(type) {
+            return true
+        }
+        return isReasoningValue(part["thinking"])
+            || isReasoningValue(part["reasoning"])
+            || isReasoningValue(part["reasoning_content"])
+            || isReasoningValue(part["analysis"])
+    }
+
+    private static func isReasoningValue(_ value: Any?) -> Bool {
+        guard let string = value as? String else { return false }
+        return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func isReasoningType(_ type: String) -> Bool {
+        type.contains("reason")
+            || type.contains("think")
+            || type.contains("analysis")
+            || type.contains("reflection")
+            || type == "summary_text"
+            || type == "redacted_thinking"
+    }
+
+    private static func normalizedType(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func cleanedFinalText(_ text: String) -> (text: String?, removedReasoning: Bool) {
+        var cleaned = text
+        var removedReasoning = false
+        for tag in ["think", "thinking", "analysis", "reasoning"] {
+            let pattern = "<\(tag)(?:\\s[^>]*)?>[\\s\\S]*?</\(tag)>"
+            let stripped = cleaned.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            if stripped != cleaned {
+                removedReasoning = true
+                cleaned = stripped
+            }
+        }
+        if cleaned.range(
+            of: #"</?(?:think|thinking|analysis|reasoning)(?:\s[^>]*)?>"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            // Unclosed reasoning markup is not a safe final answer either.
+            return (nil, true)
+        }
+        return (nonEmptyString(cleaned), removedReasoning)
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let value = value as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value
     }
 }
 
@@ -663,6 +842,12 @@ class AITranslator {
                     PageResponseFormatCache.shared.set(mode, for: cacheKey)
                     print("MReader AI page semantic response_format downgrade model=\(model) from=\(previousMode.rawValue) to=\(mode.rawValue)")
                     continue
+                }
+                if decoded.hasReasoningOnly {
+                    throw AITranslationRequestError.missingAssistantContent(
+                        model: model,
+                        finishReason: decoded.finishReason
+                    )
                 }
                 throw AITranslationRequestError.invalidTranslationJSON(
                     model: model,
@@ -1198,7 +1383,8 @@ class AITranslator {
                     textOrientation: best.textOrientation,
                     layoutRole: original.layoutRole == .standalone || best.layoutRole == .standalone
                         ? .standalone
-                        : .dialogue
+                        : .dialogue,
+                    sourceLineCount: original.sourceLineCount
                 )
                 print("MReader OCR visual review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", best.confidence))")
             } catch is CancellationError {
@@ -1258,7 +1444,8 @@ class AITranslator {
                         bubblePolygon: block.bubblePolygon,
                         translationLines: block.translationLines,
                         textOrientation: block.textOrientation,
-                        layoutRole: block.layoutRole
+                        layoutRole: block.layoutRole,
+                        sourceLineCount: block.sourceLineCount
                     )
                 }
                 corrected = mergeVisualPageRecoveryBlocks(
@@ -1717,12 +1904,14 @@ class AITranslator {
         target: TranslationTargetLanguage
     ) -> String? {
         var value = content
-            .replacingOccurrences(
-                of: #"<think>[\s\S]*?</think>"#,
+        for tag in ["think", "thinking", "analysis", "reasoning"] {
+            value = value.replacingOccurrences(
+                of: "<\(tag)(?:\\s[^>]*)?>[\\s\\S]*?</\(tag)>",
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        value = value.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let data = normalizedVisionJSONData(from: value),
            let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
@@ -2424,11 +2613,19 @@ class AITranslator {
 
     private static func extractedJSONPayload(from content: String) -> String {
         var trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        trimmed = trimmed.replacingOccurrences(
-            of: #"<think>[\s\S]*?</think>"#,
-            with: "",
+        for tag in ["think", "thinking", "analysis", "reasoning"] {
+            trimmed = trimmed.replacingOccurrences(
+                of: "<\(tag)(?:\\s[^>]*)?>[\\s\\S]*?</\(tag)>",
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        if trimmed.range(
+            of: #"</?(?:think|thinking|analysis|reasoning)(?:\s[^>]*)?>"#,
             options: [.regularExpression, .caseInsensitive]
-        )
+        ) != nil {
+            return ""
+        }
         if let start = trimmed.range(of: #"```(?:json)?"#, options: [.regularExpression, .caseInsensitive]),
            let end = trimmed.range(of: "```", range: start.upperBound..<trimmed.endIndex) {
             return String(trimmed[start.upperBound..<end.lowerBound])

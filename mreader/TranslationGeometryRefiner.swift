@@ -25,6 +25,9 @@ nonisolated enum TranslationGeometryRefiner {
 
             let locals = matches.map { localOCRBlocks[$0] }
             let localBounds = locals.dropFirst().reduce(locals[0].boundingBox) { $0.union($1.boundingBox) }
+            let sourceLineCount = locals.reduce(0) { total, block in
+                total + max(block.sourceLineCount, 1)
+            }
             let inheritedLayoutRole: TranslationLayoutRole =
                 vision.layoutRole == .standalone || locals.contains(where: {
                     $0.layoutRole == .standalone
@@ -45,7 +48,8 @@ nonisolated enum TranslationGeometryRefiner {
                 bubblePolygon: vision.bubblePolygon,
                 translationLines: vision.translationLines,
                 textOrientation: majorityOrientation(locals),
-                layoutRole: inheritedLayoutRole
+                layoutRole: inheritedLayoutRole,
+                sourceLineCount: max(vision.sourceLineCount, sourceLineCount)
             )
         }
     }

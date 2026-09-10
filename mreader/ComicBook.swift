@@ -41,6 +41,16 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         )
     }
 
+    // The stored property and Codable key keep their legacy names so existing
+    // reading settings continue to decode. New call sites use the product
+    // terminology: measured text describes the geometry strategy.
+    nonisolated static let defaultMeasuredTextTranslationFontSize = defaultBorderlessTranslationFontSize
+    nonisolated static let measuredTextTranslationFontSizeRange = borderlessTranslationFontSizeRange
+
+    nonisolated static func clampedMeasuredTextTranslationFontSize(_ value: Double) -> Double {
+        clampedBorderlessTranslationFontSize(value)
+    }
+
     var id: UUID
     var title: String
     var bookmarkData: Data // 核心：保存文件夹的持久化安全访问权限
@@ -79,8 +89,14 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var ocrTextScale: Double
     var ocrSafeAreaInset: Double
     var ocrMinimumTextHeight: Double
-    /// 没有可靠 bubbleBox 时使用的译文字号；这是显示参数，不参与 OCR/翻译缓存。
+    /// measuredText 表面使用的译文字号；这是显示参数，不参与 OCR/翻译缓存。
+    /// 属性名保留旧版 Codable 字段名，以兼容已有阅读设置。
     var borderlessTranslationFontSize: Double
+
+    var measuredTextTranslationFontSize: Double {
+        get { borderlessTranslationFontSize }
+        set { borderlessTranslationFontSize = ComicBook.clampedMeasuredTextTranslationFontSize(newValue) }
+    }
     var aiTranslationModeRaw: String
     var translationSourceLanguageRaw: String
     var hasInitializedReadingPreset: Bool
