@@ -16,9 +16,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            // OCR geometry and the Japanese vertical fallback changed; do not
-            // reuse pages written before this pipeline revision.
-            "local-ocr-v5-quality-geometry-gated",
+            // OCR geometry, the Japanese vertical fallback and the bubble
+            // grouping (visual bubble identity) changed; do not reuse pages
+            // written before this pipeline revision.
+            "local-ocr-v9-canonical-bubble-region-borderless",
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",

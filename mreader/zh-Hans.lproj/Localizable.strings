@@ -157,9 +157,9 @@
 "ocr.filter" = "OCR 过滤";
 "ocr.filterDescription" = "网页地址、广告标注、页边极小字会被忽略，不送去 OCR 放大或 AI 翻译。";
 "ocr.minTextSize" = "不处理小字大小";
-"ocr.borderlessFontSize" = "无气泡框文字字号";
-"ocr.borderlessFontSizeValue" = "Aa 当前 %d pt";
-"ocr.borderlessFontSizeDescription" = "没有可靠气泡边界的译文统一使用此字号，空间不足时会自动缩小。";
+"ocr.measuredTextFontSize" = "测量文字字号";
+"ocr.measuredTextFontSizeValue" = "Aa 当前 %d pt";
+"ocr.measuredTextFontSizeDescription" = "没有可靠气泡边界的译文使用此字号，空间不足时会自动缩小。";
 "ocr.debug" = "OCR 调试";
 "ocr.debugDescription" = "视觉图片识别翻译会把当前页或兜底切片发送到第三方 OpenAI 兼容接口。";
 "ocr.showDebugBoxes" = "显示 OCR 调试框";

@@ -91,7 +91,8 @@ nonisolated enum OCRCandidateResolver {
                 bubblePolygon: inheritedBubbleGeometry?.polygon ?? [],
                 translationLines: representative.translationLines,
                 textOrientation: inheritedOrientation,
-                layoutRole: inheritedLayoutRole
+                layoutRole: inheritedLayoutRole,
+                sourceLineCount: representative.sourceLineCount
             ))
             rejected.append(contentsOf: group.filter { $0.id != representative.id })
         }

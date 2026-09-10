@@ -1,34 +1,17 @@
-//
-//  TranslationSurfacePolicyTests.swift
-//  mreaderTests
-//
-//  译文"表面样式"的回归测试。
-//
-//  这里锁定的不变量是：
-//  只要画面上不存在可靠的漫画气泡（usableTranslationBubbleBounds == nil），
-//  policy 就必须让 renderer 收到 .borderless，从而不产生覆盖整个 translation
-//  rect 的 RoundedRectangle。
-//
-//  说明：这里测的是 policy 层而不是 SwiftUI 的 View tree——renderer 的 switch
-//  是直白的二分支。真正的视觉回归（背景是否真的没画、描边是否够清晰）最好
-//  以后补 snapshot / UI test。
-//
-
-import Testing
 import CoreGraphics
+import Testing
 import UIKit
 @testable import mreader
 
-@Suite struct TranslationSurfacePolicyTests {
-
+@Suite
+@MainActor
+struct TranslationSurfacePolicyTests {
     private static let imageBounds = CGRect(x: 0, y: 0, width: 390, height: 780)
 
     private static var transform: OCRDisplayTransform {
         OCRDisplayTransform(imageRect: imageBounds)
     }
 
-    /// 用显示坐标书写样本，再换算成 TextBlock 需要的归一化矩形，
-    /// 避免整数字面量相除被推断成 Int 除法。
     private static func normalized(_ rect: CGRect) -> CGRect {
         CGRect(
             x: rect.minX / imageBounds.width,
@@ -38,119 +21,77 @@ import UIKit
         )
     }
 
-    // MARK: - P0: 气泡存在性决定表面样式
-
-    @Test func surfaceStylePolicyRequiresReliableBubble() {
-        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: true) == .bubble)
-        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: false) == .borderless)
-        #expect(TranslationSurfaceStyle.bubble.drawsBackground)
-        #expect(TranslationSurfaceStyle.borderless.drawsBackground == false)
+    private static func block(
+        text: String = "译文",
+        rect: CGRect,
+        bubbleBox: CGRect? = nil,
+        orientation: TextOrientation = .horizontal,
+        layoutRole: TranslationLayoutRole = .dialogue
+    ) -> TextBlock {
+        TextBlock(
+            text: text,
+            boundingBox: normalized(rect),
+            ocrSource: "vision",
+            bubbleBox: bubbleBox.map(normalized),
+            textOrientation: orientation,
+            layoutRole: layoutRole
+        )
     }
 
-    /// 截图里“大白框”的根因回归：没有 bubbleBox 的普通对白仍然是 dialogue 语义，
-    /// 但绝不能凭空获得一张白色背景卡片。
-    @Test func dialogueWithoutBubbleBoxNeverDrawsBackground() {
-        let block = TextBlock(
+    @Test func noBubbleShortTranslationUsesMeasuredCard() {
+        let block = Self.block(
             text: "城市熟女。",
-            boundingBox: CGRect(x: 0.62, y: 0.18, width: 0.08, height: 0.34),
-            ocrSource: "vision:ja",
-            bubbleBox: nil,
+            rect: CGRect(x: 240, y: 120, width: 30, height: 400),
+            orientation: .vertical
+        )
+        let textRect = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: Self.transform
+        )
+
+        #expect(
+            OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) == nil
+        )
+        #expect(
+            OCRBubbleLayoutEngine.translationSurfaceStyle(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) == .measuredText
+        )
+        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: false) == .measuredText)
+        #expect(TranslationSurfaceStyle.measuredText.drawsBackground)
+        #expect(TranslationSurfaceStyle.measuredText.backgroundOpacity > 0)
+        #expect(TranslationSurfaceStyle.measuredText.borderOpacity > 0)
+
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "城市熟女。",
+            sourceFontSize: 20,
+            sourceRect: textRect,
+            allowedBounds: Self.imageBounds,
+            lineSpacing: 2,
             textOrientation: .vertical,
-            layoutRole: .dialogue
+            geometryStrategy: .measuredText
         )
-        let textRect = OCRCoordinateMapper.displayRect(
-            forNormalizedPageRect: block.boundingBox,
-            using: Self.transform
-        )
-
-        // 语义仍然是对白，不能因为缺气泡就被降级成 standalone。
-        #expect(block.layoutRole == .dialogue)
-        #expect(OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) == false)
-
-        let surface = OCRBubbleLayoutEngine.translationSurfaceStyle(
-            for: block,
-            textRect: textRect,
-            using: Self.transform
-        )
-        #expect(surface == .borderless)
-        #expect(surface.drawsBackground == false)
-        #expect(
-            OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
-                for: block,
-                textRect: textRect,
-                using: Self.transform
-            ) == nil
-        )
+        #expect(layout.contentPadding > 0)
+        #expect(layout.rect.height < 200)
     }
 
-    /// 旁白 / 音效这类本来就没有气泡的文字，同样必须是 borderless。
-    @Test func standaloneTextWithoutBubbleIsBorderless() {
-        let block = TextBlock(
-            text: "FIDGET",
-            boundingBox: CGRect(x: 0.20, y: 0.22, width: 0.46, height: 0.20),
-            ocrSource: "vision-model:soundEffect",
-            bubbleBox: nil,
-            textOrientation: .horizontal,
-            layoutRole: .standalone
-        )
-        let textRect = OCRCoordinateMapper.displayRect(
-            forNormalizedPageRect: block.boundingBox,
-            using: Self.transform
-        )
-        #expect(OCRBubbleLayoutEngine.usesStandaloneLayout(for: block))
-        #expect(
-            OCRBubbleLayoutEngine.translationSurfaceStyle(
-                for: block,
-                textRect: textRect,
-                using: Self.transform
-            ) == .borderless
-        )
-    }
-
-    /// 病态气泡（覆盖整页）会被可靠性判定拒绝，此时也不能回退成“画一张大卡片”。
-    @Test func wholePageBubbleIsRejectedAndBecomesBorderless() {
-        let block = TextBlock(
+    @Test func detectedBubbleDrawsBackground() {
+        let block = Self.block(
             text: "I knew it wouldn't be...",
-            boundingBox: CGRect(x: 0.20, y: 0.30, width: 0.42, height: 0.08),
-            ocrSource: "vision",
-            bubbleBox: CGRect(x: 0, y: 0, width: 1, height: 1),
-            textOrientation: .horizontal,
-            layoutRole: .dialogue
+            rect: CGRect(x: 150, y: 260, width: 70, height: 32),
+            bubbleBox: CGRect(x: 125, y: 220, width: 120, height: 100)
         )
         let textRect = OCRCoordinateMapper.displayRect(
             forNormalizedPageRect: block.boundingBox,
             using: Self.transform
         )
-        #expect(
-            OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
-                for: block,
-                textRect: textRect,
-                using: Self.transform
-            ) == nil
-        )
-        #expect(
-            OCRBubbleLayoutEngine.translationSurfaceStyle(
-                for: block,
-                textRect: textRect,
-                using: Self.transform
-            ) == .borderless
-        )
-    }
 
-    /// 真正合格的气泡必须继续保留气泡背景，避免过度修复把正常漫画对白也变成裸字。
-    @Test func validBubbleKeepsBubbleSurface() {
-        let block = TextBlock(
-            text: "I knew it wouldn't be...",
-            boundingBox: Self.normalized(CGRect(x: 150, y: 260, width: 70, height: 32)),
-            ocrSource: "vision",
-            bubbleBox: Self.normalized(CGRect(x: 125, y: 220, width: 120, height: 100)),
-            textOrientation: .horizontal,
-            layoutRole: .dialogue
-        )
-        let textRect = OCRCoordinateMapper.displayRect(
-            forNormalizedPageRect: block.boundingBox,
-            using: Self.transform
-        )
         #expect(
             OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
                 for: block,
@@ -163,167 +104,230 @@ import UIKit
                 for: block,
                 textRect: textRect,
                 using: Self.transform
-            ) == .bubble
+        ) == .detectedBubble
         )
+        #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: true) == .detectedBubble)
+        #expect(TranslationSurfaceStyle.detectedBubble.drawsBackground)
+        #expect(TranslationSurfaceStyle.detectedBubble.borderOpacity > 0)
     }
 
-    /// 同一段文字：气泡存在性变化只应改变表面样式，不应改变语义角色。
-    @Test func surfaceStyleIsOrthogonalToLayoutRole() {
-        let base = TextBlock(
-            text: "I knew it wouldn't be...",
-            boundingBox: Self.normalized(CGRect(x: 150, y: 260, width: 70, height: 32)),
-            ocrSource: "vision",
-            textOrientation: .horizontal,
-            layoutRole: .dialogue
+    @Test func invalidBubbleFallsBackToMeasuredText() {
+        let block = Self.block(
+            text: "Whole page",
+            rect: CGRect(x: 150, y: 260, width: 70, height: 32),
+            bubbleBox: CGRect(x: 0, y: 0, width: 390, height: 780)
         )
         let textRect = OCRCoordinateMapper.displayRect(
-            forNormalizedPageRect: base.boundingBox,
+            forNormalizedPageRect: block.boundingBox,
             using: Self.transform
         )
-        let withBubble = TextBlock(
-            text: base.text,
-            boundingBox: base.boundingBox,
-            ocrSource: "vision",
-            bubbleBox: Self.normalized(CGRect(x: 125, y: 220, width: 120, height: 100)),
-            textOrientation: .horizontal,
-            layoutRole: .dialogue
-        )
 
         #expect(
             OCRBubbleLayoutEngine.translationSurfaceStyle(
-                for: base,
+                for: block,
                 textRect: textRect,
                 using: Self.transform
-            ) == .borderless
+            ) == .measuredText
         )
-        #expect(
-            OCRBubbleLayoutEngine.translationSurfaceStyle(
-                for: withBubble,
-                textRect: textRect,
-                using: Self.transform
-            ) == .bubble
-        )
-        #expect(base.layoutRole == withBubble.layoutRole)
     }
 
-    // MARK: - P1: 无气泡时的排版范围只由文字测量结果决定
-
-    /// 又窄又高的竖排 OCR 框不能再把译文区域撑成巨大矩形。
-    @Test @MainActor func verticalBorderlessLayoutUsesMeasuredGlyphsNotOCRBox() {
-        let sourceRect = CGRect(x: 240, y: 120, width: 30, height: 400)
-        let allowedBounds = CGRect(x: 200, y: 60, width: 110, height: 560)
-        let text = "城市熟女。"
-
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: text,
-            sourceFontSize: 16,
-            sourceRect: sourceRect,
-            allowedBounds: allowedBounds,
-            lineSpacing: 2,
-            textOrientation: .vertical,
-            useSourceRectAsMinimumExtent: false
-        )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: text,
-            sourceFontSize: 16,
-            sourceRect: sourceRect,
-            allowedBounds: allowedBounds,
-            lineSpacing: 2,
-            textOrientation: .vertical,
-            useSourceRectAsMinimumExtent: true
-        )
-
-        // 无气泡：排版范围只由文字测量结果决定，不继承 400pt 高的 OCR 框。
-        #expect(borderless.rect.height < sourceRect.height)
-        #expect(borderless.rect.height < bubble.rect.height)
-        // 但仍必须装得下这五个字，不能把文字裁掉。
-        let expectedMinimum = 5 * 16 * TranslationLayoutMetrics.verticalAdvanceMultiplier
-        #expect(borderless.rect.height >= expectedMinimum)
-
-        // 有气泡：保持原有行为，译文应当填满气泡范围。
-        #expect(bubble.rect.height >= sourceRect.height)
-
-        #expect(allowedBounds.contains(borderless.rect))
-        #expect(allowedBounds.contains(bubble.rect))
-    }
-
-    /// 病态超宽的 OCR 框同样不能被继承。borderless 已经不画背景，但超宽的透明
-    /// translation rect 仍会参与避让计算，把附近的正常译文推走。
-    @Test @MainActor func horizontalBorderlessLayoutIgnoresWideOCRBox() {
-        let sourceRect = CGRect(x: 40, y: 300, width: 320, height: 40)
-        let allowedBounds = CGRect(x: 20, y: 260, width: 360, height: 120)
-
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: "Yes.",
-            sourceFontSize: 16,
-            sourceRect: sourceRect,
-            allowedBounds: allowedBounds,
-            lineSpacing: 2,
-            textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: false
-        )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: "Yes.",
-            sourceFontSize: 16,
-            sourceRect: sourceRect,
-            allowedBounds: allowedBounds,
-            lineSpacing: 2,
-            textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: true
-        )
-
-        #expect(borderless.rect.width < sourceRect.width)
-        #expect(borderless.rect.width < bubble.rect.width)
-        // 有气泡时保持原有行为：译文宽度应当填满气泡。
-        #expect(bubble.rect.width >= sourceRect.width)
-        #expect(allowedBounds.contains(borderless.rect))
-    }
-
-    /// 文字自然宽度超过允许区域时必须被截断，而不是溢出到画面外。
-    @Test @MainActor func borderlessWidthNeverExceedsAllowedBounds() {
-        let sourceRect = CGRect(x: 60, y: 300, width: 300, height: 40)
-        let allowedBounds = CGRect(x: 20, y: 260, width: 140, height: 200)
-
-        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: "This is a very long translated sentence that cannot fit on one line.",
-            sourceFontSize: 16,
-            sourceRect: sourceRect,
-            allowedBounds: allowedBounds,
-            lineSpacing: 2,
-            textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: false
-        )
-
-        #expect(layout.rect.width <= allowedBounds.width + 0.5)
-        #expect(allowedBounds.contains(layout.rect))
-    }
-
-    @Test @MainActor func horizontalBorderlessLayoutIgnoresTallOCRBox() {
+    @Test func noBubblePathologicalTallOCRDoesNotEnlargeCard() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
+        let normalSourceRect = CGRect(x: 185, y: 340, width: 30, height: 20)
         let allowedBounds = CGRect(x: 120, y: 100, width: 200, height: 500)
-
-        let borderless = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",
             sourceFontSize: 14,
             sourceRect: sourceRect,
             allowedBounds: allowedBounds,
             lineSpacing: 2,
             textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: false
+            geometryStrategy: .measuredText
         )
-        let bubble = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+        let normalLayout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "Hello there",
             sourceFontSize: 14,
-            sourceRect: sourceRect,
+            sourceRect: normalSourceRect,
             allowedBounds: allowedBounds,
             lineSpacing: 2,
             textOrientation: .horizontal,
-            useSourceRectAsMinimumExtent: true
+            geometryStrategy: .measuredText
         )
 
-        #expect(borderless.rect.height < sourceRect.height)
-        #expect(borderless.rect.height < bubble.rect.height)
-        #expect(bubble.rect.height >= sourceRect.height)
-        #expect(allowedBounds.contains(borderless.rect))
+        #expect(layout.rect.height < 200)
+        #expect(layout.rect.width < 160)
+        #expect(abs(layout.rect.width - normalLayout.rect.width) < 0.001)
+        #expect(abs(layout.rect.height - normalLayout.rect.height) < 0.001)
+    }
+
+    @Test func detectedBubbleLayoutRetainsSourceExtent() {
+        let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "Hello there",
+            sourceFontSize: 14,
+            sourceRect: sourceRect,
+            allowedBounds: CGRect(x: 120, y: 100, width: 200, height: 500),
+            lineSpacing: 2,
+            textOrientation: .horizontal,
+            geometryStrategy: .detectedBubble
+        )
+
+        #expect(layout.rect.width >= sourceRect.width)
+        #expect(layout.rect.height >= sourceRect.height)
+        #expect(layout.contentPadding == TranslationLayoutMetrics.contentPadding)
+    }
+
+    @Test func noBubbleMultilineCardWrapsActualTranslation() {
+        let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
+            translation: "第一行\n第二行",
+            translationLines: ["第一行", "第二行"],
+            sourceFontSize: 16,
+            sourceRect: CGRect(x: 120, y: 220, width: 80, height: 36),
+            allowedBounds: CGRect(x: 80, y: 180, width: 180, height: 140),
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
+        )
+
+        #expect(choice.text == "第一行\n第二行")
+        #expect(
+            TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: false)
+                == .measuredText
+        )
+        #expect(TranslationSurfaceStyle.measuredText.drawsBackground)
+        let measuredText = OCRBubbleLayoutEngine.measuredHorizontalTextSize(
+            choice.text,
+            fontSize: choice.layout.fontSize,
+            maximumWidth: choice.layout.contentRect.width,
+            lineSpacing: 2
+        )
+        #expect(abs(choice.layout.contentRect.width - measuredText.width) <= 1)
+        #expect(abs(choice.layout.contentRect.height - measuredText.height) <= 1)
+        #expect(
+            abs(
+                choice.layout.rect.width
+                    - (choice.layout.contentRect.width + choice.layout.contentPadding * 2)
+            ) < 0.001
+        )
+        #expect(
+            abs(
+                choice.layout.rect.height
+                    - (choice.layout.contentRect.height + choice.layout.contentPadding * 2)
+            ) < 0.001
+        )
+        #expect(choice.layout.rect.height > choice.layout.contentPadding * 2)
+    }
+
+    @Test func measuredTextFontDoesNotUseOCRBoxSize() {
+        let requested = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: false,
+            automaticFontSize: 300,
+            measuredTextFontSize: 18
+        )
+
+        #expect(requested == 18)
+    }
+
+    @Test func detectedBubbleAndMeasuredTextAreTheOnlySurfaceStates() {
+        #expect(Set(TranslationSurfaceStyle.allCases) == [.detectedBubble, .measuredText])
+        #expect(
+            TranslationSurfaceStyle.allCases.filter(\.drawsBackground)
+                == [.detectedBubble, .measuredText]
+        )
+    }
+
+    @Test func translationTextPassIsAboveEverySurfacePass() {
+        #expect(TranslationSurfaceLayering.surfaceZIndex < TranslationSurfaceLayering.textZIndex)
+    }
+
+    @Test func measuredTextCardPaddingEqualsHalfFinalLineHeight() {
+        let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
+        let text = "Hello there"
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: text,
+            sourceFontSize: 18,
+            sourceRect: sourceRect,
+            allowedBounds: CGRect(x: 80, y: 100, width: 300, height: 400),
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
+        )
+        let expectedPadding = OCRBubbleLayoutEngine.measuredTextCardPadding(
+            fontSize: layout.fontSize,
+            textOrientation: .horizontal
+        )
+        let font = UIFont.systemFont(ofSize: layout.fontSize, weight: .bold)
+        let measuredWidth = OCRBubbleLayoutEngine.measuredHorizontalTextSize(
+            text,
+            fontSize: layout.fontSize,
+            maximumWidth: max(layout.rect.width - expectedPadding * 2, 1),
+            lineSpacing: 2
+        ).width
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineSpacing = 2
+        let measuredHeight = (text as NSString).boundingRect(
+            with: CGSize(
+                width: max(layout.rect.width - expectedPadding * 2, 1),
+                height: .greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [
+                .font: font,
+                .paragraphStyle: paragraphStyle
+            ],
+            context: nil
+        ).integral.height
+
+        #expect(abs(layout.contentPadding - expectedPadding) < 0.001)
+        #expect(
+            abs(
+                layout.rect.width
+                    - (layout.contentRect.width + layout.contentPadding * 2)
+            ) < 0.001
+        )
+        #expect(
+            abs(
+                layout.rect.height
+                    - (layout.contentRect.height + layout.contentPadding * 2)
+            ) < 0.001
+        )
+        #expect(abs(layout.rect.width - (measuredWidth + expectedPadding * 2)) < 0.1)
+        #expect(abs(layout.rect.height - (measuredHeight + expectedPadding * 2)) <= 1)
+        #expect(layout.rect.height < sourceRect.height)
+    }
+
+    @Test func noBubblePathologicalWideOCRDoesNotEnlargeCard() {
+        let sourceRect = CGRect(x: 20, y: 360, width: 340, height: 40)
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "短句",
+            sourceFontSize: 18,
+            sourceRect: sourceRect,
+            allowedBounds: CGRect(x: 0, y: 300, width: 390, height: 180),
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
+        )
+
+        #expect(layout.rect.width < sourceRect.width)
+        #expect(layout.rect.height < 80)
+    }
+
+    @Test func verticalMeasuredCardUsesHalfGlyphHeightPadding() {
+        let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
+            text: "城市熟女。",
+            sourceFontSize: 20,
+            sourceRect: CGRect(x: 240, y: 120, width: 30, height: 400),
+            allowedBounds: CGRect(x: 180, y: 80, width: 150, height: 500),
+            lineSpacing: 2,
+            textOrientation: .vertical,
+            geometryStrategy: .measuredText
+        )
+        let expectedPadding = OCRBubbleLayoutEngine.measuredTextCardPadding(
+            fontSize: layout.fontSize,
+            textOrientation: .vertical
+        )
+
+        #expect(abs(layout.contentPadding - expectedPadding) < 0.001)
+        #expect(layout.rect.height < 400)
+        #expect(layout.rect.height < 200)
     }
 }

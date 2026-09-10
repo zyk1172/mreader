@@ -13,7 +13,8 @@ nonisolated struct AppleTranslationBlockRequest: Sendable, Identifiable, Equatab
 /// Apple 本地翻译的会话内页缓存。
 ///
 /// 让“翻回旧页”时能直接命中上次 Apple 翻译结果，而不必重新 OCR + 重新翻译。
-/// 按 (pageURL + 源语言 + 目标语言) 分键，只做内存缓存（会话内有效）。
+/// 按页面、语言和 OCR 分组输入分键，只做内存缓存（会话内有效）。
+/// OCR/分组几何变化时必须换 key，不能把旧的 translation unit 数量带回当前页面。
 actor AppleTranslationPageCache {
     static let shared = AppleTranslationPageCache()
 
@@ -50,9 +51,25 @@ actor AppleTranslationPageCache {
     nonisolated static func key(
         pageURL: URL,
         sourceLanguage: String,
-        targetLanguage: String
+        targetLanguage: String,
+        segmentationRevision: String,
+        ocrRecognitionMode: OCRRecognitionMode,
+        usesVisualOCRVerification: Bool,
+        isRightToLeft: Bool,
+        minimumTextHeight: Double,
+        safeAreaInset: Double
     ) -> String {
-        let raw = "\(pageURL.absoluteString)#\(sourceLanguage)#\(targetLanguage)"
+        let raw = [
+            pageURL.absoluteString,
+            sourceLanguage,
+            targetLanguage,
+            "segmentation=\(segmentationRevision)",
+            "ocr-mode=\(ocrRecognitionMode.rawValue)",
+            usesVisualOCRVerification ? "visual-review" : "local-only",
+            isRightToLeft ? "rtl" : "ltr",
+            String(format: "min=%.6f", minimumTextHeight),
+            String(format: "safe-area=%.6f", safeAreaInset)
+        ].joined(separator: "#")
         return SHA256.hash(data: Data(raw.utf8))
             .map { String(format: "%02x", $0) }
             .joined()

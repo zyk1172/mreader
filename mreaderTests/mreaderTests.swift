@@ -15,7 +15,10 @@ import ZIPFoundation
 
 private final class OCRFixtureResourceToken {}
 
+// 被测 App target 默认 MainActor 隔离，测试中的 TextBlock / ComicBook 等
+// 类型与大量诊断入口都是 MainActor 隔离的；套件整体运行在 MainActor 上。
 @Suite(.serialized)
+@MainActor
 struct mreaderTests {
 
     @Test func translationTargetsMigrateLegacyChineseWithoutDuplicateOption() {
@@ -1721,7 +1724,9 @@ struct mreaderTests {
         #expect(result.bubbles.count == 2)
     }
 
-    @Test func mangaSegmenterKeepsPureOCRMergeBehaviorWithoutVisualBubbles() {
+    @Test func mangaSegmenterFormsMeasuredParagraphWithoutVisualBubbles() {
+        // 无可靠 bubbleBox 时，连续横排 OCR 行仍应作为一个翻译单元；
+        // 但结果保持 measured-text 语义，不凭空创建漫画气泡。
         let result = MangaTextSegmenter.segment([
             TextBlock(
                 text: "第一行",
@@ -1736,6 +1741,8 @@ struct mreaderTests {
         ], isRightToLeft: false)
 
         #expect(result.bubbles.count == 1)
+        #expect(result.bubbles[0].text == "第一行第二行")
+        #expect(result.bubbles[0].sourceLineCount == 2)
         #expect(result.bubbles[0].bubbleBox == nil)
     }
 
@@ -1906,18 +1913,19 @@ struct mreaderTests {
         #expect(abs(OCRBubbleLayoutEngine.preferredTranslationFontSize(sourceFontSize: 6) - 6) < 0.01)
     }
 
-    @Test @MainActor func borderlessTranslationFontIgnoresPathologicalOCRGeometry() {
+    @Test @MainActor func measuredTextTranslationFontIgnoresPathologicalOCRGeometry() {
         let requested = OCRBubbleLayoutEngine.requestedTranslationFontSize(
             hasReliableBubble: false,
             automaticFontSize: 120,
-            borderlessFontSize: 14
+            measuredTextFontSize: 14
         )
         let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: "In the stationary species",
             sourceFontSize: requested,
             sourceRect: CGRect(x: 100, y: 100, width: 40, height: 20),
             allowedBounds: CGRect(x: 80, y: 80, width: 80, height: 60),
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
         )
         #expect(layout.fontSize <= 14.001)
 
@@ -1925,28 +1933,28 @@ struct mreaderTests {
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 14
+                measuredTextFontSize: 14
             ) == 14
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 3
+                measuredTextFontSize: 3
             ) == 8
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: false,
                 automaticFontSize: 72,
-                borderlessFontSize: 40
+                measuredTextFontSize: 40
             ) == 28
         )
         #expect(
             OCRBubbleLayoutEngine.requestedTranslationFontSize(
                 hasReliableBubble: true,
                 automaticFontSize: 80,
-                borderlessFontSize: 14
+                measuredTextFontSize: 14
             ) == TranslationLayoutMetrics.absoluteFontSizeCap
         )
     }
@@ -2000,7 +2008,7 @@ struct mreaderTests {
         #expect(oversizedButNotWholePage == nil)
     }
 
-    @Test @MainActor func comicBookBorderlessTranslationFontDefaultsAndClampsAcrossCodable() throws {
+    @Test @MainActor func comicBookMeasuredTextFontDefaultsAndClampsAcrossLegacyCodable() throws {
         let clamped = ComicBook(
             title: "font-setting",
             bookmarkData: Data(),
@@ -2116,11 +2124,12 @@ struct mreaderTests {
             within: imageBounds
         )
         let layout = OCRBubbleLayoutEngine.anchoredTranslationLayout(
-            text: "坐立不安的",
+            text: "这是一个需要在有限区域内自动缩小字号的独立文字翻译",
             sourceFontSize: fontSize,
             sourceRect: sourceRect,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .measuredText
         )
 
         #expect(allowed.width <= sourceRect.width + 48)
@@ -2246,7 +2255,8 @@ struct mreaderTests {
             sourceFontSize: 16,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(abs(layout.rect.midX - source.midX) < 0.01)
@@ -2265,7 +2275,8 @@ struct mreaderTests {
             sourceFontSize: 20,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(abs(layout.fontSize - 20) < 0.01)
@@ -2281,7 +2292,8 @@ struct mreaderTests {
             sourceFontSize: 20,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(layout.fontSize < 12)
@@ -2296,7 +2308,8 @@ struct mreaderTests {
             sourceFontSize: 22,
             sourceRect: CGRect(x: 3, y: 3, width: 12, height: 8),
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(allowed.contains(layout.rect))
@@ -2314,14 +2327,16 @@ struct mreaderTests {
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
         let suggested = OCRBubbleLayoutEngine.anchoredTranslationLayout(
             text: suggestedLines.joined(separator: "\n"),
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: translation,
@@ -2329,7 +2344,8 @@ struct mreaderTests {
             sourceFontSize: 18,
             sourceRect: source,
             allowedBounds: allowed,
-            lineSpacing: 2
+            lineSpacing: 2,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(natural.fontSize > suggested.fontSize)
@@ -2348,7 +2364,8 @@ struct mreaderTests {
             sourceRect: source,
             allowedBounds: allowed,
             lineSpacing: 2,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            geometryStrategy: .detectedBubble
         )
 
         #expect(choice.usesSuggestedLineBreaks == false)
@@ -2367,7 +2384,8 @@ struct mreaderTests {
             sourceRect: source,
             allowedBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
             lineSpacing: 2,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            geometryStrategy: .detectedBubble
         )
         let contentWidth = layout.rect.width - TranslationLayoutMetrics.contentPadding * 2
 
@@ -2459,6 +2477,7 @@ struct mreaderTests {
         #expect(refined[0].boundingBox == CGRect(x: 0.2, y: 0.2, width: 0.30, height: 0.12))
         #expect(refined[0].textOrientation == .horizontal)
         #expect(refined[0].estimatedFontScale == 0.05)
+        #expect(refined[0].sourceLineCount == 2)
     }
 
     @Test func translationGeometryRefinerRejectsAdjacentRepeatedShortText() {
@@ -2995,8 +3014,9 @@ struct mreaderTests {
         #expect(grouped[1].text == "广告")
     }
 
-    @Test func verticalMangaColumnsMergeIntoSingleDialogue() {
-        // 竖排日文：同一气泡里两列长度不同（顶端对齐），列宽≈字号
+    @Test func verticalMangaColumnsWithoutBubbleRegionStaySeparateMeasuredTextUnits() {
+        // 没有可靠 bubbleBox 时，不能仅凭竖排列距猜出一个漫画气泡。
+        // 两列仍各自保留为可翻译的 measured-text unit。
         let rightColumn = TextBlock(
             text: "きみのことが",
             boundingBox: CGRect(x: 0.60, y: 0.10, width: 0.035, height: 0.20),
@@ -3013,8 +3033,9 @@ struct mreaderTests {
             isRightToLeft: true
         )
 
-        #expect(grouped.count == 1)
-        #expect(grouped[0].text == "きみのことがすきだ")
+        #expect(grouped.count == 2)
+        #expect(grouped.allSatisfy { $0.bubbleBox == nil })
+        #expect(grouped.map(\.text) == ["きみのことが", "すきだ"])
     }
 
     @Test func webtoonRowsSortByReadingOrderDespiteTinyNormalizedHeights() {
@@ -3626,14 +3647,16 @@ struct mreaderTests {
 }
 
 private final class AITransportRecordingURLProtocol: URLProtocol {
+    // URLProtocol 回调运行在 URLSession 自队队列上；以下状态全部由
+    // Self.lock 串行化（configure / requestCount / lastRequest / startLoading）。
     private static let lock = NSLock()
-    private static var responseData = Data(#"{"output_text":"ok"}"#.utf8)
-    private static var responseStatusCode = 200
-    private static var responseSequence: [(statusCode: Int, data: Data)] = []
-    private static var responseSequenceIndex = 0
-    private static var failure: Error?
-    private static var capturedRequestCount = 0
-    private static var lastCapturedRequest: URLRequest?
+    private nonisolated(unsafe) static var responseData = Data(#"{"output_text":"ok"}"#.utf8)
+    private nonisolated(unsafe) static var responseStatusCode = 200
+    private nonisolated(unsafe) static var responseSequence: [(statusCode: Int, data: Data)] = []
+    private nonisolated(unsafe) static var responseSequenceIndex = 0
+    private nonisolated(unsafe) static var failure: Error?
+    private nonisolated(unsafe) static var capturedRequestCount = 0
+    private nonisolated(unsafe) static var lastCapturedRequest: URLRequest?
 
     static func configure(
         responseData: Data,
@@ -3753,7 +3776,7 @@ private actor LibrarySyncProbe {
 
     // MARK: - 代码审查回归测试
 
-    @Test func opdsAuthorizationNotForwardedToCrossOriginHost() {
+    @Test @MainActor func opdsAuthorizationNotForwardedToCrossOriginHost() {
         // OPDS feed 可能给出指向第三方域名的 cover/acquisition URL：
         // 同源（scheme+host+port 一致）才转发凭据，跨域绝不携带 Authorization。
         #expect(
@@ -3788,7 +3811,7 @@ private actor LibrarySyncProbe {
         )
     }
 
-    @Test func readingProgressMergePreservesBackwardReRead() {
+    @Test @MainActor func readingProgressMergePreservesBackwardReRead() {
         // Komga 之前记录到 300 页，用户在本地重读到 50 页（updatedAt 更新）。
         // 合并必须保留 50 作为当前阅读位置，而不是 max(300, 50) = 300。
         let existing = ComicBook(
@@ -3816,7 +3839,7 @@ private actor LibrarySyncProbe {
         #expect(resolution.furthestPageIndex == 300)
     }
 
-    @Test func readingProgressMergeTakesNewerRemoteWhenAhead() {
+    @Test @MainActor func readingProgressMergeTakesNewerRemoteWhenAhead() {
         // 反向场景：远端更新晚于本地且更靠后时，当前页取远端位置。
         let existing = ComicBook(
             title: "test",
@@ -3863,7 +3886,7 @@ private actor LibrarySyncProbe {
         #expect(large.imageRect.height == 1_000)
     }
 
-    @Test func settingsBackupPlainEncodeRefusesCredentials() {
+    @Test @MainActor func settingsBackupPlainEncodeRefusesCredentials() {
         // 明文设置备份不允许携带任何 API Key / 凭据；带凭据必须走加密。
         let backup = MReaderSettingsBackup(
             openAIAPIKey: "sk-test",
@@ -3891,7 +3914,7 @@ private actor LibrarySyncProbe {
 
     // MARK: - 第二份审查报告回归测试（源语言 + 模型拆分）
 
-    @Test func legacySelectedModelMigratesToBothRoles() throws {
+    @Test @MainActor func legacySelectedModelMigratesToBothRoles() throws {
         let json = """
         {
           "id": "00000000-0000-0000-0000-000000000001",
@@ -3931,12 +3954,12 @@ private actor LibrarySyncProbe {
         #expect(store.activeProfileID() == nil)
     }
 
-    @Test func translationSourceLanguageDefaultsToAutomatic() {
+    @Test @MainActor func translationSourceLanguageDefaultsToAutomatic() {
         let comic = ComicBook(title: "t", bookmarkData: Data(), totalPages: 1)
         #expect(comic.translationSourceLanguage == .automatic)
     }
 
-    @Test func translationSourceResolverUsesManualPreferenceFirst() {
+    @Test @MainActor func translationSourceResolverUsesManualPreferenceFirst() {
         let decision = TranslationSourceResolver.resolve(
             preference: .english,
             blocks: [TextBlock(text: "No!", boundingBox: .zero, confidence: 0.9, ocrSource: "original:en")],
@@ -3946,7 +3969,7 @@ private actor LibrarySyncProbe {
         #expect(decision?.confidence == 1)
     }
 
-    @Test func translationSourceResolverFallsBackToPreviousWhenUncertain() {
+    @Test @MainActor func translationSourceResolverFallsBackToPreviousWhenUncertain() {
         let decision = TranslationSourceResolver.resolve(
             preference: .automatic,
             blocks: [],
@@ -3955,7 +3978,7 @@ private actor LibrarySyncProbe {
         #expect(decision?.languageCode == "ja")
     }
 
-    @Test func translationSourceResolverReturnsNilWhenUnknownAndNoPrevious() {
+    @Test @MainActor func translationSourceResolverReturnsNilWhenUnknownAndNoPrevious() {
         let decision = TranslationSourceResolver.resolve(
             preference: .automatic,
             blocks: [],
@@ -3964,7 +3987,7 @@ private actor LibrarySyncProbe {
         #expect(decision == nil)
     }
 
-    @Test func translationOutputValidatorPageLevelRejectsDifferentLatinLanguage() {
+    @Test @MainActor func translationOutputValidatorPageLevelRejectsDifferentLatinLanguage() {
         // 目标英语：整页译文若是清晰的其它拉丁语言（法语），应判定不兼容
         let french = "Bonjour, comment allez-vous aujourd'hui? Je vais tres bien, merci beaucoup."
         #expect(
@@ -3982,7 +4005,7 @@ private actor LibrarySyncProbe {
         )
     }
 
-    @Test func translationPageCacheKeyTracksModelRoles() {
+    @Test @MainActor func translationPageCacheKeyTracksModelRoles() {
         // 纯 OCR 翻译：只依赖 textModel；visionModel 变化不应改变缓存 key
         let ocrA = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-a", visualVerify: false)
         let ocrB = makeTestPageRequest(mode: .ocr, textModel: "text-a", visionModel: "vision-b", visualVerify: false)
@@ -4061,38 +4084,38 @@ private func makeTestPageRequest(
 
     // MARK: - 第四份审查报告回归测试
 
-    @Test func chatResponseDecoderChatCompletionsString() throws {
+    @Test @MainActor func chatResponseDecoderChatCompletionsString() throws {
         let data = Data(#"{"choices":[{"message":{"content":"你好"}}]}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == "你好")
         #expect(!decoded.hasReasoningOnly)
     }
 
-    @Test func chatResponseDecoderContentArray() throws {
+    @Test @MainActor func chatResponseDecoderContentArray() throws {
         let data = Data(#"{"choices":[{"message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}]}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == "a\nb")
     }
 
-    @Test func chatResponseDecoderLegacyText() throws {
+    @Test @MainActor func chatResponseDecoderLegacyText() throws {
         let data = Data(#"{"choices":[{"text":"legacy"}]}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == "legacy")
     }
 
-    @Test func chatResponseDecoderResponsesOutputText() throws {
+    @Test @MainActor func chatResponseDecoderResponsesOutputText() throws {
         let data = Data(#"{"output_text":"top-level"}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == "top-level")
     }
 
-    @Test func chatResponseDecoderResponsesNestedOutput() throws {
+    @Test @MainActor func chatResponseDecoderResponsesNestedOutput() throws {
         let data = Data(#"{"output":[{"content":[{"type":"output_text","text":"nested"}]}]}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == "nested")
     }
 
-    @Test func chatResponseDecoderReasoningOnly() throws {
+    @Test @MainActor func chatResponseDecoderReasoningOnly() throws {
         let data = Data(#"{"choices":[{"message":{"reasoning_content":"thinking...","content":null},"finish_reason":"length"}]}"#.utf8)
         let decoded = AIChatResponseDecoder.decode(data)
         #expect(decoded.content == nil)
@@ -4100,13 +4123,89 @@ private func makeTestPageRequest(
         #expect(decoded.finishReason == "length")
     }
 
-    @Test func chatResponseDecoderMalformed() {
+    @Test @MainActor func chatResponseDecoderFiltersTypedReasoningParts() {
+        let data = Data(#"{"choices":[{"message":{"content":[{"type":"thinking","text":"private thought"},{"type":"text","text":"最终译文"},{"type":"tool_result","text":"不要泄漏"}]}}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func responsesDecoderFiltersReasoningItems() {
+        let data = Data(#"{"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"private thought"}]},{"type":"message","content":[{"type":"output_text","text":"最终译文"}]}]}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func anthropicDecoderFiltersThinkingBlocks() {
+        let data = Data(#"{"content":[{"type":"thinking","thinking":"private thought"},{"type":"text","text":"最终译文"}],"stop_reason":"end_turn"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "最终译文")
+        #expect(decoded.finishReason == "end_turn")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test @MainActor func anthropicDecoderMarksThinkingOnlyResponse() {
+        let data = Data(#"{"content":[{"type":"thinking","thinking":"private thought"}],"stop_reason":"max_tokens"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == nil)
+        #expect(decoded.hasReasoningOnly)
+        #expect(decoded.finishReason == "max_tokens")
+    }
+
+    @Test @MainActor func chatResponseDecoderMalformed() {
         let decoded = AIChatResponseDecoder.decode(Data("not json".utf8))
         #expect(decoded.content == nil)
         #expect(!decoded.hasReasoningOnly)
     }
 
-    @Test func singleBubblePromptAlwaysIncludesOcrTextAndTarget() {
+    @Test @MainActor func responseDecoderStripsInlineThinkingMarkupWithoutLeakingIt() {
+        let data = Data(#"{"output_text":"<thinking>private thought</thinking>\n最终译文"}"#.utf8)
+        let decoded = AIChatResponseDecoder.decode(data)
+        #expect(decoded.content == "\n最终译文")
+        #expect(!decoded.hasReasoningOnly)
+    }
+
+    @Test func pageParserStripsAllReasoningMarkupAroundJSON() throws {
+        let expected = [AIPageTranslationItem(id: "b0", sourceText: "こんにちは", order: 0)]
+        let content = #"<analysis>private thought</analysis>{"items":[{"id":"b0","translation":"你好","translationLines":[]}] }"#
+        let result = try AIPageTranslationParser.parseStrict(
+            content,
+            expectedItems: expected,
+            target: .simplifiedChinese
+        )
+        #expect(result.items.first?.translation == "你好")
+    }
+
+    @Test func translationValidatorRejectsFormattedSourceEchoAndReasoningMarkup() {
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "こんにちは。",
+            sourceText: "こんにちは",
+            target: .japanese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "這是測試",
+            sourceText: "這是測試",
+            target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "```你好```",
+            sourceText: "こんにちは",
+            target: .simplifiedChinese
+        ))
+        #expect(!TranslationOutputValidator.isAcceptableTranslation(
+            "<think>先分析</think>你好",
+            sourceText: "こんにちは",
+            target: .simplifiedChinese
+        ))
+        #expect(TranslationOutputValidator.isAcceptableTranslation(
+            "NASA",
+            sourceText: "NASA",
+            target: .simplifiedChinese
+        ))
+    }
+
+    @Test @MainActor func singleBubblePromptAlwaysIncludesOcrTextAndTarget() {
         let prompt = AITranslator.singleBubbleTranslationPrompt(
             text: "こんにちは",
             target: .simplifiedChinese,
@@ -4124,7 +4223,7 @@ private func makeTestPageRequest(
         #expect(!prompt.contains("{targetLanguage}"))
     }
 
-    @Test func settingsBackupV10RoundTripsStyleInstructions() throws {
+    @Test @MainActor func settingsBackupV10RoundTripsStyleInstructions() throws {
         let profile = AIProviderProfile.normalized(
             name: "接口",
             baseURL: "https://a.example/v1",
@@ -4149,7 +4248,7 @@ private func makeTestPageRequest(
         #expect(decoded.translationStyleInstructions == "人名保留日文原名")
     }
 
-    @Test func settingsBackupV9LegacyPromptIsSeparateField() throws {
+    @Test @MainActor func settingsBackupV9LegacyPromptIsSeparateField() throws {
         let json = """
         {
           "version": 9,
@@ -4166,7 +4265,7 @@ private func makeTestPageRequest(
         #expect(decoded.translationStyleInstructions == nil)
     }
 
-    @Test func ocrManualFrenchUsesFrenchPassFirst() {
+    @Test @MainActor func ocrManualFrenchUsesFrenchPassFirst() {
         let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
             detectedTexts: ["Bonjour, comment ça va?"],
             sourceLanguagePreference: .french
@@ -4174,7 +4273,7 @@ private func makeTestPageRequest(
         #expect(passes.first?.contains("fr-FR") == true)
     }
 
-    @Test func ocrManualRussianUsesRussianPassFirst() {
+    @Test @MainActor func ocrManualRussianUsesRussianPassFirst() {
         let passes = OCRPreprocessor.preferredLanguagePassesForDiagnostics(
             detectedTexts: ["Привет, как дела?"],
             sourceLanguagePreference: .russian
@@ -4182,14 +4281,14 @@ private func makeTestPageRequest(
         #expect(passes.first?.contains("ru-RU") == true)
     }
 
-    @Test func ocrMaximumAccuracyRespectsManualLanguage() {
+    @Test @MainActor func ocrMaximumAccuracyRespectsManualLanguage() {
         let passes = OCRPreprocessor.maximumAccuracyPassesForDiagnostics(
             sourceLanguagePreference: .french
         )
         #expect(passes.first?.contains("fr-FR") == true)
     }
 
-    @Test func supportedRecognitionLanguagesNeverReturnsUnsupported() throws {
+    @Test @MainActor func supportedRecognitionLanguagesNeverReturnsUnsupported() throws {
         let preferred = ["ar-SA", "ru-RU", "fr-FR", "en-US"]
         let result = OCRPreprocessor.supportedRecognitionLanguagesForDiagnostics(
             preferredLanguages: preferred
@@ -4201,7 +4300,7 @@ private func makeTestPageRequest(
         }
     }
 
-    @Test func aiEndpointResolverNormalizesChatCompletionsURL() {
+    @Test @MainActor func aiEndpointResolverNormalizesChatCompletionsURL() {
         #expect(
             AIEndpointResolver.chatCompletionsURL(from: "https://api.xxx/v1")?
                 .absoluteString == "https://api.xxx/v1/chat/completions"
@@ -4214,7 +4313,7 @@ private func makeTestPageRequest(
 
     // MARK: - 整本离线翻译回归测试
 
-    @Test func offlineTranslationSelectionUsesZeroBasedIndexesAndValidatesRanges() throws {
+    @Test @MainActor func offlineTranslationSelectionUsesZeroBasedIndexesAndValidatesRanges() throws {
         #expect(try OfflineTranslationSelection.entireComic.pageIndexes(totalPages: 4) == [0, 1, 2, 3])
         #expect(try OfflineTranslationSelection.fromPage(2).pageIndexes(totalPages: 4) == [2, 3])
         #expect(try OfflineTranslationSelection.range(start: 1, end: 2).pageIndexes(totalPages: 4) == [1, 2])
@@ -4233,7 +4332,7 @@ private func makeTestPageRequest(
         }
     }
 
-    @Test func offlineTranslationPageFactsRetryPartialAndFailedPagesFromDiskState() {
+    @Test @MainActor func offlineTranslationPageFactsRetryPartialAndFailedPagesFromDiskState() {
         let planned = [0, 1, 2, 3]
         let states: [Int: OfflineTranslationPageState] = [
             0: .completed,
@@ -4285,7 +4384,7 @@ private func makeTestPageRequest(
         #expect(legacy.isOfflineTranslationOverlayEnabled)
     }
 
-    @Test func offlineTranslationPromptKeepsProtocolSeparateFromStyle() {
+    @Test @MainActor func offlineTranslationPromptKeepsProtocolSeparateFromStyle() {
         let prompt = OfflineTranslationPromptBuilder.make(
             sourceLanguage: .japanese,
             targetLanguage: .simplifiedChinese,
@@ -4304,7 +4403,7 @@ private func makeTestPageRequest(
         #expect(!prompt.contains("{targetLanguage}"))
     }
 
-    @Test func offlineVisionTranslationRequiresTextBoxAndPreservesCoordinateDiagnostics() throws {
+    @Test @MainActor func offlineVisionTranslationRequiresTextBoxAndPreservesCoordinateDiagnostics() throws {
         let valid = """
         {"coordinateSpace":"normalized","items":[{
           "id":"a","sourceText":"こんにちは","translation":"你好","translationLines":["你好"],
@@ -4421,7 +4520,7 @@ private func makeTestPageRequest(
         }
     }
 
-    @Test func offlineTranslationPageDTOConvertsWithoutTextBlockJSON() throws {
+    @Test @MainActor func offlineTranslationPageDTOConvertsWithoutTextBlockJSON() throws {
         let block = TextBlock(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             text: "こんにちは",
@@ -4446,7 +4545,7 @@ private func makeTestPageRequest(
         #expect(abs((roundTrip.bubbleBox?.minX ?? 0) - 0.05) < 0.0001)
     }
 
-    @Test func offlineTranslationDTOWritesCanonicalGeometryKeysAndReadsLegacyKeys() throws {
+    @Test @MainActor func offlineTranslationDTOWritesCanonicalGeometryKeysAndReadsLegacyKeys() throws {
         let block = TextBlock(
             text: "原文",
             boundingBox: CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08),
@@ -4474,7 +4573,7 @@ private func makeTestPageRequest(
         #expect(decoded.textPolygon.count == 1)
     }
 
-    @Test func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {
+    @Test @MainActor func offlineTranslationStoragePersistsPageBeforeManifestAndSurvivesReload() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-test-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4516,7 +4615,7 @@ private func makeTestPageRequest(
         #expect((await storage.activeManifest(for: comicID))?.id == set.id)
     }
 
-    @Test func offlineTranslationStorageMarksFingerprintMismatchStaleAndSwitchesSets() async throws {
+    @Test @MainActor func offlineTranslationStorageMarksFingerprintMismatchStaleAndSwitchesSets() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-switch-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4564,7 +4663,7 @@ private func makeTestPageRequest(
         #expect(await storage.index(for: comicID) == nil)
     }
 
-    @Test func offlineTranslationKeepsAnActiveSetPerTargetLanguage() async throws {
+    @Test @MainActor func offlineTranslationKeepsAnActiveSetPerTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-target-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4592,7 +4691,7 @@ private func makeTestPageRequest(
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
     }
 
-    @Test func offlineTranslationDeletingActiveSetRestoresUsableSameTargetFallback() async throws {
+    @Test @MainActor func offlineTranslationDeletingActiveSetRestoresUsableSameTargetFallback() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-delete-active-target-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4648,7 +4747,7 @@ private func makeTestPageRequest(
         #expect((await storage.activeManifest(for: comicID))?.id == chinesePrevious.id)
     }
 
-    @Test func offlineTranslationRenderableSetLookupRequiresSourceAndTargetLanguage() async throws {
+    @Test @MainActor func offlineTranslationRenderableSetLookupRequiresSourceAndTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-running-language-(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4719,7 +4818,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationCompletedRangeRemainsRenderable() async throws {
+    @Test @MainActor func offlineTranslationCompletedRangeRemainsRenderable() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-range-visible-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4783,7 +4882,7 @@ private func makeTestPageRequest(
         ))?.id == set.id)
     }
 
-    @Test func offlineTranslationStoppedJobKeepsCompletedPagesRenderable() async throws {
+    @Test @MainActor func offlineTranslationStoppedJobKeepsCompletedPagesRenderable() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-stop-keep-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4874,7 +4973,7 @@ private func makeTestPageRequest(
         ) == nil)
     }
 
-    @Test func offlineTranslationRangeJobsInheritLatestRenderablePages() async throws {
+    @Test @MainActor func offlineTranslationRangeJobsInheritLatestRenderablePages() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-range-inheritance-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4988,7 +5087,7 @@ private func makeTestPageRequest(
         ))?.id == second.id)
     }
 
-    @Test func offlineTranslationNewActiveSuppressesOlderStoppedJob() async throws {
+    @Test @MainActor func offlineTranslationNewActiveSuppressesOlderStoppedJob() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-precedence-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5048,7 +5147,7 @@ private func makeTestPageRequest(
         ) == nil)
     }
 
-    @Test func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {
+    @Test @MainActor func offlineTranslationFingerprintIsStableAndChangesWithSourceBytes() {
         let first = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
         let same = OfflineTranslationFingerprint.sha256(for: Data("page-a".utf8))
         let changed = OfflineTranslationFingerprint.sha256(for: Data("page-b".utf8))
@@ -5057,7 +5156,7 @@ private func makeTestPageRequest(
         #expect(first.count == 64)
     }
 
-    @Test func offlineTranslationStreamingSHA256MatchesInMemorySHA256() throws {
+    @Test @MainActor func offlineTranslationStreamingSHA256MatchesInMemorySHA256() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-streaming-sha256-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -5074,7 +5173,7 @@ private func makeTestPageRequest(
         #expect(streamingDigest == memoryDigest)
     }
 
-    @Test func offlineTranslationStreamingSHA256HandlesEmptyFile() throws {
+    @Test @MainActor func offlineTranslationStreamingSHA256HandlesEmptyFile() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-streaming-sha256-empty-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -5087,7 +5186,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationStreamingSHA256CooperatesWithCancellation() async throws {
+    @Test @MainActor func offlineTranslationStreamingSHA256CooperatesWithCancellation() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-streaming-sha256-cancel-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -5107,7 +5206,7 @@ private func makeTestPageRequest(
         }
     }
 
-    @Test func offlineTranslationBackgroundPreparationSurvivesStartupDeadline() {
+    @Test @MainActor func offlineTranslationBackgroundPreparationSurvivesStartupDeadline() {
         let jobID = UUID()
         let otherJobID = UUID()
         #expect(
@@ -5156,7 +5255,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationCancellationKeepsSystemInterruptionResumable() {
+    @Test @MainActor func offlineTranslationCancellationKeepsSystemInterruptionResumable() {
         #expect(
             OfflineTranslationCancellationDisposition.resolve(stopMode: .systemInterruption)
                 == .interrupted
@@ -5171,7 +5270,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationExpirationCannotInterruptAnotherJob() {
+    @Test @MainActor func offlineTranslationExpirationCannotInterruptAnotherJob() {
         let jobA = UUID()
         let jobB = UUID()
         #expect(
@@ -5188,7 +5287,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
+    @Test @MainActor func offlineTranslationFolderRevisionTracksBytesWhenMetadataIsRestored() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-revision-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5219,7 +5318,7 @@ private func makeTestPageRequest(
         ))
     }
 
-    @Test func offlineTranslationFolderRevisionFailsClosedWhenSourceIsUnavailable() {
+    @Test @MainActor func offlineTranslationFolderRevisionFailsClosedWhenSourceIsUnavailable() {
         let missingRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-missing-folder-\(UUID().uuidString)", isDirectory: true)
         let revision = OfflineTranslationPageProvider.localFolderSourceRevision(
@@ -5235,7 +5334,7 @@ private func makeTestPageRequest(
         ))
     }
 
-    @Test func offlineTranslationFolderRevisionFailsClosedForInvalidImageCandidate() throws {
+    @Test @MainActor func offlineTranslationFolderRevisionFailsClosedForInvalidImageCandidate() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-invalid-folder-revision-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5255,7 +5354,7 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
     }
 
-    @Test func offlineTranslationFolderRevisionRequiresCompleteEnumeration() {
+    @Test @MainActor func offlineTranslationFolderRevisionRequiresCompleteEnumeration() {
         #expect(
             !OfflineTranslationPageProvider.isCompleteFolderRevision(
                 enumerationFailed: true,
@@ -5286,7 +5385,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationEmptyFolderRevisionFailsClosed() throws {
+    @Test @MainActor func offlineTranslationEmptyFolderRevisionFailsClosed() throws {
         let emptyRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-empty-folder-revision-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: emptyRoot) }
@@ -5302,7 +5401,7 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageProvider.isReliableSourceRevision(revision))
     }
 
-    @Test func offlineTranslationFolderRevisionUsesComicManagerPageExtensions() throws {
+    @Test @MainActor func offlineTranslationFolderRevisionUsesComicManagerPageExtensions() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-folder-page-extensions-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5327,7 +5426,7 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationPageProvider.isReliableSourceRevision(revision))
     }
 
-    @Test func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
+    @Test @MainActor func offlineTranslationSingleFileRevisionTracksBytesWhenMetadataIsRestored() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-single-file-revision-\(UUID().uuidString).cbz")
         defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -5353,7 +5452,7 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationPageProvider.isReliableSourceRevision(second))
     }
 
-    @Test func offlineTranslationTreatsLocalSingleFileAsExpensiveRevision() {
+    @Test @MainActor func offlineTranslationTreatsLocalSingleFileAsExpensiveRevision() {
         let comic = ComicBook(
             title: "local.cbz",
             bookmarkData: Data(),
@@ -5369,7 +5468,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationPendingRecoveryDistinguishesLoadingMissingAndResumable() {
+    @Test @MainActor func offlineTranslationPendingRecoveryDistinguishesLoadingMissingAndResumable() {
         #expect(
             OfflineTranslationPendingRecoveryDecision.resolve(
                 libraryLoaded: false,
@@ -5418,7 +5517,7 @@ private func makeTestPageRequest(
         )
     }
 
-    @Test func offlineTranslationDiscardUncommittedSetRemovesManifestAndIndexEntry() async throws {
+    @Test @MainActor func offlineTranslationDiscardUncommittedSetRemovesManifestAndIndexEntry() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-orphan-set-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5452,7 +5551,7 @@ private func makeTestPageRequest(
         #expect(await storage.index(for: comicID) == nil)
     }
 
-    @Test func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
+    @Test @MainActor func offlineTranslationMigratesLegacyActiveSetByTargetLanguage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-active-migration-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5492,7 +5591,7 @@ private func makeTestPageRequest(
         #expect((await storage.activeManifest(for: comicID, targetLanguage: .english))?.id == english.id)
     }
 
-    @Test func offlineTranslationReconcilesManifestFromPageFiles() async throws {
+    @Test @MainActor func offlineTranslationReconcilesManifestFromPageFiles() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-reconcile-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5531,7 +5630,7 @@ private func makeTestPageRequest(
         #expect(repaired?.coveredPageCount == 1)
     }
 
-    @Test func offlineTranslationDerivedSetCopiesOnlyOutsideSelectedPagesAndSwitchesAfterCompletion() async throws {
+    @Test @MainActor func offlineTranslationDerivedSetCopiesOnlyOutsideSelectedPagesAndSwitchesAfterCompletion() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-derived-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5604,7 +5703,7 @@ private func makeTestPageRequest(
         #expect((await storage.activeManifest(for: comicID))?.id == derived.id)
     }
 
-    @Test func offlineTranslationStatesTreatNoTextAsSuccessfulCoverage() {
+    @Test @MainActor func offlineTranslationStatesTreatNoTextAsSuccessfulCoverage() {
         #expect(OfflineTranslationPageState.noText.countsAsCoverage)
         #expect(OfflineTranslationPageState.noText.isUsableOverlay)
         #expect(!OfflineTranslationPageState.failed.countsAsCoverage)
@@ -5617,7 +5716,7 @@ private func makeTestPageRequest(
         #expect(!OfflineTranslationPageState.completed.needsTranslationWork)
     }
 
-    @Test func offlineTranslationFreezesOCRConfigurationAndRoundTripsIt() throws {
+    @Test @MainActor func offlineTranslationFreezesOCRConfigurationAndRoundTripsIt() throws {
         let job = OfflineTranslationJobRecord(
             comicID: UUID(),
             setID: UUID(),
@@ -5649,7 +5748,7 @@ private func makeTestPageRequest(
         #expect(decoded.usesVisualOCRVerification == false)
     }
 
-    @Test func offlineTranslationBlocksPreserveBubbleBoxThroughDTO() throws {
+    @Test @MainActor func offlineTranslationBlocksPreserveBubbleBoxThroughDTO() throws {
         let bubbleBox = CGRect(x: 0.12, y: 0.2, width: 0.5, height: 0.24)
         let block = TextBlock(
             text: "原文",
@@ -5665,7 +5764,7 @@ private func makeTestPageRequest(
         #expect(decoded.textBlock().boundingBox != bubbleBox)
     }
 
-    @Test func offlineTranslationPreservesClassificationAfterGeometryRefinement() {
+    @Test @MainActor func offlineTranslationPreservesClassificationAfterGeometryRefinement() {
         let block = TextBlock(
             text: "旁白",
             boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.08),
@@ -5676,7 +5775,7 @@ private func makeTestPageRequest(
         #expect(OfflineTranslatedBlock(block: block).classification == "narration")
     }
 
-    @Test func offlineTranslationPreservesStandaloneLayoutRole() throws {
+    @Test @MainActor func offlineTranslationPreservesStandaloneLayoutRole() throws {
         let block = TextBlock(
             text: "斜体音效",
             boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.25, height: 0.12),
@@ -5698,7 +5797,7 @@ private func makeTestPageRequest(
         #expect(decoded.textBlock().layoutRole == .standalone)
     }
 
-    @Test func offlineTranslationPartialPagePrefersMatchingCompleteFallback() {
+    @Test @MainActor func offlineTranslationPartialPagePrefersMatchingCompleteFallback() {
         let comicID = UUID()
         let newSetID = UUID()
         let parentSetID = UUID()
@@ -5744,7 +5843,7 @@ private func makeTestPageRequest(
         #expect(preferred.blocks.first?.translation == "old")
     }
 
-    @Test func offlineTranslationPersistsExplicitTextOrientationThroughDTO() throws {
+    @Test @MainActor func offlineTranslationPersistsExplicitTextOrientationThroughDTO() throws {
         let block = TextBlock(
             text: "多行横排对白",
             boundingBox: CGRect(x: 0.42, y: 0.18, width: 0.08, height: 0.28),
@@ -5760,7 +5859,7 @@ private func makeTestPageRequest(
         #expect(decoded.textBlock().textOrientation == .horizontal)
     }
 
-    @Test func offlineTranslationIntentAndPolicyCircuitAreExplicit() {
+    @Test @MainActor func offlineTranslationIntentAndPolicyCircuitAreExplicit() {
         #expect(OfflineTranslationStartIntent.fromCurrent.sourceSetID == nil)
         let explicitIndexes = try? OfflineTranslationSelection.explicitPages([1, 3]).pageIndexes(totalPages: 4)
         #expect(explicitIndexes == [1, 3])
@@ -5773,7 +5872,7 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationPolicyCircuit.refusalThreshold == 3)
     }
 
-    @Test func offlineTranslationRetryPolicyStopsAtFiniteBackoffAndPausesForAuth() {
+    @Test @MainActor func offlineTranslationRetryPolicyStopsAtFiniteBackoffAndPausesForAuth() {
         let unauthorized = AITranslationRequestError.server(
             model: "vision",
             statusCode: 401,
@@ -5816,7 +5915,7 @@ private func makeTestPageRequest(
         #expect(OfflineTranslationRetryPolicy.decision(for: forbidden, attempt: 0) == .needsConfiguration)
     }
 
-    @Test func offlineTranslationJobJSONNeverContainsAPIKey() throws {
+    @Test @MainActor func offlineTranslationJobJSONNeverContainsAPIKey() throws {
         let job = OfflineTranslationJobRecord(
             comicID: UUID(),
             setID: UUID(),
@@ -5840,7 +5939,7 @@ private func makeTestPageRequest(
         #expect(json.contains("styleInstructions"))
     }
 
-    @Test func offlineTranslationRestartMarksRunningJobsInterruptedWithoutDeletingPages() async throws {
+    @Test @MainActor func offlineTranslationRestartMarksRunningJobsInterruptedWithoutDeletingPages() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-interruption-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5896,7 +5995,7 @@ private func makeTestPageRequest(
         #expect((await storage.page(comicID: comicID, setID: set.id, pageIndex: 0))?.state == .noText)
     }
 
-    @Test func offlineTranslationCorruptPageJSONIsIgnoredForRegeneration() async throws {
+    @Test @MainActor func offlineTranslationCorruptPageJSONIsIgnoredForRegeneration() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mreader-offline-corrupt-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
