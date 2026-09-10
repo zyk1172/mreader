@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lexiaoyao20/tesseract-Apple.git",
       "state" : {
-        "revision" : "0e8c80b16d62264297187645506fe8697b716d76",
-        "version" : "5.5.1"
+        "revision" : "e5ab1b56b2d479ee2f2fcb86b0b91c1676d17b28",
+        "version" : "5.5.2"
       }
     },
     {
