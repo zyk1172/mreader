@@ -21,12 +21,12 @@
                             <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="MReader · 读懂每一页" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.78" translatesAutoresizingMaskIntoConstraints="NO" id="mainLabel">
                                 <rect key="frame" x="24" y="765" width="345" height="24"/>
                                 <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
-                                <color key="textColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                <color key="textColor" red="0.118" green="0.145" blue="0.188" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                             </label>
                             <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="本地书架 · AI 翻译 · 沉浸阅读" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.62" translatesAutoresizingMaskIntoConstraints="NO" id="capabilitiesLabel">
                                 <rect key="frame" x="24" y="794" width="345" height="17"/>
                                 <fontDescription key="fontDescription" type="system" weight="medium" pointSize="14"/>
-                                <color key="textColor" red="1" green="1" blue="1" alpha="0.72" colorSpace="custom" customColorSpace="sRGB"/>
+                                <color key="textColor" red="0.400" green="0.447" blue="0.518" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                             </label>
                         </subviews>
                         <viewLayoutGuide key="safeArea" id="safeArea"/>
@@ -38,7 +38,7 @@
                             <constraint firstItem="launchGlyph" firstAttribute="height" constant="108" id="glyphHeight"/>
                             <constraint firstItem="mainLabel" firstAttribute="centerX" secondItem="launchView" secondAttribute="centerX" id="mainCenterX"/>
                             <constraint firstItem="capabilitiesLabel" firstAttribute="centerX" secondItem="launchView" secondAttribute="centerX" id="capabilitiesCenterX"/>
-                            <constraint firstItem="capabilitiesLabel" firstAttribute="bottom" secondItem="safeArea" secondAttribute="bottom" constant="-28" id="capabilitiesBottom"/>
+                            <constraint firstItem="capabilitiesLabel" firstAttribute="bottom" secondItem="launchView" secondAttribute="bottom" constant="-28" id="capabilitiesBottom"/>
                             <constraint firstItem="mainLabel" firstAttribute="bottom" secondItem="capabilitiesLabel" secondAttribute="top" constant="-5" id="mainBottom"/>
                             <constraint firstItem="mainLabel" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="launchView" secondAttribute="leading" constant="24" id="mainLeading"/>
                             <constraint firstItem="launchView" firstAttribute="trailing" relation="greaterThanOrEqual" secondItem="mainLabel" secondAttribute="trailing" constant="-24" id="mainTrailing"/>
@@ -55,7 +55,7 @@
     <resources>
         <image name="LaunchGlyph" width="108" height="108"/>
         <namedColor name="LaunchBackground">
-            <color red="0.055" green="0.055" blue="0.063" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+            <color red="0.933" green="0.949" blue="0.969" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
         </namedColor>
     </resources>
 </document>

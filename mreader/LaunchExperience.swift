@@ -72,8 +72,7 @@ struct LaunchOverlayView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                Color(LaunchExperienceMetrics.backgroundColorName)
-                    .ignoresSafeArea()
+                LaunchGradientBackground()
 
                 Image(LaunchExperienceMetrics.glyphImageName)
                     .resizable()
@@ -87,27 +86,44 @@ struct LaunchOverlayView: View {
                         y: proxy.size.height * LaunchExperienceMetrics.artworkVerticalRatio
                     )
 
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .overlay(alignment: .bottom) {
                 VStack(spacing: LaunchExperienceMetrics.labelSpacing) {
                     Text(verbatim: LaunchExperienceCopy.brandLine)
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color(red: 0.118, green: 0.145, blue: 0.188))
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
 
                     Text(verbatim: LaunchExperienceCopy.capabilitiesLine)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(Color(red: 0.400, green: 0.447, blue: 0.518))
                         .lineLimit(1)
                         .minimumScaleFactor(0.62)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.horizontal, 24)
-                .padding(.bottom, proxy.safeAreaInsets.bottom + LaunchExperienceMetrics.brandBottomPadding)
+                // Keep the copy at a fixed distance from the full-screen bottom
+                // edge during the handoff from the system launch storyboard.
+                .padding(.bottom, LaunchExperienceMetrics.brandBottomPadding)
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .ignoresSafeArea()
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(LaunchExperienceMetrics.overlayAccessibilityIdentifier)
+    }
+}
+
+struct LaunchGradientBackground: View {
+    var body: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.984, green: 0.992, blue: 1.000),
+                Color(red: 0.863, green: 0.890, blue: 0.925)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
     }
 }

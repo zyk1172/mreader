@@ -10,8 +10,7 @@ struct StartupRootView: View {
 
     var body: some View {
         ZStack {
-            Color(LaunchExperienceMetrics.backgroundColorName)
-                .ignoresSafeArea()
+            LaunchGradientBackground()
 
             ContentView()
                 .transaction { transaction in
