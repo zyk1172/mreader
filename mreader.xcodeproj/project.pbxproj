@@ -633,7 +633,7 @@
 			repositoryURL = "https://github.com/lexiaoyao20/tesseract-Apple.git";
 			requirement = {
 				kind = exactVersion;
-				version = 5.5.1;
+				version = 5.5.2;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
