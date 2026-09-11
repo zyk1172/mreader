@@ -34,6 +34,9 @@ nonisolated private struct KomgaCoverFetchResult: Sendable {
 
 nonisolated enum KomgaProvider {
     private static let repository = MediaSourceRepository.shared
+    /// Reader 已经从书库缓存拿到了可用阅读进度，打开页面时再刷新 Komga 进度只能是
+    /// best-effort enrichment，绝不能成为进入阅读器的阻塞条件。
+    private static let readerProgressRefreshTimeoutNanoseconds: UInt64 = 2_000_000_000
 
     static func loadSources() async -> [MediaSource] {
         await repository.loadSources()
@@ -242,10 +245,35 @@ nonisolated enum KomgaProvider {
     }
 
     static func remoteReadProgress(for comic: ComicBook) async throws -> Int? {
-        try await remoteReadingProgressSnapshot(for: comic)?.pageIndex
+        try await fetchRemoteReadingProgressSnapshot(for: comic)?.pageIndex
     }
 
+    /// Reader 打开阶段使用的 best-effort 刷新。远端进度慢或不可达时，在 2 秒内放弃，
+    /// 让 Reader 继续使用书库同步时已经合并到 `ComicBook` 的本地进度。
     static func remoteReadingProgressSnapshot(for comic: ComicBook) async throws -> RemoteReadingProgressSnapshot? {
+        try await withThrowingTaskGroup(of: RemoteReadingProgressSnapshot?.self) { group in
+            group.addTask {
+                try await fetchRemoteReadingProgressSnapshot(for: comic)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: readerProgressRefreshTimeoutNanoseconds)
+                throw MediaSourceError.timeout
+            }
+
+            do {
+                let result = try await group.next() ?? nil
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+
+    /// Explicit live progress reads keep their original network semantics. This is split from
+    /// the Reader-open wrapper so other callers are not silently downgraded to cached progress.
+    private static func fetchRemoteReadingProgressSnapshot(for comic: ComicBook) async throws -> RemoteReadingProgressSnapshot? {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,
               let bookID = comic.komgaBookID,
