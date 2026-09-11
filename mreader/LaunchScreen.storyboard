@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="27000" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="launchViewController">
+    <device id="retina6_12" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="27000"/>
+        <capability name="Named colors" minToolsVersion="9.0"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="launchScene">
+            <objects>
+                <viewController id="launchViewController" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="launchView">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchGlyph" translatesAutoresizingMaskIntoConstraints="NO" id="launchGlyph">
+                                <rect key="frame" x="142.5" y="372.6" width="108" height="108"/>
+                            </imageView>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="MReader · 读懂每一页" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.78" translatesAutoresizingMaskIntoConstraints="NO" id="mainLabel">
+                                <rect key="frame" x="24" y="765" width="345" height="24"/>
+                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
+                                <color key="textColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                            </label>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="本地书架 · AI 翻译 · 沉浸阅读" textAlignment="center" lineBreakMode="clipping" adjustsFontSizeToFit="YES" minimumScaleFactor="0.62" translatesAutoresizingMaskIntoConstraints="NO" id="capabilitiesLabel">
+                                <rect key="frame" x="24" y="794" width="345" height="17"/>
+                                <fontDescription key="fontDescription" type="system" weight="medium" pointSize="14"/>
+                                <color key="textColor" red="1" green="1" blue="1" alpha="0.72" colorSpace="custom" customColorSpace="sRGB"/>
+                            </label>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="safeArea"/>
+                        <color key="backgroundColor" name="LaunchBackground" catalog="Assets"/>
+                        <constraints>
+                            <constraint firstItem="launchGlyph" firstAttribute="centerX" secondItem="launchView" secondAttribute="centerX" id="glyphCenterX"/>
+                            <constraint firstItem="launchGlyph" firstAttribute="centerY" secondItem="launchView" secondAttribute="centerY" multiplier="0.8" id="glyphCenterY"/>
+                            <constraint firstItem="launchGlyph" firstAttribute="width" constant="108" id="glyphWidth"/>
+                            <constraint firstItem="launchGlyph" firstAttribute="height" constant="108" id="glyphHeight"/>
+                            <constraint firstItem="mainLabel" firstAttribute="centerX" secondItem="launchView" secondAttribute="centerX" id="mainCenterX"/>
+                            <constraint firstItem="capabilitiesLabel" firstAttribute="centerX" secondItem="launchView" secondAttribute="centerX" id="capabilitiesCenterX"/>
+                            <constraint firstItem="capabilitiesLabel" firstAttribute="bottom" secondItem="safeArea" secondAttribute="bottom" constant="-28" id="capabilitiesBottom"/>
+                            <constraint firstItem="mainLabel" firstAttribute="bottom" secondItem="capabilitiesLabel" secondAttribute="top" constant="-5" id="mainBottom"/>
+                            <constraint firstItem="mainLabel" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="launchView" secondAttribute="leading" constant="24" id="mainLeading"/>
+                            <constraint firstItem="launchView" firstAttribute="trailing" relation="greaterThanOrEqual" secondItem="mainLabel" secondAttribute="trailing" constant="-24" id="mainTrailing"/>
+                            <constraint firstItem="capabilitiesLabel" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="launchView" secondAttribute="leading" constant="24" id="capabilitiesLeading"/>
+                            <constraint firstItem="launchView" firstAttribute="trailing" relation="greaterThanOrEqual" secondItem="capabilitiesLabel" secondAttribute="trailing" constant="-24" id="capabilitiesTrailing"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="launchFirstResponder" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="42" y="-17"/>
+        </scene>
+    </scenes>
+    <resources>
+        <image name="LaunchGlyph" width="108" height="108"/>
+        <namedColor name="LaunchBackground">
+            <color red="0.055" green="0.055" blue="0.063" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+        </namedColor>
+    </resources>
+</document>
