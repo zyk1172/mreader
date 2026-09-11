@@ -3,6 +3,10 @@ import Testing
 
 struct StartupPresentationTests {
     @Test func launchCoverKeepsTheRequestedMinimumDuration() {
-        #expect(StartupRootView.minimumCoverDurationNanoseconds == 1_500_000_000)
+        #expect(
+            StartupRootView.minimumCoverDurationNanoseconds
+                == LaunchExperienceMetrics.minimumDisplayDurationNanoseconds
+        )
+        #expect(StartupRootView.minimumCoverDurationNanoseconds == 2_000_000_000)
     }
 }

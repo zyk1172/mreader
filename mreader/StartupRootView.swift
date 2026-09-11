@@ -1,72 +1,40 @@
 import SwiftUI
-import UIKit
 
-/// Keeps the real shelf alive behind an opaque launch cover so startup work can
+/// Keeps the real shelf alive behind the branded launch overlay so startup work can
 /// progress without exposing intermediate NavigationStack/TabView layout states.
 struct StartupRootView: View {
-    static let minimumCoverDurationNanoseconds: UInt64 = 1_500_000_000
+    static let minimumCoverDurationNanoseconds = LaunchExperienceMetrics.minimumDisplayDurationNanoseconds
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isCoverVisible = true
+    @StateObject private var launchState = AppLaunchState()
 
     var body: some View {
         ZStack {
+            Color(LaunchExperienceMetrics.backgroundColorName)
+                .ignoresSafeArea()
+
             ContentView()
-                // Initial library snapshot / iCloud / remote-source updates can all
-                // change the shelf in quick succession. Suppress those hidden spring
-                // animations so NavigationStack's large title is never revealed in
-                // an intermediate layout state.
                 .transaction { transaction in
-                    if isCoverVisible {
+                    if launchState.isVisible {
                         transaction.animation = nil
                         transaction.disablesAnimations = true
                     }
                 }
-                .allowsHitTesting(!isCoverVisible)
-                .accessibilityHidden(isCoverVisible)
+                .allowsHitTesting(!launchState.isVisible)
+                .accessibilityHidden(launchState.isVisible)
 
-            if isCoverVisible {
-                StartupCoverView()
+            if launchState.isVisible {
+                LaunchOverlayView()
+                    .transition(.opacity)
                     .zIndex(1)
             }
         }
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: LaunchExperienceMetrics.fadeDuration),
+            value: launchState.isVisible
+        )
         .task {
-            try? await Task.sleep(nanoseconds: Self.minimumCoverDurationNanoseconds)
-            guard !Task.isCancelled else { return }
-
-            if reduceMotion {
-                isCoverVisible = false
-            } else {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    isCoverVisible = false
-                }
-            }
+            await launchState.start {}
         }
-    }
-}
-
-private struct StartupCoverView: View {
-    var body: some View {
-        ZStack {
-            Color(uiColor: .systemBackground)
-                .ignoresSafeArea()
-
-            VStack(spacing: 16) {
-                Image(systemName: "books.vertical.fill")
-                    .font(.system(size: 46, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.primary)
-
-                Text("MReader")
-                    .font(.title2.weight(.semibold))
-
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityHidden(true)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("MReader")
-        .accessibilityIdentifier("mreader.startup.cover")
     }
 }
