@@ -23,7 +23,8 @@ annotation is `manga_page_publicdomainq.gold.json`.
 `sample_shirohage_manga.jpg` is Wikimedia Commons' `Sample of SHIROHAGE MANGA.jpg`,
 a Japanese speech-balloon manga example by しんぎんぐきゃっと, licensed under
 CC BY-SA 4.0. The repository stores the original file unchanged (SHA-1
-`8c828fc750e946ce94038a00782cbe115537c15e`).
+`8c828fc750e946ce94038a00782cbe115537c15e`). The image remains licensed under
+CC BY-SA 4.0 and is not relicensed under the repository's source-code license.
 
 - Source: https://commons.wikimedia.org/wiki/File:Sample_of_SHIROHAGE_MANGA.jpg
 - License: https://creativecommons.org/licenses/by-sa/4.0/
