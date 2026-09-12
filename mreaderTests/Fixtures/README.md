@@ -15,10 +15,10 @@ the result with unrelated horizontal labels. The crop retains the original
 pixels and license.
 
 The larger `manga_page_publicdomainq.png` fixture is a CC0 manga-drawing page
-from Wikimedia Commons. Visual review found no human-verified translatable manga
-dialogue on the page, so it is intentionally a **negative `noText` gold fixture**.
-It must not be used as Japanese OCR/translation ground truth. Its page-level gold
-annotation is `manga_page_publicdomainq.gold.json`.
+from Wikimedia Commons. Visual review suggests there is no translatable manga
+dialogue on the page, so `manga_page_publicdomainq.gold.json` currently stores
+a **candidate `noText` annotation**. It remains `pending` and must not contribute
+reportable quality metrics until a human reviewer explicitly verifies it.
 
 `sample_shirohage_manga.jpg` is Wikimedia Commons' `Sample of SHIROHAGE MANGA.jpg`,
 a Japanese speech-balloon manga example by しんぎんぐきゃっと, licensed under
@@ -40,6 +40,11 @@ metrics only when `annotationStatus` is `ready`. `pending` means the image is
 licensed and available but its human gold annotations are incomplete; CI must
 not infer or fabricate missing OCR text, reading order, translation, or layout
 ground truth.
+
+Page-level annotation files additionally carry a `verificationStatus`. A
+`candidate` annotation may be useful for review and test-data preparation but
+is never reportable gold. Only `humanVerified` annotations may be paired with a
+`ready` manifest entry for page-level quality reporting.
 
 The benchmark intentionally separates metrics instead of reducing translation
 quality to one score:
