@@ -1403,6 +1403,27 @@ struct ReaderView: View {
                         Text("ocr.measuredTextFontSizeDescription".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        Divider()
+
+                        HStack {
+                            Text("ocr.minimumReadableTranslationFontSize".localized)
+                            Slider(value: Binding(
+                                get: { comic.minimumReadableTranslationFontSize },
+                                set: { newValue in
+                                    updateComic {
+                                        $0.minimumReadableTranslationFontSize = ComicBook.clampedMinimumReadableTranslationFontSize(newValue)
+                                    }
+                                }
+                            ), in: ComicBook.minimumReadableTranslationFontSizeRange, step: 1)
+                        }
+                        Text("ocr.minimumReadableTranslationFontSizeValue".localizedFormat(
+                            Int(comic.minimumReadableTranslationFontSize.rounded())
+                        ))
+                        .font(.caption.monospacedDigit())
+                        Text("ocr.minimumReadableTranslationFontSizeDescription".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -3969,20 +3990,33 @@ struct LocalImageView: View {
     private func translationOverlay(in size: CGSize) -> some View {
         if (shouldDisplayOfflineTranslation && isOfflineTranslationDisplayed) || canTranslate {
             let items = translationLayoutItems(in: size)
-            ForEach(items) { item in
-                TranslationTextRenderer(
-                    segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
-                        let value = displayTranslation(for: $0)
-                        return value.isEmpty ? nil : value
-                    },
-                    fontSize: item.fontSize,
-                    layoutSize: item.rect.size,
-                    contentPadding: item.contentPadding,
-                    style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
-                    textOrientation: item.textOrientation,
-                    surfaceStyle: item.surfaceStyle
-                )
-                .position(x: item.rect.midX, y: item.rect.midY)
+            ZStack {
+                // F07: all surfaces are one real layer below every glyph layer.
+                ForEach(items) { item in
+                    TranslationSurfaceRenderer(
+                        layoutSize: item.rect.size,
+                        surfaceStyle: item.surfaceStyle
+                    )
+                    .position(x: item.rect.midX, y: item.rect.midY)
+                    .zIndex(TranslationSurfaceLayering.surfaceZIndex)
+                    .allowsHitTesting(false)
+                }
+                ForEach(items) { item in
+                    TranslationTextRenderer(
+                        segments: item.displayText.map { [$0] } ?? item.blocks.compactMap {
+                            let value = displayTranslation(for: $0)
+                            return value.isEmpty ? nil : value
+                        },
+                        fontSize: item.fontSize,
+                        layoutSize: item.rect.size,
+                        contentPadding: item.contentPadding,
+                        style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
+                        textOrientation: item.textOrientation,
+                        layoutStatus: item.layoutStatus
+                    )
+                    .position(x: item.rect.midX, y: item.rect.midY)
+                    .zIndex(TranslationSurfaceLayering.textZIndex)
+                }
             }
         }
     }
@@ -4198,12 +4232,14 @@ struct LocalImageView: View {
         return TranslationLayoutItem(
             blocks: [block],
             rect: geometry.choice.layout.rect,
+            allowedBounds: geometry.allowedBounds,
             fontSize: geometry.choice.layout.fontSize,
             contentPadding: geometry.choice.layout.contentPadding,
             displayText: translation.isEmpty ? nil : geometry.choice.text,
             textOrientation: geometry.translationOrientation,
             layoutRole: block.layoutRole,
-            surfaceStyle: geometry.surfaceStyle
+            surfaceStyle: geometry.surfaceStyle,
+            layoutStatus: geometry.choice.layout.status
         )
     }
 
@@ -4283,7 +4319,8 @@ struct LocalImageView: View {
             lineSpacing: 2,
             textOrientation: translationOrientation,
             // detected bubble 沿用真实气泡范围；measuredText 只按译文测量结果排版。
-            geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText
+            geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText,
+            minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
         )
         #if DEBUG
         print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
@@ -4340,13 +4377,10 @@ struct LocalImageView: View {
 
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
         let initialItems = visibleTranslationBlocks.map { translationLayoutItem(for: $0, in: size) }
-
-        // 离线翻译优先替换原文字位置：允许重叠也不把对白移动到别处。
-        guard !isOfflineTranslationDisplayed else { return initialItems }
-
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
         let transform = ocrDisplayTransform(in: size)
+
         for item in initialItems {
             let original = item.rect
             let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
@@ -4354,26 +4388,39 @@ struct LocalImageView: View {
                 forNormalizedPageRect: sourceRect,
                 using: transform
             )
+            let boundedMovement = item.allowedBounds.intersection(transform.imageRect)
+            let movementBounds = boundedMovement.isNull || boundedMovement.width <= 0 || boundedMovement.height <= 0
+                ? transform.imageRect
+                : boundedMovement
             let rect = OCRBubbleLayoutEngine.nonOverlappingRect(
                 original,
                 anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
                 occupiedRects: occupiedRects,
-                bounds: transform.imageRect,
-                // original 已由 anchoredTranslationLayout 按整本离线翻译相同的文字测量结果生成。
-                // 这里仅为普通 OCR/视觉翻译做避让，不能再用 12pt 页边距压缩气泡，
-                // 否则靠近页面边缘时边框会小于已测量的字形范围。
+                // Reliable bubbles are now a hard movement boundary. Measured
+                // text keeps its local fallback region as the anchor boundary.
+                bounds: movementBounds,
                 margin: 0
             )
+            let collisionRemains = occupiedRects.contains { $0.intersects(rect) }
+            let escapedBubble = item.surfaceStyle == .detectedBubble
+                && !movementBounds.insetBy(dx: -0.5, dy: -0.5).contains(rect)
+            let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus =
+                item.layoutStatus == .needsExpansion || collisionRemains || escapedBubble
+                    ? .needsExpansion
+                    : .fitted
+
             occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(
                 blocks: item.blocks,
                 rect: rect,
+                allowedBounds: item.allowedBounds,
                 fontSize: item.fontSize,
                 contentPadding: item.contentPadding,
                 displayText: item.displayText,
                 textOrientation: item.textOrientation,
                 layoutRole: item.layoutRole,
-                surfaceStyle: item.surfaceStyle
+                surfaceStyle: item.surfaceStyle,
+                layoutStatus: layoutStatus
             ))
         }
         return items
@@ -4425,13 +4472,15 @@ struct LocalImageView: View {
             items.append(TranslationLayoutItem(
                 blocks: [block],
                 rect: rect,
+                allowedBounds: transform.imageRect,
                 fontSize: uniformOCRFontSize,
                 contentPadding: TranslationLayoutMetrics.contentPadding,
                 displayText: nil,
                 textOrientation: block.textOrientation,
                 layoutRole: block.layoutRole,
                 // OCR 放大本身就是要盖住原文字，属于有意绘制的白底卡片。
-                surfaceStyle: .detectedBubble
+                surfaceStyle: .detectedBubble,
+                layoutStatus: .fitted
             ))
         }
         return items
@@ -5160,6 +5209,8 @@ struct LocalImageView: View {
 private struct TranslationLayoutItem: Identifiable {
     let blocks: [TextBlock]
     let rect: CGRect
+    /// Region inside which collision avoidance is allowed to move this item.
+    let allowedBounds: CGRect
     let fontSize: CGFloat
     /// 与 OCRBubbleLayoutEngine 测量时完全一致的卡片内边距。
     let contentPadding: CGFloat
@@ -5170,6 +5221,7 @@ private struct TranslationLayoutItem: Identifiable {
     /// 有可靠漫画气泡时为 detectedBubble；否则为 measuredText。两种表面都绘制
     /// RoundedRectangle 背景，只采用不同的卡片尺寸算法。
     let surfaceStyle: TranslationSurfaceStyle
+    let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
 
     var id: UUID { blocks.first?.id ?? UUID() }
 }
@@ -5231,6 +5283,26 @@ private enum TranslationColorStyle: String, CaseIterable {
     }
 }
 
+private struct TranslationSurfaceRenderer: View {
+    let layoutSize: CGSize
+    let surfaceStyle: TranslationSurfaceStyle
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                    .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+            }
+            .frame(width: layoutSize.width, height: layoutSize.height)
+    }
+}
+
 private struct TranslationTextRenderer: View {
     let segments: [String]
     let fontSize: CGFloat
@@ -5238,73 +5310,58 @@ private struct TranslationTextRenderer: View {
     let contentPadding: CGFloat
     let style: TranslationColorStyle
     let textOrientation: TextOrientation
-    let surfaceStyle: TranslationSurfaceStyle
+    let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
+    @State private var isExpansionPresented = false
+
+    private var fullText: String {
+        segments.joined(separator: "\n\n")
+    }
 
     var body: some View {
-        content
-            .background { bubbleBackground }
-            .overlay { bubbleBorder }
-    }
-
-    private var bubbleBackground: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-            }
-    }
-
-    private var bubbleBorder: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-    }
-
-    @ViewBuilder
-    private var content: some View {
         Group {
-            if textOrientation == .vertical {
-                CoreTextVerticalTranslationView(
-                    text: segments.joined(separator: "\n"),
-                    fontSize: fontSize,
-                    color: style.coreTextColor
-                )
-            } else {
-                VStack(spacing: segments.count > 1 ? 7 : 0) {
-                    ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                        segmentLabel(segment, index: index)
-                    }
+            if layoutStatus == .needsExpansion {
+                Button {
+                    isExpansionPresented = true
+                } label: {
+                    Image(systemName: "text.magnifyingglass")
+                        .font(.system(size: max(min(fontSize, 18), 12), weight: .semibold))
+                        .foregroundStyle(style.coreTextColor.swiftUIColor)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("ocr.translationNeedsExpansion".localized)
+            } else {
+                CoreTextTranslationView(
+                    text: fullText,
+                    fontSize: fontSize,
+                    color: style.coreTextColor,
+                    textOrientation: textOrientation,
+                    lineSpacing: 2
+                )
             }
         }
         .padding(contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
-    }
-
-    @ViewBuilder
-    private func segmentLabel(_ segment: String, index: Int) -> some View {
-        let label = Text(segment)
-            .font(.system(size: fontSize, weight: .bold))
-            .lineLimit(nil)
-            .fixedSize(horizontal: false, vertical: true)
-            .multilineTextAlignment(.center)
-            .lineSpacing(2)
-            .foregroundStyle(colorGradient(index: index))
-
-        label
-            .shadow(color: .white.opacity(0.78), radius: 0.7)
-            .shadow(color: .black.opacity(0.62), radius: 1.2, y: 1)
-    }
-
-    private func colorGradient(index: Int) -> LinearGradient {
-        let palettes = style.palettes
-        let colors = palettes[index % palettes.count]
-        return LinearGradient(
-            colors: colors,
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+        .sheet(isPresented: $isExpansionPresented) {
+            NavigationStack {
+                ScrollView {
+                    Text(fullText)
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(20)
+                        .textSelection(.enabled)
+                }
+                .navigationTitle("ocr.aiTranslation".localized)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("nav.done".localized) {
+                            isExpansionPresented = false
+                        }
+                    }
+                }
+            }
+        }
     }
 
     static let palette: [Color] = [
@@ -5318,31 +5375,39 @@ private struct TranslationTextRenderer: View {
     ]
 }
 
-/// CoreText is used for vertical source text so glyphs are shaped using the
-/// platform's vertical forms and the frame progresses right-to-left by column.
-/// It receives the natural string; no per-character newline or whole-view
-/// rotation is used.
-private struct CoreTextVerticalTranslationView: UIViewRepresentable {
+private extension UIColor {
+    var swiftUIColor: Color { Color(self) }
+}
+
+/// Measurement and drawing both use TranslationTypesetter. The renderer no
+/// longer has a second line-breaking algorithm that can disagree with layout.
+private struct CoreTextTranslationView: UIViewRepresentable {
     let text: String
     let fontSize: CGFloat
     let color: UIColor
+    let textOrientation: TextOrientation
+    let lineSpacing: CGFloat
 
-    func makeUIView(context: Context) -> VerticalTranslationUIView {
-        VerticalTranslationUIView()
+    func makeUIView(context: Context) -> TranslationTextUIView {
+        TranslationTextUIView()
     }
 
-    func updateUIView(_ uiView: VerticalTranslationUIView, context: Context) {
+    func updateUIView(_ uiView: TranslationTextUIView, context: Context) {
         uiView.text = text
         uiView.fontSize = fontSize
         uiView.color = color
+        uiView.textOrientation = textOrientation
+        uiView.lineSpacing = lineSpacing
         uiView.setNeedsDisplay()
     }
 }
 
-private final class VerticalTranslationUIView: UIView {
+private final class TranslationTextUIView: UIView {
     var text = ""
     var fontSize: CGFloat = 16
     var color = UIColor.label
+    var textOrientation: TextOrientation = .horizontal
+    var lineSpacing: CGFloat = 2
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -5359,42 +5424,17 @@ private final class VerticalTranslationUIView: UIView {
     }
 
     override func draw(_ rect: CGRect) {
-        guard !text.isEmpty, rect.width > 2, rect.height > 2,
+        guard !text.isEmpty, bounds.width > 0, bounds.height > 0,
               let context = UIGraphicsGetCurrentContext() else { return }
-
-        let font = CTFontCreateWithName(
-            UIFont.systemFont(ofSize: max(fontSize, 0.1), weight: .bold).fontName as CFString,
-            max(fontSize, 0.1),
-            nil
+        TranslationTypesetter.draw(
+            text: text,
+            in: bounds,
+            context: context,
+            fontSize: fontSize,
+            orientation: textOrientation,
+            lineSpacing: lineSpacing,
+            color: color
         )
-        let attributed = NSMutableAttributedString(string: text)
-        let range = NSRange(location: 0, length: attributed.length)
-        attributed.addAttributes([
-            NSAttributedString.Key(kCTFontAttributeName as String): font,
-            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
-            NSAttributedString.Key(kCTVerticalFormsAttributeName as String): true
-        ], range: range)
-
-        let path = CGPath(
-            rect: bounds.insetBy(dx: 2, dy: 2),
-            transform: nil
-        )
-        let frameAttributes: [NSAttributedString.Key: Any] = [
-            NSAttributedString.Key(kCTFrameProgressionAttributeName as String): NSNumber(value: 1)
-        ]
-        let framesetter = CTFramesetterCreateWithAttributedString(attributed)
-        let frame = CTFramesetterCreateFrame(
-            framesetter,
-            CFRange(location: 0, length: attributed.length),
-            path,
-            frameAttributes as CFDictionary
-        )
-
-        context.saveGState()
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1, y: -1)
-        CTFrameDraw(frame, context)
-        context.restoreGState()
     }
 }
 

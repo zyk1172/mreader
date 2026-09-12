@@ -403,3 +403,8 @@
 "offlineTranslation.changeModel" = "Choose another model";
 "offlineTranslation.errorDetails" = "View error details";
 "nav.close" = "Close";
+
+"ocr.minimumReadableTranslationFontSize" = "最小可读译文字号";
+"ocr.minimumReadableTranslationFontSizeValue" = "可读下限：%d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "低于此字号时不再继续缩小，而改为可展开阅读。";
+"ocr.translationNeedsExpansion" = "译文需要展开阅读";

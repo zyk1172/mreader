@@ -561,3 +561,8 @@
 "offlineTranslation.changeModel" = "다른 모델 선택";
 "offlineTranslation.errorDetails" = "오류 세부 정보 보기";
 "nav.close" = "닫기";
+
+"ocr.minimumReadableTranslationFontSize" = "번역 최소 가독 글자 크기";
+"ocr.minimumReadableTranslationFontSizeValue" = "가독 하한: %d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "이 크기보다 더 줄이지 않고, 공간이 부족하면 펼쳐서 전체 번역을 읽습니다.";
+"ocr.translationNeedsExpansion" = "번역을 펼쳐서 읽어야 합니다";
