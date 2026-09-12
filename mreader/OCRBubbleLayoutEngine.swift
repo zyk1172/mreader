@@ -447,9 +447,14 @@ nonisolated enum OCRBubbleLayoutEngine {
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal,
         geometryStrategy: TranslationLayoutStrategy,
-        minimumReadableFontSize: CGFloat = CGFloat(ComicBook.defaultMinimumReadableTranslationFontSize)
+        minimumReadableFontSize: CGFloat? = nil
     ) -> TranslationLayout {
-        let readableFloor = max(minimumReadableFontSize, 1)
+        // The app passes its configured readability floor explicitly. Keep a
+        // nil default for callers that still use the legacy layout-only API,
+        // whose final fallback is allowed to reach the historical 0.1pt
+        // sentinel for an impossible geometry.
+        let readableFloor = max(minimumReadableFontSize ?? 0.1, 0.1)
+        let enforcesReadableFloor = minimumReadableFontSize != nil
         let useSourceRectAsMinimumExtent = geometryStrategy.usesSourceRectAsMinimumExtent
         if textOrientation == .vertical {
             return anchoredVerticalTranslationLayout(
@@ -460,7 +465,7 @@ nonisolated enum OCRBubbleLayoutEngine {
                 padding: padding,
                 lineSpacing: lineSpacing,
                 geometryStrategy: geometryStrategy,
-                minimumReadableFontSize: readableFloor
+                minimumReadableFontSize: minimumReadableFontSize
             )
         }
 
@@ -490,9 +495,16 @@ nonisolated enum OCRBubbleLayoutEngine {
             y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
         )
 
-        func fittedLayout(fontSize: CGFloat) -> TranslationLayout? {
+        func fittedLayout(
+            fontSize: CGFloat,
+            requestedCardWidth: CGFloat? = nil
+        ) -> TranslationLayout? {
             let p = effectivePadding(fontSize)
-            let maximumContentWidth = max(safeBounds.width - p * 2, 1)
+            let maximumCardWidth = min(
+                max(requestedCardWidth ?? safeBounds.width, 1),
+                safeBounds.width
+            )
+            let maximumContentWidth = max(maximumCardWidth - p * 2, 1)
             let measured = TranslationTypesetter.horizontalMeasuredSize(
                 text: text,
                 fontSize: fontSize,
@@ -506,7 +518,9 @@ nonisolated enum OCRBubbleLayoutEngine {
             let minimumCardHeight = useSourceRectAsMinimumExtent
                 ? min(max(sourceRect.height + p * 2, 1), safeBounds.height)
                 : 0
-            let cardWidth = min(max(contentWidth + p * 2, minimumCardWidth), safeBounds.width)
+            let cardWidth = useSourceRectAsMinimumExtent
+                ? maximumCardWidth
+                : min(max(contentWidth + p * 2, minimumCardWidth), safeBounds.width)
             let cardHeight = max(measured.height + p * 2, minimumCardHeight)
             guard cardHeight <= safeBounds.height + 0.5 else { return nil }
 
@@ -535,9 +549,50 @@ nonisolated enum OCRBubbleLayoutEngine {
             )
         }
 
-        if let target = fittedLayout(fontSize: targetFontSize) {
+        let targetPadding = effectivePadding(targetFontSize)
+        let initialCardWidth = useSourceRectAsMinimumExtent
+            ? min(max(sourceRect.width + targetPadding * 2, 1), safeBounds.width)
+            : nil
+
+        if let target = fittedLayout(
+            fontSize: targetFontSize,
+            requestedCardWidth: initialCardWidth
+        ) {
             return target
         }
+
+        // A detected bubble should grow around its original center before the
+        // font is reduced. Find the smallest wider card that CoreText accepts.
+        // This also prevents clamping from moving a card that could still fit
+        // while centered on the source rectangle.
+        if useSourceRectAsMinimumExtent,
+           let initialCardWidth,
+           initialCardWidth < safeBounds.width,
+           fittedLayout(
+               fontSize: targetFontSize,
+               requestedCardWidth: safeBounds.width
+           ) != nil {
+            var lower = initialCardWidth
+            var upper = safeBounds.width
+            for _ in 0..<16 {
+                let candidate = (lower + upper) / 2
+                if fittedLayout(
+                    fontSize: targetFontSize,
+                    requestedCardWidth: candidate
+                ) != nil {
+                    upper = candidate
+                } else {
+                    lower = candidate
+                }
+            }
+            if let expanded = fittedLayout(
+                fontSize: targetFontSize,
+                requestedCardWidth: upper
+            ) {
+                return expanded
+            }
+        }
+
         if let floor = fittedLayout(fontSize: readableFloor) {
             if targetFontSize <= readableFloor + 0.01 { return floor }
             var lower = readableFloor
@@ -551,6 +606,16 @@ nonisolated enum OCRBubbleLayoutEngine {
                 }
             }
             return fittedLayout(fontSize: lower) ?? floor
+        }
+
+        guard enforcesReadableFloor else {
+            let p = effectivePadding(0.1)
+            return TranslationLayout(
+                rect: safeBounds,
+                contentRect: safeBounds.insetBy(dx: p, dy: p),
+                fontSize: 0.1,
+                contentPadding: p
+            )
         }
 
         // Never continue below the user-selected readability floor. The full
@@ -578,7 +643,7 @@ nonisolated enum OCRBubbleLayoutEngine {
         padding: CGFloat = TranslationLayoutMetrics.contentPadding,
         textOrientation: TextOrientation = .horizontal,
         geometryStrategy: TranslationLayoutStrategy,
-        minimumReadableFontSize: CGFloat = CGFloat(ComicBook.defaultMinimumReadableTranslationFontSize)
+        minimumReadableFontSize: CGFloat? = nil
     ) -> TranslationLayoutChoice {
         let naturalText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         if textOrientation == .vertical {
@@ -831,10 +896,11 @@ nonisolated enum OCRBubbleLayoutEngine {
         padding: CGFloat,
         lineSpacing: CGFloat,
         geometryStrategy: TranslationLayoutStrategy,
-        minimumReadableFontSize: CGFloat
+        minimumReadableFontSize: CGFloat?
     ) -> TranslationLayout {
         let useSourceRectAsMinimumExtent = geometryStrategy.usesSourceRectAsMinimumExtent
-        let readableFloor = max(minimumReadableFontSize, 1)
+        let readableFloor = max(minimumReadableFontSize ?? 0.1, 0.1)
+        let enforcesReadableFloor = minimumReadableFontSize != nil
         let safeBounds = allowedBounds.standardized
         let targetFontSize = max(
             preferredTranslationFontSize(sourceFontSize: sourceFontSize),
@@ -862,7 +928,11 @@ nonisolated enum OCRBubbleLayoutEngine {
         )
         let glyphCount = max(text.filter { !$0.isWhitespace && $0 != "\n" }.count, 1)
 
-        func makeLayout(fontSize: CGFloat, forceFullBounds: Bool) -> TranslationLayout? {
+        func makeLayout(
+            fontSize: CGFloat,
+            forceFullBounds: Bool,
+            requireMeasurement: Bool = true
+        ) -> TranslationLayout? {
             let p = effectivePadding(fontSize)
             let cardRect: CGRect
             if forceFullBounds {
@@ -902,7 +972,7 @@ nonisolated enum OCRBubbleLayoutEngine {
                 orientation: .vertical,
                 lineSpacing: lineSpacing
             )
-            guard measurement.fitsAllText else { return nil }
+            guard !requireMeasurement || measurement.fitsAllText else { return nil }
             return TranslationLayout(
                 rect: cardRect,
                 contentRect: contentRect,
@@ -914,6 +984,24 @@ nonisolated enum OCRBubbleLayoutEngine {
         func fittedLayout(fontSize: CGFloat) -> TranslationLayout? {
             makeLayout(fontSize: fontSize, forceFullBounds: false)
                 ?? makeLayout(fontSize: fontSize, forceFullBounds: true)
+        }
+
+        if !enforcesReadableFloor {
+            if let compact = makeLayout(
+                fontSize: targetFontSize,
+                forceFullBounds: false,
+                requireMeasurement: false
+            ) {
+                return compact
+            }
+
+            let p = effectivePadding(0.1)
+            return TranslationLayout(
+                rect: safeBounds,
+                contentRect: safeBounds.insetBy(dx: p, dy: p),
+                fontSize: 0.1,
+                contentPadding: p
+            )
         }
 
         if let target = fittedLayout(fontSize: targetFontSize) {
