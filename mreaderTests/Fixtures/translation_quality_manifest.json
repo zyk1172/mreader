@@ -16,9 +16,9 @@
       "image": "manga_page_publicdomainq.png",
       "license": "CC0",
       "sourceLanguage": "und",
-      "annotationStatus": "ready",
+      "annotationStatus": "pending",
       "goldText": null,
-      "notes": "Licensed full-page negative fixture. It contains manga-drawing artwork but no human-verified translatable manga dialogue; use it to detect false text/noText state regressions, not as Japanese OCR ground truth.",
+      "notes": "Licensed full-page negative candidate. Visual review suggests no translatable manga dialogue, but page-level gold remains pending until human verification.",
       "goldAnnotation": "manga_page_publicdomainq.gold.json"
     },
     {
