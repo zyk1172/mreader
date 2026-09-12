@@ -63,7 +63,8 @@ nonisolated enum TranslationRuntimeService {
         modelDescriptor: AIModelDescriptor? = nil,
         sourceLanguagePreference: TranslationSourceLanguage? = nil,
         detectedLanguage: String? = nil,
-        visualVerificationEnabled: Bool = true
+        visualVerificationEnabled: Bool = true,
+        coverageRecoveryRequested: Bool = false
     ) async throws -> [TextBlock] {
         try await AITranslator.visualVerifyOCRRegions(
             image: image,
@@ -75,7 +76,8 @@ nonisolated enum TranslationRuntimeService {
             modelDescriptor: modelDescriptor,
             sourceLanguagePreference: sourceLanguagePreference,
             detectedLanguage: detectedLanguage,
-            visualVerificationEnabled: visualVerificationEnabled
+            visualVerificationEnabled: visualVerificationEnabled,
+            coverageRecoveryRequested: coverageRecoveryRequested
         )
     }
 
@@ -90,6 +92,7 @@ nonisolated enum TranslationRuntimeService {
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
         sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = "",
         visionModelDescriptor: AIModelDescriptor? = nil,
         textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
@@ -104,10 +107,12 @@ nonisolated enum TranslationRuntimeService {
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
             visionModelDescriptor: visionModelDescriptor,
             textFallbackModelDescriptor: textFallbackModelDescriptor
         )
     }
+
     static func translateVisionPageWithStatus(
         image: UIImage,
         apiKey: String,
@@ -119,6 +124,7 @@ nonisolated enum TranslationRuntimeService {
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
         sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = "",
         visionModelDescriptor: AIModelDescriptor? = nil,
         textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> AIVisionTranslationResult {
@@ -133,9 +139,9 @@ nonisolated enum TranslationRuntimeService {
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
             visionModelDescriptor: visionModelDescriptor,
             textFallbackModelDescriptor: textFallbackModelDescriptor
         )
     }
-
 }
