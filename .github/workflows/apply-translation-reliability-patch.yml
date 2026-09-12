@@ -1,0 +1,211 @@
+name: Apply translation reliability patch
+
+on:
+  push:
+    branches:
+      - codex/translation-contract-reliability
+    paths:
+      - .github/translation-reliability-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/translation-contract-reliability
+
+      - name: Apply deterministic source patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # F03: classify target-language failures separately from structural JSON failures.
+          replace_once(
+              "mreader/AITranslator.swift",
+              """    case invalidTranslationJSON(model: String, excerpt: String)\n    case incompleteResponse(model: String, finishReason: String)\n""",
+              """    case invalidTranslationJSON(model: String, excerpt: String)\n    case invalidTranslationLanguage(model: String)\n    case incompleteResponse(model: String, finishReason: String)\n"""
+          )
+          replace_once(
+              "mreader/AITranslator.swift",
+              """        case .invalidTranslationJSON(let model, let excerpt):\n            return \"模型 \\(model) 返回的翻译 JSON 无效：\\(excerpt)\"\n        case .incompleteResponse(let model, let finishReason):\n""",
+              """        case .invalidTranslationJSON(let model, let excerpt):\n            return \"模型 \\(model) 返回的翻译 JSON 无效：\\(excerpt)\"\n        case .invalidTranslationLanguage(let model):\n            return \"模型 \\(model) 返回的译文不符合目标语言\"\n        case .incompleteResponse(let model, let finishReason):\n"""
+          )
+          replace_once(
+              "mreader/AITranslator.swift",
+              """    /// 是否属于“格式/协议类”失败：可以触发缩小 batch 或逐气泡兜底。\n    var isFormatFailure: Bool {\n""",
+              """    var isTranslationContentFailure: Bool {\n        if case .invalidTranslationLanguage = self { return true }\n        return false\n    }\n\n    /// 是否属于“格式/协议类”失败：可以触发缩小 batch 或逐气泡兜底。\n    var isFormatFailure: Bool {\n"""
+          )
+          replace_once(
+              "mreader/AITranslator.swift",
+              """            do {\n                let result = try AIPageTranslationParser.parseStrict(\n                    content,\n                    expectedItems: items,\n                    target: target\n                )\n                PageResponseFormatCache.shared.set(mode, for: cacheKey)\n                return result\n            } catch {\n                let classification = AIPageTranslationParser.classifyResponse(\n""",
+              """            do {\n                let result = try AIPageTranslationParser.parseStrict(\n                    content,\n                    expectedItems: items,\n                    target: target\n                )\n                PageResponseFormatCache.shared.set(mode, for: cacheKey)\n                return result\n            } catch AIPageTranslationParserError.pageLanguageMismatch {\n                // A semantically wrong target language is not malformed JSON.\n                // Let the coordinator retry the affected bubbles instead of asking\n                // the JSON repair request to preserve the wrong translation.\n                throw AITranslationRequestError.invalidTranslationLanguage(model: model)\n            } catch {\n                let classification = AIPageTranslationParser.classifyResponse(\n"""
+          )
+
+          # F01/F02: canonical translation is authoritative; keep known missing items for fallback.
+          replace_once(
+              "mreader/AITranslator.swift",
+              """            let rawLines = ((item[\"translationLines\"] ?? item[\"translation_lines\"] ?? item[\"lines\"]) as? [String])?\n                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }\n                .filter { !$0.isEmpty } ?? []\n            let rawTranslation = firstString(in: item, keys: [\"translation\", \"translatedText\", \"translated_text\", \"targetText\", \"target_text\"]).trimmingCharacters(in: .whitespacesAndNewlines)\n            let translation = rawLines.isEmpty ? rawTranslation : rawLines.joined(separator: \"\\n\")\n            guard !translation.isEmpty else { return nil }\n            let normalizedTranslation: String\n            if let target {\n                guard let value = TranslationOutputValidator.normalizedAcceptableTranslation(\n                    translation,\n                    sourceText: text,\n                    target: target\n                ) else {\n                    return nil\n                }\n                normalizedTranslation = value\n            } else {\n                normalizedTranslation = translation\n            }\n""",
+              """            let rawLines = ((item[\"translationLines\"] ?? item[\"translation_lines\"] ?? item[\"lines\"]) as? [String])?\n                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }\n                .filter { !$0.isEmpty } ?? []\n            let translationKeys = [\"translation\", \"translatedText\", \"translated_text\", \"targetText\", \"target_text\"]\n            let hasExplicitTranslation = translationKeys.contains { item[$0] != nil }\n            let rawTranslation = firstString(in: item, keys: translationKeys)\n                .trimmingCharacters(in: .whitespacesAndNewlines)\n            // `translation` is canonical. Only legacy responses that omit the\n            // canonical field entirely may fall back to line-only output. An\n            // explicitly empty/invalid translation stays present as a missing\n            // item so the text fallback can recover it.\n            let canonicalCandidate = (!hasExplicitTranslation && rawTranslation.isEmpty)\n                ? rawLines.joined(separator: \"\\n\")\n                : rawTranslation\n            let normalizedTranslation: String\n            if canonicalCandidate.isEmpty {\n                normalizedTranslation = \"\"\n            } else if let target {\n                normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(\n                    canonicalCandidate,\n                    sourceText: text,\n                    target: target\n                ) ?? \"\"\n            } else {\n                normalizedTranslation = canonicalCandidate\n            }\n"""
+          )
+          replace_once(
+              "mreader/AITranslator.swift",
+              """                rawLines: target.map { target in\n                    rawLines.map { TranslationOutputValidator.normalize($0, for: target) }\n                } ?? rawLines,\n""",
+              """                rawLines: target.map { target in\n                    TranslationOutputValidator.validatedTranslationLines(\n                        rawLines,\n                        canonicalTranslation: normalizedTranslation,\n                        sourceText: text,\n                        target: target\n                    )\n                } ?? [],\n"""
+          )
+          replace_once(
+              "mreader/AITranslator.swift",
+              """        let completed = translated.filter {\n            !(\$0.translation ?? \"\").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty\n        }\n        guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }\n        return completed\n""".replace('\\$0', '$0'),
+              """        let completed = translated.filter {\n            !($0.translation ?? \"\").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty\n        }\n        guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }\n        // Preserve known source regions that still lack a valid translation.\n        // They remain invisible to rendering but are available to retry logic\n        // and, critically, are not mistaken for a complete page.\n        return translated\n"""
+          )
+
+          # F04: replace the non-transitive proximity comparator with deterministic clustering.
+          old_sort = """    nonisolated static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {\n        let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }\n        guard validBlocks.count > 1 else { return validBlocks }\n\n        let verticalCount = validBlocks.filter { block in\n            block.boundingBox.height > block.boundingBox.width * 1.35\n        }.count\n        let isMostlyVertical = verticalCount > validBlocks.count / 2\n\n        // 行/列分组阈值随页面字号自适应：长条漫画（webtoon）归一化后的字号远小于普通单页，\n        // 固定阈值会把纵向相邻的多行文字误判成同一行。\n        let fontScales = validBlocks\n            .map { min($0.boundingBox.width, $0.boundingBox.height) }\n            .sorted()\n        let medianFontScale = fontScales[fontScales.count / 2]\n\n        if isMostlyVertical {\n            let columnThreshold = min(max(medianFontScale * 1.1, 0.02), 0.045)\n            return validBlocks.sorted { lhs, rhs in\n                let columnDistance = abs(lhs.boundingBox.midX - rhs.boundingBox.midX)\n                if columnDistance > columnThreshold {\n                    return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX\n                }\n                return lhs.boundingBox.midY < rhs.boundingBox.midY\n            }\n        }\n\n        let rowThreshold = min(max(medianFontScale * 0.75, 0.006), 0.035)\n        return validBlocks.sorted { lhs, rhs in\n            let rowDistance = abs(lhs.boundingBox.midY - rhs.boundingBox.midY)\n            if rowDistance > rowThreshold {\n                return lhs.boundingBox.midY < rhs.boundingBox.midY\n            }\n            return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX\n        }\n    }\n"""
+          new_sort = """    nonisolated static func sortedTextBlocks(_ blocks: [TextBlock], isRightToLeft: Bool) -> [TextBlock] {\n        let validBlocks = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }\n        guard validBlocks.count > 1 else { return validBlocks }\n\n        let verticalCount = validBlocks.filter { block in\n            block.boundingBox.height > block.boundingBox.width * 1.35\n        }.count\n        let isMostlyVertical = verticalCount > validBlocks.count / 2\n        let fontScales = validBlocks\n            .map { min($0.boundingBox.width, $0.boundingBox.height) }\n            .sorted()\n        let medianFontScale = fontScales[fontScales.count / 2]\n\n        func stableTieBreak(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {\n            lhs.id.uuidString < rhs.id.uuidString\n        }\n\n        if isMostlyVertical {\n            let columnThreshold = min(max(medianFontScale * 1.1, 0.02), 0.045)\n            let byColumn = validBlocks.sorted { lhs, rhs in\n                if lhs.boundingBox.midX != rhs.boundingBox.midX {\n                    return isRightToLeft\n                        ? lhs.boundingBox.midX > rhs.boundingBox.midX\n                        : lhs.boundingBox.midX < rhs.boundingBox.midX\n                }\n                if lhs.boundingBox.midY != rhs.boundingBox.midY {\n                    return lhs.boundingBox.midY < rhs.boundingBox.midY\n                }\n                return stableTieBreak(lhs, rhs)\n            }\n            var columns: [[TextBlock]] = []\n            for block in byColumn {\n                if let index = columns.indices.last,\n                   let anchor = columns[index].first,\n                   abs(block.boundingBox.midX - anchor.boundingBox.midX) <= columnThreshold {\n                    columns[index].append(block)\n                } else {\n                    columns.append([block])\n                }\n            }\n            return columns.flatMap { column in\n                column.sorted { lhs, rhs in\n                    if lhs.boundingBox.midY != rhs.boundingBox.midY {\n                        return lhs.boundingBox.midY < rhs.boundingBox.midY\n                    }\n                    if lhs.boundingBox.midX != rhs.boundingBox.midX {\n                        return isRightToLeft\n                            ? lhs.boundingBox.midX > rhs.boundingBox.midX\n                            : lhs.boundingBox.midX < rhs.boundingBox.midX\n                    }\n                    return stableTieBreak(lhs, rhs)\n                }\n            }\n        }\n\n        let rowThreshold = min(max(medianFontScale * 0.75, 0.006), 0.035)\n        let byRow = validBlocks.sorted { lhs, rhs in\n            if lhs.boundingBox.midY != rhs.boundingBox.midY {\n                return lhs.boundingBox.midY < rhs.boundingBox.midY\n            }\n            if lhs.boundingBox.midX != rhs.boundingBox.midX {\n                return isRightToLeft\n                    ? lhs.boundingBox.midX > rhs.boundingBox.midX\n                    : lhs.boundingBox.midX < rhs.boundingBox.midX\n            }\n            return stableTieBreak(lhs, rhs)\n        }\n        var rows: [[TextBlock]] = []\n        for block in byRow {\n            if let index = rows.indices.last,\n               let anchor = rows[index].first,\n               abs(block.boundingBox.midY - anchor.boundingBox.midY) <= rowThreshold {\n                rows[index].append(block)\n            } else {\n                rows.append([block])\n            }\n        }\n        return rows.flatMap { row in\n            row.sorted { lhs, rhs in\n                if lhs.boundingBox.midX != rhs.boundingBox.midX {\n                    return isRightToLeft\n                        ? lhs.boundingBox.midX > rhs.boundingBox.midX\n                        : lhs.boundingBox.midX < rhs.boundingBox.midX\n                }\n                if lhs.boundingBox.midY != rhs.boundingBox.midY {\n                    return lhs.boundingBox.midY < rhs.boundingBox.midY\n                }\n                return stableTieBreak(lhs, rhs)\n            }\n        }\n    }\n"""
+          replace_once("mreader/AITranslator.swift", old_sort, new_sort)
+
+          # F03: page-level language validation in strict parser and narrower meta-output detection.
+          replace_once(
+              "mreader/AIPageTranslation.swift",
+              """        let ordered = expectedItems.compactMap { accepted[$0.id] }\n        let missing = ordered.filter { $0.translation.isEmpty }.map(\\.id)\n        return AIPageTranslationResult(items: ordered, missingIDs: missing)\n""",
+              """        let ordered = expectedItems.compactMap { accepted[$0.id] }\n        let missing = ordered.filter { $0.translation.isEmpty }.map(\\.id)\n        let completedTranslations = ordered\n            .map(\\.translation)\n            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }\n        if !completedTranslations.isEmpty,\n           !TranslationOutputValidator.pageIsCompatible(completedTranslations, target: target) {\n            throw AIPageTranslationParserError.pageLanguageMismatch\n        }\n        return AIPageTranslationResult(items: ordered, missingIDs: missing)\n"""
+          )
+          replace_once(
+              "mreader/AIPageTranslation.swift",
+              """    static func containsExplanatoryGarbage(_ text: String) -> Bool {\n        let suspiciousMarkers = [\n            \"system prompt\", \"user prompt\", \"analysis:\", \"reasoning:\",\n            \"thinking:\", \"thought process:\", \"reasoning_content\", \"_output\",\n            \"输出要求\", \"提示词\", \"作为一个\", \"我不能\", \"根据用户\", \"翻译过程\",\n            \"<think\", \"</think>\", \"<thinking\", \"</thinking>\", \"<analysis\", \"</analysis>\",\n            \"<reasoning\", \"</reasoning>\"\n        ]\n        let lowercased = text.lowercased()\n        guard !lowercased.contains(\"```\") else { return true }\n        if suspiciousMarkers.contains(where: { lowercased.contains($0.lowercased()) }) {\n            return true\n        }\n        return text.range(\n            of: #\"^\\s*(?:answer|final answer|translation|translated text|译文|翻译(?:结果)?|以下是翻译(?:结果)?)\\s*[:：]\"#,\n            options: [.regularExpression, .caseInsensitive]\n        ) != nil\n    }\n""",
+              """    static func containsExplanatoryGarbage(_ text: String) -> Bool {\n        let protocolMarkers = [\n            \"system prompt\", \"user prompt\", \"analysis:\", \"reasoning:\",\n            \"thinking:\", \"thought process:\", \"reasoning_content\", \"_output\",\n            \"输出要求\", \"翻译过程\",\n            \"<think\", \"</think>\", \"<thinking\", \"</thinking>\", \"<analysis\", \"</analysis>\",\n            \"<reasoning\", \"</reasoning>\"\n        ]\n        let lowercased = text.lowercased()\n        guard !lowercased.contains(\"```\") else { return true }\n        if protocolMarkers.contains(where: { lowercased.contains($0.lowercased()) }) {\n            return true\n        }\n        // Natural dialogue can legitimately contain phrases such as “我不能” or\n        // “作为一个”. Treat only response-envelope wording at the start as meta output.\n        return text.range(\n            of: #\"^\\s*(?:(?:answer|final answer|translation|translated text|译文|翻译(?:结果)?|以下是翻译(?:结果)?)\\s*[:：]|(?:根据用户(?:要求|提示)|提示词(?:要求)?|作为(?:一个|一名).{0,20}(?:AI|人工智能)|我(?:不能|无法).{0,12}(?:协助|帮助|提供|完成).{0,12}(?:翻译|请求)))\"#,\n            options: [.regularExpression, .caseInsensitive]\n        ) != nil\n    }\n"""
+          )
+
+          # F02: preserve partial blocks but never promote them into a complete cache hit.
+          replace_once(
+              "mreader/AITranslationPageCoordinator.swift",
+              'static let translationCacheRevision = "translation-v19-canonical-bubble-region-measured-paragraph"',
+              'static let translationCacheRevision = "translation-v20-partial-aware-canonical-translation"'
+          )
+          replace_once(
+              "mreader/AITranslationPageCoordinator.swift",
+              """    private func store(_ blocks: [TextBlock], forKey key: String) {\n        guard !blocks.isEmpty else { return }\n        insertIntoMemory(blocks, forKey: key)\n""",
+              """    private func store(_ blocks: [TextBlock], forKey key: String) {\n        guard !blocks.isEmpty else { return }\n        let isComplete = blocks.allSatisfy { block in\n            !(block.translation ?? \"\").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty\n        }\n        guard isComplete else {\n            print(\"MReader AI translation cache skipped partial key=\\(key.prefix(10)) blocks=\\(blocks.count)\")\n            return\n        }\n        insertIntoMemory(blocks, forKey: key)\n"""
+          )
+          replace_once(
+              "mreader/AITranslationPageCoordinator.swift",
+              """        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingIDs)\n""",
+              """        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingIDs)\n"""
+          )
+          replace_once(
+              "mreader/AITranslationPageCoordinator.swift",
+              """        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingBlockIDs)\n""",
+              """        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingBlockIDs)\n"""
+          )
+          replace_once(
+              "mreader/AITranslationPageCoordinator.swift",
+              """        } catch let error as AITranslationRequestError where error.isFormatFailure {\n            print(\"MReader OCR 整页翻译格式失败，逐气泡兜底: \\(error.localizedDescription)\")\n            try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)\n        }\n""",
+              """        } catch let error as AITranslationRequestError\n            where error.isFormatFailure || error.isTranslationContentFailure {\n            print(\"MReader OCR 整页翻译需要逐气泡恢复: \\(error.localizedDescription)\")\n            try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)\n        }\n"""
+          )
+
+          Path("mreaderTests/TranslationReliabilityRegressionTests.swift").write_text(r'''import XCTest
+@testable import mreader
+
+final class TranslationReliabilityRegressionTests: XCTestCase {
+    func testLineHintsCannotReplaceCanonicalTranslation() {
+        let canonical = "不要走"
+        let lines = TranslationOutputValidator.validatedTranslationLines(
+            ["快走"],
+            canonicalTranslation: canonical,
+            sourceText: "行くな",
+            target: .simplifiedChinese
+        )
+
+        XCTAssertTrue(lines.isEmpty)
+        XCTAssertEqual(
+            TranslationOutputValidator.validatedDisplayTranslation(
+                canonicalTranslation: canonical,
+                translationLines: ["快走"],
+                sourceText: "行くな",
+                target: .simplifiedChinese
+            ),
+            canonical
+        )
+    }
+
+    func testNaturalDialogueContainingCannotIsAccepted() {
+        XCTAssertTrue(
+            TranslationOutputValidator.isAcceptableTranslation(
+                "我不能放弃你",
+                sourceText: "諦められない",
+                target: .simplifiedChinese
+            )
+        )
+    }
+
+    func testStrictParserRejectsWholePageWrongLatinLanguage() throws {
+        let expected = [
+            AIPageTranslationItem(id: "b0", sourceText: "これはテストです", order: 0),
+            AIPageTranslationItem(id: "b1", sourceText: "次の台詞です", order: 1)
+        ]
+        let payload = #"{"items":[{"id":"b0","translation":"Je suis très heureux de vous voir aujourd'hui.","translationLines":[]},{"id":"b1","translation":"Nous allons continuer cette conversation ensemble.","translationLines":[]}]}"#
+
+        XCTAssertThrowsError(
+            try AIPageTranslationParser.parseStrict(
+                payload,
+                expectedItems: expected,
+                target: .english
+            )
+        ) { error in
+            XCTAssertEqual(error as? AIPageTranslationParserError, .pageLanguageMismatch)
+        }
+    }
+
+    func testReadingOrderIsStableAcrossPermutationCounterexample() {
+        let a = TextBlock(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!,
+            text: "A",
+            boundingBox: CGRect(x: 0.78, y: 0.18, width: 0.04, height: 0.04)
+        )
+        let b = TextBlock(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!,
+            text: "B",
+            boundingBox: CGRect(x: 0.48, y: 0.20, width: 0.04, height: 0.04)
+        )
+        let c = TextBlock(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000000C")!,
+            text: "C",
+            boundingBox: CGRect(x: 0.18, y: 0.22, width: 0.04, height: 0.04)
+        )
+        let permutations = [
+            [a, b, c], [a, c, b], [b, a, c],
+            [b, c, a], [c, a, b], [c, b, a]
+        ]
+        let outputs = permutations.map {
+            AITranslator.sortedTextBlocks($0, isRightToLeft: false).map(\.id)
+        }
+
+        XCTAssertEqual(Set(outputs.map { $0.map(\.uuidString).joined(separator: ",") }).count, 1)
+        XCTAssertEqual(outputs.first?.count, 3)
+    }
+}
+''')
+          PY
+
+      - name: Validate patch
+        run: git diff --check
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mreader/AITranslator.swift mreader/AIPageTranslation.swift mreader/AITranslationPageCoordinator.swift mreaderTests/TranslationReliabilityRegressionTests.swift
+          git commit -m "fix: harden translation result contract"
+          git push origin HEAD:codex/translation-contract-reliability
