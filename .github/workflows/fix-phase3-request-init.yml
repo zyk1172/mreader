@@ -1,0 +1,38 @@
+name: Fix Phase 3 Request Init
+
+on:
+  push:
+    branches:
+      - codex/translation-context-recovery
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/translation-context-recovery
+          fetch-depth: 0
+      - name: Fix synthesized request initializer
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('mreader/AITranslationPageCoordinator.swift')
+          s = p.read_text()
+          old = '''    let contextScopeID: String? = nil\n    let pageIndex: Int? = nil'''
+          new = '''    var contextScopeID: String? = nil\n    var pageIndex: Int? = nil'''
+          if old not in s:
+              raise SystemExit('request initializer anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Remove temporary workflow and commit
+        run: |
+          rm -f .github/workflows/fix-phase3-request-init.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: expose phase 3 context request parameters"
+          git push origin HEAD:codex/translation-context-recovery
