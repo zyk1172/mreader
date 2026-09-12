@@ -1,0 +1,537 @@
+{
+  "bubbleBlocks": [
+    {
+      "confidence": 0.95776413,
+      "id": "60FCACEA-D451-416C-8C97-056E92A0696E",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.03406485424172945,
+        "width": 0.025146484375,
+        "x": 0.89111328125,
+        "y": 0.5437274811660662
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "は"
+    },
+    {
+      "confidence": 1,
+      "id": "E8A73100-7790-4CC0-882F-8BCED1C9B0C0",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.4829966937869053,
+        "width": 0.0827059518723261,
+        "x": 0.7194263689610026,
+        "y": 0.13818117335969926
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "があるか」です。"
+    },
+    {
+      "confidence": 0.5,
+      "id": "6E6E29B1-924B-4122-BB2D-A7CF2E4C22AE",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.04093567117880126,
+        "width": 0.03488371864197748,
+        "x": 0.5726744196761044,
+        "y": 0.4327485383384746
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "い"
+    },
+    {
+      "confidence": 0.5,
+      "id": "AB796AB9-C3C1-45CB-A3FC-7CF5E83F026C",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.04093567117880115,
+        "width": 0.03052325475783574,
+        "x": 0.41424418649281175,
+        "y": 0.43274853842375727
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "い"
+    },
+    {
+      "confidence": 0.30000001192092896,
+      "id": "40779198-925C-4860-8AA5-4A7CCBB71C6F",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.017543859983077503,
+        "width": 0.03052325475783574,
+        "x": 0.4360465121135724,
+        "y": 0.7816764130152837
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "ハト"
+    },
+    {
+      "confidence": 0.30000001192092896,
+      "id": "C0D1BB91-16E5-49D6-8348-F5A5EBBE79BF",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.22521623419827008,
+        "width": 0.053779083584982235,
+        "x": 0.33720929536649813,
+        "y": 0.7387914229196642
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "OEIIII"
+    },
+    {
+      "confidence": 0.5,
+      "id": "9032DF0E-5F96-4526-B5AA-B6E16B25AC68",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.27019232206160604,
+        "width": 0.05072786505260163,
+        "x": 0.27691130439947964,
+        "y": 0.07132565016280878
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "、ウッキペディアに"
+    },
+    {
+      "confidence": 1,
+      "id": "5F148E08-BA2B-41D7-996F-F58EF5637574",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.2590117413285409,
+        "width": 0.08026902259342253,
+        "x": 0.17865951871259864,
+        "y": 0.10265775503171104
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "有名人です。"
+    },
+    {
+      "confidence": 1,
+      "id": "5190C33E-8FB1-47B1-8E01-2AEC27D656E9",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.11695906486181284,
+        "width": 0.04505814824785506,
+        "x": 0.09883720483682829,
+        "y": 0.7056530205905361
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "です。"
+    }
+  ],
+  "bubbleCount": 9,
+  "detectedLanguage": "ja",
+  "elapsedMilliseconds": 5367.892026901245,
+  "lineBlocks": [
+    {
+      "confidence": 0.95776413,
+      "id": "60FCACEA-D451-416C-8C97-056E92A0696E",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.03406485424172945,
+        "width": 0.025146484375,
+        "x": 0.89111328125,
+        "y": 0.5437274811660662
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "は"
+    },
+    {
+      "confidence": 1,
+      "id": "E8A73100-7790-4CC0-882F-8BCED1C9B0C0",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.4829966937869053,
+        "width": 0.0827059518723261,
+        "x": 0.7194263689610026,
+        "y": 0.13818117335969926
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "があるか」です。"
+    },
+    {
+      "confidence": 0.5,
+      "id": "6E6E29B1-924B-4122-BB2D-A7CF2E4C22AE",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.04093567117880126,
+        "width": 0.03488371864197748,
+        "x": 0.5726744196761044,
+        "y": 0.4327485383384746
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "い"
+    },
+    {
+      "confidence": 0.5,
+      "id": "AB796AB9-C3C1-45CB-A3FC-7CF5E83F026C",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.04093567117880115,
+        "width": 0.03052325475783574,
+        "x": 0.41424418649281175,
+        "y": 0.43274853842375727
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "い"
+    },
+    {
+      "confidence": 0.30000001192092896,
+      "id": "40779198-925C-4860-8AA5-4A7CCBB71C6F",
+      "orientation": "horizontal",
+      "rect": {
+        "height": 0.017543859983077503,
+        "width": 0.03052325475783574,
+        "x": 0.4360465121135724,
+        "y": 0.7816764130152837
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "ハト"
+    },
+    {
+      "confidence": 0.30000001192092896,
+      "id": "C0D1BB91-16E5-49D6-8348-F5A5EBBE79BF",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.22521623419827008,
+        "width": 0.053779083584982235,
+        "x": 0.33720929536649813,
+        "y": 0.7387914229196642
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "OEIIII"
+    },
+    {
+      "confidence": 0.5,
+      "id": "9032DF0E-5F96-4526-B5AA-B6E16B25AC68",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.27019232206160604,
+        "width": 0.05072786505260163,
+        "x": 0.27691130439947964,
+        "y": 0.07132565016280878
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "、ウッキペディアに"
+    },
+    {
+      "confidence": 1,
+      "id": "5F148E08-BA2B-41D7-996F-F58EF5637574",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.2590117413285409,
+        "width": 0.08026902259342253,
+        "x": 0.17865951871259864,
+        "y": 0.10265775503171104
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "有名人です。"
+    },
+    {
+      "confidence": 1,
+      "id": "5190C33E-8FB1-47B1-8E01-2AEC27D656E9",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.11695906486181284,
+        "width": 0.04505814824785506,
+        "x": 0.09883720483682829,
+        "y": 0.7056530205905361
+      },
+      "role": "dialogue",
+      "source": "original:manual",
+      "text": "です。"
+    }
+  ],
+  "lineCount": 9,
+  "quality": {
+    "averageConfidence": 0.48699896911367446,
+    "blockCount": 25,
+    "characterCount": 122,
+    "hanCount": 17,
+    "japaneseScriptRatio": 0.7786885245901639,
+    "kanaCount": 78,
+    "latinCount": 11,
+    "score": 0.9531591595368004,
+    "suspicious": false,
+    "verticalColumnCount": 4,
+    "visionKitCharacterCount": 0,
+    "visionKitCoverage": 1
+  },
+  "rawCount": 26,
+  "rejectedBlocks": [
+    {
+      "confidence": 0.49018783875000005,
+      "id": "59163E10-2907-4B8E-9D5B-FEF208D18C2F",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.44120537176547664,
+        "width": 0.05908203125,
+        "x": 0.732177734375,
+        "y": 0.14248280379954142
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "おみれ瓜るげ」とすっ"
+    },
+    {
+      "confidence": 0.4494752183333333,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "CD72B93E-D843-42D9-8155-4DE3399D5163",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.44448083851948905,
+        "width": 0.10009765625,
+        "x": 0.82861328125,
+        "y": 0.1333114968883066
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "z和朋婦人FE"
+    },
+    {
+      "confidence": 0.6207395600000001,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "FDBB200C-EE5B-4F0E-9353-9A2D07441670",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.022600720602685864,
+        "width": 0.024658203125,
+        "x": 0.88037109375,
+        "y": 0.35604323616115297
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "ベ"
+    },
+    {
+      "confidence": 0.5614537,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "D65FCF03-7B22-4577-9896-4E2D1229F67B",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.37438584998362273,
+        "width": 0.08154296875,
+        "x": 0.773681640625,
+        "y": 0.12905339010809042
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "[7キベデ。アre"
+    },
+    {
+      "confidence": 0.155967505,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "1A4646EF-F36D-4466-BD3B-DC9E2C160CCD",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.0635440550278415,
+        "width": 0.051025390625,
+        "x": 0.80322265625,
+        "y": 0.4824762528660334
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "5言"
+    },
+    {
+      "confidence": 0.16444683000000002,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "0DB20878-9807-4129-91EA-37F69A9F712F",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.26105470029479194,
+        "width": 0.069580078125,
+        "x": 0.579345703125,
+        "y": 0.6704880445463478
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "ミニミニ"
+    },
+    {
+      "confidence": 0,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "B03FCAA6-140D-4EA9-8D46-3DC7BA043DE8",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.026858827382902017,
+        "width": 0.03369140625,
+        "x": 0.52685546875,
+        "y": 0.8395021290533901
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "三"
+    },
+    {
+      "confidence": 0.44667819999999997,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "45C62D8D-FBB5-4F1C-AC01-E5A0EDB39F0E",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.08254176220111364,
+        "width": 0.078369140625,
+        "x": 0.43798828125,
+        "y": 0.7451686865378316
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "|"
+    },
+    {
+      "confidence": 0.59463564,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "30B940A4-9D92-4FC5-8EB7-E616DBAD0184",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.11202096298722564,
+        "width": 0.03564453125,
+        "x": 0.3466796875,
+        "y": 0.8270553553881428
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "ミニミニ"
+    },
+    {
+      "confidence": 0.4029609625,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "AAAC3011-317B-4828-BEFD-D2437F5B3077",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.25745168686537834,
+        "width": 0.10791015625,
+        "x": 0.2119140625,
+        "y": 0.07533573534228627
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "上ホホキキでダブアイっニー"
+    },
+    {
+      "confidence": 0.28940811,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "53836B0A-0603-4996-9FE5-F2B40676B81A",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.013756960366852283,
+        "width": 0.01123046875,
+        "x": 0.25,
+        "y": 0.14412053717654766
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "っ"
+    },
+    {
+      "confidence": 0.4160617175,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "8AF1E086-4109-4962-AF04-E5CDD5383663",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.17458237798886342,
+        "width": 0.039306640625,
+        "x": 0.19287109375,
+        "y": 0.10678021618080577
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "記入4トて"
+    },
+    {
+      "confidence": 0.42496968700000004,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "5A60DAC0-5273-49D7-9876-9C204CD056E6",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.42188011791680313,
+        "width": 0.054931640625,
+        "x": 0.22900390625,
+        "y": 0.4785456927612185
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "っキキへベヘデプへ.て"
+    },
+    {
+      "confidence": 0.81013351,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "C9B6A8EF-E9ED-4036-AA42-9133769EB693",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.011136586963642281,
+        "width": 0.010986328125,
+        "x": 0.149169921875,
+        "y": 0.676056338028169
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "、"
+    },
+    {
+      "confidence": 0.294514207,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "6A2623A5-FB98-40B8-AB62-C45F7D4AE0FD",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.45070422535211274,
+        "width": 0.07177734375,
+        "x": 0.15625,
+        "y": 0.4877169996724533
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "ガへに座久人^よ史うう"
+    },
+    {
+      "confidence": 0.07994318,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "576A9AB4-1CEF-4285-A68E-DB7A86202501",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.06976744186046513,
+        "width": 0.007568359375,
+        "x": 0.136962890625,
+        "y": 0.49361283982967574
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "16"
+    },
+    {
+      "confidence": 0.4058220466666667,
+      "filterReason": "OCR几何/字符/恢复来源不安全",
+      "id": "D99F7FEA-009C-4ECF-B840-52984542FF8A",
+      "orientation": "vertical",
+      "rect": {
+        "height": 0.3494923026531281,
+        "width": 0.0791015625,
+        "x": 0.100830078125,
+        "y": 0.49623321323288566
+      },
+      "role": "dialogue",
+      "source": "tesseract:jpn_vert",
+      "text": "ごるままつどすファヵは自"
+    }
+  ],
+  "rejectedCount": 17,
+  "resolvedCount": 9,
+  "sampleID": "manga-page-shirohage-ja",
+  "schemaVersion": 1
+}
