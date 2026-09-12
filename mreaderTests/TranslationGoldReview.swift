@@ -17,11 +17,10 @@ struct TranslationGoldReviewReceipt: Codable, Equatable, Sendable {
             return false
         }
         let normalizedSHA1 = sourceImageSHA1.lowercased()
-        return normalizedSHA1.count == 40
-            && normalizedSHA1.unicodeScalars.allSatisfy { scalar in
-                ("0"..."9").contains(Character(String(scalar)))
-                    || ("a"..."f").contains(Character(String(scalar)))
-            }
+        guard normalizedSHA1.count == 40 else { return false }
+        return normalizedSHA1.unicodeScalars.allSatisfy { scalar in
+            (48...57).contains(Int(scalar.value)) || (97...102).contains(Int(scalar.value))
+        }
     }
 }
 
