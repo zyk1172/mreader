@@ -16,3 +16,27 @@ pixels and license.
 
 The larger `manga_page_publicdomainq.png` fixture is a CC0 example manga page
 from Wikimedia Commons and is retained for future page-level recovery tests.
+
+## Translation quality benchmark policy
+
+`translation_quality_manifest.json` is the canonical inventory for fixtures
+used by the translation quality benchmark. A sample may be reported in quality
+metrics only when `annotationStatus` is `ready`. `pending` means the image is
+licensed and available but its human gold annotations are incomplete; CI must
+not infer or fabricate missing OCR text, reading order, translation, or layout
+ground truth.
+
+The benchmark intentionally separates metrics instead of reducing translation
+quality to one score:
+
+- detection recall for human-marked text regions;
+- OCR character error rate (CER), with layout whitespace excluded by default;
+- reading-order pairwise accuracy plus coverage;
+- terminology/name drift without assuming one uniquely correct translation;
+- targeted partial-recovery precision/recall and stability of already-successful translations;
+- unreadable-font, overflow and safe-region escape rates;
+- P50/P95 latency, actual request count and observed/estimated provider cost.
+
+Naturalness still requires bilingual human review over licensed multi-page
+samples. A single reference sentence or model self-rating must not be reported
+as a naturalness percentage.
