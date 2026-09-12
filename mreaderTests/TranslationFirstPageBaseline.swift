@@ -30,15 +30,32 @@ struct TranslationBaselineQuality: Codable, Equatable, Sendable {
     let suspicious: Bool
 }
 
+/// Runtime provenance for an observed OCR baseline. These values describe the
+/// environment that produced the observation; they are not quality metrics.
+struct TranslationBaselineCapture: Codable, Equatable, Sendable {
+    let commitSHA: String?
+    let xcodeVersion: String?
+    let xcodeBuild: String?
+    let platformName: String
+    let platformVersion: String
+    let deviceModel: String
+    let captureSource: String
+}
+
 struct TranslationFirstPageBaselineReport: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let sampleID: String
+    let capture: TranslationBaselineCapture?
     let detectedLanguage: String?
     let elapsedMilliseconds: Double
     let rawCount: Int
     let resolvedCount: Int
     let lineCount: Int
-    let bubbleCount: Int
+    /// Number of output blocks produced by the grouping stage. This does not
+    /// imply that the same number of physical speech balloons were detected.
+    let bubbleBlockCount: Int
+    /// Unique non-nil physical bubble rectangles carried by output blocks.
+    let physicalBubbleCount: Int
     let rejectedCount: Int
     let quality: TranslationBaselineQuality?
     let lineBlocks: [TranslationBaselineBlock]
@@ -51,22 +68,31 @@ struct TranslationFirstPageBaselineReport: Codable, Equatable, Sendable {
 }
 
 enum TranslationFirstPageBaseline {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 
+    @MainActor
     static func makeReport(
         sampleID: String,
         result: OCRPipelineResult,
-        elapsedMilliseconds: Double
+        elapsedMilliseconds: Double,
+        capture: TranslationBaselineCapture? = nil
     ) -> TranslationFirstPageBaselineReport {
-        TranslationFirstPageBaselineReport(
+        let physicalBubbleKeys = Set(
+            result.bubbleBlocks.compactMap { block in
+                block.bubbleBox.map(physicalBubbleKey)
+            }
+        )
+        return TranslationFirstPageBaselineReport(
             schemaVersion: schemaVersion,
             sampleID: sampleID,
+            capture: capture,
             detectedLanguage: result.detectedLanguage,
             elapsedMilliseconds: max(elapsedMilliseconds, 0),
             rawCount: result.rawBlocks.count,
             resolvedCount: result.resolvedBlocks.count,
             lineCount: result.lineBlocks.count,
-            bubbleCount: result.bubbleBlocks.count,
+            bubbleBlockCount: result.bubbleBlocks.count,
+            physicalBubbleCount: physicalBubbleKeys.count,
             rejectedCount: result.rejectedBlocks.count,
             quality: result.quality.map { quality in
                 TranslationBaselineQuality(
@@ -92,8 +118,8 @@ enum TranslationFirstPageBaseline {
 
     /// Produces a machine-assisted annotation candidate from the exact local OCR
     /// pipeline that ships in the app. It is deliberately never reportable gold:
-    /// a person must correct text/geometry/order/grouping and flip the verification
-    /// status only after comparing every region against the source page.
+    /// a person must correct text/geometry/order/grouping, explicitly determine
+    /// the expected page state, and only then flip the verification status.
     static func candidateGold(
         sampleID: String,
         report: TranslationFirstPageBaselineReport
@@ -111,13 +137,14 @@ enum TranslationFirstPageBaseline {
             schemaVersion: 1,
             sampleID: sampleID,
             verificationStatus: .candidate,
-            expectedPageState: regions.isEmpty ? .noText : .completed,
+            expectedPageState: .unknown,
             regions: regions,
             referenceTranslations: [:],
-            notes: "Machine-assisted candidate generated from MangaOCRPipeline. Human review must correct text, normalized regions, reading order and bubble grouping before marking humanVerified. Reference translations remain intentionally empty until reviewed."
+            notes: "Machine-assisted candidate generated from MangaOCRPipeline. Human review must correct text, normalized regions, reading order and bubble grouping, then explicitly resolve expectedPageState before marking humanVerified. Reference translations remain intentionally empty until reviewed."
         )
     }
 
+    @MainActor
     private static func makeBlock(_ block: TextBlock) -> TranslationBaselineBlock {
         TranslationBaselineBlock(
             id: block.id.uuidString,
@@ -140,6 +167,13 @@ enum TranslationFirstPageBaseline {
             width: Double(rect.size.width),
             height: Double(rect.size.height)
         )
+    }
+
+    private static func physicalBubbleKey(_ rect: CGRect) -> String {
+        let values = [rect.origin.x, rect.origin.y, rect.size.width, rect.size.height].map {
+            Int(($0 * 10_000).rounded())
+        }
+        return values.map(String.init).joined(separator: ":")
     }
 
     private static func bubbleID(for rect: TranslationBenchmarkRect?) -> String? {
