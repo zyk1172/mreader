@@ -1,0 +1,76 @@
+name: Phase 3 scope fix
+
+on:
+  push:
+    branches:
+      - codex/translation-context-recovery
+    paths:
+      - .github/workflows/phase3-scope-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/translation-context-recovery
+          fetch-depth: 0
+      - name: Apply narrow compile fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          reader = Path('mreader/ReaderView.swift')
+          text = reader.read_text()
+
+          old = '''previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: blocks
+                    ),'''
+          new = '''previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: pageSnapshot,
+                        requestedIndexes: pageSnapshot.indices.filter { index in
+                            missingIDs.contains(pageSnapshot[index].id)
+                        }
+                    ),'''
+          if old not in text:
+              raise SystemExit('cloud fallback anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: pageSnapshot,
+                        requestedIndexes: pageSnapshot.indices.filter { index in
+                            missingIDs.contains(pageSnapshot[index].id)
+                        }
+                    ),'''
+          new = '''previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: blocks,
+                        requestedIndexes: Array(blocks.indices)
+                    ),'''
+          # Replace the second occurrence: after the first edit there are two identical blocks.
+          first = text.find(old)
+          second = text.find(old, first + 1) if first >= 0 else -1
+          if second < 0:
+              raise SystemExit('OCR page translation anchor not found')
+          text = text[:second] + new + text[second + len(old):]
+          reader.write_text(text)
+
+          context = Path('mreader/TranslationContext.swift')
+          ctext = context.read_text()
+          if 'import CoreGraphics\n' not in ctext:
+              ctext = ctext.replace('import CryptoKit\n', 'import CoreGraphics\nimport CryptoKit\n', 1)
+          context.write_text(ctext)
+          PY
+          rm .github/workflows/phase3-scope-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mreader/ReaderView.swift mreader/TranslationContext.swift .github/workflows/phase3-scope-fix.yml
+          git commit -m 'fix: repair phase 3 context compile scopes'
+          git push origin HEAD:codex/translation-context-recovery
