@@ -115,6 +115,28 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
         }
     }
 
+    func testPersistedShirohageBaselineHasV2ProvenanceAndDistinctBubbleSemantics() throws {
+        let report: TranslationFirstPageBaselineReport = try decodeFixture(
+            "sample_shirohage_manga.baseline",
+            extension: "json"
+        )
+
+        XCTAssertEqual(report.schemaVersion, 2)
+        XCTAssertEqual(report.sampleID, "manga-page-shirohage-ja")
+        XCTAssertEqual(report.bubbleBlockCount, 9)
+        XCTAssertEqual(report.physicalBubbleCount, 0)
+        XCTAssertEqual(report.capture?.capturedAt, "2026-09-12T16:38:42Z")
+        XCTAssertEqual(report.capture?.commitSHA, "4675a607c2b7835671631c27475e8a911b914d7b")
+        XCTAssertEqual(report.capture?.workflowRunID, "34705735085")
+        XCTAssertEqual(report.capture?.xcodeVersion, "26.5")
+        XCTAssertEqual(report.capture?.xcodeBuild, "17F66")
+        XCTAssertEqual(report.capture?.sdkName, "iphonesimulator26.5")
+        XCTAssertEqual(report.capture?.platformName, "iOS Simulator")
+        XCTAssertEqual(report.capture?.platformVersion, "26.5")
+        XCTAssertEqual(report.capture?.deviceModel, "iPhone 17")
+        XCTAssertEqual(report.capture?.captureSource, "github-actions")
+    }
+
     /// Opt-in benchmark against the actual licensed manga page. Normal CI skips
     /// this because Vision output is OS/runtime dependent and the point is to
     /// capture a baseline, not to turn one simulator OCR result into a golden
@@ -196,9 +218,12 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
         let info = Bundle.main.infoDictionary ?? [:]
         let isGitHubActions = environment["GITHUB_ACTIONS"] == "true"
         return TranslationBaselineCapture(
+            capturedAt: ISO8601DateFormatter().string(from: Date()),
             commitSHA: environment["MREADER_BENCHMARK_COMMIT_SHA"] ?? environment["GITHUB_SHA"],
+            workflowRunID: environment["GITHUB_RUN_ID"],
             xcodeVersion: info["DTXcode"] as? String,
             xcodeBuild: info["DTXcodeBuild"] as? String,
+            sdkName: environment["SDK_NAME"] ?? info["DTSDKName"] as? String,
             platformName: UIDevice.current.systemName,
             platformVersion: environment["SIMULATOR_RUNTIME_VERSION"] ?? UIDevice.current.systemVersion,
             deviceModel: environment["SIMULATOR_DEVICE_NAME"] ?? UIDevice.current.model,

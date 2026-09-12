@@ -16,9 +16,9 @@ pixels and license.
 
 The larger `manga_page_publicdomainq.png` fixture is a CC0 manga-drawing page
 from Wikimedia Commons. Visual review suggests there is no translatable manga
-dialogue on the page, so `manga_page_publicdomainq.gold.json` currently stores
-a **candidate `noText` annotation**. It remains `pending` and must not contribute
-reportable quality metrics until a human reviewer explicitly verifies it.
+dialogue on the page, but `manga_page_publicdomainq.gold.json` deliberately keeps
+`expectedPageState` as **`unknown`**. It remains `pending` and must not contribute
+reportable quality metrics until a human reviewer explicitly verifies the page state.
 
 `sample_shirohage_manga.jpg` is Wikimedia Commons' `Sample of SHIROHAGE MANGA.jpg`,
 a Japanese speech-balloon manga example by しんぎんぐきゃっと, licensed under
@@ -43,8 +43,9 @@ ground truth.
 
 Page-level annotation files additionally carry a `verificationStatus`. A
 `candidate` annotation may be useful for review and test-data preparation but
-is never reportable gold. Only `humanVerified` annotations may be paired with a
-`ready` manifest entry for page-level quality reporting.
+is never reportable gold. Candidate page state stays `unknown`; completeness metrics
+exclude it. Only a `humanVerified` annotation with an explicitly resolved non-unknown
+page state may be paired with a `ready` manifest entry for page-level quality reporting.
 
 The benchmark intentionally separates metrics instead of reducing translation
 quality to one score:

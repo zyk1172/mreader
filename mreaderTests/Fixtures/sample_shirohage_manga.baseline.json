@@ -1,4 +1,5 @@
 {
+  "bubbleBlockCount": 9,
   "bubbleBlocks": [
     {
       "confidence": 0.95776413,
@@ -127,7 +128,18 @@
       "text": "です。"
     }
   ],
-  "bubbleCount": 9,
+  "capture": {
+    "captureSource": "github-actions",
+    "capturedAt": "2026-09-12T16:38:42Z",
+    "commitSHA": "4675a607c2b7835671631c27475e8a911b914d7b",
+    "deviceModel": "iPhone 17",
+    "platformName": "iOS Simulator",
+    "platformVersion": "26.5",
+    "sdkName": "iphonesimulator26.5",
+    "workflowRunID": "34705735085",
+    "xcodeBuild": "17F66",
+    "xcodeVersion": "26.5"
+  },
   "detectedLanguage": "ja",
   "elapsedMilliseconds": 5367.892026901245,
   "lineBlocks": [
@@ -259,6 +271,7 @@
     }
   ],
   "lineCount": 9,
+  "physicalBubbleCount": 0,
   "quality": {
     "averageConfidence": 0.48699896911367446,
     "blockCount": 25,
@@ -533,5 +546,5 @@
   "rejectedCount": 17,
   "resolvedCount": 9,
   "sampleID": "manga-page-shirohage-ja",
-  "schemaVersion": 1
+  "schemaVersion": 2
 }

@@ -9,6 +9,16 @@ It is intentionally split into two kinds of evidence:
 
 Do not compare a candidate annotation against the same OCR run and report that result as accuracy. That would make the system grade itself.
 
+## Integrity rules
+
+- Machine-generated page annotations always start with `expectedPageState: unknown`. OCR output may suggest that text exists or does not exist, but it cannot establish benchmark truth about `completed`, `partial`, `noText` or `failed`.
+- A page becomes reportable gold only after a human reviewer resolves the page state, verifies the regions/order/grouping, sets `verificationStatus` to `humanVerified`, and the manifest entry is `ready`.
+- `bubbleBlockCount` is the number of grouped output blocks produced by the pipeline. It is not a count of physical speech balloons.
+- `physicalBubbleCount` counts unique non-nil detected bubble rectangles carried by those blocks. A value of `0` is valid even when `bubbleBlockCount` is nonzero.
+- Baseline schema v2 records capture provenance so results from different Xcode/Vision/runtime environments are not silently compared as if they were equivalent.
+
+The pinned Shirohage baseline was captured on GitHub Actions from commit `4675a607c2b7835671631c27475e8a911b914d7b`, workflow run `34705735085`, using Xcode 26.5 (`17F66`), `iphonesimulator26.5`, iPhone 17 on iOS 26.5. Its OCR text, geometry, confidence and latency remain an observed diagnostic snapshot, not quality ground truth.
+
 ## Run the baseline in Xcode
 
 1. Open `mreader.xcodeproj` and select the `mreader` scheme.
@@ -54,7 +64,7 @@ xcodebuild \
   test-without-building
 ```
 
-The test logs one summary line with detected language, raw/resolved/line/bubble/rejected counts and elapsed time. The JSON attachments contain the complete block-level result.
+The test logs one summary line with detected language, raw/resolved/line/grouped-bubble-block/physical-bubble/rejected counts and elapsed time. The JSON attachments contain the complete block-level result and runtime provenance.
 
 ## Human verification: turn the candidate into real gold
 
@@ -66,8 +76,9 @@ Open the source image and `sample_shirohage_manga.gold.json` side by side. For e
 4. **Reading order:** assign `readingOrder` according to the actual manga reading sequence, not the OCR output order.
 5. **Bubble grouping:** lines in the same physical speech balloon share one `bubbleID`; text with no real balloon remains independent rather than receiving a fabricated bubble.
 6. **Reference translation:** optionally add a human-reviewed Simplified Chinese translation under `referenceTranslations[regionID]`. Multiple natural translations can be valid; this field is a review anchor, not an automatic naturalness score.
-7. After the entire page has been checked, set `verificationStatus` to `humanVerified`.
-8. Only then change the corresponding manifest sample from `pending` to `ready`.
+7. Explicitly resolve `expectedPageState` from `unknown` to `completed`, `partial`, `noText` or `failed` based on the human review.
+8. After the entire page has been checked, set `verificationStatus` to `humanVerified`.
+9. Only then change the corresponding manifest sample from `pending` to `ready`.
 
 A `ready` page whose annotation is still `candidate` must fail the benchmark contract tests.
 

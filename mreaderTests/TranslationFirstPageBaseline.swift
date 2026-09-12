@@ -33,9 +33,12 @@ struct TranslationBaselineQuality: Codable, Equatable, Sendable {
 /// Runtime provenance for an observed OCR baseline. These values describe the
 /// environment that produced the observation; they are not quality metrics.
 struct TranslationBaselineCapture: Codable, Equatable, Sendable {
+    let capturedAt: String?
     let commitSHA: String?
+    let workflowRunID: String?
     let xcodeVersion: String?
     let xcodeBuild: String?
+    let sdkName: String?
     let platformName: String
     let platformVersion: String
     let deviceModel: String
