@@ -4019,7 +4019,8 @@ struct LocalImageView: View {
                     TranslationSurfaceRenderer(
                         layoutSize: item.rect.size,
                         surfaceStyle: item.surfaceStyle,
-                        displayMode: item.displayMode
+                        displayMode: item.displayMode,
+                        layoutStatus: item.layoutStatus
                     )
                     .position(x: item.rect.midX, y: item.rect.midY)
                     .zIndex(TranslationSurfaceLayering.surfaceZIndex)
@@ -4452,10 +4453,28 @@ struct LocalImageView: View {
                     ? .needsExpansion
                     : .fitted
 
-            occupiedRects.append(rect.insetBy(dx: -4, dy: -4))
+            let presentationRect: CGRect
+            if layoutStatus == .needsExpansion {
+                let compactPreview = TranslationOverflowPresentationPolicy.compactPreviewRect(
+                    sourceRect: mappedSourceRect,
+                    allowedBounds: movementBounds,
+                    orientation: item.textOrientation
+                )
+                presentationRect = OCRBubbleLayoutEngine.nonOverlappingRect(
+                    compactPreview,
+                    anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
+                    occupiedRects: occupiedRects,
+                    bounds: movementBounds,
+                    margin: 0
+                )
+            } else {
+                presentationRect = rect
+            }
+
+            occupiedRects.append(presentationRect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(
                 blocks: item.blocks,
-                rect: rect,
+                rect: presentationRect,
                 allowedBounds: item.allowedBounds,
                 fontSize: item.fontSize,
                 contentPadding: item.contentPadding,
@@ -5380,35 +5399,52 @@ private struct TranslationSurfaceRenderer: View {
     let layoutSize: CGSize
     let surfaceStyle: TranslationSurfaceStyle
     let displayMode: TranslationDisplayMode
+    let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
 
     @ViewBuilder
     var body: some View {
-        switch displayMode {
-        case .inPlace:
-            RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
-                .fill(Color.white.opacity(0.94))
-                .frame(width: layoutSize.width, height: layoutSize.height)
-        case .assistOverlay:
-            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+        if layoutStatus == .needsExpansion {
+            // Overflow is a compact, low-obstruction preview. The full text is
+            // opened only after the user taps this specific region.
+            RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay {
-                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                    RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
+                        .fill(Color.white.opacity(0.18))
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                    RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.6)
                 }
                 .frame(width: layoutSize.width, height: layoutSize.height)
-        case .annotation:
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(.thinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.white.opacity(0.30))
-                }
-                .frame(width: layoutSize.width, height: layoutSize.height)
+        } else {
+            switch displayMode {
+            case .inPlace:
+                RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .assistOverlay:
+                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                    }
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .annotation:
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(.thinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.30))
+                    }
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            }
         }
     }
 }
@@ -5434,14 +5470,31 @@ private struct TranslationTextRenderer: View {
                 Button {
                     isExpansionPresented = true
                 } label: {
-                    Image(systemName: "text.magnifyingglass")
-                        .font(.system(size: max(min(fontSize, 18), 12), weight: .semibold))
-                        .foregroundStyle(style.coreTextColor.swiftUIColor)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(Rectangle())
+                    ZStack(alignment: .bottomTrailing) {
+                        // Keep a real translation preview visible at the readable
+                        // floor. The preview may clip, but it must never degrade
+                        // into an icon-only card.
+                        CoreTextTranslationView(
+                            text: fullText,
+                            fontSize: fontSize,
+                            color: displayMode == .inPlace ? UIColor.label : style.coreTextColor,
+                            textOrientation: textOrientation,
+                            lineSpacing: 2
+                        )
+                        .allowsHitTesting(false)
+
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(style.coreTextColor.swiftUIColor)
+                            .padding(3)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .padding(2)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("ocr.translationNeedsExpansion".localized)
+                .accessibilityValue(fullText)
             } else {
                 CoreTextTranslationView(
                     text: fullText,
@@ -5452,8 +5505,9 @@ private struct TranslationTextRenderer: View {
                 )
             }
         }
-        .padding(contentPadding)
+        .padding(layoutStatus == .needsExpansion ? min(contentPadding, 3) : contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
+        .clipped()
         .sheet(isPresented: $isExpansionPresented) {
             NavigationStack {
                 ScrollView {
