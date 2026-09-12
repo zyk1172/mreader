@@ -4,10 +4,17 @@ import XCTest
 
 final class TranslationQualityBenchmarkTests: XCTestCase {
     func testFixtureManifestOnlyMarksAnnotatedSamplesReady() throws {
-        let manifestURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent("translation_quality_manifest.json")
+        let bundle = Bundle(for: TranslationQualityBenchmarkTests.self)
+        let manifestURL = try XCTUnwrap(
+            bundle.url(
+                forResource: "translation_quality_manifest",
+                withExtension: "json",
+                subdirectory: "Fixtures"
+            ) ?? bundle.url(
+                forResource: "translation_quality_manifest",
+                withExtension: "json"
+            )
+        )
         let data = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(TranslationQualityBenchmarkManifest.self, from: data)
 
