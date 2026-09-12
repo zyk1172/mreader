@@ -39,6 +39,7 @@ enum TranslationGoldReviewIssue: String, Equatable, Sendable {
     case candidateHasReviewReceipt
     case missingReviewReceipt
     case invalidReviewReceipt
+    case sourceImageMismatch
 }
 
 enum TranslationGoldReviewValidator {
@@ -100,7 +101,8 @@ enum TranslationGoldReviewValidator {
     }
 
     static func reportabilityIssues(
-        for gold: TranslationBenchmarkPageGold
+        for gold: TranslationBenchmarkPageGold,
+        expectedSourceImageSHA1: String? = nil
     ) -> Set<TranslationGoldReviewIssue> {
         var issues = structuralIssues(for: gold)
 
@@ -120,6 +122,10 @@ enum TranslationGoldReviewValidator {
             }
             if !review.isValid {
                 issues.insert(.invalidReviewReceipt)
+            }
+            if let expectedSourceImageSHA1,
+               review.sourceImageSHA1.lowercased() != expectedSourceImageSHA1.lowercased() {
+                issues.insert(.sourceImageMismatch)
             }
         }
 
@@ -156,9 +162,15 @@ enum TranslationGoldBaselineScorer {
     static func score(
         gold: TranslationBenchmarkPageGold,
         baseline: TranslationFirstPageBaselineReport,
+        expectedSourceImageSHA1: String,
         iouThreshold: Double = 0.50
     ) throws -> TranslationReportableBaselineScore {
-        guard gold.isReportableGold else {
+        let reportabilityIssues = TranslationGoldReviewValidator.reportabilityIssues(
+            for: gold,
+            expectedSourceImageSHA1: expectedSourceImageSHA1
+        )
+        guard gold.verificationStatus == .humanVerified,
+              reportabilityIssues.isEmpty else {
             throw TranslationGoldScoringError.goldNotReportable
         }
 
