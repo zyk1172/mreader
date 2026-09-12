@@ -171,6 +171,18 @@ nonisolated private struct InitialReadingPreset {
     )
 }
 
+nonisolated enum ReadingPresetSamplePagePolicy {
+    static func pageIndices(totalPages: Int) -> [Int] {
+        guard totalPages > 0 else { return [] }
+
+        let preferredEnd = min(totalPages, 5)
+        guard 2 < preferredEnd else {
+            return Array(0..<totalPages)
+        }
+        return Array(2..<preferredEnd)
+    }
+}
+
 /// 阅读预设检测器：在 Reader 第一次创建之前完成“这本漫画是不是长条”的判断，
 /// 避免先按普通模式预载再切到 8192 重解码（审查 #17）。
 nonisolated private enum InitialReadingPresetDetector {
@@ -186,7 +198,7 @@ nonisolated private enum InitialReadingPresetDetector {
         if isDocument(comic, "pdf") {
             return InitialReadingPreset.longStrip
         }
-        let sampleIndices = samplePageIndices(totalPages: pages.count)
+        let sampleIndices = ReadingPresetSamplePagePolicy.pageIndices(totalPages: pages.count)
         guard !sampleIndices.isEmpty else { return .normalPage }
         var ratios: [CGFloat] = []
         for index in sampleIndices {
@@ -251,12 +263,6 @@ nonisolated private enum InitialReadingPresetDetector {
             return true
         }
         return comic.chapterTypeRaw?.lowercased() == expectedExtension
-    }
-
-    private static func samplePageIndices(totalPages: Int) -> [Int] {
-        guard totalPages > 0 else { return [] }
-        let preferred = (2..<min(totalPages, 5)).map { $0 }
-        return preferred.isEmpty ? Array(0..<totalPages) : preferred
     }
 
     private static func medianRatio(_ ratios: [CGFloat]) -> CGFloat? {
@@ -1594,7 +1600,7 @@ struct ReaderView: View {
                 reason: "pdf"
             )
         }
-        let sampleIndices = readingPresetSamplePageIndices(totalPages: manager.pages.count)
+        let sampleIndices = ReadingPresetSamplePagePolicy.pageIndices(totalPages: manager.pages.count)
         guard !sampleIndices.isEmpty else {
             print("MReader initial preset fallback: no sample pages for comic=\(comic.id)")
             return InitialReadingPreset.normalPage
@@ -1626,15 +1632,6 @@ struct ReaderView: View {
             imageFitMode: .fitScreen,
             reason: String(format: "median ratio %.3f pages %@", medianRatio, sampleIndices.map { "\($0 + 1)" }.joined(separator: ","))
         )
-    }
-
-    private func readingPresetSamplePageIndices(totalPages: Int) -> [Int] {
-        guard totalPages > 0 else { return [] }
-        let preferred = (2..<min(totalPages, 5)).map { $0 }
-        if !preferred.isEmpty {
-            return preferred
-        }
-        return Array(0..<totalPages)
     }
 
     private func medianRatio(_ ratios: [CGFloat]) -> CGFloat? {
