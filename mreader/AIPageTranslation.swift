@@ -467,6 +467,13 @@ nonisolated enum AIPageTranslationParser {
         }
         let ordered = expectedItems.compactMap { accepted[$0.id] }
         let missing = ordered.filter { $0.translation.isEmpty }.map(\.id)
+        let completedTranslations = ordered
+            .map(\.translation)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !completedTranslations.isEmpty,
+           !TranslationOutputValidator.pageIsCompatible(completedTranslations, target: target) {
+            throw AIPageTranslationParserError.pageLanguageMismatch
+        }
         return AIPageTranslationResult(items: ordered, missingIDs: missing)
     }
 
@@ -664,20 +671,20 @@ nonisolated enum TranslationOutputValidator {
     }
 
     static func containsExplanatoryGarbage(_ text: String) -> Bool {
-        let suspiciousMarkers = [
+        let protocolMarkers = [
             "system prompt", "user prompt", "analysis:", "reasoning:",
             "thinking:", "thought process:", "reasoning_content", "_output",
-            "输出要求", "提示词", "作为一个", "我不能", "根据用户", "翻译过程",
+            "输出要求", "翻译过程",
             "<think", "</think>", "<thinking", "</thinking>", "<analysis", "</analysis>",
             "<reasoning", "</reasoning>"
         ]
         let lowercased = text.lowercased()
         guard !lowercased.contains("```") else { return true }
-        if suspiciousMarkers.contains(where: { lowercased.contains($0.lowercased()) }) {
+        if protocolMarkers.contains(where: { lowercased.contains($0.lowercased()) }) {
             return true
         }
         return text.range(
-            of: #"^\s*(?:answer|final answer|translation|translated text|译文|翻译(?:结果)?|以下是翻译(?:结果)?)\s*[:：]"#,
+            of: #"^\s*(?:(?:answer|final answer|translation|translated text|译文|翻译(?:结果)?|以下是翻译(?:结果)?)\s*[:：]|(?:根据用户(?:要求|提示)|提示词(?:要求)?|作为(?:一个|一名).{0,20}(?:AI|人工智能)|我(?:不能|无法).{0,12}(?:协助|帮助|提供|完成).{0,12}(?:翻译|请求)))"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }

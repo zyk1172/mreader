@@ -223,6 +223,7 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
     case invalidResponseEnvelope(model: String, contentType: String?, excerpt: String)
     case missingAssistantContent(model: String, finishReason: String?)
     case invalidTranslationJSON(model: String, excerpt: String)
+    case invalidTranslationLanguage(model: String)
     case incompleteResponse(model: String, finishReason: String)
 
     var errorDescription: String? {
@@ -251,6 +252,8 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
             return "模型 \(model) 没有返回最终回答内容"
         case .invalidTranslationJSON(let model, let excerpt):
             return "模型 \(model) 返回的翻译 JSON 无效：\(excerpt)"
+        case .invalidTranslationLanguage(let model):
+            return "模型 \(model) 返回的译文不符合目标语言"
         case .incompleteResponse(let model, let finishReason):
             return "模型 \(model) 响应不完整（finish_reason=\(finishReason)）"
         }
@@ -271,6 +274,11 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
             return retryAfterSeconds
         }
         return nil
+    }
+
+    var isTranslationContentFailure: Bool {
+        if case .invalidTranslationLanguage = self { return true }
+        return false
     }
 
     /// 是否属于“格式/协议类”失败：可以触发缩小 batch 或逐气泡兜底。
@@ -863,6 +871,8 @@ class AITranslator {
                 )
                 PageResponseFormatCache.shared.set(mode, for: cacheKey)
                 return result
+            } catch AIPageTranslationParserError.pageLanguageMismatch {
+                throw AITranslationRequestError.invalidTranslationLanguage(model: model)
             } catch {
                 let classification = AIPageTranslationParser.classifyResponse(
                     content,
@@ -1054,7 +1064,8 @@ class AITranslator {
             !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }
-        return completed
+        // Keep known untranslated regions so retry/completeness logic can see them.
+        return translated
     }
 
     static func recognizeVisionPage(
@@ -2306,21 +2317,26 @@ class AITranslator {
             let rawLines = ((item["translationLines"] ?? item["translation_lines"] ?? item["lines"]) as? [String])?
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty } ?? []
-            let rawTranslation = firstString(in: item, keys: ["translation", "translatedText", "translated_text", "targetText", "target_text"]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let translation = rawLines.isEmpty ? rawTranslation : rawLines.joined(separator: "\n")
-            guard !translation.isEmpty else { return nil }
+            let translationKeys = ["translation", "translatedText", "translated_text", "targetText", "target_text"]
+            let hasExplicitTranslation = translationKeys.contains { item[$0] != nil }
+            let rawTranslation = firstString(in: item, keys: translationKeys)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // `translation` is canonical. A line-only value is accepted only for
+            // legacy responses that omitted the canonical field entirely.
+            let canonicalCandidate = (!hasExplicitTranslation && rawTranslation.isEmpty)
+                ? rawLines.joined(separator: "\n")
+                : rawTranslation
             let normalizedTranslation: String
-            if let target {
-                guard let value = TranslationOutputValidator.normalizedAcceptableTranslation(
-                    translation,
+            if canonicalCandidate.isEmpty {
+                normalizedTranslation = ""
+            } else if let target {
+                normalizedTranslation = TranslationOutputValidator.normalizedAcceptableTranslation(
+                    canonicalCandidate,
                     sourceText: text,
                     target: target
-                ) else {
-                    return nil
-                }
-                normalizedTranslation = value
+                ) ?? ""
             } else {
-                normalizedTranslation = translation
+                normalizedTranslation = canonicalCandidate
             }
             let textPolygon = pointsValue(from: item["textPolygon"] ?? item["text_polygon"]) ?? []
             let bubblePolygon = pointsValue(from: item["bubblePolygon"] ?? item["bubble_polygon"]) ?? []
@@ -2354,8 +2370,13 @@ class AITranslator {
                 text: text,
                 translation: normalizedTranslation,
                 rawLines: target.map { target in
-                    rawLines.map { TranslationOutputValidator.normalize($0, for: target) }
-                } ?? rawLines,
+                    TranslationOutputValidator.validatedTranslationLines(
+                        rawLines,
+                        canonicalTranslation: normalizedTranslation,
+                        sourceText: text,
+                        target: target
+                    )
+                } ?? [],
                 textPolygon: textPolygon,
                 bubblePolygon: bubblePolygon,
                 textRect: textRect,
@@ -2985,32 +3006,87 @@ class AITranslator {
             block.boundingBox.height > block.boundingBox.width * 1.35
         }.count
         let isMostlyVertical = verticalCount > validBlocks.count / 2
-
-        // 行/列分组阈值随页面字号自适应：长条漫画（webtoon）归一化后的字号远小于普通单页，
-        // 固定阈值会把纵向相邻的多行文字误判成同一行。
         let fontScales = validBlocks
             .map { min($0.boundingBox.width, $0.boundingBox.height) }
             .sorted()
         let medianFontScale = fontScales[fontScales.count / 2]
 
+        func stableTieBreak(_ lhs: TextBlock, _ rhs: TextBlock) -> Bool {
+            lhs.id.uuidString < rhs.id.uuidString
+        }
+
         if isMostlyVertical {
             let columnThreshold = min(max(medianFontScale * 1.1, 0.02), 0.045)
-            return validBlocks.sorted { lhs, rhs in
-                let columnDistance = abs(lhs.boundingBox.midX - rhs.boundingBox.midX)
-                if columnDistance > columnThreshold {
-                    return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX
+            let byColumn = validBlocks.sorted { lhs, rhs in
+                if lhs.boundingBox.midX != rhs.boundingBox.midX {
+                    return isRightToLeft
+                        ? lhs.boundingBox.midX > rhs.boundingBox.midX
+                        : lhs.boundingBox.midX < rhs.boundingBox.midX
                 }
-                return lhs.boundingBox.midY < rhs.boundingBox.midY
+                if lhs.boundingBox.midY != rhs.boundingBox.midY {
+                    return lhs.boundingBox.midY < rhs.boundingBox.midY
+                }
+                return stableTieBreak(lhs, rhs)
+            }
+            var columns: [[TextBlock]] = []
+            for block in byColumn {
+                if let index = columns.indices.last,
+                   let anchor = columns[index].first,
+                   abs(block.boundingBox.midX - anchor.boundingBox.midX) <= columnThreshold {
+                    columns[index].append(block)
+                } else {
+                    columns.append([block])
+                }
+            }
+            return columns.flatMap { column in
+                column.sorted { lhs, rhs in
+                    if lhs.boundingBox.midY != rhs.boundingBox.midY {
+                        return lhs.boundingBox.midY < rhs.boundingBox.midY
+                    }
+                    if lhs.boundingBox.midX != rhs.boundingBox.midX {
+                        return isRightToLeft
+                            ? lhs.boundingBox.midX > rhs.boundingBox.midX
+                            : lhs.boundingBox.midX < rhs.boundingBox.midX
+                    }
+                    return stableTieBreak(lhs, rhs)
+                }
             }
         }
 
         let rowThreshold = min(max(medianFontScale * 0.75, 0.006), 0.035)
-        return validBlocks.sorted { lhs, rhs in
-            let rowDistance = abs(lhs.boundingBox.midY - rhs.boundingBox.midY)
-            if rowDistance > rowThreshold {
+        let byRow = validBlocks.sorted { lhs, rhs in
+            if lhs.boundingBox.midY != rhs.boundingBox.midY {
                 return lhs.boundingBox.midY < rhs.boundingBox.midY
             }
-            return isRightToLeft ? lhs.boundingBox.midX > rhs.boundingBox.midX : lhs.boundingBox.midX < rhs.boundingBox.midX
+            if lhs.boundingBox.midX != rhs.boundingBox.midX {
+                return isRightToLeft
+                    ? lhs.boundingBox.midX > rhs.boundingBox.midX
+                    : lhs.boundingBox.midX < rhs.boundingBox.midX
+            }
+            return stableTieBreak(lhs, rhs)
+        }
+        var rows: [[TextBlock]] = []
+        for block in byRow {
+            if let index = rows.indices.last,
+               let anchor = rows[index].first,
+               abs(block.boundingBox.midY - anchor.boundingBox.midY) <= rowThreshold {
+                rows[index].append(block)
+            } else {
+                rows.append([block])
+            }
+        }
+        return rows.flatMap { row in
+            row.sorted { lhs, rhs in
+                if lhs.boundingBox.midX != rhs.boundingBox.midX {
+                    return isRightToLeft
+                        ? lhs.boundingBox.midX > rhs.boundingBox.midX
+                        : lhs.boundingBox.midX < rhs.boundingBox.midX
+                }
+                if lhs.boundingBox.midY != rhs.boundingBox.midY {
+                    return lhs.boundingBox.midY < rhs.boundingBox.midY
+                }
+                return stableTieBreak(lhs, rhs)
+            }
         }
     }
 }

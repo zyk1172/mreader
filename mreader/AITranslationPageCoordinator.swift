@@ -22,7 +22,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    static let translationCacheRevision = "translation-v19-canonical-bubble-region-measured-paragraph"
+    static let translationCacheRevision = "translation-v20-partial-aware-canonical-translation"
     static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
@@ -252,6 +252,13 @@ actor AITranslationPageCoordinator {
 
     private func store(_ blocks: [TextBlock], forKey key: String) {
         guard !blocks.isEmpty else { return }
+        let isComplete = blocks.allSatisfy { block in
+            !(block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard isComplete else {
+            print("MReader AI translation cache skipped partial key=\(key.prefix(10)) blocks=\(blocks.count)")
+            return
+        }
         insertIntoMemory(blocks, forKey: key)
         let page = CachedTranslationPage(
             createdAt: Date(),
@@ -361,7 +368,7 @@ nonisolated enum AITranslationPagePipeline {
             let translation = (translated[index].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? translated[index].id : nil
         }
-        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingIDs)
+        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingIDs)
     }
 
     private static func translateOCR(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
@@ -431,7 +438,7 @@ nonisolated enum AITranslationPagePipeline {
             let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? block.id : nil
         }
-        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingBlockIDs)
+        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingBlockIDs)
     }
 
     /// Vision=noText 的复核必须复用正常 OCR 的 annotate -> filter -> segment 链路，
@@ -462,8 +469,9 @@ nonisolated enum AITranslationPagePipeline {
     ) async throws {
         do {
             try await applyBatchTranslation(to: &blocks, indexes: indexes, request: request)
-        } catch let error as AITranslationRequestError where error.isFormatFailure {
-            print("MReader OCR 整页翻译格式失败，逐气泡兜底: \(error.localizedDescription)")
+        } catch let error as AITranslationRequestError
+            where error.isFormatFailure || error.isTranslationContentFailure {
+            print("MReader OCR 整页翻译需要逐气泡恢复: \(error.localizedDescription)")
             try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)
         }
     }
