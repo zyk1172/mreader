@@ -50,16 +50,43 @@ nonisolated enum TranslationDisplayMode: String, Codable, Sendable, Equatable {
 nonisolated enum TranslationDisplayPolicy {
     static func mode(
         contentRole: TranslationContentRole,
-        hasReliableDetectedBubble: Bool
+        hasReliableDetectedBubble: Bool,
+        prefersInPlace: Bool
     ) -> TranslationDisplayMode {
         switch contentRole {
-        case .dialogue where hasReliableDetectedBubble:
+        case .dialogue where hasReliableDetectedBubble && prefersInPlace:
             return .inPlace
         case .soundEffect:
             return .annotation
         case .dialogue, .narration, .other:
             return .assistOverlay
         }
+    }
+}
+
+nonisolated enum TranslationRegionPolicy {
+    /// A model-provided safe region is placement evidence, never bubble evidence.
+    /// It must stay on-page and overlap the source text; reliable bubble content
+    /// is additionally intersected with the physical bubble so in-place text
+    /// cannot escape the actual balloon.
+    static func resolvedLayoutSafeRegion(
+        sourceTextRegion: CGRect,
+        proposedSafeRegion: CGRect?,
+        detectedBubble: CGRect?,
+        pageBounds: CGRect
+    ) -> CGRect? {
+        guard !pageBounds.isNull, pageBounds.width > 0, pageBounds.height > 0 else { return nil }
+        guard let proposedSafeRegion else { return nil }
+        let safe = proposedSafeRegion.standardized.intersection(pageBounds.standardized)
+        guard !safe.isNull, safe.width > 0, safe.height > 0,
+              safe.intersects(sourceTextRegion.standardized) else { return nil }
+        guard let detectedBubble else { return safe }
+        let bubble = detectedBubble.standardized.intersection(pageBounds.standardized)
+        guard !bubble.isNull, bubble.width > 0, bubble.height > 0 else { return safe }
+        let constrained = safe.intersection(bubble)
+        guard !constrained.isNull, constrained.width > 0, constrained.height > 0,
+              constrained.intersects(sourceTextRegion.standardized) else { return nil }
+        return constrained
     }
 }
 

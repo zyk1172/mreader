@@ -566,3 +566,5 @@
 "ocr.minimumReadableTranslationFontSizeValue" = "可読下限：%d pt";
 "ocr.minimumReadableTranslationFontSizeDescription" = "このサイズより小さくせず、収まらない場合は展開表示で全文を読みます。";
 "ocr.translationNeedsExpansion" = "翻訳を展開して読む必要があります";
+"ocr.inPlaceTranslation" = "インプレース翻訳";
+"ocr.inPlaceTranslationDescription" = "信頼できる吹き出しだけを可逆なインプレース表示にし、効果音の原画は保持します。";
