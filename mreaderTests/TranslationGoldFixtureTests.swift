@@ -55,7 +55,18 @@ final class TranslationGoldFixtureTests: XCTestCase {
         )
         let sample = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-shirohage-ja" })
         XCTAssertEqual(sample.annotationStatus, .pending)
-        XCTAssertFalse(sample.hasGoldReference)
+
+        if let annotation = sample.goldAnnotation {
+            let file = URL(fileURLWithPath: annotation)
+            let candidate: TranslationBenchmarkPageGold = try decodeFixture(
+                file.deletingPathExtension().lastPathComponent,
+                extension: file.pathExtension
+            )
+            XCTAssertEqual(candidate.verificationStatus, .candidate)
+            XCTAssertFalse(candidate.isReportableGold)
+        } else {
+            XCTAssertFalse(sample.hasGoldReference)
+        }
 
         let bundle = Bundle(for: TranslationGoldFixtureTests.self)
         let imageURL = bundle.url(

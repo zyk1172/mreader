@@ -34,7 +34,7 @@ final class TranslationQualityBenchmarkTests: XCTestCase {
         let positiveCandidate = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-shirohage-ja" })
         XCTAssertEqual(positiveCandidate.annotationStatus, .pending)
         XCTAssertNil(positiveCandidate.goldText)
-        XCTAssertNil(positiveCandidate.goldAnnotation)
+        XCTAssertEqual(positiveCandidate.goldAnnotation, "sample_shirohage_manga.gold.json")
     }
 
     func testCERUsesCharactersAndIgnoresLayoutWhitespace() {

@@ -28,8 +28,8 @@
       "sourceLanguage": "ja",
       "annotationStatus": "pending",
       "goldText": null,
-      "goldAnnotation": null,
-      "notes": "Licensed Japanese speech-balloon manga fixture from Wikimedia Commons. Keep pending until regions, reading order, bubble grouping and reference translations are human-verified."
+      "goldAnnotation": "sample_shirohage_manga.gold.json",
+      "notes": "Pinned simulator baseline captured from the actual MangaOCRPipeline. The linked page annotation remains a machine-assisted candidate and must be human-verified before the sample may become ready."
     }
   ]
 }
