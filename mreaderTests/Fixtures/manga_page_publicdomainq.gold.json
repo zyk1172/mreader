@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "sampleID": "manga-page-publicdomainq",
   "verificationStatus": "candidate",
-  "expectedPageState": "noText",
+  "expectedPageState": "unknown",
   "regions": [],
   "referenceTranslations": {},
-  "notes": "Candidate negative-page annotation prepared from visual review. It is not human-verified gold and must not contribute reportable quality metrics until explicitly reviewed. Decorative drawing marks and the English INK bottle label are intentionally excluded from manga-dialogue completeness scoring."
+  "notes": "Candidate negative-page annotation prepared from visual review. Visual review suggests no translatable manga dialogue, but the expected page state remains unknown until a human reviewer explicitly confirms it. Decorative drawing marks and the English INK bottle label are intentionally excluded from manga-dialogue completeness scoring."
 }
