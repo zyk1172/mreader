@@ -2,8 +2,8 @@ import Foundation
 
 /// Page-level annotation schema used to prepare human gold truth. Candidate
 /// annotations may be machine/model-assisted, but they are never reportable
-/// until a human reviewer explicitly marks them as `humanVerified` and resolves
-/// the expected page state.
+/// until a human reviewer explicitly marks them as `humanVerified`, resolves
+/// the expected page state, and records a review receipt for the exact image.
 struct TranslationBenchmarkPageGold: Codable, Equatable, Sendable {
     enum VerificationStatus: String, Codable, Sendable {
         case candidate
@@ -16,29 +16,35 @@ struct TranslationBenchmarkPageGold: Codable, Equatable, Sendable {
     let expectedPageState: TranslationBenchmarkPageState
     let regions: [TranslationBenchmarkRegion]
     let referenceTranslations: [String: String]
+    let review: TranslationGoldReviewReceipt?
     let notes: String?
 
-    var isInternallyConsistent: Bool {
-        let regionIDs = Set(regions.map(\.id))
-        guard Set(referenceTranslations.keys).isSubset(of: regionIDs) else {
-            return false
-        }
+    init(
+        schemaVersion: Int,
+        sampleID: String,
+        verificationStatus: VerificationStatus,
+        expectedPageState: TranslationBenchmarkPageState,
+        regions: [TranslationBenchmarkRegion],
+        referenceTranslations: [String: String],
+        review: TranslationGoldReviewReceipt? = nil,
+        notes: String?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.sampleID = sampleID
+        self.verificationStatus = verificationStatus
+        self.expectedPageState = expectedPageState
+        self.regions = regions
+        self.referenceTranslations = referenceTranslations
+        self.review = review
+        self.notes = notes
+    }
 
-        switch expectedPageState {
-        case .unknown:
-            // Candidate state: zero or more machine-assisted regions are valid,
-            // but this state can never become reportable benchmark truth.
-            return true
-        case .noText:
-            return regions.isEmpty && referenceTranslations.isEmpty
-        case .completed, .partial, .failed:
-            return !regions.isEmpty
-        }
+    var isInternallyConsistent: Bool {
+        TranslationGoldReviewValidator.structuralIssues(for: self).isEmpty
     }
 
     var isReportableGold: Bool {
         verificationStatus == .humanVerified
-            && expectedPageState != .unknown
-            && isInternallyConsistent
+            && TranslationGoldReviewValidator.reportabilityIssues(for: self).isEmpty
     }
 }
