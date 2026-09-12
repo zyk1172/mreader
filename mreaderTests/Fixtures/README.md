@@ -14,8 +14,23 @@ column cropped from that source page so the golden OCR test does not dilute
 the result with unrelated horizontal labels. The crop retains the original
 pixels and license.
 
-The larger `manga_page_publicdomainq.png` fixture is a CC0 example manga page
-from Wikimedia Commons and is retained for future page-level recovery tests.
+The larger `manga_page_publicdomainq.png` fixture is a CC0 manga-drawing page
+from Wikimedia Commons. Visual review suggests there is no translatable manga
+dialogue on the page, so `manga_page_publicdomainq.gold.json` currently stores
+a **candidate `noText` annotation**. It remains `pending` and must not contribute
+reportable quality metrics until a human reviewer explicitly verifies it.
+
+`sample_shirohage_manga.jpg` is Wikimedia Commons' `Sample of SHIROHAGE MANGA.jpg`,
+a Japanese speech-balloon manga example by しんぎんぐきゃっと, licensed under
+CC BY-SA 4.0. The repository stores the original file unchanged (SHA-1
+`8c828fc750e946ce94038a00782cbe115537c15e`). The image remains licensed under
+CC BY-SA 4.0 and is not relicensed under the repository's source-code license.
+
+- Source: https://commons.wikimedia.org/wiki/File:Sample_of_SHIROHAGE_MANGA.jpg
+- License: https://creativecommons.org/licenses/by-sa/4.0/
+- Author: しんぎんぐきゃっと
+- Fixture status: `pending` until human gold regions, reading order, grouping and
+  reference translations are completed.
 
 ## Translation quality benchmark policy
 
@@ -25,6 +40,11 @@ metrics only when `annotationStatus` is `ready`. `pending` means the image is
 licensed and available but its human gold annotations are incomplete; CI must
 not infer or fabricate missing OCR text, reading order, translation, or layout
 ground truth.
+
+Page-level annotation files additionally carry a `verificationStatus`. A
+`candidate` annotation may be useful for review and test-data preparation but
+is never reportable gold. Only `humanVerified` annotations may be paired with a
+`ready` manifest entry for page-level quality reporting.
 
 The benchmark intentionally separates metrics instead of reducing translation
 quality to one score:

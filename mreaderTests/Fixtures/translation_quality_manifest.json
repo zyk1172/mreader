@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "samples": [
     {
       "id": "japanese-vertical-tateyoko",
@@ -8,16 +8,28 @@
       "sourceLanguage": "ja",
       "annotationStatus": "ready",
       "goldText": "ノートを買った。",
-      "notes": "Deterministic OCR/CER fixture; line breaks are excluded from CER by the benchmark normalizer."
+      "notes": "Deterministic OCR/CER fixture; line breaks are excluded from CER by the benchmark normalizer.",
+      "goldAnnotation": null
     },
     {
       "id": "manga-page-publicdomainq",
       "image": "manga_page_publicdomainq.png",
       "license": "CC0",
+      "sourceLanguage": "und",
+      "annotationStatus": "pending",
+      "goldText": null,
+      "notes": "Licensed full-page negative candidate. Visual review suggests no translatable manga dialogue, but page-level gold remains pending until human verification.",
+      "goldAnnotation": "manga_page_publicdomainq.gold.json"
+    },
+    {
+      "id": "manga-page-shirohage-ja",
+      "image": "sample_shirohage_manga.jpg",
+      "license": "CC BY-SA 4.0",
       "sourceLanguage": "ja",
       "annotationStatus": "pending",
       "goldText": null,
-      "notes": "Reserved for page-level detection, structure, translation and layout annotation. Do not report quality metrics for this sample until the gold annotations are completed."
+      "goldAnnotation": null,
+      "notes": "Licensed Japanese speech-balloon manga fixture from Wikimedia Commons. Keep pending until regions, reading order, bubble grouping and reference translations are human-verified."
     }
   ]
 }

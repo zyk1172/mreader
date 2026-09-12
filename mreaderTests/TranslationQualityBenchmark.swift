@@ -77,7 +77,19 @@ struct TranslationQualityBenchmarkManifest: Codable, Equatable, Sendable {
         let sourceLanguage: String
         let annotationStatus: AnnotationStatus
         let goldText: String?
+        /// Optional page-level gold file for regions, structure and expected page state.
+        let goldAnnotation: String?
         let notes: String?
+
+        var hasGoldReference: Bool {
+            let hasText = !(goldText ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            let hasPageGold = !(goldAnnotation ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            return hasText || hasPageGold
+        }
     }
 
     let schemaVersion: Int
