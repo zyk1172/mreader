@@ -1,135 +1,77 @@
-name: iOS CI
+name: Temporary Shirohage gold review overlay
 
 on:
-  pull_request:
   push:
     branches:
-      - main
+      - codex/translation-gold-review
 
 permissions:
-  contents: read
-
-concurrency:
-  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  XCODE_PATH: /Applications/Xcode_26.5.app/Contents/Developer
-  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.5
+  contents: write
 
 jobs:
-  build-and-test:
-    name: Unit tests
-    runs-on: macos-26
-    timeout-minutes: 45
+  render:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Check whitespace
-        run: git diff --check
+      - name: Install Pillow
+        run: python3 -m pip install --quiet pillow
 
-      - name: Select Xcode and inspect simulator runtimes
+      - name: Render numbered candidate regions
         run: |
-          sudo xcode-select -s "$XCODE_PATH"
-          xcodebuild -version
-          xcrun simctl list runtimes
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
 
-      - name: Resolve Swift packages
-        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
+          image_path = Path('mreaderTests/Fixtures/sample_shirohage_manga.jpg')
+          gold_path = Path('mreaderTests/Fixtures/sample_shirohage_manga.gold.json')
+          output_path = Path('docs/shirohage-gold-review-overlay.png')
 
-      - name: Build unit-test bundle
+          image = Image.open(image_path).convert('RGB')
+          width, height = image.size
+          draw = ImageDraw.Draw(image)
+          font = ImageFont.load_default(size=32)
+          regions = sorted(json.loads(gold_path.read_text())['regions'], key=lambda item: item['readingOrder'])
+
+          line_width = max(5, round(min(width, height) * 0.0025))
+          for index, region in enumerate(regions, start=1):
+              rect = region['rect']
+              x1 = round(rect['x'] * width)
+              y1 = round(rect['y'] * height)
+              x2 = round((rect['x'] + rect['width']) * width)
+              y2 = round((rect['y'] + rect['height']) * height)
+              draw.rectangle((x1, y1, x2, y2), outline=(220, 32, 32), width=line_width)
+
+              label = str(index)
+              bbox = draw.textbbox((0, 0), label, font=font, stroke_width=1)
+              label_width = bbox[2] - bbox[0] + 18
+              label_height = bbox[3] - bbox[1] + 14
+              label_x = max(0, min(x1, width - label_width))
+              label_y = max(0, y1 - label_height)
+              draw.rectangle(
+                  (label_x, label_y, label_x + label_width, label_y + label_height),
+                  fill=(220, 32, 32)
+              )
+              draw.text(
+                  (label_x + 9, label_y + 5),
+                  label,
+                  fill=(255, 255, 255),
+                  font=font,
+                  stroke_width=1,
+                  stroke_fill=(255, 255, 255)
+              )
+
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          image.save(output_path, format='PNG', optimize=True)
+          print(f'rendered {len(regions)} regions on {width}x{height} source')
+          PY
+
+      - name: Commit overlay
         run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            build-for-testing
-
-      - name: Run unit tests
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            -only-testing:mreaderTests \
-            -resultBundlePath "$RUNNER_TEMP/MReaderUnitTests.xcresult" \
-            test-without-building
-
-      - name: Upload unit test result
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mreader-unit-test-results
-          path: |
-            ${{ runner.temp }}/MReaderUnitTests.xcresult
-            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
-          if-no-files-found: warn
-
-  ui-smoke:
-    name: UI smoke tests
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Select Xcode and inspect simulator runtimes
-        run: |
-          sudo xcode-select -s "$XCODE_PATH"
-          xcodebuild -version
-          xcrun simctl list runtimes
-
-      - name: Resolve Swift packages
-        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
-
-      - name: Build UI-test bundle
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            build-for-testing
-
-      - name: Run UI smoke tests
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            -only-testing:mreaderUITests \
-            -retry-tests-on-failure \
-            -test-iterations 2 \
-            -test-repetition-relaunch-enabled YES \
-            -resultBundlePath "$RUNNER_TEMP/MReaderUISmoke.xcresult" \
-            test-without-building
-
-      - name: Upload UI test result
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mreader-ui-smoke-results
-          path: |
-            ${{ runner.temp }}/MReaderUISmoke.xcresult
-            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
-          if-no-files-found: warn
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/shirohage-gold-review-overlay.png
+          git commit -m "docs: add Shirohage gold review overlay"
+          git push origin HEAD:codex/translation-gold-review
