@@ -45,19 +45,48 @@ jobs:
             SWIFT_STRICT_CONCURRENCY=complete \
             build-for-testing
 
+      - name: Configure benchmark test environment
+        run: |
+          XCTESTRUN="$(find "$RUNNER_TEMP/MReaderBaselineDerivedData" -name '*.xctestrun' -type f -print -quit)"
+          if [[ -z "$XCTESTRUN" ]]; then
+            echo "No xctestrun file found after build-for-testing" >&2
+            exit 1
+          fi
+
+          python3 - "$XCTESTRUN" <<'PY'
+          import pathlib
+          import plistlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          with path.open("rb") as stream:
+              xctestrun = plistlib.load(stream)
+
+          configured_targets = []
+          for target_name, target in xctestrun.items():
+              if not isinstance(target, dict):
+                  continue
+              if "TestBundlePath" not in target and "TestBundleIdentifier" not in target:
+                  continue
+              environment = target.setdefault("EnvironmentVariables", {})
+              environment["MREADER_RUN_PAGE_BENCHMARK"] = "1"
+              configured_targets.append(target_name)
+
+          if not configured_targets:
+              raise SystemExit("No test bundle configuration found in xctestrun")
+
+          with path.open("wb") as stream:
+              plistlib.dump(xctestrun, stream, sort_keys=False)
+          print(f"Configured benchmark environment for: {', '.join(configured_targets)}")
+          PY
+
+          printf 'MREADER_XCTESTRUN=%s\n' "$XCTESTRUN" >> "$GITHUB_ENV"
+
       - name: Run real-page baseline into xcresult
-        env:
-          MREADER_RUN_PAGE_BENCHMARK: "1"
         run: |
           xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
+            -xctestrun "$MREADER_XCTESTRUN" \
             -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderBaselineDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
             -only-testing:mreaderTests/TranslationFirstPageBaselineTests/testGenerateShirohagePageBaselineWhenOptedIn \
             -resultBundlePath "$RUNNER_TEMP/MReaderPageBaseline.xcresult" \
             test-without-building
