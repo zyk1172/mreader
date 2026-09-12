@@ -4409,6 +4409,7 @@ private func makeTestPageRequest(
           "id":"a","sourceText":"こんにちは","translation":"你好","translationLines":["你好"],
           "textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},
           "bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},
+          "layoutSafeRegion":{"x":0.12,"y":0.23,"width":0.46,"height":0.24},
           "textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],
           "bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"
         }]}
@@ -4421,7 +4422,7 @@ private func makeTestPageRequest(
         #expect(blocks.first?.boundingBox == CGRect(x: 0.2, y: 0.3, width: 0.2, height: 0.08))
 
         let unmatchedMultiLine = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"一二三四五六七八九十一二三四五六","translation":"多行译文","textBox":{"x":0.2,"y":0.25,"width":0.16,"height":0.24},"bubbleBox":{"x":0.1,"y":0.2,"width":0.4,"height":0.35},"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"一二三四五六七八九十一二三四五六","translation":"多行译文","textBox":{"x":0.2,"y":0.25,"width":0.16,"height":0.24},"bubbleBox":{"x":0.1,"y":0.2,"width":0.4,"height":0.35},"layoutSafeRegion":{"x":0.12,"y":0.23,"width":0.36,"height":0.29},"confidence":0.9,"classification":"dialogue"}]}
         """
         let unmatchedBlocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
             from: unmatchedMultiLine,
@@ -4433,7 +4434,7 @@ private func makeTestPageRequest(
         #expect((unmatchedBlocks.first?.estimatedFontScale ?? 0) > 0.04)
 
         let verticalVision = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"上下","translation":"上下","textBox":{"x":0.2,"y":0.25,"width":20.0/390.0,"height":40.0/780.0},"bubbleBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.2},"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"上下","translation":"上下","textBox":{"x":0.2,"y":0.25,"width":20.0/390.0,"height":40.0/780.0},"bubbleBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.2},"layoutSafeRegion":{"x":0.12,"y":0.22,"width":0.16,"height":0.16},"confidence":0.9,"classification":"dialogue"}]}
         """.replacingOccurrences(of: "20.0/390.0", with: "0.05128205")
             .replacingOccurrences(of: "40.0/780.0", with: "0.05128205")
         let verticalVisionBlock = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -4445,7 +4446,7 @@ private func makeTestPageRequest(
         #expect(abs((verticalVisionBlock?.estimatedFontScale ?? 0) - 20.0 / 390.0) < 0.001)
 
         let emptyLines = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":[],"textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":[],"textBox":{"x":0.2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"layoutSafeRegion":{"x":0.12,"y":0.23,"width":0.46,"height":0.24},"confidence":0.9,"classification":"dialogue"}]}
         """
         let emptyLineBlocks = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
             from: emptyLines,
@@ -4456,7 +4457,7 @@ private func makeTestPageRequest(
         #expect(emptyLineBlocks.first?.translationLines.isEmpty == true)
 
         let missingTextBox = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"layoutSafeRegion":{"x":0.12,"y":0.23,"width":0.46,"height":0.24},"textPolygon":[{"x":0.2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -4470,7 +4471,7 @@ private func makeTestPageRequest(
         }
 
         let emptyTranslation = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"https://example.com","translation":"","textBox":{"x":0.1,"y":0.2,"width":0.3,"height":0.05}}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"https://example.com","translation":"","textBox":{"x":0.1,"y":0.2,"width":0.3,"height":0.05},"layoutSafeRegion":{"x":0.1,"y":0.2,"width":0.3,"height":0.05}}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
@@ -4484,7 +4485,7 @@ private func makeTestPageRequest(
         }
 
         let invalidCoordinates = """
-        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"textPolygon":[{"x":2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
+        {"coordinateSpace":"normalized","items":[{"sourceText":"こんにちは","translation":"你好","translationLines":["你好"],"textBox":{"x":2,"y":0.3,"width":0.2,"height":0.08},"bubbleBox":{"x":0.1,"y":0.2,"width":0.5,"height":0.3},"layoutSafeRegion":{"x":0.12,"y":0.23,"width":0.46,"height":0.24},"textPolygon":[{"x":2,"y":0.3},{"x":0.4,"y":0.3},{"x":0.4,"y":0.38},{"x":0.2,"y":0.38}],"bubblePolygon":[{"x":0.1,"y":0.2},{"x":0.6,"y":0.2},{"x":0.6,"y":0.5},{"x":0.1,"y":0.5}],"confidence":0.9,"classification":"dialogue"}]}
         """
         do {
             _ = try AITranslator.parseVisionTranslationBlocksForDiagnostics(
