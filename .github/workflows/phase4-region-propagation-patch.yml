@@ -1,0 +1,32 @@
+name: Phase 4 region propagation
+
+on:
+  push:
+    branches:
+      - codex/translation-comic-integration
+    paths:
+      - .github/workflows/phase4-region-propagation-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/translation-comic-integration
+          fetch-depth: 0
+      - name: Apply propagation fix
+        run: python3 .github/phase4_region_propagation_patch.py
+      - name: Commit and clean helpers
+        shell: bash
+        run: |
+          rm -f .github/phase4_region_propagation_patch.py .github/workflows/phase4-region-propagation-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: preserve translation safe regions through block rebuilding'
+          git push origin HEAD:codex/translation-comic-integration
