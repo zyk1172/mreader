@@ -1,0 +1,310 @@
+name: Apply visual OCR reliability patch v5
+
+on:
+  push:
+    branches:
+      - codex/visual-ocr-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/visual-ocr-reliability
+          fetch-depth: 0
+      - name: Patch visual OCR pipeline
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('mreader/AITranslator.swift')
+          s = p.read_text()
+
+          def one(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {n}')
+              s = s.replace(old, new, 1)
+
+          one(
+          '''nonisolated struct OCRVerificationRegion: Sendable {
+              let blockID: UUID
+              let sourceRect: CGRect
+          }
+          ''',
+          '''nonisolated struct OCRVerificationRegion: Sendable {
+              let blockID: UUID
+              let sourceRect: CGRect
+          }
+
+          nonisolated struct VisionRegionTextCandidate: Equatable, Sendable {
+              let text: String
+              let confidence: Double
+          }
+          ''', 'candidate type')
+
+          fn = s.index('    static func visualVerifyOCRRegions(')
+          start = s.index('                let cropImage = UIImage(cgImage: crop, scale: 1, orientation: .up)', fn)
+          end = s.index('            } catch is CancellationError {', start)
+          s = s[:start] + '''                let cropImage = UIImage(cgImage: crop, scale: 1, orientation: .up)
+                          let review = try await recognizeVisionRegionText(
+                              image: cropImage,
+                              apiKey: apiKey,
+                              baseURL: baseURL,
+                              model: model,
+                              modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model)
+                          )
+                          let original = corrected[originalIndex]
+                          corrected[originalIndex] = visualReviewedBlock(original: original, review: review)
+                          print("MReader OCR visual text review corrected block=\\(region.blockID) confidence=\\(String(format: \"%.2f\", review.confidence))")
+          ''' + s[end:]
+
+          one(
+              '只使用 coordinateSpace、items、id、sourceText、translation、translationLines、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段',
+              '只使用 coordinateSpace、items、id、sourceText、translation、translationLines、textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段',
+              'translation system fields')
+          one(
+              '只使用 coordinateSpace、items、id、sourceText、textBox、bubbleBox、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段',
+              '只使用 coordinateSpace、items、id、sourceText、textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段',
+              'recognition system fields')
+
+          one(
+              '        let defaultMode: VisionResponseFormatMode = usesTranslationSchema ? .jsonSchema : .jsonObject\n',
+              '        let defaultMode: VisionResponseFormatMode = .jsonSchema\n',
+              'recognition response mode')
+
+          one(
+          '''        case .jsonSchema:
+                      guard usesTranslationSchema else {
+                          return .jsonObject
+                      }
+                      guard let schema = try? JSONSerialization.data(
+                          withJSONObject: offlineVisionTranslationSchema()
+                      ) else {
+                          return nil
+                      }
+                      return .jsonSchema(name: "manga_offline_translation", schema: schema)
+          ''',
+          '''        case .jsonSchema:
+                      let schemaObject = usesTranslationSchema
+                          ? offlineVisionTranslationSchema()
+                          : visionRecognitionSchema()
+                      guard let schema = try? JSONSerialization.data(withJSONObject: schemaObject) else {
+                          return nil
+                      }
+                      return .jsonSchema(
+                          name: usesTranslationSchema ? "manga_offline_translation" : "manga_vision_recognition",
+                          schema: schema
+                      )
+          ''', 'schema transport')
+
+          marker = '    private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {\n'
+          if s.count(marker) != 1:
+              raise SystemExit(f'recognizeVisionImage marker count={s.count(marker)}')
+          helper = '''    private static func recognizeVisionRegionText(
+              image: UIImage,
+              apiKey: String,
+              baseURL: String,
+              model: String,
+              modelDescriptor: AIModelDescriptor
+          ) async throws -> VisionRegionTextCandidate {
+              guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  throw VisionTranslationError.api("未配置 API Key")
+              }
+              guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  throw VisionTranslationError.api("未配置模型")
+              }
+              let prepared = resizedImageForVision(image, maxDimension: 1536)
+              guard let imageDataURL = encodedVisionImageDataURL(prepared) else {
+                  throw VisionTranslationError.imageEncodingFailed
+              }
+              let systemPrompt = "你只做漫画局部图片的原文转录。不要翻译，不要返回坐标，不要描述画面，不要输出思考过程。只返回 sourceText 和 confidence。"
+              let prompt = """
+              这是已经由本地 OCR 定位好的单个漫画文字区域裁剪。
+              只逐字抄录图片内实际可见的原文，不猜裁剪外内容，不翻译，不补剧情。
+              保留标点、数字、拉长音、小假名和大小写；竖排按自然阅读顺序合并为一个字符串。
+              不需要任何坐标。
+              只输出 JSON：{"sourceText":"图中原文","confidence":0.95}
+              若确实没有可读文字，输出 {"sourceText":"","confidence":0.0}。
+              """
+
+              let data: Data
+              do {
+                  data = try await visionCompletionData(
+                      apiKey: apiKey,
+                      baseURL: baseURL,
+                      model: model,
+                      modelDescriptor: modelDescriptor,
+                      systemPrompt: systemPrompt,
+                      prompt: prompt,
+                      imageDataURL: imageDataURL,
+                      responseFormat: .jsonObject
+                  )
+              } catch {
+                  guard isUnsupportedResponseFormat(error) else { throw error }
+                  data = try await visionCompletionData(
+                      apiKey: apiKey,
+                      baseURL: baseURL,
+                      model: model,
+                      modelDescriptor: modelDescriptor,
+                      systemPrompt: systemPrompt,
+                      prompt: prompt,
+                      imageDataURL: imageDataURL,
+                      responseFormat: nil
+                  )
+              }
+              guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let content = assistantContent(from: json),
+                    let result = parseVisionRegionTextCandidate(from: content) else {
+                  throw VisionTranslationError.emptyResult
+              }
+              return result
+          }
+
+          private static func parseVisionRegionTextCandidate(from content: String) -> VisionRegionTextCandidate? {
+              if let data = normalizedVisionJSONData(from: content),
+                 let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                  var item: [String: Any]?
+                  if let dictionary = object as? [String: Any] {
+                      let direct = firstString(in: dictionary, keys: ["sourceText", "source_text", "text", "original", "originalText"])
+                      item = direct.isEmpty ? (dictionary["items"] as? [[String: Any]])?.first : dictionary
+                  } else if let array = object as? [[String: Any]] {
+                      item = array.first
+                  }
+                  guard let item else { return nil }
+                  let value = firstString(in: item, keys: ["sourceText", "source_text", "text", "original", "originalText"])
+                      .trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !value.isEmpty, !looksLikeVisionRefusal(value) else { return nil }
+                  return VisionRegionTextCandidate(
+                      text: value,
+                      confidence: min(max(doubleValue(from: item["confidence"]) ?? 0.75, 0), 1)
+                  )
+              }
+              var plain = content.trimmingCharacters(in: .whitespacesAndNewlines)
+              if plain.hasPrefix("```") {
+                  plain = plain.replacingOccurrences(of: #"^```(?:text|markdown)?\\s*|\\s*```$"#, with: "", options: [.regularExpression, .caseInsensitive])
+                      .trimmingCharacters(in: .whitespacesAndNewlines)
+              }
+              guard !plain.isEmpty, !looksLikeVisionRefusal(plain) else { return nil }
+              return VisionRegionTextCandidate(text: plain, confidence: 0.6)
+          }
+
+          private static func looksLikeVisionRefusal(_ text: String) -> Bool {
+              let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+              guard value.count <= 240 else { return false }
+              let markers = [
+                  "无法识别", "无法读取", "无法返回", "不能识别", "不能读取",
+                  "未检测到文字", "没有检测到文字", "未发现文字", "没有可读文字",
+                  "抱歉，我无法", "看不到图片", "无法查看图片",
+                  "unable to read", "unable to identify", "cannot read", "can't read",
+                  "cannot view", "can't view", "no readable text", "no text found"
+              ]
+              return markers.contains { value.contains($0) }
+          }
+
+          private static func visualReviewedBlock(original: TextBlock, review: VisionRegionTextCandidate) -> TextBlock {
+              TextBlock(
+                  id: original.id,
+                  text: review.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                  boundingBox: original.boundingBox,
+                  translation: original.translation,
+                  confidence: max(original.confidence, review.confidence),
+                  ocrSource: "visual-review-text",
+                  isFiltered: false,
+                  filterReason: nil,
+                  estimatedFontScale: original.estimatedFontScale,
+                  textColorHex: original.textColorHex,
+                  bubbleBox: original.bubbleBox,
+                  layoutSafeRegion: original.layoutSafeRegion,
+                  polygon: original.polygon,
+                  bubblePolygon: original.bubblePolygon,
+                  translationLines: original.translationLines,
+                  textOrientation: original.textOrientation,
+                  layoutRole: original.layoutRole,
+                  sourceLineCount: original.sourceLineCount
+              )
+          }
+
+          static func parseVisionRegionTextCandidateForDiagnostics(from content: String) -> VisionRegionTextCandidate? {
+              parseVisionRegionTextCandidate(from: content)
+          }
+
+          static func visualReviewedBlockForDiagnostics(original: TextBlock, review: VisionRegionTextCandidate) -> TextBlock {
+              visualReviewedBlock(original: original, review: review)
+          }
+
+          '''
+          s = s.replace(marker, helper + marker, 1)
+
+          schema_marker = '    private static func offlineVisionTranslationSchema() -> [String: Any] {\n'
+          if s.count(schema_marker) != 1:
+              raise SystemExit(f'schema marker count={s.count(schema_marker)}')
+          schema = '''    private static func visionRecognitionSchema() -> [String: Any] {
+              let point: [String: Any] = [
+                  "type": "object", "additionalProperties": false,
+                  "required": ["x", "y"],
+                  "properties": [
+                      "x": ["type": "number", "minimum": 0, "maximum": 1],
+                      "y": ["type": "number", "minimum": 0, "maximum": 1]
+                  ]
+              ]
+              let rect: [String: Any] = [
+                  "type": "object", "additionalProperties": false,
+                  "required": ["x", "y", "width", "height"],
+                  "properties": [
+                      "x": ["type": "number", "minimum": 0, "maximum": 1],
+                      "y": ["type": "number", "minimum": 0, "maximum": 1],
+                      "width": ["type": "number", "exclusiveMinimum": 0, "maximum": 1],
+                      "height": ["type": "number", "exclusiveMinimum": 0, "maximum": 1]
+                  ]
+              ]
+              let nullableRect: [String: Any] = ["anyOf": [rect, ["type": "null"]]]
+              let polygon: [String: Any] = ["type": "array", "items": point]
+              return [
+                  "type": "object", "additionalProperties": false,
+                  "required": ["coordinateSpace", "items"],
+                  "properties": [
+                      "coordinateSpace": ["type": "string", "enum": ["normalized"]],
+                      "items": [
+                          "type": "array",
+                          "items": [
+                              "type": "object", "additionalProperties": false,
+                              "required": ["id", "sourceText", "textBox", "bubbleBox", "layoutSafeRegion", "textPolygon", "bubblePolygon", "confidence", "classification"],
+                              "properties": [
+                                  "id": ["type": "string"],
+                                  "sourceText": ["type": "string"],
+                                  "textBox": rect,
+                                  "bubbleBox": nullableRect,
+                                  "layoutSafeRegion": nullableRect,
+                                  "textPolygon": polygon,
+                                  "bubblePolygon": polygon,
+                                  "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                                  "classification": ["type": "string", "enum": ["dialogue", "narration", "soundEffect", "url", "advertisement", "watermark", "copyright", "pageNumber"]]
+                              ]
+                          ]
+                      ]
+                  ]
+              ]
+          }
+
+          '''
+          s = s.replace(schema_marker, schema + schema_marker, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+          git diff --stat
+      - name: Commit product patch and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mreader/AITranslator.swift
+          git rm .github/workflows/apply-visual-ocr-reliability-v5.yml
+          git commit -m "fix: make visual OCR review text-first"
+          git push origin HEAD:codex/visual-ocr-reliability
