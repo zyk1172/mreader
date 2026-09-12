@@ -26,6 +26,10 @@ struct TranslationBenchmarkHumanReviewScore: Equatable, Sendable {
 }
 
 enum TranslationBenchmarkPageState: String, Codable, Equatable, Sendable {
+    /// Candidate annotations use `unknown` until a human reviewer explicitly
+    /// determines whether the source page is complete, partial, empty or failed.
+    /// Unknown expectations are never reportable benchmark truth.
+    case unknown
     case completed
     case partial
     case noText
@@ -140,20 +144,24 @@ extension TranslationQualityBenchmark {
     static func completenessScore(
         observations: [TranslationBenchmarkCompletenessObservation]
     ) -> TranslationBenchmarkCompletenessScore {
-        guard !observations.isEmpty else {
+        // Machine-assisted candidates deliberately carry an unknown expected
+        // state. They must not affect quality metrics until a person resolves
+        // the page state and promotes the annotation to human gold.
+        let scorable = observations.filter { $0.expected != .unknown }
+        guard !scorable.isEmpty else {
             return TranslationBenchmarkCompletenessScore(
                 exactStateAccuracy: 1,
                 noTextFalsePositiveRate: 0
             )
         }
-        let exact = observations.filter { $0.expected == $0.actual }.count
-        let pagesThatContainOrFailedToResolveText = observations.filter { $0.expected != .noText }
+        let exact = scorable.filter { $0.expected == $0.actual }.count
+        let pagesThatContainOrFailedToResolveText = scorable.filter { $0.expected != .noText }
         let falseNoText = pagesThatContainOrFailedToResolveText.filter { $0.actual == .noText }.count
         let falsePositiveRate = pagesThatContainOrFailedToResolveText.isEmpty
             ? 0
             : Double(falseNoText) / Double(pagesThatContainOrFailedToResolveText.count)
         return TranslationBenchmarkCompletenessScore(
-            exactStateAccuracy: Double(exact) / Double(observations.count),
+            exactStateAccuracy: Double(exact) / Double(scorable.count),
             noTextFalsePositiveRate: falsePositiveRate
         )
     }
