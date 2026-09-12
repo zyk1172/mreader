@@ -5001,7 +5001,10 @@ struct LocalImageView: View {
                     sourceLanguage: comicTranslationSourceLanguage,
                     previousContext: TranslationContextBuilder.promptContext(
                         previousContext: inheritedContext,
-                        pageBlocks: blocks
+                        pageBlocks: pageSnapshot,
+                        requestedIndexes: pageSnapshot.indices.filter { index in
+                            missingIDs.contains(pageSnapshot[index].id)
+                        }
                     ),
                     modelDescriptor: activeConfiguration.textModelDescriptor
                 )
@@ -5095,10 +5098,8 @@ struct LocalImageView: View {
                     sourceLanguage: comicTranslationSourceLanguage,
                     previousContext: TranslationContextBuilder.promptContext(
                         previousContext: inheritedContext,
-                        pageBlocks: pageSnapshot,
-                        requestedIndexes: pageSnapshot.indices.filter { index in
-                            missingIDs.contains(pageSnapshot[index].id)
-                        }
+                        pageBlocks: blocks,
+                        requestedIndexes: Array(blocks.indices)
                     ),
                     modelDescriptor: activeConfiguration.textModelDescriptor
                 )
