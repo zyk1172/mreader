@@ -2,7 +2,8 @@ import Foundation
 
 /// Page-level annotation schema used to prepare human gold truth. Candidate
 /// annotations may be machine/model-assisted, but they are never reportable
-/// until a human reviewer explicitly marks them as `humanVerified`.
+/// until a human reviewer explicitly marks them as `humanVerified` and resolves
+/// the expected page state.
 struct TranslationBenchmarkPageGold: Codable, Equatable, Sendable {
     enum VerificationStatus: String, Codable, Sendable {
         case candidate
@@ -18,14 +19,26 @@ struct TranslationBenchmarkPageGold: Codable, Equatable, Sendable {
     let notes: String?
 
     var isInternallyConsistent: Bool {
-        if expectedPageState == .noText {
-            return regions.isEmpty && referenceTranslations.isEmpty
-        }
         let regionIDs = Set(regions.map(\.id))
-        return !regions.isEmpty && Set(referenceTranslations.keys).isSubset(of: regionIDs)
+        guard Set(referenceTranslations.keys).isSubset(of: regionIDs) else {
+            return false
+        }
+
+        switch expectedPageState {
+        case .unknown:
+            // Candidate state: zero or more machine-assisted regions are valid,
+            // but this state can never become reportable benchmark truth.
+            return true
+        case .noText:
+            return regions.isEmpty && referenceTranslations.isEmpty
+        case .completed, .partial, .failed:
+            return !regions.isEmpty
+        }
     }
 
     var isReportableGold: Bool {
-        verificationStatus == .humanVerified && isInternallyConsistent
+        verificationStatus == .humanVerified
+            && expectedPageState != .unknown
+            && isInternallyConsistent
     }
 }
