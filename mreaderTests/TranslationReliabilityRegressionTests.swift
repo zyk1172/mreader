@@ -41,7 +41,10 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
         XCTAssertThrowsError(
             try AIPageTranslationParser.parseStrict(payload, expectedItems: expected, target: .english)
         ) { error in
-            XCTAssertEqual(error as? AIPageTranslationParserError, .pageLanguageMismatch)
+            guard case AIPageTranslationParserError.pageLanguageMismatch = error else {
+                XCTFail("Expected pageLanguageMismatch, got \(error)")
+                return
+            }
         }
     }
 
