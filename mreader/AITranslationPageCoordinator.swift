@@ -22,7 +22,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    static let translationCacheRevision = "translation-v19-canonical-bubble-region-measured-paragraph"
+    static let translationCacheRevision = "translation-v20-partial-aware-canonical-translation"
     static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
@@ -87,6 +87,11 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
 nonisolated struct AITranslationOCRResult: Sendable {
     let blocks: [TextBlock]
     let missingBlockIDs: [UUID]
+}
+
+nonisolated struct AITranslationPipelineResult: Sendable {
+    let blocks: [TextBlock]
+    let isComplete: Bool
 }
 
 nonisolated private struct CachedTranslationBlock: Codable, Sendable {
@@ -184,7 +189,7 @@ actor AITranslationPageCoordinator {
     private let cacheDirectory: URL
     private var memoryCache: [String: [TextBlock]] = [:]
     private var memoryOrder: [String] = []
-    private var inFlight: [String: Task<[TextBlock], Error>] = [:]
+    private var inFlight: [String: Task<AITranslationPipelineResult, Error>] = [:]
     private let memoryPageLimit = 80
     private let diskByteLimit: Int64 = 50 * 1024 * 1024
 
@@ -202,7 +207,7 @@ actor AITranslationPageCoordinator {
         }
         if let existing = inFlight[key] {
             print("MReader AI translation joined in-flight key=\(key.prefix(10))")
-            return try await existing.value
+            return try await existing.value.blocks
         }
 
         let task = Task.detached(priority: .userInitiated) {
@@ -210,10 +215,14 @@ actor AITranslationPageCoordinator {
         }
         inFlight[key] = task
         do {
-            let blocks = try await task.value
+            let result = try await task.value
             inFlight[key] = nil
-            store(blocks, forKey: key)
-            return blocks
+            if result.isComplete {
+                store(result.blocks, forKey: key)
+            } else {
+                print("MReader AI translation cache skipped explicit partial key=\(key.prefix(10)) blocks=\(result.blocks.count)")
+            }
+            return result.blocks
         } catch {
             inFlight[key] = nil
             throw error
@@ -252,6 +261,13 @@ actor AITranslationPageCoordinator {
 
     private func store(_ blocks: [TextBlock], forKey key: String) {
         guard !blocks.isEmpty else { return }
+        let isComplete = blocks.allSatisfy { block in
+            !(block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard isComplete else {
+            print("MReader AI translation cache skipped partial key=\(key.prefix(10)) blocks=\(blocks.count)")
+            return
+        }
         insertIntoMemory(blocks, forKey: key)
         let page = CachedTranslationPage(
             createdAt: Date(),
@@ -303,12 +319,16 @@ actor AITranslationPageCoordinator {
 }
 
 nonisolated enum AITranslationPagePipeline {
-    static func translate(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
+    static func translate(_ request: AITranslationPageRequest) async throws -> AITranslationPipelineResult {
         switch request.mode {
         case .ocr:
-            return try await translateOCRPageWithStatus(request).blocks
+            let result = try await translateOCRPageWithStatus(request)
+            return AITranslationPipelineResult(
+                blocks: result.blocks,
+                isComplete: result.missingBlockIDs.isEmpty
+            )
         case .vision:
-            return try await TranslationRuntimeService.translateVisionPage(
+            let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
@@ -321,6 +341,10 @@ nonisolated enum AITranslationPagePipeline {
                 sourceLanguage: request.sourceLanguagePreference,
                 visionModelDescriptor: request.configuration.visionModelDescriptor,
                 textFallbackModelDescriptor: request.configuration.textModelDescriptor
+            )
+            return AITranslationPipelineResult(
+                blocks: result.blocks,
+                isComplete: result.isComplete
             )
         }
     }
@@ -361,7 +385,7 @@ nonisolated enum AITranslationPagePipeline {
             let translation = (translated[index].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? translated[index].id : nil
         }
-        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingIDs)
+        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingIDs)
     }
 
     private static func translateOCR(_ request: AITranslationPageRequest) async throws -> [TextBlock] {
@@ -431,7 +455,7 @@ nonisolated enum AITranslationPagePipeline {
             let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? block.id : nil
         }
-        return AITranslationOCRResult(blocks: completed, missingBlockIDs: missingBlockIDs)
+        return AITranslationOCRResult(blocks: translated, missingBlockIDs: missingBlockIDs)
     }
 
     /// Vision=noText 的复核必须复用正常 OCR 的 annotate -> filter -> segment 链路，
@@ -462,8 +486,9 @@ nonisolated enum AITranslationPagePipeline {
     ) async throws {
         do {
             try await applyBatchTranslation(to: &blocks, indexes: indexes, request: request)
-        } catch let error as AITranslationRequestError where error.isFormatFailure {
-            print("MReader OCR 整页翻译格式失败，逐气泡兜底: \(error.localizedDescription)")
+        } catch let error as AITranslationRequestError
+            where error.isFormatFailure || error.isTranslationContentFailure {
+            print("MReader OCR 整页翻译需要逐气泡恢复: \(error.localizedDescription)")
             try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)
         }
     }

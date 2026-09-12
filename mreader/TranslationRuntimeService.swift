@@ -108,4 +108,34 @@ nonisolated enum TranslationRuntimeService {
             textFallbackModelDescriptor: textFallbackModelDescriptor
         )
     }
+    static func translateVisionPageWithStatus(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        textFallbackModel: String,
+        targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue,
+        promptTemplate: String = AITranslator.defaultVisionTranslationPromptTemplate,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0,
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        visionModelDescriptor: AIModelDescriptor? = nil,
+        textFallbackModelDescriptor: AIModelDescriptor? = nil
+    ) async throws -> AIVisionTranslationResult {
+        try await AITranslator.translateVisionPageWithStatus(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            visionModel: visionModel,
+            textFallbackModel: textFallbackModel,
+            targetLanguage: targetLanguage,
+            promptTemplate: promptTemplate,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            sourceLanguage: sourceLanguage,
+            visionModelDescriptor: visionModelDescriptor,
+            textFallbackModelDescriptor: textFallbackModelDescriptor
+        )
+    }
+
 }
