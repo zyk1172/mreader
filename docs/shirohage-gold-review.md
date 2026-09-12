@@ -10,7 +10,7 @@ This sheet is the human handoff for the first full-page manga benchmark. The ori
 
 ## Review overlay
 
-`docs/shirohage-gold-review-overlay.png` is the original machine-candidate overlay used to identify the bad regions. It is retained as review evidence, but its old numbers no longer map one-to-one to the corrected candidate below.
+`docs/shirohage-gold-review-overlay.png` has been regenerated from the corrected Gold candidate. Its labels `1` through `10` map directly to the corrected regions in the table below. The original user-provided screenshot remains the review evidence used to identify the machine candidate's false positives, fragmentation and missed middle column.
 
 The user-provided screenshot established the following corrections:
 
