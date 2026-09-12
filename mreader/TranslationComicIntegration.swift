@@ -96,9 +96,10 @@ extension TextBlock {
     nonisolated var textRegion: CGRect { boundingBox }
     nonisolated var detectedBubble: CGRect? { bubbleBox }
 
-    /// `layoutSafeRegion` is allowed to be nil for legacy/local OCR. Callers
-    /// then fall back to a validated physical bubble or a bounded local region;
-    /// they must never reinterpret an arbitrary safe rectangle as a bubble.
+    /// `layoutSafeRegion` is allowed to be nil for legacy/local OCR. New offline
+    /// results persist it independently from `bubbleBox`; callers fall back to a
+    /// validated physical bubble or bounded local region only when it is absent.
+    /// They must never reinterpret an arbitrary safe rectangle as a bubble.
     nonisolated var effectiveLayoutSafeRegion: CGRect? {
         layoutSafeRegion
     }
