@@ -91,6 +91,12 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
         XCTAssertLessThan(first.range(of: "第1页")!.lowerBound, first.range(of: "第2页")!.lowerBound)
     }
 
+    func testContextVersionChangesWithSemanticContent() {
+        let first = TranslationContextBuilder.versionedContext(["原文=兄さん → 译文=哥哥"])
+        let second = TranslationContextBuilder.versionedContext(["原文=姉さん → 译文=姐姐"])
+        XCTAssertNotEqual(first.components(separatedBy: "\n").first, second.components(separatedBy: "\n").first)
+    }
+
     func testVisualReviewIncludesRejectedAndVerticalCandidates() {
         let rejected = block("faint", x: 0.05, filtered: true)
         let vertical = block("縦書き", x: 0.30, orientation: .vertical)
