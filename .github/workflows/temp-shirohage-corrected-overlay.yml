@@ -1,0 +1,68 @@
+name: Temporary corrected Shirohage overlay
+
+on:
+  push:
+    branches:
+      - codex/translation-gold-review
+    paths:
+      - .github/workflows/temp-shirohage-corrected-overlay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/translation-gold-review
+      - name: Install Pillow
+        run: python -m pip install pillow
+      - name: Render corrected numbered regions
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+
+          root = Path('.')
+          image_path = root / 'mreaderTests/Fixtures/sample_shirohage_manga.jpg'
+          gold_path = root / 'mreaderTests/Fixtures/sample_shirohage_manga.gold.json'
+          output_path = root / 'docs/shirohage-gold-review-overlay.png'
+
+          image = Image.open(image_path).convert('RGB')
+          gold = json.loads(gold_path.read_text())
+          draw = ImageDraw.Draw(image)
+          width, height = image.size
+          line_width = max(4, round(width / 700))
+          label_pad = max(8, round(width / 500))
+          label_size = max(40, round(width / 90))
+
+          for index, region in enumerate(gold['regions'], start=1):
+              rect = region['rect']
+              x0 = round(rect['x'] * width)
+              y0 = round(rect['y'] * height)
+              x1 = round((rect['x'] + rect['width']) * width)
+              y1 = round((rect['y'] + rect['height']) * height)
+              draw.rectangle((x0, y0, x1, y1), outline='red', width=line_width)
+              label = str(index)
+              bx0 = x0
+              by0 = max(0, y0 - label_size - label_pad)
+              bx1 = x0 + label_size + label_pad * 2
+              by1 = y0
+              draw.rectangle((bx0, by0, bx1, by1), fill='red')
+              draw.text((bx0 + label_pad, by0 + label_pad // 2), label, fill='white')
+
+          image.save(output_path)
+          PY
+      - name: Commit corrected overlay
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/shirohage-gold-review-overlay.png
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'docs: refresh corrected Shirohage review overlay'
+          git push origin HEAD:codex/translation-gold-review
