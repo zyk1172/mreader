@@ -4,42 +4,60 @@ Sample: `manga-page-shirohage-ja`
 Source image: `mreaderTests/Fixtures/sample_shirohage_manga.jpg`  
 Pinned SHA-1: `8c828fc750e946ce94038a00782cbe115537c15e`  
 License: CC BY-SA 4.0, author しんぎんぐきゃっと  
-Current status: **candidate / not reportable**
+Current status: **visually corrected candidate / not reportable**
 
-This sheet is the human handoff for the first full-page manga benchmark. The machine-generated candidate is intentionally not benchmark truth. A reviewer must inspect the original image, correct every text region, confirm reading order and bubble grouping, resolve the page state, and only then add the review receipt and promote the manifest entry to `ready`.
+This sheet is the human handoff for the first full-page manga benchmark. The original machine-generated candidate has now been corrected against the user-provided numbered review image: false-positive face/newspaper regions were removed and fragmented OCR was rebuilt into complete vertical text columns. The result is still intentionally not benchmark truth until a person gives final confirmation against the pinned source image.
 
 ## Review overlay
 
-The generated overlay is stored at `docs/shirohage-gold-review-overlay.png`. Each numbered box corresponds to the candidate region below. The overlay is for review only; it is not a source of truth.
+`docs/shirohage-gold-review-overlay.png` is the original machine-candidate overlay used to identify the bad regions. It is retained as review evidence, but its old numbers no longer map one-to-one to the corrected candidate below.
 
-## Candidate regions
+The user-provided screenshot established the following corrections:
 
-| # | Region | Current OCR candidate | Reading order | Bubble ID |
+- old regions 3 and 4: delete as face/art false positives;
+- old regions 5 and 6: delete as newspaper/art false positives;
+- old region 1: do not keep as an isolated one-character fragment; rebuild the full right narration block;
+- old region 9: do not keep as an isolated sentence tail; rebuild the full lower-left narration block;
+- old regions 7 and 8: retain as evidence for the left-top speech balloon, while adding its previously missed middle column.
+
+## Corrected candidate regions
+
+Reading order follows Japanese vertical layout: rightmost column first within each text block, then move leftward.
+
+| # | Region | Corrected source text | Reading order | Bubble ID |
 | ---: | --- | --- | ---: | --- |
-| 1 | `region-001` | `は` | 0 | none |
-| 2 | `region-002` | `があるか」です。` | 1 | none |
-| 3 | `region-003` | `い` | 2 | none |
-| 4 | `region-004` | `い` | 3 | none |
-| 5 | `region-005` | `ハト` | 4 | none |
-| 6 | `region-006` | `OEIIII` | 5 | none |
-| 7 | `region-007` | `、ウッキペディアに` | 6 | none |
-| 8 | `region-008` | `有名人です。` | 7 | none |
-| 9 | `region-009` | `です。` | 8 | none |
+| 1 | `region-001` | `「有名人」の基準は、` | 0 | none |
+| 2 | `region-002` | `「ウィキペディアに記事` | 1 | none |
+| 3 | `region-003` | `があるか」です。` | 2 | none |
+| 4 | `region-004` | `ウィキペディアに` | 3 | `bubble-left-top` |
+| 5 | `region-005` | `のってたら` | 4 | `bubble-left-top` |
+| 6 | `region-006` | `有名人です。` | 5 | `bubble-left-top` |
+| 7 | `region-007` | `ウィキペディアにのって` | 6 | none |
+| 8 | `region-008` | `ないのに有名人のよう` | 7 | none |
+| 9 | `region-009` | `にふるまうのは自惚れ` | 8 | none |
+| 10 | `region-010` | `です。` | 9 | none |
 
-The strings above are pipeline output, not verified transcription. In particular, Latin-looking `OEIIII`, isolated one-character regions, and punctuation/wording must be checked against the source image rather than accepted because OCR produced them.
+The three left-top columns share one physical speech-balloon ID. The right and lower-left rectangular narration boxes intentionally have no `bubbleID`; the benchmark must not fabricate speech balloons for rectangular text panels. Newspaper scribbles and face marks are excluded because they are not stable translatable Japanese text.
 
-## Human approval checklist
+## Current reconstructed text
 
-- [ ] Every visible translatable Japanese text region is represented exactly once.
-- [ ] False-positive OCR regions are removed.
-- [ ] Region rectangles match the intended text, not nearby art or another balloon.
-- [ ] Japanese transcription is corrected character-by-character.
-- [ ] Reading order is contiguous from `0` and matches intended manga reading order.
-- [ ] Lines belonging to the same physical speech balloon share one non-empty `bubbleID`; narration/SFX without a physical balloon remain independent.
-- [ ] `expectedPageState` is explicitly changed from `unknown` to the reviewed state.
-- [ ] Reference translations are added only when they have been reviewed; multiple natural translations may be handled by later human-review scoring rather than forced exact-match equivalence.
+The corrected regions reconstruct these three visible text blocks:
+
+- Right narration: `「有名人」の基準は、「ウィキペディアに記事があるか」です。`
+- Left-top speech balloon: `ウィキペディアにのってたら有名人です。`
+- Lower-left narration: `ウィキペディアにのってないのに有名人のようにふるまうのは自惚れです。`
+
+## Final human approval checklist
+
+- [x] Machine false-positive face/newspaper regions removed from the corrected candidate.
+- [x] Fragmented candidate text rebuilt into complete visible vertical columns.
+- [x] Reading order is contiguous from `0` and follows the visible vertical text layout.
+- [x] The left-top physical speech balloon uses one shared `bubbleID`; narration boxes remain independent.
+- [ ] A human reviewer has checked every corrected transcription character against the pinned source image.
+- [ ] A human reviewer has checked every corrected rectangle against the pinned source image.
+- [ ] `expectedPageState` has been explicitly changed from `unknown` to the reviewed state.
 - [ ] `review` records the human reviewer, ISO-8601 review time, `visualHumanReview`, and the pinned source-image SHA-1 above.
-- [ ] `verificationStatus` is changed to `humanVerified` only after all checks are complete.
+- [ ] `verificationStatus` has been changed to `humanVerified` only after final confirmation.
 - [ ] `translation_quality_manifest.json` changes this sample from `pending` to `ready` only after the annotation is reportable.
 
 ## Reportable gate
@@ -49,6 +67,6 @@ The test code rejects page-level scoring unless all of the following are true:
 1. the annotation is structurally valid;
 2. the page state is resolved;
 3. `verificationStatus == humanVerified`;
-4. a valid human review receipt is present.
+4. a valid human review receipt is present and bound to the pinned source image.
 
-Until then, OCR output can be used for diagnostics and candidate preparation but cannot produce official detection recall, CER, reading-order, or grouping claims.
+Until the final human confirmation is recorded, this corrected candidate can be used for review and diagnostics but cannot produce official detection recall, CER, reading-order, or grouping claims.
