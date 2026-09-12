@@ -626,20 +626,34 @@ class AITranslator {
     nonisolated static func visualVerificationRegionsForDiagnostics(
         _ blocks: [TextBlock],
         confidenceThreshold: Double = 0.72,
-        maximumCount: Int = 3
+        maximumCount: Int = 6
     ) -> [OCRVerificationRegion] {
         blocks
             .filter { block in
-                block.confidence < confidenceThreshold || appearsGarbled(block.text)
+                block.isFiltered
+                    || block.textOrientation == .vertical
+                    || block.confidence < confidenceThreshold
+                    || appearsGarbled(block.text)
             }
             .sorted { lhs, rhs in
+                if lhs.isFiltered != rhs.isFiltered { return lhs.isFiltered }
+                let lhsVertical = lhs.textOrientation == .vertical
+                let rhsVertical = rhs.textOrientation == .vertical
+                if lhsVertical != rhsVertical { return lhsVertical }
                 if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }
                 return lhs.boundingBox.minY < rhs.boundingBox.minY
             }
             .prefix(max(maximumCount, 0))
             .map { block in
-                let horizontalPadding = max(block.boundingBox.width * 0.15, 0.008)
-                let verticalPadding = max(block.boundingBox.height * 0.15, 0.006)
+                // A vertical crop needs enough horizontal neighbourhood to see
+                // sibling columns and the physical bubble instead of reviewing
+                // one isolated column forever.
+                let horizontalPadding = block.textOrientation == .vertical
+                    ? max(block.boundingBox.width * 1.25, 0.04)
+                    : max(block.boundingBox.width * 0.20, 0.010)
+                let verticalPadding = block.textOrientation == .vertical
+                    ? max(block.boundingBox.height * 0.20, 0.010)
+                    : max(block.boundingBox.height * 0.20, 0.008)
                 let padded = block.boundingBox.insetBy(
                     dx: -horizontalPadding,
                     dy: -verticalPadding
@@ -675,7 +689,7 @@ class AITranslator {
     nonisolated static let defaultTranslationPromptTemplate = defaultTranslationStyleInstructions
 
     nonisolated static let defaultVisionTranslationPromptTemplate = """
-    你是一个漫画图片文字识别与翻译助手。请只处理图片中的文字，不要描述画面、人物、动作、身体、场景或剧情，不要评价、总结、续写或添加任何新细节。
+    你是一个漫画图片文字识别与翻译助手。可以利用画面中的指代方向、说话者位置和表情等视觉线索消歧，但这些线索只能用于判断文字含义；最终只处理图片中的文字，不要描述画面、人物、动作、身体、场景或剧情，不要评价、总结、续写或添加任何新细节。无法确定代词指向时不要凭空补人名。
     你的任务是：识别漫画页面中的对白、旁白、拟声词和必要的画面文字，翻译为：{targetLanguage}，并给出文字框和推荐显示气泡框坐标。
     这一页的阅读顺序是{readingOrder}，items 必须按该阅读顺序排列；被切成多列或多段的同一句话要先按阅读顺序还原成完整一句再翻译，不要按碎片逐段直译。
     如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
@@ -1027,6 +1041,7 @@ class AITranslator {
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
         sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = "",
         visionModelDescriptor: AIModelDescriptor? = nil,
         textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
@@ -1041,6 +1056,7 @@ class AITranslator {
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
             sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
             visionModelDescriptor: visionModelDescriptor,
             textFallbackModelDescriptor: textFallbackModelDescriptor
         )
@@ -1058,6 +1074,7 @@ class AITranslator {
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
         sourceLanguage: TranslationSourceLanguage? = nil,
+        previousContext: String = "",
         visionModelDescriptor: AIModelDescriptor? = nil,
         textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> AIVisionTranslationResult {
@@ -1072,7 +1089,10 @@ class AITranslator {
             viewportAspect: viewportAspect,
             additionalInstructions: "",
             translationTarget: target,
-            translationPromptTemplate: promptTemplate,
+            translationPromptTemplate: TranslationContextBuilder.visionPrompt(
+                basePrompt: promptTemplate,
+                previousContext: previousContext
+            ),
             strictTranslationGeometry: false
         )
         try Task.checkCancellation()
@@ -1091,6 +1111,11 @@ class AITranslator {
                 target: target,
                 promptTemplate: defaultTranslationPromptTemplate,
                 sourceLanguage: sourceLanguage,
+                previousContext: TranslationContextBuilder.promptContext(
+                    previousContext: previousContext,
+                    pageBlocks: translated,
+                    requestedIndexes: missingIndexes
+                ),
                 modelDescriptor: textFallbackModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: textFallbackModel)
             )
             for (position, index) in missingIndexes.enumerated() {
@@ -1363,7 +1388,8 @@ class AITranslator {
         modelDescriptor: AIModelDescriptor? = nil,
         sourceLanguagePreference: TranslationSourceLanguage? = nil,
         detectedLanguage: String? = nil,
-        visualVerificationEnabled: Bool = true
+        visualVerificationEnabled: Bool = true,
+        coverageRecoveryRequested: Bool = false
     ) async throws -> [TextBlock] {
         guard visualVerificationEnabled,
               !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1431,8 +1457,10 @@ class AITranslator {
                     translation: original.translation,
                     confidence: max(original.confidence, best.confidence),
                     ocrSource: "visual-review",
-                    isFiltered: original.isFiltered,
-                    filterReason: original.filterReason,
+                    // A rejected/uncertain local candidate that passed a
+                    // visual text+geometry match is explicitly recovered.
+                    isFiltered: false,
+                    filterReason: nil,
                     estimatedFontScale: correctedFontScale,
                     textColorHex: original.textColorHex,
                     bubbleBox: bubbleGeometry.bubbleBox,
@@ -1466,12 +1494,13 @@ class AITranslator {
         } else {
             effectiveSourceLanguage = sourceLanguagePreference
         }
-        if JapaneseVerticalOCRService.shouldRequestPageRecovery(
+        let japanesePageRecoveryRequested = JapaneseVerticalOCRService.shouldRequestPageRecovery(
             in: image,
-            existingBlocks: corrected,
+            existingBlocks: corrected.filter { !$0.isFiltered },
             isRightToLeft: isRightToLeft,
             sourceLanguagePreference: effectiveSourceLanguage
-        ) {
+        )
+        if japanesePageRecoveryRequested || coverageRecoveryRequested {
             do {
                 let recovered = try await recognizeVisionImage(
                     image: image,
@@ -1481,7 +1510,9 @@ class AITranslator {
                     model: model,
                     modelDescriptor: modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model),
                     isRightToLeft: isRightToLeft,
-                    additionalInstructions: "这是日文竖排页面的整页补漏。请识别页面中所有可读文字，包括本地 OCR 没有产生 block 的整列竖排文字；不要因为已有识别结果而省略任何文字。",
+                    additionalInstructions: japanesePageRecoveryRequested
+                        ? "这是日文竖排页面的整页补漏。请识别页面中所有可读文字，包括本地 OCR 没有产生 block 的整列竖排文字；不要因为已有识别结果而省略任何文字。"
+                        : "这是 OCR 覆盖补漏。请重新检查整页所有可读文字，特别关注被本地质量门排除的弱对比、小字号、英文或韩文横排区域；只返回图中真实存在的文字，不要根据上下文猜字。",
                     translationTarget: nil,
                     translationPromptTemplate: defaultVisionTranslationPromptTemplate,
                     strictTranslationGeometry: false
@@ -1566,7 +1597,8 @@ class AITranslator {
                     || (textSimilarity >= 0.82 && overlap >= 0.08)
             }
             if let duplicateIndex {
-                if candidate.confidence > merged[duplicateIndex].confidence {
+                if merged[duplicateIndex].isFiltered
+                    || candidate.confidence > merged[duplicateIndex].confidence {
                     merged[duplicateIndex] = candidate
                 }
             } else {

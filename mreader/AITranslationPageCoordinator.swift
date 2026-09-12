@@ -22,7 +22,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    static let translationCacheRevision = "translation-v20-partial-aware-canonical-translation"
+    static let translationCacheRevision = "translation-v21-context-recovery"
     static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
@@ -39,7 +39,11 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     let usesVisualOCRVerification: Bool
     let viewportAspect: CGFloat
     let sourceLanguagePreference: TranslationSourceLanguage?
-    let previousContext: String
+    var previousContext: String
+    /// Stable scope/page identity for chapter-local context. Existing callers
+    /// remain source-compatible because both additions have defaults.
+    let contextScopeID: String? = nil
+    let pageIndex: Int? = nil
 
     var cacheKey: String {
         let sourceIdentity: String
@@ -76,6 +80,8 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             usesVisualOCRVerification ? "visual-review" : "local-only",
             String(format: "%.3f", Double(viewportAspect)),
             sourceLanguagePreference?.rawValue ?? "auto",
+            contextScopeID ?? "unscoped",
+            pageIndex.map(String.init) ?? "no-page",
             previousContext,
             translationPromptTemplate,
             visionPromptTemplate
@@ -200,9 +206,20 @@ actor AITranslationPageCoordinator {
     }
 
     func translatedBlocks(for request: AITranslationPageRequest) async throws -> [TextBlock] {
-        let key = request.cacheKey
+        var contextualRequest = request
+        contextualRequest.previousContext = await TranslationContextRegistry.shared.context(
+            scopeID: request.contextScopeID,
+            pageIndex: request.pageIndex,
+            seed: request.previousContext
+        )
+        let key = contextualRequest.cacheKey
         if let cached = cachedBlocks(forKey: key) {
             print("MReader AI translation cache hit key=\(key.prefix(10)) blocks=\(cached.count)")
+            await TranslationContextRegistry.shared.record(
+                scopeID: contextualRequest.contextScopeID,
+                pageIndex: contextualRequest.pageIndex,
+                blocks: cached
+            )
             return cached
         }
         if let existing = inFlight[key] {
@@ -211,7 +228,7 @@ actor AITranslationPageCoordinator {
         }
 
         let task = Task.detached(priority: .userInitiated) {
-            try await AITranslationPagePipeline.translate(request)
+            try await AITranslationPagePipeline.translate(contextualRequest)
         }
         inFlight[key] = task
         do {
@@ -219,6 +236,11 @@ actor AITranslationPageCoordinator {
             inFlight[key] = nil
             if result.isComplete {
                 store(result.blocks, forKey: key)
+                await TranslationContextRegistry.shared.record(
+                    scopeID: contextualRequest.contextScopeID,
+                    pageIndex: contextualRequest.pageIndex,
+                    blocks: result.blocks
+                )
             } else {
                 print("MReader AI translation cache skipped explicit partial key=\(key.prefix(10)) blocks=\(result.blocks.count)")
             }
@@ -339,6 +361,7 @@ nonisolated enum AITranslationPagePipeline {
                 isRightToLeft: request.isRightToLeft,
                 viewportAspect: request.viewportAspect,
                 sourceLanguage: request.sourceLanguagePreference,
+                previousContext: request.previousContext,
                 visionModelDescriptor: request.configuration.visionModelDescriptor,
                 textFallbackModelDescriptor: request.configuration.textModelDescriptor
             )
@@ -411,9 +434,13 @@ nonisolated enum AITranslationPagePipeline {
                 from: request.pageURL,
                 fallback: request.image
             ) ?? request.image
+            // Rejected candidates retain geometry/reason and must remain visible
+            // to visual review; otherwise weak but real text can never re-enter the
+            // translation pipeline.
+            let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
             resolvedBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
-                blocks: localResult.resolvedBlocks,
+                blocks: reviewBlocks,
                 apiKey: request.configuration.apiKey,
                 baseURL: request.configuration.baseURL,
                 model: request.configuration.visionModel,
@@ -421,7 +448,9 @@ nonisolated enum AITranslationPagePipeline {
                 modelDescriptor: request.configuration.visionModelDescriptor,
                 sourceLanguagePreference: request.sourceLanguagePreference,
                 detectedLanguage: localResult.detectedLanguage,
-                visualVerificationEnabled: request.usesVisualOCRVerification
+                visualVerificationEnabled: request.usesVisualOCRVerification,
+                coverageRecoveryRequested: localResult.quality?.isSuspicious == true
+                    || !localResult.rejectedBlocks.isEmpty
             )
         } else {
             resolvedBlocks = localResult.resolvedBlocks
@@ -513,13 +542,11 @@ nonisolated enum AITranslationPagePipeline {
             func submit(_ localIndex: Int) {
                 let index = indexes[localIndex]
                 let block = blocks[index]
-                let localContext = blocks.count > 1
-                    ? AITranslator.pageContextDescription(blocks: blocks, currentIndex: index)
-                    : ""
-                let pageContext = [request.previousContext, localContext]
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n")
+                let pageContext = TranslationContextBuilder.promptContext(
+                    previousContext: request.previousContext,
+                    pageBlocks: blocks,
+                    requestedIndexes: [index]
+                )
                 group.addTask {
                     do {
                 let text = try await TranslationRuntimeService.translate(
@@ -583,6 +610,11 @@ nonisolated enum AITranslationPagePipeline {
     ) async throws {
         guard !indexes.isEmpty else { return }
         let requestedBlocks = indexes.map { blocks[$0] }
+        let fullPageContext = TranslationContextBuilder.promptContext(
+            previousContext: request.previousContext,
+            pageBlocks: blocks,
+            requestedIndexes: indexes
+        )
         let result = try await TranslationRuntimeService.translatePage(
             blocks: requestedBlocks,
             apiKey: request.configuration.apiKey,
@@ -591,7 +623,7 @@ nonisolated enum AITranslationPagePipeline {
             target: request.target,
             promptTemplate: request.translationPromptTemplate,
             sourceLanguage: request.sourceLanguagePreference,
-            previousContext: request.previousContext,
+            previousContext: fullPageContext,
             modelDescriptor: request.configuration.textModelDescriptor
         )
         // 线上 ID 是 b0/b1/...，顺序 = requestedBlocks（即 indexes）中的位置

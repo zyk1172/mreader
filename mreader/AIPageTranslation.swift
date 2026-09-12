@@ -176,9 +176,10 @@ nonisolated enum AIPageTranslationPromptBuilder {
         styleInstructions: String,
         previousContext: String = ""
     ) throws -> String {
-        let wireItems = items.map { item -> [String: Any] in
-            ["id": item.id, "sourceText": item.sourceText]
-        }
+        // Keep the already-known page geometry and reading order in the wire
+        // payload. This lets the model resolve nearby references without changing
+        // the one-id-in / one-id-out contract.
+        let wireItems = items.map(\.jsonObject)
         let payload: [String: Any] = ["items": wireItems]
         let data = try JSONSerialization.data(
             withJSONObject: payload,
@@ -196,12 +197,14 @@ nonisolated enum AIPageTranslationPromptBuilder {
         目标语言：\(target.modelInstruction)
         输入 items 已完成 OCR；不要识别图片，不要讨论 OCR 是否正确，不要合并、拆分、新增或遗漏 id。
         每个 id 必须返回一次。translation 只放译文；不确定时使用空字符串。translationLines 不确定时使用空数组。
+        可以利用 items 的 order、textBox、fontScale 和同页相邻原文来判断断句、称呼、代词和语气，但不得改变、合并或拆分 id。
+        无法从原文或上下文确定代词指向时，保留自然的代词表达，不得凭空补人名或剧情事实。
         不要输出思考过程、词义分析或任何 JSON 之外的字符。
 
         翻译风格要求（只能影响措辞）：
         \(style)
 
-        上下文（只用于术语一致，不要复述）：
+        上下文快照（用于称呼、术语、代词、语气和跨气泡指代消歧；不要复述或新增事实）：
         \(contextSection)
 
         输入：\(json)

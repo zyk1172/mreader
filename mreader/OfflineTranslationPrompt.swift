@@ -7,7 +7,7 @@ nonisolated enum OfflineVisionPageResult: Sendable {
 }
 
 nonisolated enum OfflineTranslationPromptBuilder {
-    static let revision = "offline-vision-v3"
+    static let revision = "offline-vision-v4-context"
 
     static func make(
         sourceLanguage: TranslationSourceLanguage,
@@ -29,7 +29,7 @@ nonisolated enum OfflineTranslationPromptBuilder {
         目标语言：\(targetLanguage.modelInstruction)
         阅读顺序：\(direction)
 
-        仅用于理解称呼和上下文的前序页面译文（不得复制为新的气泡）：
+        上下文快照（可能同时包含前序原文、已确认原文→译文对照和同批次预识别原文；仅用于称呼、术语、代词、语气与指代消歧，不得复制为新的气泡）：
         \(context.isEmpty ? "（无）" : context)
 
         翻译风格要求（只能影响措辞和断句，不能改变协议、字段或坐标）：
@@ -41,6 +41,7 @@ nonisolated enum OfflineTranslationPromptBuilder {
         classification 只能是 dialogue、narration、soundEffect 之一。不要返回网址、广告、版权、水印或页码等非翻译文字。
         textBox 是紧贴原文字的必填字段，用于原文字号与位置；bubbleBox 只表示译文可扩展到的最大范围，不能代替 textBox。polygon 若提供，分别对应两个框。
         同一气泡内的碎片应合并，不同气泡不能合并；translation 必须非空。translationLines 仅是换行建议，不需要时可输出空数组。
+        可以利用当前画面中的指代方向、说话者位置和表情来消歧，但不得输出画面描述；无法可靠判断代词指向时不得凭空补人名。
         没有可翻译文字时返回 {"coordinateSpace":"normalized","items":[]}，这是成功结果，不要编造文字。
 
         JSON 示例形状（不要输出示例内容）：
