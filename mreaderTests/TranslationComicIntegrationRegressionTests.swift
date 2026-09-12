@@ -94,6 +94,25 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         )
     }
 
+    func testOfflineBlockRoundTripPreservesIndependentLayoutSafeRegion() throws {
+        let source = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.20, y: 0.30, width: 0.12, height: 0.08),
+            translation: "译文",
+            confidence: 0.92,
+            ocrSource: "vision-model:dialogue",
+            bubbleBox: CGRect(x: 0.18, y: 0.28, width: 0.18, height: 0.14),
+            layoutSafeRegion: CGRect(x: 0.19, y: 0.29, width: 0.16, height: 0.12)
+        )
+        let stored = OfflineTranslatedBlock(block: source)
+        let data = try JSONEncoder().encode(stored)
+        let decoded = try JSONDecoder().decode(OfflineTranslatedBlock.self, from: data)
+        let restored = decoded.textBlock()
+
+        XCTAssertEqual(restored.bubbleBox, source.bubbleBox)
+        XCTAssertEqual(restored.layoutSafeRegion, source.layoutSafeRegion)
+    }
+
     @MainActor
     func testVisionSliceBoundariesAreStableAcrossViewportAspect() {
         let format = UIGraphicsImageRendererFormat()

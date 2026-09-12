@@ -364,6 +364,8 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
     let translationLines: [String]
     let textBox: OfflineTranslationRect
     let bubbleBox: OfflineTranslationRect?
+    /// Independent safe layout region. Optional for backward compatibility with pre-F10 files.
+    let layoutSafeRegion: OfflineTranslationRect?
     let textPolygon: [OfflineTranslationPoint]
     let bubblePolygon: [OfflineTranslationPoint]
     let confidence: Double
@@ -375,7 +377,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
     let sourceLineCount: Int
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceText, translation, translationLines, lines, textBox, bubbleBox
+        case id, sourceText, translation, translationLines, lines, textBox, bubbleBox, layoutSafeRegion
         case textPolygon, bubblePolygon, polygon, confidence, classification, estimatedFontScale, textColorHex, textOrientation, layoutRole, sourceLineCount
     }
 
@@ -386,6 +388,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         translationLines: [String],
         textBox: OfflineTranslationRect,
         bubbleBox: OfflineTranslationRect? = nil,
+        layoutSafeRegion: OfflineTranslationRect? = nil,
         textPolygon: [OfflineTranslationPoint] = [],
         bubblePolygon: [OfflineTranslationPoint] = [],
         confidence: Double,
@@ -402,6 +405,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         self.translationLines = translationLines
         self.textBox = textBox
         self.bubbleBox = bubbleBox
+        self.layoutSafeRegion = layoutSafeRegion
         self.textPolygon = textPolygon
         self.bubblePolygon = bubblePolygon
         self.confidence = confidence
@@ -423,6 +427,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             ?? []
         textBox = try container.decode(OfflineTranslationRect.self, forKey: .textBox)
         bubbleBox = try container.decodeIfPresent(OfflineTranslationRect.self, forKey: .bubbleBox)
+        layoutSafeRegion = try container.decodeIfPresent(OfflineTranslationRect.self, forKey: .layoutSafeRegion)
         textPolygon = try container.decodeIfPresent([OfflineTranslationPoint].self, forKey: .textPolygon)
             ?? (try container.decodeIfPresent([OfflineTranslationPoint].self, forKey: .polygon))
             ?? []
@@ -445,6 +450,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
         try container.encode(translationLines, forKey: .translationLines)
         try container.encode(textBox, forKey: .textBox)
         try container.encodeIfPresent(bubbleBox, forKey: .bubbleBox)
+        try container.encodeIfPresent(layoutSafeRegion, forKey: .layoutSafeRegion)
         try container.encode(textPolygon, forKey: .textPolygon)
         try container.encode(bubblePolygon, forKey: .bubblePolygon)
         try container.encode(confidence, forKey: .confidence)
@@ -483,6 +489,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             translationLines: block.translationLines,
             textBox: OfflineTranslationRect(block.boundingBox),
             bubbleBox: block.bubbleBox.map(OfflineTranslationRect.init),
+            layoutSafeRegion: block.layoutSafeRegion.map(OfflineTranslationRect.init),
             textPolygon: block.polygon.map(OfflineTranslationPoint.init),
             bubblePolygon: block.bubblePolygon.map(OfflineTranslationPoint.init),
             confidence: block.confidence,
@@ -506,6 +513,7 @@ nonisolated struct OfflineTranslatedBlock: Codable, Equatable, Sendable, Identif
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
             bubbleBox: bubbleBox?.cgRect,
+            layoutSafeRegion: layoutSafeRegion?.cgRect,
             polygon: textPolygon.map(\.cgPoint),
             bubblePolygon: bubblePolygon.map(\.cgPoint),
             translationLines: translationLines,
