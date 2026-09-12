@@ -30,6 +30,40 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         )
     }
 
+    func testOverflowPreviewIsCompactAnchoredAndBoundedForHorizontalText() {
+        let bounds = CGRect(x: 10, y: 20, width: 360, height: 520)
+        let source = CGRect(x: 150, y: 180, width: 210, height: 90)
+        let rect = TranslationOverflowPresentationPolicy.compactPreviewRect(
+            sourceRect: source,
+            allowedBounds: bounds,
+            orientation: .horizontal
+        )
+
+        XCTAssertTrue(bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect))
+        XCTAssertLessThanOrEqual(rect.width, 120)
+        XCTAssertLessThanOrEqual(rect.height, 56)
+        XCTAssertGreaterThanOrEqual(rect.width, 64)
+        XCTAssertGreaterThanOrEqual(rect.height, 32)
+        XCTAssertEqual(rect.midX, source.midX, accuracy: 0.5)
+    }
+
+    func testOverflowPreviewForVerticalTextNeverExpandsIntoLargeAssistCard() {
+        let bounds = CGRect(x: 0, y: 0, width: 280, height: 600)
+        let source = CGRect(x: 228, y: 120, width: 24, height: 250)
+        let rect = TranslationOverflowPresentationPolicy.compactPreviewRect(
+            sourceRect: source,
+            allowedBounds: bounds,
+            orientation: .vertical
+        )
+
+        XCTAssertTrue(bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect))
+        XCTAssertLessThanOrEqual(rect.width, 56)
+        XCTAssertLessThanOrEqual(rect.height, 120)
+        XCTAssertGreaterThanOrEqual(rect.width, 36)
+        XCTAssertGreaterThanOrEqual(rect.height, 64)
+        XCTAssertLessThan(rect.width * rect.height, source.width * source.height * 1.2)
+    }
+
     func testLayoutSafeRegionIsConstrainedByPhysicalBubbleWithoutBecomingBubbleEvidence() {
         let text = CGRect(x: 40, y: 40, width: 20, height: 12)
         let bubble = CGRect(x: 30, y: 25, width: 70, height: 55)

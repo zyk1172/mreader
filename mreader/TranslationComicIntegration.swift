@@ -64,6 +64,38 @@ nonisolated enum TranslationDisplayPolicy {
     }
 }
 
+/// Rendering fallback for translations that cannot fit at the configured
+/// readable floor. Overflow remains visible as a small preview anchored to the
+/// source region; only the selected region opens the full scrollable text.
+nonisolated enum TranslationOverflowPresentationPolicy {
+    static func compactPreviewRect(
+        sourceRect: CGRect,
+        allowedBounds: CGRect,
+        orientation: TextOrientation
+    ) -> CGRect {
+        let bounds = allowedBounds.standardized
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
+            return sourceRect.standardized
+        }
+
+        let source = sourceRect.standardized
+        let minimum = orientation == .vertical
+            ? CGSize(width: 36, height: 64)
+            : CGSize(width: 64, height: 32)
+        let maximum = orientation == .vertical
+            ? CGSize(width: 56, height: 120)
+            : CGSize(width: 120, height: 56)
+
+        let width = min(max(source.width, min(minimum.width, bounds.width)), min(maximum.width, bounds.width))
+        let height = min(max(source.height, min(minimum.height, bounds.height)), min(maximum.height, bounds.height))
+        let desiredX = source.midX - width / 2
+        let desiredY = source.midY - height / 2
+        let x = min(max(desiredX, bounds.minX), bounds.maxX - width)
+        let y = min(max(desiredY, bounds.minY), bounds.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
 nonisolated enum TranslationRegionPolicy {
     /// A model-provided safe region is placement evidence, never bubble evidence.
     /// It must stay on-page and overlap the source text; reliable bubble content
