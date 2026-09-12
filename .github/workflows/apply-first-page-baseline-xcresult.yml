@@ -89,6 +89,8 @@ jobs:
                   payload = json.loads(path.read_text())
               except Exception:
                   continue
+              if not isinstance(payload, dict):
+                  continue
               if payload.get("sampleID") != "manga-page-shirohage-ja":
                   continue
               if "rawCount" in payload and "lineBlocks" in payload:
