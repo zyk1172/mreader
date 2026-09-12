@@ -42,8 +42,8 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     var previousContext: String
     /// Stable scope/page identity for chapter-local context. Existing callers
     /// remain source-compatible because both additions have defaults.
-    let contextScopeID: String? = nil
-    let pageIndex: Int? = nil
+    var contextScopeID: String? = nil
+    var pageIndex: Int? = nil
 
     var cacheKey: String {
         let sourceIdentity: String
