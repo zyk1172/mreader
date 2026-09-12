@@ -42,9 +42,37 @@ final class TranslationGoldReviewTests: XCTestCase {
 
         XCTAssertTrue(gold.isInternallyConsistent)
         XCTAssertTrue(
-            TranslationGoldReviewValidator.reportabilityIssues(for: gold).isEmpty
+            TranslationGoldReviewValidator.reportabilityIssues(
+                for: gold,
+                expectedSourceImageSHA1: fixtureSHA1
+            ).isEmpty
         )
         XCTAssertTrue(gold.isReportableGold)
+    }
+
+    func testPinnedImageMismatchPreventsTrustedReporting() {
+        let gold = makeGold(
+            verificationStatus: .humanVerified,
+            expectedPageState: .completed,
+            review: makeReview()
+        )
+        let wrongSHA1 = String(repeating: "0", count: 40)
+
+        XCTAssertTrue(
+            TranslationGoldReviewValidator.reportabilityIssues(
+                for: gold,
+                expectedSourceImageSHA1: wrongSHA1
+            ).contains(.sourceImageMismatch)
+        )
+        XCTAssertThrowsError(
+            try TranslationGoldBaselineScorer.score(
+                gold: gold,
+                baseline: makeBaseline(),
+                expectedSourceImageSHA1: wrongSHA1
+            )
+        ) { error in
+            XCTAssertEqual(error as? TranslationGoldScoringError, .goldNotReportable)
+        }
     }
 
     func testStructuralValidationRejectsBrokenRegionContract() {
@@ -93,7 +121,8 @@ final class TranslationGoldReviewTests: XCTestCase {
         XCTAssertThrowsError(
             try TranslationGoldBaselineScorer.score(
                 gold: candidate,
-                baseline: makeBaseline()
+                baseline: makeBaseline(),
+                expectedSourceImageSHA1: fixtureSHA1
             )
         ) { error in
             XCTAssertEqual(error as? TranslationGoldScoringError, .goldNotReportable)
@@ -108,7 +137,8 @@ final class TranslationGoldReviewTests: XCTestCase {
         )
         let score = try TranslationGoldBaselineScorer.score(
             gold: gold,
-            baseline: makeBaseline()
+            baseline: makeBaseline(),
+            expectedSourceImageSHA1: fixtureSHA1
         )
 
         XCTAssertEqual(score.detectionRecall, 1, accuracy: 0.0001)
