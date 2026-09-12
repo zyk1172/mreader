@@ -5,14 +5,16 @@ This benchmark exercises mReader's **actual local OCR/structure pipeline** on th
 It is intentionally split into two kinds of evidence:
 
 - `sample_shirohage_manga.baseline.json`: observed output from `MangaOCRPipeline` on a specific OS/Xcode/Vision runtime.
-- `sample_shirohage_manga.gold.json`: a machine-assisted annotation **candidate**. It is not quality ground truth until a person checks every region and changes `verificationStatus` from `candidate` to `humanVerified`.
+- `sample_shirohage_manga.gold.json`: a machine-assisted annotation **candidate**. It is not quality ground truth until a person checks every region, resolves page state, records a review receipt for the exact source image, and changes `verificationStatus` from `candidate` to `humanVerified`.
 
 Do not compare a candidate annotation against the same OCR run and report that result as accuracy. That would make the system grade itself.
 
 ## Integrity rules
 
 - Machine-generated page annotations always start with `expectedPageState: unknown`. OCR output may suggest that text exists or does not exist, but it cannot establish benchmark truth about `completed`, `partial`, `noText` or `failed`.
-- A page becomes reportable gold only after a human reviewer resolves the page state, verifies the regions/order/grouping, sets `verificationStatus` to `humanVerified`, and the manifest entry is `ready`.
+- A page becomes reportable gold only after a human reviewer resolves the page state, verifies the regions/order/grouping, sets `verificationStatus` to `humanVerified`, records a valid `review` receipt, and the manifest entry is `ready`.
+- A review receipt records the human reviewer, ISO-8601 review time, review method and SHA-1 of the exact source image. A status flip without this receipt remains non-reportable.
+- `TranslationGoldBaselineScorer` refuses non-reportable annotations instead of emitting pseudo-accuracy for candidates.
 - `bubbleBlockCount` is the number of grouped output blocks produced by the pipeline. It is not a count of physical speech balloons.
 - `physicalBubbleCount` counts unique non-nil detected bubble rectangles carried by those blocks. A value of `0` is valid even when `bubbleBlockCount` is nonzero.
 - Baseline schema v2 records capture provenance so results from different Xcode/Vision/runtime environments are not silently compared as if they were equivalent.
@@ -68,19 +70,23 @@ The test logs one summary line with detected language, raw/resolved/line/grouped
 
 ## Human verification: turn the candidate into real gold
 
+Start with `docs/shirohage-gold-review.md` and `docs/shirohage-gold-review-overlay.png`. The overlay places numbered boxes over the current nine machine-generated candidate regions so a reviewer can check the image and JSON against the same identifiers. It is a review aid, not ground truth.
+
 Open the source image and `sample_shirohage_manga.gold.json` side by side. For every translatable text region:
 
 1. **Coverage:** add any missed dialogue/narration/SFX region and delete false text detections.
 2. **Source text:** correct the Japanese text character by character. Do not copy the model's translation back into the source field.
 3. **Geometry:** correct normalized `rect` values (`x`, `y`, `width`, `height`, all relative to the page in the same coordinate convention used by the benchmark).
-4. **Reading order:** assign `readingOrder` according to the actual manga reading sequence, not the OCR output order.
-5. **Bubble grouping:** lines in the same physical speech balloon share one `bubbleID`; text with no real balloon remains independent rather than receiving a fabricated bubble.
+4. **Reading order:** assign `readingOrder` according to the actual manga reading sequence, not the OCR output order. Values must be contiguous from `0`.
+5. **Bubble grouping:** lines in the same physical speech balloon share one non-empty `bubbleID`; text with no real balloon remains independent rather than receiving a fabricated bubble.
 6. **Reference translation:** optionally add a human-reviewed Simplified Chinese translation under `referenceTranslations[regionID]`. Multiple natural translations can be valid; this field is a review anchor, not an automatic naturalness score.
 7. Explicitly resolve `expectedPageState` from `unknown` to `completed`, `partial`, `noText` or `failed` based on the human review.
-8. After the entire page has been checked, set `verificationStatus` to `humanVerified`.
-9. Only then change the corresponding manifest sample from `pending` to `ready`.
+8. Add `review` with the real human reviewer, ISO-8601 review timestamp, `method: visualHumanReview`, and SHA-1 of the exact reviewed image. The pinned Shirohage source SHA-1 is `8c828fc750e946ce94038a00782cbe115537c15e`.
+9. After the entire page has been checked, set `verificationStatus` to `humanVerified`.
+10. Only then change the corresponding manifest sample from `pending` to `ready`.
+11. Run the benchmark tests; only a reportable annotation may enter `TranslationGoldBaselineScorer` and emit detection recall, mean region CER, reading-order and grouping metrics.
 
-A `ready` page whose annotation is still `candidate` must fail the benchmark contract tests.
+A `ready` page whose annotation is still a candidate, has unresolved page state, lacks a valid review receipt, or violates structural validation must fail the benchmark contract tests.
 
 ## What to inspect in the app
 
