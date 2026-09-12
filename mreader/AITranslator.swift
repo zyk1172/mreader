@@ -612,6 +612,16 @@ nonisolated enum AIChatResponseDecoder {
     }
 }
 
+nonisolated struct AIVisionTranslationResult: Sendable {
+    let blocks: [TextBlock]
+    let failedSlices: Int
+    let missingBlockIDs: [UUID]
+
+    var isComplete: Bool {
+        failedSlices == 0 && missingBlockIDs.isEmpty
+    }
+}
+
 class AITranslator {
     nonisolated static func visualVerificationRegionsForDiagnostics(
         _ blocks: [TextBlock],
@@ -1020,27 +1030,59 @@ class AITranslator {
         visionModelDescriptor: AIModelDescriptor? = nil,
         textFallbackModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> [TextBlock] {
+        let result = try await translateVisionPageWithStatus(
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            visionModel: visionModel,
+            textFallbackModel: textFallbackModel,
+            targetLanguage: targetLanguage,
+            promptTemplate: promptTemplate,
+            isRightToLeft: isRightToLeft,
+            viewportAspect: viewportAspect,
+            sourceLanguage: sourceLanguage,
+            visionModelDescriptor: visionModelDescriptor,
+            textFallbackModelDescriptor: textFallbackModelDescriptor
+        )
+        return result.blocks
+    }
+
+    static func translateVisionPageWithStatus(
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        textFallbackModel: String,
+        targetLanguage: String = TranslationTargetLanguage.simplifiedChinese.rawValue,
+        promptTemplate: String = defaultVisionTranslationPromptTemplate,
+        isRightToLeft: Bool = false,
+        viewportAspect: CGFloat = 2.0,
+        sourceLanguage: TranslationSourceLanguage? = nil,
+        visionModelDescriptor: AIModelDescriptor? = nil,
+        textFallbackModelDescriptor: AIModelDescriptor? = nil
+    ) async throws -> AIVisionTranslationResult {
         let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
-        let recognized = try await recognizeVisionPage(
+        let recognition = try await recognizeVisionPageUsingModelWithStats(
             image: image,
             apiKey: apiKey,
             baseURL: baseURL,
             model: visionModel,
+            modelDescriptor: visionModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel),
             isRightToLeft: isRightToLeft,
             viewportAspect: viewportAspect,
+            additionalInstructions: "",
             translationTarget: target,
             translationPromptTemplate: promptTemplate,
-            modelDescriptor: visionModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel)
+            strictTranslationGeometry: false
         )
         try Task.checkCancellation()
 
-        var translated = recognized
+        var translated = recognition.blocks
         let missingIndexes = translated.indices.filter {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if !missingIndexes.isEmpty {
             let missingBlocks = missingIndexes.map { translated[$0] }
-            // Vision 漏译的纯文本补译走文本模型，而不是昂贵的视觉模型（审查 #12）
             let pageResult = try await translatePage(
                 blocks: missingBlocks,
                 apiKey: apiKey,
@@ -1051,7 +1093,6 @@ class AITranslator {
                 sourceLanguage: sourceLanguage,
                 modelDescriptor: textFallbackModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: textFallbackModel)
             )
-            // 线上 ID 是 b0/b1/...（顺序 = missingBlocks 中的位置）
             for (position, index) in missingIndexes.enumerated() {
                 if let result = pageResult.translation(for: "b\(position)") {
                     translated[index].translation = result.translation
@@ -1064,8 +1105,15 @@ class AITranslator {
             !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }
-        // Keep known untranslated regions so retry/completeness logic can see them.
-        return translated
+        let missingBlockIDs = translated.compactMap { block -> UUID? in
+            let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return translation.isEmpty ? block.id : nil
+        }
+        return AIVisionTranslationResult(
+            blocks: translated,
+            failedSlices: recognition.failedSlices,
+            missingBlockIDs: missingBlockIDs
+        )
     }
 
     static func recognizeVisionPage(

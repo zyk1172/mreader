@@ -54,6 +54,15 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
         }
     }
 
+    func testFailedVisionSliceCannotBeMarkedComplete() {
+        let result = AIVisionTranslationResult(
+            blocks: [],
+            failedSlices: 1,
+            missingBlockIDs: []
+        )
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testReadingOrderIsStableAcrossPermutationCounterexample() {
         let a = TextBlock(
             id: UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!,
