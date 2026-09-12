@@ -39,11 +39,16 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
         ]
         let payload = #"{"items":[{"id":"b0","translation":"Je suis très heureux de vous voir aujourd'hui.","translationLines":[]},{"id":"b1","translation":"Nous allons continuer cette conversation ensemble.","translationLines":[]}]}"#
             .replacingOccurrences(of: "\\\"", with: "\"")
+
         XCTAssertThrowsError(
             try AIPageTranslationParser.parseStrict(payload, expectedItems: expected, target: .english)
         ) { error in
-            guard case AIPageTranslationParserError.pageLanguageMismatch = error else {
-                XCTFail("Expected pageLanguageMismatch, got \(error)")
+            guard let parserError = error as? AIPageTranslationParserError else {
+                XCTFail("Expected parser error, got \(error)")
+                return
+            }
+            guard case .pageLanguageMismatch = parserError else {
+                XCTFail("Expected pageLanguageMismatch, got \(parserError)")
                 return
             }
         }
