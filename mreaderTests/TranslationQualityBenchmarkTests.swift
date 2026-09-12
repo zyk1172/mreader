@@ -18,20 +18,23 @@ final class TranslationQualityBenchmarkTests: XCTestCase {
         let data = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(TranslationQualityBenchmarkManifest.self, from: data)
 
-        XCTAssertEqual(manifest.schemaVersion, 1)
+        XCTAssertEqual(manifest.schemaVersion, 2)
         XCTAssertFalse(manifest.samples.isEmpty)
         XCTAssertTrue(manifest.samples.allSatisfy { !$0.license.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
 
         let ready = manifest.samples.filter { $0.annotationStatus == .ready }
         XCTAssertFalse(ready.isEmpty)
-        XCTAssertTrue(ready.allSatisfy { sample in
-            guard let goldText = sample.goldText else { return false }
-            return !goldText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        })
+        XCTAssertTrue(ready.allSatisfy(\.hasGoldReference))
 
-        let pending = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-publicdomainq" })
+        let negative = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-publicdomainq" })
+        XCTAssertEqual(negative.annotationStatus, .ready)
+        XCTAssertNil(negative.goldText)
+        XCTAssertEqual(negative.goldAnnotation, "manga_page_publicdomainq.gold.json")
+
+        let pending = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-shirohage-ja" })
         XCTAssertEqual(pending.annotationStatus, .pending)
         XCTAssertNil(pending.goldText)
+        XCTAssertNil(pending.goldAnnotation)
     }
 
     func testCERUsesCharactersAndIgnoresLayoutWhitespace() {

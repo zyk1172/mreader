@@ -14,8 +14,22 @@ column cropped from that source page so the golden OCR test does not dilute
 the result with unrelated horizontal labels. The crop retains the original
 pixels and license.
 
-The larger `manga_page_publicdomainq.png` fixture is a CC0 example manga page
-from Wikimedia Commons and is retained for future page-level recovery tests.
+The larger `manga_page_publicdomainq.png` fixture is a CC0 manga-drawing page
+from Wikimedia Commons. Visual review found no human-verified translatable manga
+dialogue on the page, so it is intentionally a **negative `noText` gold fixture**.
+It must not be used as Japanese OCR/translation ground truth. Its page-level gold
+annotation is `manga_page_publicdomainq.gold.json`.
+
+`sample_shirohage_manga.jpg` is Wikimedia Commons' `Sample of SHIROHAGE MANGA.jpg`,
+a Japanese speech-balloon manga example by しんぎんぐきゃっと, licensed under
+CC BY-SA 4.0. The repository stores the original file unchanged (SHA-1
+`8c828fc750e946ce94038a00782cbe115537c15e`).
+
+- Source: https://commons.wikimedia.org/wiki/File:Sample_of_SHIROHAGE_MANGA.jpg
+- License: https://creativecommons.org/licenses/by-sa/4.0/
+- Author: しんぎんぐきゃっと
+- Fixture status: `pending` until human gold regions, reading order, grouping and
+  reference translations are completed.
 
 ## Translation quality benchmark policy
 
