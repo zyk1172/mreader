@@ -1,0 +1,35 @@
+name: Phase 4 display integration
+
+on:
+  push:
+    branches:
+      - codex/translation-comic-integration
+    paths:
+      - .github/workflows/phase4-f11-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: codex/translation-comic-integration
+          fetch-depth: 0
+
+      - name: Apply F11 integration
+        run: python3 .github/phase4_f11_patch.py
+
+      - name: Commit and clean helpers
+        shell: bash
+        run: |
+          rm -f .github/phase4_f11_patch.py .github/workflows/phase4-f11-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat: integrate manga-aware translation display modes'
+          git push origin HEAD:codex/translation-comic-integration
