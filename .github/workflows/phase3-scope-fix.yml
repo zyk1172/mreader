@@ -23,43 +23,38 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           reader = Path('mreader/ReaderView.swift')
           text = reader.read_text()
 
-          old = '''previousContext: TranslationContextBuilder.promptContext(
-                        previousContext: inheritedContext,
-                        pageBlocks: blocks
-                    ),'''
-          new = '''previousContext: TranslationContextBuilder.promptContext(
-                        previousContext: inheritedContext,
-                        pageBlocks: pageSnapshot,
-                        requestedIndexes: pageSnapshot.indices.filter { index in
-                            missingIDs.contains(pageSnapshot[index].id)
-                        }
-                    ),'''
-          if old not in text:
-              raise SystemExit('cloud fallback anchor not found')
-          text = text.replace(old, new, 1)
+          cloud_start = text.index('private func cloudFallbackForMissing(')
+          cloud_end = text.index('private func makeTranslationPageRequest', cloud_start)
+          cloud = text[cloud_start:cloud_end]
+          cloud, count = re.subn(
+              r'pageBlocks:\s*blocks\s*\n\s*\),',
+              'pageBlocks: pageSnapshot,\n                        requestedIndexes: pageSnapshot.indices.filter { index in\n                            missingIDs.contains(pageSnapshot[index].id)\n                        }\n                    ),',
+              cloud,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(f'cloud fallback replacement count={count}')
+          text = text[:cloud_start] + cloud + text[cloud_end:]
 
-          old = '''previousContext: TranslationContextBuilder.promptContext(
-                        previousContext: inheritedContext,
-                        pageBlocks: pageSnapshot,
-                        requestedIndexes: pageSnapshot.indices.filter { index in
-                            missingIDs.contains(pageSnapshot[index].id)
-                        }
-                    ),'''
-          new = '''previousContext: TranslationContextBuilder.promptContext(
-                        previousContext: inheritedContext,
-                        pageBlocks: blocks,
-                        requestedIndexes: Array(blocks.indices)
-                    ),'''
-          # Replace the second occurrence: after the first edit there are two identical blocks.
-          first = text.find(old)
-          second = text.find(old, first + 1) if first >= 0 else -1
-          if second < 0:
-              raise SystemExit('OCR page translation anchor not found')
-          text = text[:second] + new + text[second + len(old):]
+          ocr_start = text.index('private func startOCRTextTranslation(')
+          ocr_end = text.index('private func recognizedPipelineResult', ocr_start)
+          ocr = text[ocr_start:ocr_end]
+          pattern = re.compile(
+              r'pageBlocks:\s*pageSnapshot,\s*\n\s*requestedIndexes:\s*pageSnapshot\.indices\.filter\s*\{\s*index\s+in\s*\n\s*missingIDs\.contains\(pageSnapshot\[index\]\.id\)\s*\n\s*\}'
+          )
+          ocr, count = pattern.subn(
+              'pageBlocks: blocks,\n                        requestedIndexes: Array(blocks.indices)',
+              ocr,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(f'OCR page replacement count={count}')
+          text = text[:ocr_start] + ocr + text[ocr_end:]
           reader.write_text(text)
 
           context = Path('mreader/TranslationContext.swift')
