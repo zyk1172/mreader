@@ -30,6 +30,15 @@ nonisolated private struct OfflineTranslationPageWork: @unchecked Sendable {
     let setID: UUID
 }
 
+nonisolated private struct OfflineTranslationSourceContextWork: @unchecked Sendable {
+    let page: ComicPage
+    let comic: ComicBook
+    let sourceSession: OfflineTranslationPageProvider.SourceSession
+    let sourceLanguage: TranslationSourceLanguage
+    let isRightToLeft: Bool
+    let ocrRecognitionMode: OCRRecognitionMode
+}
+
 nonisolated private struct OfflineTranslationPageWorkerResult: @unchecked Sendable {
     let pageIndex: Int
     let state: OfflineTranslationPageState?
@@ -646,15 +655,27 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 guard !remaining.isEmpty else { break }
 
                 let batch = Array(remaining.prefix(Self.maxConcurrentPages))
+                let processingMode = record.processingMode ?? .vision
+                let sourcePreference = TranslationSourceLanguage(rawValue: record.resolvedSourceLanguage ?? "")
+                    ?? record.sourceLanguage
+                // Phase 1 of each concurrent batch: recognize source text first.
+                // Later pages can use earlier source dialogue without waiting for
+                // an earlier translation task to finish.
+                let batchSourceContext = await sourceFirstBatchContexts(
+                    for: batch,
+                    pages: pages,
+                    comic: comic,
+                    sourceSession: sourceSession,
+                    sourceLanguage: sourcePreference,
+                    isRightToLeft: record.readingDirectionRaw == "rightToLeft",
+                    ocrRecognitionMode: record.ocrRecognitionMode ?? .adaptive
+                )
                 let contextSnapshot = await fixedBatchContexts(
                     for: batch,
                     comicID: record.comicID,
                     setID: record.setID,
                     minimumPageIndex: record.pageIndexes.min() ?? 0
                 )
-                let processingMode = record.processingMode ?? .vision
-                let sourcePreference = TranslationSourceLanguage(rawValue: record.resolvedSourceLanguage ?? "")
-                    ?? record.sourceLanguage
                 let works = try batch.map { pageIndex in
                     OfflineTranslationPageWork(
                         page: try pageAt(pageIndex, pages: pages),
@@ -664,7 +685,10 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         sourceLanguage: sourcePreference,
                         targetLanguage: record.targetLanguage,
                         styleInstructions: styleInstructions,
-                        previousContext: contextSnapshot[pageIndex] ?? "",
+                        previousContext: TranslationContextBuilder.versionedContext([
+                            contextSnapshot[pageIndex] ?? "",
+                            batchSourceContext[pageIndex] ?? ""
+                        ]),
                         isRightToLeft: record.readingDirectionRaw == "rightToLeft",
                         processingMode: processingMode,
                         ocrRecognitionMode: record.ocrRecognitionMode ?? .adaptive,
@@ -1313,6 +1337,84 @@ final class OfflineTranslationCoordinator: ObservableObject {
         )
     }
 
+    private func sourceFirstBatchContexts(
+        for pageIndexes: [Int],
+        pages: [ComicPage],
+        comic: ComicBook,
+        sourceSession: OfflineTranslationPageProvider.SourceSession,
+        sourceLanguage: TranslationSourceLanguage,
+        isRightToLeft: Bool,
+        ocrRecognitionMode: OCRRecognitionMode
+    ) async -> [Int: String] {
+        let works: [OfflineTranslationSourceContextWork] = pageIndexes.sorted().compactMap { pageIndex in
+            guard let page = try? pageAt(pageIndex, pages: pages) else { return nil }
+            return OfflineTranslationSourceContextWork(
+                page: page,
+                comic: comic,
+                sourceSession: sourceSession,
+                sourceLanguage: sourceLanguage,
+                isRightToLeft: isRightToLeft,
+                ocrRecognitionMode: ocrRecognitionMode
+            )
+        }
+        var sourceByPage: [Int: String] = [:]
+        await withTaskGroup(of: (Int, String).self) { group in
+            for work in works {
+                group.addTask {
+                    do {
+                        let data = try await OfflineTranslationPageProvider.data(
+                            for: work.comic,
+                            page: work.page,
+                            session: work.sourceSession
+                        )
+                        let image = try OfflineTranslationPageProvider.image(
+                            for: data,
+                            pageIndex: work.page.index
+                        )
+                        let options = OCRPreprocessor.Options(
+                            isRightToLeft: work.isRightToLeft,
+                            minimumTextHeight: 0.008,
+                            recognitionMode: work.ocrRecognitionMode,
+                            sourceLanguagePreference: work.sourceLanguage
+                        )
+                        let cacheRequest = OCRRecognitionCacheRequest(
+                            pageURL: work.page.url,
+                            fallbackImage: image,
+                            options: options
+                        )
+                        let result = try await OCRRuntimeService.recognize(for: cacheRequest)
+                        return (
+                            work.page.index,
+                            TranslationContextBuilder.sourceOnlySummary(
+                                pageIndex: work.page.index,
+                                blocks: result.bubbleBlocks
+                            )
+                        )
+                    } catch is CancellationError {
+                        return (work.page.index, "")
+                    } catch {
+                        print("MReader offline source-context preflight skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
+                        return (work.page.index, "")
+                    }
+                }
+            }
+            for await (pageIndex, context) in group {
+                sourceByPage[pageIndex] = context
+            }
+        }
+
+        let sorted = pageIndexes.sorted()
+        var result: [Int: String] = [:]
+        for pageIndex in sorted {
+            let priorSource = sorted
+                .filter { $0 < pageIndex }
+                .suffix(2)
+                .compactMap { sourceByPage[$0] }
+            result[pageIndex] = TranslationContextBuilder.mergeContexts(priorSource)
+        }
+        return result
+    }
+
     private func fixedBatchContexts(
         for pageIndexes: [Int],
         comicID: UUID,
@@ -1365,7 +1467,12 @@ final class OfflineTranslationCoordinator: ObservableObject {
             for block in page.blocks {
                 let translation = block.translation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !translation.isEmpty else { continue }
-                lines.append("第\(index + 1)页：\(translation)")
+                let source = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if source.isEmpty {
+                    lines.append("第\(index + 1)页译文：\(translation)")
+                } else {
+                    lines.append("第\(index + 1)页：原文=\(source) → 译文=\(translation)")
+                }
             }
         }
         var context = lines.joined(separator: "\n")

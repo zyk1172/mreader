@@ -1937,7 +1937,12 @@ struct ReaderView: View {
                         usesVisualOCRVerification: usesVisualVerification,
                         viewportAspect: 2.0,
                         sourceLanguagePreference: comic.translationSourceLanguage,
-                        previousContext: ""
+                        previousContext: "",
+                        contextScopeID: TranslationContextBuilder.scopeID(
+                            comicID: comicID,
+                            target: target
+                        ),
+                        pageIndex: pageIndex
                     )
                     _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
                     print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
@@ -3784,6 +3789,15 @@ struct LocalImageView: View {
                         )
                         Task {
                             await AppleTranslationPageCache.shared.store(self.textBlocks, key: cacheKey)
+                            let target = TranslationTargetLanguage.migrateLegacyValue(bridgeTarget)
+                            await TranslationContextRegistry.shared.record(
+                                scopeID: TranslationContextBuilder.scopeID(
+                                    comicID: self.comicID,
+                                    target: target
+                                ),
+                                pageIndex: self.pageIndex,
+                                blocks: self.textBlocks
+                            )
                         }
                         let missing = self.appleTranslationRequests
                             .filter { !seen.contains($0.id) }
@@ -4969,6 +4983,12 @@ struct LocalImageView: View {
             guard !missingBlocks.isEmpty,
                   let activeConfiguration = AIProviderStore.shared.activeConfiguration() else { return }
             let requestTarget = TranslationTargetLanguage.migrateLegacyValue(self.targetLanguage)
+            let contextScopeID = TranslationContextBuilder.scopeID(comicID: self.comicID, target: requestTarget)
+            let inheritedContext = await TranslationContextRegistry.shared.context(
+                scopeID: contextScopeID,
+                pageIndex: self.pageIndex
+            )
+            let pageSnapshot = self.textBlocks
             do {
                 // 纯文本兜底：用文本模型而不是昂贵的视觉模型（审查 #14）
                 let pageResult = try await TranslationRuntimeService.translatePage(
@@ -4979,6 +4999,13 @@ struct LocalImageView: View {
                     target: requestTarget,
                     promptTemplate: translationStyleInstructions,
                     sourceLanguage: comicTranslationSourceLanguage,
+                    previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: pageSnapshot,
+                        requestedIndexes: pageSnapshot.indices.filter { index in
+                            missingIDs.contains(pageSnapshot[index].id)
+                        }
+                    ),
                     modelDescriptor: activeConfiguration.textModelDescriptor
                 )
                 try Task.checkCancellation()
@@ -4994,6 +5021,11 @@ struct LocalImageView: View {
                         self.textBlocks[index].translationLines = value.translationLines
                     }
                 }
+                await TranslationContextRegistry.shared.record(
+                    scopeID: contextScopeID,
+                    pageIndex: self.pageIndex,
+                    blocks: self.textBlocks
+                )
             } catch {
                 print("Apple 翻译云端兜底失败: \(error.localizedDescription)")
             }
@@ -5020,7 +5052,12 @@ struct LocalImageView: View {
             viewportAspect: visionViewportAspect
                 ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25),
             sourceLanguagePreference: comicTranslationSourceLanguage,
-            previousContext: ""
+            previousContext: "",
+            contextScopeID: TranslationContextBuilder.scopeID(
+                comicID: comicID,
+                target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+            ),
+            pageIndex: pageIndex
         )
     }
 
@@ -5042,6 +5079,11 @@ struct LocalImageView: View {
         let requestModelName = activeConfiguration.textModel
         let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
         let requestPromptTemplate = translationStyleInstructions
+        let contextScopeID = TranslationContextBuilder.scopeID(comicID: comicID, target: requestTarget)
+        let inheritedContext = await TranslationContextRegistry.shared.context(
+            scopeID: contextScopeID,
+            pageIndex: pageIndex
+        )
         var translatedIndexes = Set<Int>()
 
         if AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: blocks.count) {
@@ -5054,6 +5096,11 @@ struct LocalImageView: View {
                     target: requestTarget,
                     promptTemplate: requestPromptTemplate,
                     sourceLanguage: comicTranslationSourceLanguage,
+                    previousContext: TranslationContextBuilder.promptContext(
+                        previousContext: inheritedContext,
+                        pageBlocks: blocks,
+                        requestedIndexes: Array(blocks.indices)
+                    ),
                     modelDescriptor: activeConfiguration.textModelDescriptor
                 )
                 try Task.checkCancellation()
@@ -5088,9 +5135,11 @@ struct LocalImageView: View {
                 let blockIndex = missingIndexes[missingIndex]
                 let block = blocks[blockIndex]
                 // 整页对白按阅读顺序作为上下文，帮助模型正确断句、统一称呼和语气
-                let pageContext = blocks.count > 1
-                    ? AITranslator.pageContextDescription(blocks: blocks, currentIndex: blockIndex)
-                    : ""
+                let pageContext = TranslationContextBuilder.promptContext(
+                    previousContext: inheritedContext,
+                    pageBlocks: blocks,
+                    requestedIndexes: [blockIndex]
+                )
                 group.addTask {
                     do {
                         let translatedText = try await TranslationRuntimeService.translate(
@@ -5139,6 +5188,11 @@ struct LocalImageView: View {
             }
         }
         try Task.checkCancellation()
+        await TranslationContextRegistry.shared.record(
+            scopeID: contextScopeID,
+            pageIndex: pageIndex,
+            blocks: textBlocks
+        )
     }
 
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
@@ -5170,9 +5224,10 @@ struct LocalImageView: View {
         let result: OCRPipelineResult
         if ocrVisualVerificationEnabled, let activeConfiguration {
             let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
+            let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
             let corrected = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
-                blocks: localResult.resolvedBlocks,
+                blocks: reviewBlocks,
                 apiKey: activeConfiguration.apiKey,
                 baseURL: activeConfiguration.baseURL,
                 model: activeConfiguration.visionModel,
@@ -5180,18 +5235,21 @@ struct LocalImageView: View {
                 modelDescriptor: activeConfiguration.visionModelDescriptor,
                 sourceLanguagePreference: comicTranslationSourceLanguage,
                 detectedLanguage: localResult.detectedLanguage,
-                visualVerificationEnabled: ocrVisualVerificationEnabled
+                visualVerificationEnabled: ocrVisualVerificationEnabled,
+                coverageRecoveryRequested: localResult.quality?.isSuspicious == true
+                    || !localResult.rejectedBlocks.isEmpty
             )
+            let usableCorrected = corrected.filter { !$0.isFiltered }
             let segmentation = MangaTextSegmenter.segment(
-                corrected,
+                usableCorrected,
                 isRightToLeft: isRightToLeftReading
             )
             result = OCRPipelineResult(
                 rawBlocks: localResult.rawBlocks,
-                resolvedBlocks: corrected,
+                resolvedBlocks: usableCorrected,
                 lineBlocks: segmentation.lines,
                 bubbleBlocks: segmentation.bubbles,
-                rejectedBlocks: localResult.rejectedBlocks,
+                rejectedBlocks: corrected.filter(\.isFiltered),
                 detectedLanguage: localResult.detectedLanguage,
                 quality: localResult.quality
             )
