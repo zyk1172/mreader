@@ -38,6 +38,7 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
             AIPageTranslationItem(id: "b1", sourceText: "次の台詞です", order: 1)
         ]
         let payload = #"{"items":[{"id":"b0","translation":"Je suis très heureux de vous voir aujourd'hui.","translationLines":[]},{"id":"b1","translation":"Nous allons continuer cette conversation ensemble.","translationLines":[]}]}"#
+            .replacingOccurrences(of: "\\\"", with: "\"")
         XCTAssertThrowsError(
             try AIPageTranslationParser.parseStrict(payload, expectedItems: expected, target: .english)
         ) { error in
