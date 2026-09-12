@@ -5314,9 +5314,7 @@ private struct TranslationTextRenderer: View {
     @State private var isExpansionPresented = false
 
     private var fullText: String {
-        segments.joined(separator: "
-
-")
+        segments.joined(separator: "\n\n")
     }
 
     var body: some View {

@@ -860,8 +860,7 @@ nonisolated enum OCRBubbleLayoutEngine {
             x: min(max(sourceRect.midX, safeBounds.minX), safeBounds.maxX),
             y: min(max(sourceRect.midY, safeBounds.minY), safeBounds.maxY)
         )
-        let glyphCount = max(text.filter { !$0.isWhitespace && $0 != "
-" }.count, 1)
+        let glyphCount = max(text.filter { !$0.isWhitespace && $0 != "\n" }.count, 1)
 
         func makeLayout(fontSize: CGFloat, forceFullBounds: Bool) -> TranslationLayout? {
             let p = effectivePadding(fontSize)
