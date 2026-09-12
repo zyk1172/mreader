@@ -1,7 +1,8 @@
 {
   "expectedPageState": "unknown",
-  "notes": "Machine-assisted candidate generated from MangaOCRPipeline. Human review must correct text, normalized regions, reading order and bubble grouping, then explicitly resolve expectedPageState before marking humanVerified. Reference translations remain intentionally empty until reviewed.",
+  "notes": "Machine-assisted candidate generated from MangaOCRPipeline. Human review must correct text, normalized regions, reading order and bubble grouping, then explicitly resolve expectedPageState before marking humanVerified. A valid review receipt for the pinned source image is required before this annotation becomes reportable. Reference translations remain intentionally empty until reviewed.",
   "referenceTranslations": {},
+  "review": null,
   "regions": [
     {
       "id": "region-001",
