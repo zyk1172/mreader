@@ -1,0 +1,1 @@
+This branch changes visual OCR region review to text-first transcription, preserves local OCR geometry, aligns the visual JSON contract, and adds recognition structured-output support with regression coverage.
