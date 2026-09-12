@@ -116,7 +116,7 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
 
         XCTAssertGreaterThan(compact.count, 1)
         XCTAssertEqual(compact, tall)
-        XCTAssertEqual(compact.first?.minY, 0)
-        XCTAssertEqual(compact.last?.maxY, 1, accuracy: 0.0001)
+        XCTAssertEqual(compact.first?.minY ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(compact.last?.maxY ?? -1, 1, accuracy: 0.0001)
     }
 }
