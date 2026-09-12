@@ -566,3 +566,5 @@
 "ocr.minimumReadableTranslationFontSizeValue" = "가독 하한: %d pt";
 "ocr.minimumReadableTranslationFontSizeDescription" = "이 크기보다 더 줄이지 않고, 공간이 부족하면 펼쳐서 전체 번역을 읽습니다.";
 "ocr.translationNeedsExpansion" = "번역을 펼쳐서 읽어야 합니다";
+"ocr.inPlaceTranslation" = "원위치 번역";
+"ocr.inPlaceTranslationDescription" = "신뢰할 수 있는 대사 말풍선만 되돌릴 수 있는 원위치 표시를 사용하고 효과음 원화는 유지합니다.";

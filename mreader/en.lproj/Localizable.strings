@@ -573,3 +573,5 @@
 "ocr.minimumReadableTranslationFontSizeValue" = "Readable floor: %d pt";
 "ocr.minimumReadableTranslationFontSizeDescription" = "Below this size, text is not shrunk further; use the expandable translation instead.";
 "ocr.translationNeedsExpansion" = "Translation needs expanded reading";
+"ocr.inPlaceTranslation" = "In-place translation";
+"ocr.inPlaceTranslationDescription" = "Use reversible in-place coverage only for reliable dialogue bubbles; sound effects keep their original artwork and use annotations.";

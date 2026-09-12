@@ -108,6 +108,9 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     /// region cannot fit at this size, layout returns `needsExpansion` instead
     /// of silently shrinking to microscopic text.
     var minimumReadableTranslationFontSize: Double
+    /// Opt-in, non-destructive original-position rendering for reliable dialogue bubbles.
+    /// The image itself is never modified; disabling this immediately restores the artwork.
+    var prefersInPlaceTranslation: Bool
 
     var measuredTextTranslationFontSize: Double {
         get { borderlessTranslationFontSize }
@@ -135,7 +138,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
-    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, borderlessTranslationFontSize: Double = ComicBook.defaultBorderlessTranslationFontSize, minimumReadableTranslationFontSize: Double = ComicBook.defaultMinimumReadableTranslationFontSize, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, borderlessTranslationFontSize: Double = ComicBook.defaultBorderlessTranslationFontSize, minimumReadableTranslationFontSize: Double = ComicBook.defaultMinimumReadableTranslationFontSize, prefersInPlaceTranslation: Bool = false, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -175,6 +178,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.ocrMinimumTextHeight = ocrMinimumTextHeight
         self.borderlessTranslationFontSize = ComicBook.clampedBorderlessTranslationFontSize(borderlessTranslationFontSize)
         self.minimumReadableTranslationFontSize = ComicBook.clampedMinimumReadableTranslationFontSize(minimumReadableTranslationFontSize)
+        self.prefersInPlaceTranslation = prefersInPlaceTranslation
         self.aiTranslationModeRaw = aiTranslationModeRaw
         self.translationSourceLanguageRaw = translationSourceLanguageRaw
         self.hasInitializedReadingPreset = hasInitializedReadingPreset
@@ -233,6 +237,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
             try container.decodeIfPresent(Double.self, forKey: .minimumReadableTranslationFontSize)
                 ?? ComicBook.defaultMinimumReadableTranslationFontSize
         )
+        prefersInPlaceTranslation = try container.decodeIfPresent(Bool.self, forKey: .prefersInPlaceTranslation) ?? false
         aiTranslationModeRaw = try container.decodeIfPresent(String.self, forKey: .aiTranslationModeRaw) ?? AITranslationMode.ocr.rawValue
         translationSourceLanguageRaw = try container.decodeIfPresent(String.self, forKey: .translationSourceLanguageRaw) ?? TranslationSourceLanguage.automatic.rawValue
         hasInitializedReadingPreset = try container.decodeIfPresent(Bool.self, forKey: .hasInitializedReadingPreset) ?? true

@@ -1424,6 +1424,15 @@ struct ReaderView: View {
                         Text("ocr.minimumReadableTranslationFontSizeDescription".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        Toggle("ocr.inPlaceTranslation".localized, isOn: Binding(
+                            get: { comic.prefersInPlaceTranslation },
+                            set: { newValue in updateComic { $0.prefersInPlaceTranslation = newValue } }
+                        ))
+                        .disabled(!comic.isAITranslationEnabled)
+                        Text("ocr.inPlaceTranslationDescription".localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -4009,7 +4018,8 @@ struct LocalImageView: View {
                 ForEach(items) { item in
                     TranslationSurfaceRenderer(
                         layoutSize: item.rect.size,
-                        surfaceStyle: item.surfaceStyle
+                        surfaceStyle: item.surfaceStyle,
+                        displayMode: item.displayMode
                     )
                     .position(x: item.rect.midX, y: item.rect.midY)
                     .zIndex(TranslationSurfaceLayering.surfaceZIndex)
@@ -4026,6 +4036,7 @@ struct LocalImageView: View {
                         contentPadding: item.contentPadding,
                         style: TranslationColorStyle(rawValue: translationColorStyleRaw) ?? .contrast,
                         textOrientation: item.textOrientation,
+                        displayMode: item.displayMode,
                         layoutStatus: item.layoutStatus
                     )
                     .position(x: item.rect.midX, y: item.rect.midY)
@@ -4252,6 +4263,8 @@ struct LocalImageView: View {
             displayText: translation.isEmpty ? nil : geometry.choice.text,
             textOrientation: geometry.translationOrientation,
             layoutRole: block.layoutRole,
+            contentRole: block.translationContentRole,
+            displayMode: geometry.displayMode,
             surfaceStyle: geometry.surfaceStyle,
             layoutStatus: geometry.choice.layout.status
         )
@@ -4265,6 +4278,7 @@ struct LocalImageView: View {
         allowedBounds: CGRect,
         layoutBounds: CGRect,
         translationOrientation: TextOrientation,
+        displayMode: TranslationDisplayMode,
         surfaceStyle: TranslationSurfaceStyle,
         choice: OCRBubbleLayoutEngine.TranslationLayoutChoice
     ) {
@@ -4290,8 +4304,22 @@ struct LocalImageView: View {
         // 气泡存在性只判定一次：allowedBounds、字号策略与渲染层的表面样式都从这
         // 一个结果派生，避免"布局判断 A、渲染判断 B"的状态漂移。
         let hasReliableBubble = usableBubbleBounds != nil
+        let displayMode = TranslationDisplayPolicy.mode(
+            contentRole: block.translationContentRole,
+            hasReliableDetectedBubble: hasReliableBubble,
+            prefersInPlace: comic?.prefersInPlaceTranslation ?? false
+        )
         let surfaceStyle = TranslationSurfacePolicy.surfaceStyle(
             hasReliableBubble: hasReliableBubble
+        )
+        let mappedSafeRegion = block.effectiveLayoutSafeRegion.map {
+            OCRCoordinateMapper.displayRect(forNormalizedPageRect: $0, using: transform)
+        }
+        let resolvedSafeRegion = TranslationRegionPolicy.resolvedLayoutSafeRegion(
+            sourceTextRegion: textRect,
+            proposedSafeRegion: mappedSafeRegion,
+            detectedBubble: usableBubbleBounds,
+            pageBounds: imageBounds
         )
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
@@ -4305,7 +4333,7 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds = usableBubbleBounds ?? fallbackBounds
+        let allowedBounds = resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
         let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
             around: textRect,
             within: allowedBounds,
@@ -4344,6 +4372,7 @@ struct LocalImageView: View {
             allowedBounds: allowedBounds,
             layoutBounds: layoutBounds,
             translationOrientation: translationOrientation,
+            displayMode: displayMode,
             surfaceStyle: surfaceStyle,
             choice: choice
         )
@@ -4433,6 +4462,8 @@ struct LocalImageView: View {
                 displayText: item.displayText,
                 textOrientation: item.textOrientation,
                 layoutRole: item.layoutRole,
+                contentRole: item.contentRole,
+                displayMode: item.displayMode,
                 surfaceStyle: item.surfaceStyle,
                 layoutStatus: layoutStatus
             ))
@@ -4492,6 +4523,8 @@ struct LocalImageView: View {
                 displayText: nil,
                 textOrientation: block.textOrientation,
                 layoutRole: block.layoutRole,
+                contentRole: block.translationContentRole,
+                displayMode: .assistOverlay,
                 // OCR 放大本身就是要盖住原文字，属于有意绘制的白底卡片。
                 surfaceStyle: .detectedBubble,
                 layoutStatus: .fitted
@@ -5276,6 +5309,8 @@ private struct TranslationLayoutItem: Identifiable {
     let displayText: String?
     let textOrientation: TextOrientation
     let layoutRole: TranslationLayoutRole
+    let contentRole: TranslationContentRole
+    let displayMode: TranslationDisplayMode
     /// 有可靠漫画气泡时为 detectedBubble；否则为 measuredText。两种表面都绘制
     /// RoundedRectangle 背景，只采用不同的卡片尺寸算法。
     let surfaceStyle: TranslationSurfaceStyle
@@ -5344,20 +5379,37 @@ private enum TranslationColorStyle: String, CaseIterable {
 private struct TranslationSurfaceRenderer: View {
     let layoutSize: CGSize
     let surfaceStyle: TranslationSurfaceStyle
+    let displayMode: TranslationDisplayMode
 
+    @ViewBuilder
     var body: some View {
-        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                    .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-            }
-            .frame(width: layoutSize.width, height: layoutSize.height)
+        switch displayMode {
+        case .inPlace:
+            RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
+                .fill(Color.white.opacity(0.94))
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        case .assistOverlay:
+            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                }
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        case .annotation:
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(.thinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.30))
+                }
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        }
     }
 }
 
@@ -5368,6 +5420,7 @@ private struct TranslationTextRenderer: View {
     let contentPadding: CGFloat
     let style: TranslationColorStyle
     let textOrientation: TextOrientation
+    let displayMode: TranslationDisplayMode
     let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
     @State private var isExpansionPresented = false
 
@@ -5393,7 +5446,7 @@ private struct TranslationTextRenderer: View {
                 CoreTextTranslationView(
                     text: fullText,
                     fontSize: fontSize,
-                    color: style.coreTextColor,
+                    color: displayMode == .inPlace ? UIColor.label : style.coreTextColor,
                     textOrientation: textOrientation,
                     lineSpacing: 2
                 )
