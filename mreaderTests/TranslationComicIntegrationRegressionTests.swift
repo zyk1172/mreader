@@ -94,6 +94,27 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         )
     }
 
+    func testSegmentationPreservesIndependentLayoutSafeRegion() {
+        let safe = CGRect(x: 0.18, y: 0.20, width: 0.30, height: 0.20)
+        let bubble = CGRect(x: 0.16, y: 0.18, width: 0.34, height: 0.24)
+        let block = TextBlock(
+            text: "こんにちは",
+            boundingBox: CGRect(x: 0.22, y: 0.24, width: 0.18, height: 0.08),
+            confidence: 0.95,
+            ocrSource: "vision-recognition:dialogue",
+            bubbleBox: bubble,
+            layoutSafeRegion: safe,
+            textOrientation: .horizontal,
+            layoutRole: .dialogue
+        )
+
+        let result = MangaTextSegmenter.segment([block], isRightToLeft: false)
+        let unit = result.bubbles.first
+
+        XCTAssertEqual(unit?.bubbleBox, bubble)
+        XCTAssertEqual(unit?.layoutSafeRegion, safe)
+    }
+
     func testOfflineBlockRoundTripPreservesIndependentLayoutSafeRegion() throws {
         let source = TextBlock(
             text: "原文",

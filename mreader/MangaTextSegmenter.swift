@@ -498,6 +498,17 @@ nonisolated enum MangaTextSegmenter {
             )
         }
 
+        let safeCandidates = ordered.compactMap(\.layoutSafeRegion)
+        let proposedSafeRegion: CGRect? = safeCandidates.isEmpty
+            ? nil
+            : safeCandidates.dropFirst().reduce(safeCandidates[0]) { $0.union($1) }
+        let mergedSafeRegion = TranslationRegionPolicy.resolvedLayoutSafeRegion(
+            sourceTextRegion: bounds,
+            proposedSafeRegion: proposedSafeRegion,
+            detectedBubble: selectedBubble?.box,
+            pageBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
+        ) ?? selectedBubble?.box
+
         return TextBlock(
             id: ordered[0].id,
             text: ordered.map(\.text).reduce("", joinedText),
@@ -507,6 +518,7 @@ nonisolated enum MangaTextSegmenter {
             estimatedFontScale: scale,
             textColorHex: ordered.compactMap(\.textColorHex).first,
             bubbleBox: selectedBubble?.box,
+            layoutSafeRegion: mergedSafeRegion,
             polygon: ordered.flatMap(\.polygon),
             bubblePolygon: selectedBubble?.polygon ?? [],
             textOrientation: ordered[0].textOrientation,
