@@ -4320,7 +4320,7 @@ struct LocalImageView: View {
             textOrientation: translationOrientation,
             // detected bubble 沿用真实气泡范围；measuredText 只按译文测量结果排版。
             geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText,
-            minimumReadableFontSize: CGFloat(comic.minimumReadableTranslationFontSize)
+            minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
         )
         #if DEBUG
         print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
