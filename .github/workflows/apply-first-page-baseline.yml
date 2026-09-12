@@ -1,0 +1,112 @@
+name: Apply first page baseline capture
+
+on:
+  push:
+    branches:
+      - codex/translation-first-page-baseline
+    paths:
+      - .github/workflows/apply-first-page-baseline.yml
+
+permissions:
+  contents: write
+
+env:
+  XCODE_PATH: /Applications/Xcode_26.5.app/Contents/Developer
+  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.5
+
+jobs:
+  capture:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: codex/translation-first-page-baseline
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
+
+      - name: Build tests
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderBaselineDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            build-for-testing
+
+      - name: Capture real-page OCR baseline
+        env:
+          MREADER_RUN_PAGE_BENCHMARK: "1"
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Debug \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/MReaderBaselineDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            -only-testing:mreaderTests/TranslationFirstPageBaselineTests/testGenerateShirohagePageBaselineWhenOptedIn \
+            test-without-building | tee "$RUNNER_TEMP/page-baseline.log"
+
+      - name: Extract baseline fixtures
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import pathlib
+          import re
+
+          root = pathlib.Path.cwd()
+          log = pathlib.Path("${{ runner.temp }}/page-baseline.log").read_text(errors="ignore")
+
+          def extract(marker: str) -> bytes:
+              matches = re.findall(rf"{marker}=([A-Za-z0-9+/=]+)", log)
+              if not matches:
+                  raise SystemExit(f"missing {marker} in xcodebuild output")
+              return base64.b64decode(matches[-1])
+
+          fixtures = root / "mreaderTests" / "Fixtures"
+          (fixtures / "sample_shirohage_manga.baseline.json").write_bytes(
+              extract("MREADER_BASELINE_BASE64")
+          )
+          candidate_path = fixtures / "sample_shirohage_manga.gold.json"
+          candidate_path.write_bytes(extract("MREADER_CANDIDATE_BASE64"))
+
+          manifest_path = fixtures / "translation_quality_manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          for sample in manifest["samples"]:
+              if sample["id"] == "manga-page-shirohage-ja":
+                  sample["annotationStatus"] = "pending"
+                  sample["goldAnnotation"] = candidate_path.name
+                  sample["notes"] = (
+                      "Real-page local OCR baseline captured on the pinned CI simulator. "
+                      "The linked annotation is machine-assisted candidate truth only; "
+                      "a human must verify text, regions, reading order and bubble grouping before ready."
+                  )
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+          )
+          PY
+
+      - name: Commit captured baseline and remove helper workflow
+        run: |
+          rm .github/workflows/apply-first-page-baseline.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "test: capture first licensed manga page baseline"
+          git push origin HEAD:codex/translation-first-page-baseline
