@@ -118,6 +118,9 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             -only-testing:mreaderUITests \
+            -retry-tests-on-failure \
+            -test-iterations 2 \
+            -test-repetition-relaunch-enabled YES \
             -resultBundlePath "$RUNNER_TEMP/MReaderUISmoke.xcresult" \
             test-without-building
 

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "samples": [
+    {
+      "id": "japanese-vertical-tateyoko",
+      "image": "japanese_vertical_tateyoko_crop.png",
+      "license": "public-domain",
+      "sourceLanguage": "ja",
+      "annotationStatus": "ready",
+      "goldText": "ノートを買った。",
+      "notes": "Deterministic OCR/CER fixture; line breaks are excluded from CER by the benchmark normalizer."
+    },
+    {
+      "id": "manga-page-publicdomainq",
+      "image": "manga_page_publicdomainq.png",
+      "license": "CC0",
+      "sourceLanguage": "ja",
+      "annotationStatus": "pending",
+      "goldText": null,
+      "notes": "Reserved for page-level detection, structure, translation and layout annotation. Do not report quality metrics for this sample until the gold annotations are completed."
+    }
+  ]
+}
