@@ -26,15 +26,15 @@ final class TranslationQualityBenchmarkTests: XCTestCase {
         XCTAssertFalse(ready.isEmpty)
         XCTAssertTrue(ready.allSatisfy(\.hasGoldReference))
 
-        let negative = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-publicdomainq" })
-        XCTAssertEqual(negative.annotationStatus, .ready)
-        XCTAssertNil(negative.goldText)
-        XCTAssertEqual(negative.goldAnnotation, "manga_page_publicdomainq.gold.json")
+        let negativeCandidate = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-publicdomainq" })
+        XCTAssertEqual(negativeCandidate.annotationStatus, .pending)
+        XCTAssertNil(negativeCandidate.goldText)
+        XCTAssertEqual(negativeCandidate.goldAnnotation, "manga_page_publicdomainq.gold.json")
 
-        let pending = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-shirohage-ja" })
-        XCTAssertEqual(pending.annotationStatus, .pending)
-        XCTAssertNil(pending.goldText)
-        XCTAssertNil(pending.goldAnnotation)
+        let positiveCandidate = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-shirohage-ja" })
+        XCTAssertEqual(positiveCandidate.annotationStatus, .pending)
+        XCTAssertNil(positiveCandidate.goldText)
+        XCTAssertNil(positiveCandidate.goldAnnotation)
     }
 
     func testCERUsesCharactersAndIgnoresLayoutWhitespace() {
