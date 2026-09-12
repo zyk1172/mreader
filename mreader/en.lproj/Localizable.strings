@@ -568,3 +568,8 @@
 "offlineTranslation.changeModel" = "Choose another model";
 "offlineTranslation.errorDetails" = "View error details";
 "nav.close" = "Close";
+
+"ocr.minimumReadableTranslationFontSize" = "Minimum readable translation size";
+"ocr.minimumReadableTranslationFontSizeValue" = "Readable floor: %d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "Below this size, text is not shrunk further; use the expandable translation instead.";
+"ocr.translationNeedsExpansion" = "Translation needs expanded reading";
