@@ -2,17 +2,15 @@ import Foundation
 import XCTest
 
 final class TranslationGoldFixtureTests: XCTestCase {
-    func testReadyPageGoldFilesDecodeAndMatchManifest() throws {
+    func testPageAnnotationFilesDecodeAndRespectVerificationGate() throws {
         let manifest: TranslationQualityBenchmarkManifest = try decodeFixture(
             "translation_quality_manifest",
             extension: "json"
         )
-        let pageGoldSamples = manifest.samples.filter {
-            $0.annotationStatus == .ready && $0.goldAnnotation != nil
-        }
-        XCTAssertFalse(pageGoldSamples.isEmpty)
+        let annotatedSamples = manifest.samples.filter { $0.goldAnnotation != nil }
+        XCTAssertFalse(annotatedSamples.isEmpty)
 
-        for sample in pageGoldSamples {
+        for sample in annotatedSamples {
             let annotation = try XCTUnwrap(sample.goldAnnotation)
             let file = URL(fileURLWithPath: annotation)
             let gold: TranslationBenchmarkPageGold = try decodeFixture(
@@ -22,24 +20,32 @@ final class TranslationGoldFixtureTests: XCTestCase {
             XCTAssertEqual(gold.schemaVersion, 1)
             XCTAssertEqual(gold.sampleID, sample.id)
             XCTAssertTrue(gold.isInternallyConsistent)
+            if sample.annotationStatus == .ready {
+                XCTAssertTrue(gold.isReportableGold)
+            } else {
+                XCTAssertFalse(gold.isReportableGold)
+            }
         }
     }
 
-    func testPublicDomainQPageIsExplicitNoTextNegativeGold() throws {
+    func testPublicDomainQPageRemainsCandidateUntilHumanVerification() throws {
+        let manifest: TranslationQualityBenchmarkManifest = try decodeFixture(
+            "translation_quality_manifest",
+            extension: "json"
+        )
+        let sample = try XCTUnwrap(manifest.samples.first { $0.id == "manga-page-publicdomainq" })
+        XCTAssertEqual(sample.annotationStatus, .pending)
+
         let gold: TranslationBenchmarkPageGold = try decodeFixture(
             "manga_page_publicdomainq.gold",
             extension: "json"
         )
+        XCTAssertEqual(gold.verificationStatus, .candidate)
         XCTAssertEqual(gold.expectedPageState, .noText)
         XCTAssertTrue(gold.regions.isEmpty)
         XCTAssertTrue(gold.referenceTranslations.isEmpty)
         XCTAssertTrue(gold.isInternallyConsistent)
-
-        let score = TranslationQualityBenchmark.completenessScore(
-            observations: [.init(expected: .noText, actual: .noText)]
-        )
-        XCTAssertEqual(score.exactStateAccuracy, 1, accuracy: 0.0001)
-        XCTAssertEqual(score.noTextFalsePositiveRate, 0, accuracy: 0.0001)
+        XCTAssertFalse(gold.isReportableGold)
     }
 
     func testPendingJapaneseMangaFixtureIsBundledButCannotReportQualityYet() throws {
