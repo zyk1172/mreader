@@ -33,8 +33,8 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
             styleInstructions: "自然对白",
             previousContext: "原文=兄さん → 译文=哥哥"
         )
-        XCTAssertTrue(prompt.contains("\\\"order\\\":0"))
-        XCTAssertTrue(prompt.contains("\\\"textBox\\\""))
+        XCTAssertTrue(prompt.contains("\"order\":0"))
+        XCTAssertTrue(prompt.contains("\"textBox\""))
         XCTAssertTrue(prompt.contains("称呼、术语、代词、语气"))
         XCTAssertTrue(prompt.contains("原文=兄さん → 译文=哥哥"))
         XCTAssertTrue(prompt.contains("不得凭空补人名"))
@@ -99,7 +99,7 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
             [stable, vertical, rejected],
             maximumCount: 6
         )
-        let ids = Set(regions.map(\\.blockID))
+        let ids = Set(regions.map(\.blockID))
         XCTAssertTrue(ids.contains(rejected.id))
         XCTAssertTrue(ids.contains(vertical.id))
         XCTAssertFalse(ids.contains(stable.id))
