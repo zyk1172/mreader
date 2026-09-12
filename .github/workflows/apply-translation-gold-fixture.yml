@@ -1,0 +1,36 @@
+name: Apply translation gold fixture
+
+on:
+  push:
+    branches:
+      - codex/translation-gold-benchmark
+    paths:
+      - scripts/apply_translation_gold_fixture.py
+      - .github/workflows/apply-translation-gold-fixture.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/translation-gold-benchmark
+          fetch-depth: 0
+
+      - name: Apply licensed fixture and gold metadata
+        run: python3 scripts/apply_translation_gold_fixture.py
+
+      - name: Commit generated fixture changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git commit -m "test: add licensed manga gold fixtures"
+          git push origin HEAD:codex/translation-gold-benchmark
