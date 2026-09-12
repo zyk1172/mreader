@@ -4,6 +4,7 @@ import XCTest
 @testable import mreader
 
 final class TranslationFirstPageBaselineTests: XCTestCase {
+    @MainActor
     func testCandidateGeneratedFromObservedPipelineDataRemainsNonReportable() throws {
         let line = TextBlock(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
@@ -34,15 +35,62 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
             report: report
         )
 
-        XCTAssertEqual(report.schemaVersion, 1)
+        XCTAssertEqual(report.schemaVersion, 2)
         XCTAssertEqual(report.lineCount, 1)
-        XCTAssertEqual(report.bubbleCount, 1)
+        XCTAssertEqual(report.bubbleBlockCount, 1)
+        XCTAssertEqual(report.physicalBubbleCount, 1)
         XCTAssertEqual(report.transcript, "テストです。")
         XCTAssertEqual(candidate.verificationStatus, .candidate)
+        XCTAssertEqual(candidate.expectedPageState, .unknown)
         XCTAssertFalse(candidate.isReportableGold)
         XCTAssertEqual(candidate.regions.count, 1)
         XCTAssertEqual(candidate.regions[0].text, "テストです。")
         XCTAssertNotNil(candidate.regions[0].bubbleID)
+    }
+
+    @MainActor
+    func testBubbleBlockCountDoesNotPretendEveryGroupHasPhysicalBubble() {
+        let line = TextBlock(
+            text: "枠なし",
+            boundingBox: CGRect(x: 0.2, y: 0.2, width: 0.1, height: 0.2),
+            confidence: 0.9,
+            ocrSource: "vision:sfx",
+            bubbleBox: nil,
+            textOrientation: .vertical,
+            layoutRole: .standalone
+        )
+        let result = OCRPipelineResult(
+            rawBlocks: [line],
+            resolvedBlocks: [line],
+            lineBlocks: [line],
+            bubbleBlocks: [line],
+            rejectedBlocks: [],
+            detectedLanguage: "ja"
+        )
+
+        let report = TranslationFirstPageBaseline.makeReport(
+            sampleID: "fixture",
+            result: result,
+            elapsedMilliseconds: 1
+        )
+
+        XCTAssertEqual(report.bubbleBlockCount, 1)
+        XCTAssertEqual(report.physicalBubbleCount, 0)
+    }
+
+    func testHumanVerifiedUnknownStateStillCannotBecomeReportableGold() {
+        let annotation = TranslationBenchmarkPageGold(
+            schemaVersion: 1,
+            sampleID: "fixture",
+            verificationStatus: .humanVerified,
+            expectedPageState: .unknown,
+            regions: [],
+            referenceTranslations: [:],
+            notes: nil
+        )
+
+        XCTAssertTrue(annotation.isInternallyConsistent)
+        XCTAssertFalse(annotation.isReportableGold)
     }
 
     func testShirohageFixtureCannotBeScoredBeforeHumanVerification() throws {
@@ -63,13 +111,37 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
             )
             XCTAssertFalse(gold.isReportableGold)
             XCTAssertEqual(gold.verificationStatus, .candidate)
+            XCTAssertEqual(gold.expectedPageState, .unknown)
         }
+    }
+
+    func testPersistedShirohageBaselineHasV2ProvenanceAndDistinctBubbleSemantics() throws {
+        let report: TranslationFirstPageBaselineReport = try decodeFixture(
+            "sample_shirohage_manga.baseline",
+            extension: "json"
+        )
+
+        XCTAssertEqual(report.schemaVersion, 2)
+        XCTAssertEqual(report.sampleID, "manga-page-shirohage-ja")
+        XCTAssertEqual(report.bubbleBlockCount, 9)
+        XCTAssertEqual(report.physicalBubbleCount, 0)
+        XCTAssertEqual(report.capture?.capturedAt, "2026-09-12T16:38:42Z")
+        XCTAssertEqual(report.capture?.commitSHA, "4675a607c2b7835671631c27475e8a911b914d7b")
+        XCTAssertEqual(report.capture?.workflowRunID, "34705735085")
+        XCTAssertEqual(report.capture?.xcodeVersion, "26.5")
+        XCTAssertEqual(report.capture?.xcodeBuild, "17F66")
+        XCTAssertEqual(report.capture?.sdkName, "iphonesimulator26.5")
+        XCTAssertEqual(report.capture?.platformName, "iOS Simulator")
+        XCTAssertEqual(report.capture?.platformVersion, "26.5")
+        XCTAssertEqual(report.capture?.deviceModel, "iPhone 17")
+        XCTAssertEqual(report.capture?.captureSource, "github-actions")
     }
 
     /// Opt-in benchmark against the actual licensed manga page. Normal CI skips
     /// this because Vision output is OS/runtime dependent and the point is to
     /// capture a baseline, not to turn one simulator OCR result into a golden
     /// assertion. Set MREADER_RUN_PAGE_BENCHMARK=1 to execute it.
+    @MainActor
     func testGenerateShirohagePageBaselineWhenOptedIn() async throws {
         guard ProcessInfo.processInfo.environment["MREADER_RUN_PAGE_BENCHMARK"] == "1" else {
             throw XCTSkip("Set MREADER_RUN_PAGE_BENCHMARK=1 to run the real-page OCR baseline.")
@@ -102,7 +174,8 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
         let report = TranslationFirstPageBaseline.makeReport(
             sampleID: "manga-page-shirohage-ja",
             result: result,
-            elapsedMilliseconds: elapsedMilliseconds
+            elapsedMilliseconds: elapsedMilliseconds,
+            capture: currentCapture()
         )
         let candidate = TranslationFirstPageBaseline.candidateGold(
             sampleID: "manga-page-shirohage-ja",
@@ -124,19 +197,38 @@ final class TranslationFirstPageBaselineTests: XCTestCase {
         candidateAttachment.lifetime = .keepAlways
         add(candidateAttachment)
 
-        // One-line base64 markers make the exact simulator output extractable
-        // from xcodebuild logs by the one-shot fixture-generation workflow.
         print("MREADER_BASELINE_BASE64=\(reportData.base64EncodedString())")
         print("MREADER_CANDIDATE_BASE64=\(candidateData.base64EncodedString())")
         print(
             "MReader benchmark sample=manga-page-shirohage-ja language=\(report.detectedLanguage ?? "unknown") "
                 + "raw=\(report.rawCount) resolved=\(report.resolvedCount) lines=\(report.lineCount) "
-                + "bubbles=\(report.bubbleCount) rejected=\(report.rejectedCount) "
-                + "elapsedMs=\(String(format: "%.0f", report.elapsedMilliseconds))"
+                + "bubbleBlocks=\(report.bubbleBlockCount) physicalBubbles=\(report.physicalBubbleCount) "
+                + "rejected=\(report.rejectedCount) elapsedMs=\(String(format: "%.0f", report.elapsedMilliseconds))"
         )
 
         XCTAssertEqual(report.sampleID, "manga-page-shirohage-ja")
+        XCTAssertNotNil(report.capture)
+        XCTAssertEqual(candidate.expectedPageState, .unknown)
         XCTAssertFalse(candidate.isReportableGold)
+    }
+
+    @MainActor
+    private func currentCapture() -> TranslationBaselineCapture {
+        let environment = ProcessInfo.processInfo.environment
+        let info = Bundle.main.infoDictionary ?? [:]
+        let isGitHubActions = environment["GITHUB_ACTIONS"] == "true"
+        return TranslationBaselineCapture(
+            capturedAt: ISO8601DateFormatter().string(from: Date()),
+            commitSHA: environment["MREADER_BENCHMARK_COMMIT_SHA"] ?? environment["GITHUB_SHA"],
+            workflowRunID: environment["GITHUB_RUN_ID"],
+            xcodeVersion: info["DTXcode"] as? String,
+            xcodeBuild: info["DTXcodeBuild"] as? String,
+            sdkName: environment["SDK_NAME"] ?? info["DTSDKName"] as? String,
+            platformName: UIDevice.current.systemName,
+            platformVersion: environment["SIMULATOR_RUNTIME_VERSION"] ?? UIDevice.current.systemVersion,
+            deviceModel: environment["SIMULATOR_DEVICE_NAME"] ?? UIDevice.current.model,
+            captureSource: isGitHubActions ? "github-actions" : "local-xctest"
+        )
     }
 
     private func decodeFixture<T: Decodable>(

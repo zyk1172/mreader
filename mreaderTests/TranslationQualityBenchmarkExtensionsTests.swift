@@ -74,6 +74,20 @@ final class TranslationQualityBenchmarkExtensionsTests: XCTestCase {
         XCTAssertEqual(score.noTextFalsePositiveRate, 1.0 / 3.0, accuracy: 0.0001)
     }
 
+    func testCompletenessScoreIgnoresUnknownCandidateExpectations() {
+        let score = TranslationQualityBenchmark.completenessScore(
+            observations: [
+                .init(expected: .unknown, actual: .completed),
+                .init(expected: .unknown, actual: .noText),
+                .init(expected: .completed, actual: .completed),
+                .init(expected: .partial, actual: .noText)
+            ]
+        )
+
+        XCTAssertEqual(score.exactStateAccuracy, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(score.noTextFalsePositiveRate, 0.5, accuracy: 0.0001)
+    }
+
     private func region(
         id: String,
         order: Int,

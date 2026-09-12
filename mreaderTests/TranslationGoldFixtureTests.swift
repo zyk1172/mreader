@@ -21,6 +21,7 @@ final class TranslationGoldFixtureTests: XCTestCase {
             XCTAssertEqual(gold.sampleID, sample.id)
             XCTAssertTrue(gold.isInternallyConsistent)
             if sample.annotationStatus == .ready {
+                XCTAssertNotEqual(gold.expectedPageState, .unknown)
                 XCTAssertTrue(gold.isReportableGold)
             } else {
                 XCTAssertFalse(gold.isReportableGold)
@@ -41,7 +42,7 @@ final class TranslationGoldFixtureTests: XCTestCase {
             extension: "json"
         )
         XCTAssertEqual(gold.verificationStatus, .candidate)
-        XCTAssertEqual(gold.expectedPageState, .noText)
+        XCTAssertEqual(gold.expectedPageState, .unknown)
         XCTAssertTrue(gold.regions.isEmpty)
         XCTAssertTrue(gold.referenceTranslations.isEmpty)
         XCTAssertTrue(gold.isInternallyConsistent)
@@ -63,6 +64,7 @@ final class TranslationGoldFixtureTests: XCTestCase {
                 extension: file.pathExtension
             )
             XCTAssertEqual(candidate.verificationStatus, .candidate)
+            XCTAssertEqual(candidate.expectedPageState, .unknown)
             XCTAssertFalse(candidate.isReportableGold)
         } else {
             XCTAssertFalse(sample.hasGoldReference)
