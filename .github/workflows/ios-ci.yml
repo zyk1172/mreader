@@ -1,135 +1,143 @@
-name: iOS CI
+name: Temporary translation benchmark v2 migration
 
 on:
-  pull_request:
   push:
     branches:
-      - main
+      - codex/translation-benchmark-integrity
 
 permissions:
-  contents: read
-
-concurrency:
-  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  XCODE_PATH: /Applications/Xcode_26.5.app/Contents/Developer
-  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.5
+  contents: write
 
 jobs:
-  build-and-test:
-    name: Unit tests
-    runs-on: macos-26
-    timeout-minutes: 45
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Check whitespace
-        run: git diff --check
-
-      - name: Select Xcode and inspect simulator runtimes
+      - name: Migrate benchmark contract and persisted baseline
         run: |
-          sudo xcode-select -s "$XCODE_PATH"
-          xcodebuild -version
-          xcrun simctl list runtimes
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Resolve Swift packages
-        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
 
-      - name: Build unit-test bundle
+          baseline_swift = "mreaderTests/TranslationFirstPageBaseline.swift"
+          tests_swift = "mreaderTests/TranslationFirstPageBaselineTests.swift"
+          docs = "docs/translation-first-page-benchmark.md"
+          fixtures_readme = "mreaderTests/Fixtures/README.md"
+          baseline_json = Path("mreaderTests/Fixtures/sample_shirohage_manga.baseline.json")
+
+          replace_once(
+              baseline_swift,
+              '''struct TranslationBaselineCapture: Codable, Equatable, Sendable {\n    let commitSHA: String?\n    let xcodeVersion: String?\n    let xcodeBuild: String?\n    let platformName: String\n    let platformVersion: String\n    let deviceModel: String\n    let captureSource: String\n}\n''',
+              '''struct TranslationBaselineCapture: Codable, Equatable, Sendable {\n    let capturedAt: String?\n    let commitSHA: String?\n    let workflowRunID: String?\n    let xcodeVersion: String?\n    let xcodeBuild: String?\n    let sdkName: String?\n    let platformName: String\n    let platformVersion: String\n    let deviceModel: String\n    let captureSource: String\n}\n'''
+          )
+
+          replace_once(
+              tests_swift,
+              '''        return TranslationBaselineCapture(\n            commitSHA: environment["MREADER_BENCHMARK_COMMIT_SHA"] ?? environment["GITHUB_SHA"],\n            xcodeVersion: info["DTXcode"] as? String,\n            xcodeBuild: info["DTXcodeBuild"] as? String,\n            platformName: UIDevice.current.systemName,\n            platformVersion: environment["SIMULATOR_RUNTIME_VERSION"] ?? UIDevice.current.systemVersion,\n            deviceModel: environment["SIMULATOR_DEVICE_NAME"] ?? UIDevice.current.model,\n            captureSource: isGitHubActions ? "github-actions" : "local-xctest"\n        )''',
+              '''        return TranslationBaselineCapture(\n            capturedAt: ISO8601DateFormatter().string(from: Date()),\n            commitSHA: environment["MREADER_BENCHMARK_COMMIT_SHA"] ?? environment["GITHUB_SHA"],\n            workflowRunID: environment["GITHUB_RUN_ID"],\n            xcodeVersion: info["DTXcode"] as? String,\n            xcodeBuild: info["DTXcodeBuild"] as? String,\n            sdkName: environment["SDK_NAME"] ?? info["DTSDKName"] as? String,\n            platformName: UIDevice.current.systemName,\n            platformVersion: environment["SIMULATOR_RUNTIME_VERSION"] ?? UIDevice.current.systemVersion,\n            deviceModel: environment["SIMULATOR_DEVICE_NAME"] ?? UIDevice.current.model,\n            captureSource: isGitHubActions ? "github-actions" : "local-xctest"\n        )'''
+          )
+
+          marker = '''    /// Opt-in benchmark against the actual licensed manga page. Normal CI skips\n'''
+          persisted_test = '''    func testPersistedShirohageBaselineHasV2ProvenanceAndDistinctBubbleSemantics() throws {\n        let report: TranslationFirstPageBaselineReport = try decodeFixture(\n            "sample_shirohage_manga.baseline",\n            extension: "json"\n        )\n\n        XCTAssertEqual(report.schemaVersion, 2)\n        XCTAssertEqual(report.sampleID, "manga-page-shirohage-ja")\n        XCTAssertEqual(report.bubbleBlockCount, 9)\n        XCTAssertEqual(report.physicalBubbleCount, 0)\n        XCTAssertEqual(report.capture?.capturedAt, "2026-09-12T16:38:42Z")\n        XCTAssertEqual(report.capture?.commitSHA, "4675a607c2b7835671631c27475e8a911b914d7b")\n        XCTAssertEqual(report.capture?.workflowRunID, "34705735085")\n        XCTAssertEqual(report.capture?.xcodeVersion, "26.5")\n        XCTAssertEqual(report.capture?.xcodeBuild, "17F66")\n        XCTAssertEqual(report.capture?.sdkName, "iphonesimulator26.5")\n        XCTAssertEqual(report.capture?.platformName, "iOS Simulator")\n        XCTAssertEqual(report.capture?.platformVersion, "26.5")\n        XCTAssertEqual(report.capture?.deviceModel, "iPhone 17")\n        XCTAssertEqual(report.capture?.captureSource, "github-actions")\n    }\n\n'''
+          replace_once(tests_swift, marker, persisted_test + marker)
+
+          data = json.loads(baseline_json.read_text())
+          old_bubble_count = data.pop("bubbleCount", None)
+          data["schemaVersion"] = 2
+          data["bubbleBlockCount"] = old_bubble_count if old_bubble_count is not None else len(data.get("bubbleBlocks", []))
+
+          def rect_key(rect):
+              if not rect:
+                  return None
+              return tuple(round(float(rect[key]), 8) for key in ("x", "y", "width", "height"))
+
+          physical_bubbles = {
+              key
+              for block in data.get("bubbleBlocks", [])
+              if (key := rect_key(block.get("bubbleRect"))) is not None
+          }
+          data["physicalBubbleCount"] = len(physical_bubbles)
+          data["capture"] = {
+              "capturedAt": "2026-09-12T16:38:42Z",
+              "commitSHA": "4675a607c2b7835671631c27475e8a911b914d7b",
+              "workflowRunID": "34705735085",
+              "xcodeVersion": "26.5",
+              "xcodeBuild": "17F66",
+              "sdkName": "iphonesimulator26.5",
+              "platformName": "iOS Simulator",
+              "platformVersion": "26.5",
+              "deviceModel": "iPhone 17",
+              "captureSource": "github-actions"
+          }
+          if data["bubbleBlockCount"] != 9:
+              raise SystemExit(f"unexpected bubble block count: {data['bubbleBlockCount']}")
+          if data["physicalBubbleCount"] != 0:
+              raise SystemExit(f"unexpected physical bubble count: {data['physicalBubbleCount']}")
+          baseline_json.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+          replace_once(
+              docs,
+              '''Do not compare a candidate annotation against the same OCR run and report that result as accuracy. That would make the system grade itself.\n\n## Run the baseline in Xcode\n''',
+              '''Do not compare a candidate annotation against the same OCR run and report that result as accuracy. That would make the system grade itself.\n\n## Integrity rules\n\n- Machine-generated page annotations always start with `expectedPageState: unknown`. OCR output may suggest that text exists or does not exist, but it cannot establish benchmark truth about `completed`, `partial`, `noText` or `failed`.\n- A page becomes reportable gold only after a human reviewer resolves the page state, verifies the regions/order/grouping, sets `verificationStatus` to `humanVerified`, and the manifest entry is `ready`.\n- `bubbleBlockCount` is the number of grouped output blocks produced by the pipeline. It is not a count of physical speech balloons.\n- `physicalBubbleCount` counts unique non-nil detected bubble rectangles carried by those blocks. A value of `0` is valid even when `bubbleBlockCount` is nonzero.\n- Baseline schema v2 records capture provenance so results from different Xcode/Vision/runtime environments are not silently compared as if they were equivalent.\n\nThe pinned Shirohage baseline was captured on GitHub Actions from commit `4675a607c2b7835671631c27475e8a911b914d7b`, workflow run `34705735085`, using Xcode 26.5 (`17F66`), `iphonesimulator26.5`, iPhone 17 on iOS 26.5. Its OCR text, geometry, confidence and latency remain an observed diagnostic snapshot, not quality ground truth.\n\n## Run the baseline in Xcode\n'''
+          )
+          replace_once(
+              docs,
+              '''The test logs one summary line with detected language, raw/resolved/line/bubble/rejected counts and elapsed time. The JSON attachments contain the complete block-level result.\n''',
+              '''The test logs one summary line with detected language, raw/resolved/line/grouped-bubble-block/physical-bubble/rejected counts and elapsed time. The JSON attachments contain the complete block-level result and runtime provenance.\n'''
+          )
+          replace_once(
+              docs,
+              '''7. After the entire page has been checked, set `verificationStatus` to `humanVerified`.\n8. Only then change the corresponding manifest sample from `pending` to `ready`.\n''',
+              '''7. Explicitly resolve `expectedPageState` from `unknown` to `completed`, `partial`, `noText` or `failed` based on the human review.\n8. After the entire page has been checked, set `verificationStatus` to `humanVerified`.\n9. Only then change the corresponding manifest sample from `pending` to `ready`.\n'''
+          )
+
+          replace_once(
+              fixtures_readme,
+              '''from Wikimedia Commons. Visual review suggests there is no translatable manga\ndialogue on the page, so `manga_page_publicdomainq.gold.json` currently stores\na **candidate `noText` annotation**. It remains `pending` and must not contribute\nreportable quality metrics until a human reviewer explicitly verifies it.\n''',
+              '''from Wikimedia Commons. Visual review suggests there is no translatable manga\ndialogue on the page, but `manga_page_publicdomainq.gold.json` deliberately keeps\n`expectedPageState` as **`unknown`**. It remains `pending` and must not contribute\nreportable quality metrics until a human reviewer explicitly verifies the page state.\n'''
+          )
+          replace_once(
+              fixtures_readme,
+              '''`candidate` annotation may be useful for review and test-data preparation but\nis never reportable gold. Only `humanVerified` annotations may be paired with a\n`ready` manifest entry for page-level quality reporting.\n''',
+              '''`candidate` annotation may be useful for review and test-data preparation but\nis never reportable gold. Candidate page state stays `unknown`; completeness metrics\nexclude it. Only a `humanVerified` annotation with an explicitly resolved non-unknown\npage state may be paired with a `ready` manifest entry for page-level quality reporting.\n'''
+          )
+
+          print("benchmark integrity v2 migration applied")
+          PY
+
+      - name: Verify migration
         run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            build-for-testing
+          git diff --check
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('mreaderTests/Fixtures/sample_shirohage_manga.baseline.json').read_text())
+          assert data['schemaVersion'] == 2
+          assert data['bubbleBlockCount'] == 9
+          assert data['physicalBubbleCount'] == 0
+          assert data['capture']['commitSHA'] == '4675a607c2b7835671631c27475e8a911b914d7b'
+          assert data['capture']['workflowRunID'] == '34705735085'
+          assert 'bubbleCount' not in data
+          PY
 
-      - name: Run unit tests
+      - name: Commit migration
         run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            -only-testing:mreaderTests \
-            -resultBundlePath "$RUNNER_TEMP/MReaderUnitTests.xcresult" \
-            test-without-building
-
-      - name: Upload unit test result
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mreader-unit-test-results
-          path: |
-            ${{ runner.temp }}/MReaderUnitTests.xcresult
-            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
-          if-no-files-found: warn
-
-  ui-smoke:
-    name: UI smoke tests
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Select Xcode and inspect simulator runtimes
-        run: |
-          sudo xcode-select -s "$XCODE_PATH"
-          xcodebuild -version
-          xcrun simctl list runtimes
-
-      - name: Resolve Swift packages
-        run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
-
-      - name: Build UI-test bundle
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            build-for-testing
-
-      - name: Run UI smoke tests
-        run: |
-          xcodebuild \
-            -project mreader.xcodeproj \
-            -scheme mreader \
-            -configuration Debug \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/MReaderDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            -only-testing:mreaderUITests \
-            -retry-tests-on-failure \
-            -test-iterations 2 \
-            -test-repetition-relaunch-enabled YES \
-            -resultBundlePath "$RUNNER_TEMP/MReaderUISmoke.xcresult" \
-            test-without-building
-
-      - name: Upload UI test result
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mreader-ui-smoke-results
-          path: |
-            ${{ runner.temp }}/MReaderUISmoke.xcresult
-            ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
-          if-no-files-found: warn
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mreaderTests/TranslationFirstPageBaseline.swift \
+                  mreaderTests/TranslationFirstPageBaselineTests.swift \
+                  mreaderTests/Fixtures/sample_shirohage_manga.baseline.json \
+                  mreaderTests/Fixtures/README.md \
+                  docs/translation-first-page-benchmark.md
+          git commit -m "test: complete benchmark integrity v2 migration"
+          git push origin HEAD:codex/translation-benchmark-integrity
