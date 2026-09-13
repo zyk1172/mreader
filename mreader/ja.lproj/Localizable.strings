@@ -100,6 +100,11 @@
 "ocr.magnifySize" = "テキスト拡大サイズ";
 "ocr.safeArea" = "端部分を無視";
 "ocr.aiTranslation" = "AI 翻訳";
+
+/* 审查 #15：同一个 key 曾同时承担 Section / Toggle / 导航标题三种语义 */
+"ocr.aiTranslation.sectionTitle" = "AI 翻訳";
+"ocr.aiTranslation.toggleTitle" = "AI 翻訳";
+"ocr.aiTranslation.navigationTitle" = "AI 翻訳";
 "ocr.translationMode" = "翻訳モード";
 "ocr.translationMode.ocr" = "OCR テキスト";
 "ocr.translationMode.vision" = "画像認識";
@@ -568,3 +573,12 @@
 "ocr.translationNeedsExpansion" = "翻訳を展開して読む必要があります";
 "ocr.inPlaceTranslation" = "インプレース翻訳";
 "ocr.inPlaceTranslationDescription" = "信頼できる吹き出しだけを可逆なインプレース表示にし、効果音の原画は保持します。";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "この Vision プロンプトは使用できないため、組み込みプロトコルテンプレートに切り替えました。";
+"settings.visionPrompt.missingPlaceholders" = "不足しているプレースホルダー：";
+"settings.visionPrompt.missingTokens" = "不足しているプロトコル項目：";
+
+/* AI 诊断日志开关（审查 #10） */
+"settings.aiDiagnosticLogging" = "AI 診断ログ";
+"settings.aiDiagnosticLoggingFooter" = "オンにすると、翻訳トラブルの調査時にモデルの生レスポンスと原文の断片を端末内のシステムログに記録します。通常はオフのままにしてください。オフの場合、ログにはモデル名・HTTP ステータス・エラー種別のみが記録され、原文や訳文は含まれません。";

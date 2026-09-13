@@ -192,4 +192,147 @@ struct ReadingActivityStoreTests {
         #expect(payloadDay.deviceSeconds == ["device-a": 30, "device-b": 1])
         #expect(payloadDay.devicePages == ["device-a": 3, "device-b": 1])
     }
+
+    /// 审查 #8：读盘不再阻塞主线程，但加载完成后必须把磁盘上的天数应用回内存。
+    @Test
+    func loadsExistingDaysInBackgroundAndAppliesThem() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MReaderReadingActivity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let storageURL = directory.appendingPathComponent("reading_activity.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let seeded = [
+            ReadingActivityDay(dateKey: "2026-01-01", seconds: 120, pages: 7)
+        ]
+        try JSONEncoder().encode(seeded).write(to: storageURL, options: .atomic)
+
+        let store = ReadingActivityStore(storageURL: storageURL)
+        await waitUntil { !store.days.isEmpty }
+
+        #expect(store.days.map(\.dateKey) == ["2026-01-01"])
+        #expect(store.days.first?.seconds == 120)
+        #expect(store.days.first?.pages == 7)
+    }
+
+    /// 审查 #8：写盘移出主线程后，重新打开 store 仍应读回刚写入的记录。
+    @Test
+    func recordedDaysSurviveReloadAfterAsyncWrite() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MReaderReadingActivity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let storageURL = directory.appendingPathComponent("reading_activity.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let start = Date(timeIntervalSince1970: 0)
+        let store = ReadingActivityStore(calendar: calendar, storageURL: storageURL)
+        store.record(
+            comicID: UUID(),
+            previousDate: start,
+            now: start.addingTimeInterval(12),
+            previousPageIndex: 0,
+            currentPageIndex: 2,
+            completed: false
+        )
+
+        await waitUntil { FileManager.default.fileExists(atPath: storageURL.path) }
+
+        let reloaded = ReadingActivityStore(calendar: calendar, storageURL: storageURL)
+        await waitUntil { !reloaded.days.isEmpty }
+        #expect(reloaded.days.first?.pages == 2)
+        #expect(reloaded.days.first?.seconds == 12)
+    }
+
+    /// 审查 #6：读盘完成前发生的 record 不能立刻落盘，
+    /// 否则会把"还没包含磁盘历史"的快照写回去，用户在这一瞬间退出就永久丢了旧统计。
+    @Test
+    func recordingBeforeBackgroundLoadKeepsDiskHistory() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MReaderReadingActivity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let storageURL = directory.appendingPathComponent("reading_activity.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // 磁盘上已有历史：1970-01-02。
+        let seeded = [ReadingActivityDay(dateKey: "1970-01-02", seconds: 100, pages: 5)]
+        try JSONEncoder().encode(seeded).write(to: storageURL, options: .atomic)
+
+        // 立刻创建 store 并马上 record：此时后台读盘尚未完成。
+        let store = ReadingActivityStore(calendar: calendar, storageURL: storageURL)
+        let day = Date(timeIntervalSince1970: 172_800) // 1970-01-03 UTC
+        store.record(
+            comicID: UUID(),
+            previousDate: day,
+            now: day.addingTimeInterval(12),
+            previousPageIndex: 0,
+            currentPageIndex: 2,
+            completed: false
+        )
+
+        await waitUntil { Self.storedDayKeys(at: storageURL).count == 2 }
+        #expect(Self.storedDayKeys(at: storageURL) == ["1970-01-02", "1970-01-03"])
+
+        // 重启后历史与新记录都在。
+        let reloaded = ReadingActivityStore(calendar: calendar, storageURL: storageURL)
+        await waitUntil { reloaded.days.count == 2 }
+        #expect(reloaded.days.map(\.dateKey) == ["1970-01-02", "1970-01-03"])
+        #expect(reloaded.days.first { $0.dateKey == "1970-01-02" }?.seconds == 100)
+        #expect(reloaded.days.first { $0.dateKey == "1970-01-03" }?.pages == 2)
+    }
+
+    /// 审查 #6：写入走防抖，但显式 flush（例如进入后台）必须立即落盘。
+    @Test
+    func explicitFlushPersistsPendingChangesImmediately() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MReaderReadingActivity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let storageURL = directory.appendingPathComponent("reading_activity.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let seeded = [ReadingActivityDay(dateKey: "1970-01-02", seconds: 100, pages: 5)]
+        try JSONEncoder().encode(seeded).write(to: storageURL, options: .atomic)
+
+        let store = ReadingActivityStore(calendar: calendar, storageURL: storageURL)
+        // 读到磁盘历史即证明读盘阶段已结束。
+        await waitUntil { !store.days.isEmpty }
+
+        let day = Date(timeIntervalSince1970: 172_800)
+        store.record(
+            comicID: UUID(),
+            previousDate: day,
+            now: day.addingTimeInterval(5),
+            previousPageIndex: 0,
+            currentPageIndex: 1,
+            completed: false
+        )
+        store.flushPendingWrites()
+
+        await waitUntil { Self.storedDayKeys(at: storageURL).count == 2 }
+        #expect(Self.storedDayKeys(at: storageURL) == ["1970-01-02", "1970-01-03"])
+    }
+
+    private static func storedDayKeys(at url: URL) -> [String] {
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
+            return []
+        }
+        return decoded.map(\.dateKey).sorted()
+    }
+
+    /// 轮询等待后台 IO 完成，避免测试依赖固定 sleep 时长。
+    private func waitUntil(
+        timeout: TimeInterval = 5,
+        _ condition: @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
 }

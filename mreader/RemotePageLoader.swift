@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import ImageIO
 import UIKit
+import os
 
 nonisolated enum RemoteImageLoader {
     nonisolated struct CoverCacheResult: Sendable, Equatable {
@@ -27,7 +28,7 @@ nonisolated enum RemoteImageLoader {
             try FileManager.default.moveItem(at: legacyRoot, to: newRoot)
             print("MReader migrated legacy cover cache to Application Support")
         } catch {
-            print("MReader cover cache migration failed: \(error.localizedDescription)")
+            MReaderLog.reader.error("cover cache migration failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 
@@ -476,7 +477,7 @@ actor RemotePageCache {
             return nil
         } catch {
             await KomgaProvider.invalidateResolvedURL(for: key.sourceID)
-            print("Komga 页面加载失败 page=\(key.pageIndex): \(error.localizedDescription)")
+            MReaderLog.reader.error("remote page load failed page=\(key.pageIndex, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
             return nil
         }
     }

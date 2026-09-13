@@ -113,6 +113,9 @@ nonisolated enum TranslationRuntimeService {
         )
     }
 
+    /// 视觉链路原文真实性复核：对可疑 block 裁剪局部图片做 text-first 复核，
+    /// 只重新确认 sourceText。已并入 `translateVisionPageWithStatus` 的收尾链路
+    /// （实时与整本离线翻译共用），这里不再单独对外暴露入口。
     static func translateVisionPageWithStatus(
         image: UIImage,
         apiKey: String,

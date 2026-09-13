@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated struct OPDSPublication: Hashable, Sendable {
     let id: String
@@ -322,6 +323,21 @@ nonisolated private struct OPDSClient: Sendable {
     let source: MediaSource
     let credential: String
 
+    /// 目标访问策略：只把用户显式配置的 baseURL / lanURL 视为可信目标。
+    /// 恶意 feed 提供的跨源私网 / 回环 / link-local 地址不会被自动跟随（审查 #11）。
+    private var destination: RemoteDestinationPolicy.Context {
+        RemoteDestinationPolicy.Context(source: source)
+    }
+
+    private func requireAllowedDestination(_ url: URL) throws {
+        if case .denied(let denial) = destination.decision(for: url) {
+            throw RemoteDestinationPolicyError.denied(
+                denial,
+                host: RemoteDestinationPolicy.normalizedHost(of: url) ?? ""
+            )
+        }
+    }
+
     func publications(limit: Int = 5_000) async throws -> [OPDSPublication] {
         guard let rootURL = URL(string: source.baseURL) else { throw MediaSourceError.invalidURL }
         var queue: [(URL, Int)] = [(rootURL, 0)]
@@ -346,6 +362,10 @@ nonisolated private struct OPDSClient: Sendable {
                 if publications.count >= limit { break }
             }
             for navigationURL in parsed.navigationURLs where !visited.contains(navigationURL) {
+                guard destination.allowsRequest(to: navigationURL) else {
+                    MReaderLog.reader.notice("OPDS navigation target blocked host=\(RemoteDestinationPolicy.normalizedHost(of: navigationURL) ?? "", privacy: .public)")
+                    continue
+                }
                 queue.append((navigationURL, depth + 1))
             }
         }
@@ -357,6 +377,7 @@ nonisolated private struct OPDSClient: Sendable {
     }
 
     func contentRevision(for url: URL) async -> String? {
+        guard destination.allowsRequest(to: url) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 20
@@ -366,7 +387,8 @@ nonisolated private struct OPDSClient: Sendable {
         do {
             let (data, response) = try await BoundedHTTPResponseReader.data(
                 for: request,
-                maximumBytes: OPDSResponseLimits.feedBytes
+                maximumBytes: OPDSResponseLimits.feedBytes,
+                redirectPolicy: { destination.decision(for: $0) }
             )
             guard let httpResponse = response as? HTTPURLResponse,
                   (200..<300).contains(httpResponse.statusCode),
@@ -407,7 +429,15 @@ nonisolated private struct OPDSClient: Sendable {
             applyAuthorization(to: &request)
         }
         request.timeoutInterval = 120
-        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+        // 命中本地缓存直接返回；未命中才需要走网络，此时必须先过目标策略。
+        try requireAllowedDestination(url)
+        // 策略感知下载：302 在**跟随之前**逐跳判定，被禁止的内网地址不会被请求；
+        // 允许的跨源跳转会显式剥离 Authorization（审查 #5）。
+        let (temporaryURL, response) = try await PolicyCheckedDownloader.download(
+            for: request,
+            maximumBytes: OPDSResponseLimits.downloadBytes,
+            redirectPolicy: { destination.decision(for: $0) }
+        )
         try validate(response, maximumBytes: OPDSResponseLimits.downloadBytes)
         guard let values = try? temporaryURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true,
@@ -417,13 +447,13 @@ nonisolated private struct OPDSClient: Sendable {
             throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
         }
         let extensionValue = resolvedFileExtension(url: url, response: response)
-        let destination = root
+        let cacheDestinationURL = root
             .appendingPathComponent(safeID)
             .appendingPathExtension(extensionValue)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        return destination
+        try? FileManager.default.removeItem(at: cacheDestinationURL)
+        try FileManager.default.moveItem(at: temporaryURL, to: cacheDestinationURL)
+        return cacheDestinationURL
     }
 
     private func resolvedFileExtension(url: URL, response: URLResponse) -> String {
@@ -447,6 +477,7 @@ nonisolated private struct OPDSClient: Sendable {
     }
 
     private func responseData(from url: URL) async throws -> (Data, HTTPURLResponse) {
+        try requireAllowedDestination(url)
         var request = URLRequest(url: url)
         request.setValue("application/opds+json, application/atom+xml;profile=opds-catalog, application/atom+xml, application/json, */*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 45
@@ -457,7 +488,9 @@ nonisolated private struct OPDSClient: Sendable {
         do {
             (data, response) = try await BoundedHTTPResponseReader.data(
                 for: request,
-                maximumBytes: OPDSResponseLimits.feedBytes
+                maximumBytes: OPDSResponseLimits.feedBytes,
+                // 重定向逐跳判定，避免 feed 通过 302 把请求引到内网地址。
+                redirectPolicy: { destination.decision(for: $0) }
             )
         } catch BoundedHTTPResponseError.tooLarge {
             throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")

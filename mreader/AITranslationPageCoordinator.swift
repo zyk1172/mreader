@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import UIKit
+import os
 
 nonisolated enum AITranslationPrefetchPolicy {
     static func pageIndices(
@@ -22,7 +23,9 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    static let translationCacheRevision = "translation-v21-context-recovery"
+    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核，
+    /// 会改写 sourceText 与 translation unit 数量，旧缓存必须失效。
+    static let translationCacheRevision = "translation-v22-vision-slice-merge-and-source-review"
     static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
@@ -214,7 +217,7 @@ actor AITranslationPageCoordinator {
         )
         let key = contextualRequest.cacheKey
         if let cached = cachedBlocks(forKey: key) {
-            print("MReader AI translation cache hit key=\(key.prefix(10)) blocks=\(cached.count)")
+            MReaderLog.aiTranslation.debug("translation cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.count, privacy: .public)")
             await TranslationContextRegistry.shared.record(
                 scopeID: contextualRequest.contextScopeID,
                 pageIndex: contextualRequest.pageIndex,
@@ -223,7 +226,7 @@ actor AITranslationPageCoordinator {
             return cached
         }
         if let existing = inFlight[key] {
-            print("MReader AI translation joined in-flight key=\(key.prefix(10))")
+            MReaderLog.aiTranslation.debug("translation joined in-flight key=\(key.prefix(10), privacy: .public)")
             return try await existing.value.blocks
         }
 
@@ -242,7 +245,7 @@ actor AITranslationPageCoordinator {
                     blocks: result.blocks
                 )
             } else {
-                print("MReader AI translation cache skipped explicit partial key=\(key.prefix(10)) blocks=\(result.blocks.count)")
+                MReaderLog.aiTranslation.notice("translation cache skipped explicit partial key=\(key.prefix(10), privacy: .public) blocks=\(result.blocks.count, privacy: .public)")
             }
             return result.blocks
         } catch {
@@ -287,7 +290,7 @@ actor AITranslationPageCoordinator {
             !(block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         guard isComplete else {
-            print("MReader AI translation cache skipped partial key=\(key.prefix(10)) blocks=\(blocks.count)")
+            MReaderLog.aiTranslation.notice("translation cache skipped partial key=\(key.prefix(10), privacy: .public) blocks=\(blocks.count, privacy: .public)")
             return
         }
         insertIntoMemory(blocks, forKey: key)
@@ -298,7 +301,7 @@ actor AITranslationPageCoordinator {
         guard let data = try? JSONEncoder().encode(page) else { return }
         try? data.write(to: fileURL(forKey: key), options: .atomic)
         pruneDiskCacheIfNeeded()
-        print("MReader AI translation cache stored key=\(key.prefix(10)) blocks=\(blocks.count)")
+        MReaderLog.aiTranslation.debug("translation cache stored key=\(key.prefix(10), privacy: .public) blocks=\(blocks.count, privacy: .public)")
     }
 
     private func insertIntoMemory(_ blocks: [TextBlock], forKey key: String) {
@@ -350,6 +353,8 @@ nonisolated enum AITranslationPagePipeline {
                 isComplete: result.missingBlockIDs.isEmpty
             )
         case .vision:
+            // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
+            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与离线共用同一条链路。
             let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
@@ -477,9 +482,6 @@ nonisolated enum AITranslationPagePipeline {
         if !missing.isEmpty {
             try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: request)
         }
-        let completed = translated.filter {
-            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
         let missingBlockIDs = translated.compactMap { block in
             let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? block.id : nil
@@ -517,7 +519,7 @@ nonisolated enum AITranslationPagePipeline {
             try await applyBatchTranslation(to: &blocks, indexes: indexes, request: request)
         } catch let error as AITranslationRequestError
             where error.isFormatFailure || error.isTranslationContentFailure {
-            print("MReader OCR 整页翻译需要逐气泡恢复: \(error.localizedDescription)")
+            MReaderLog.aiPage.notice("OCR page translation needs per-bubble recovery reason=\(MReaderLog.describe(error), privacy: .public)")
             try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)
         }
     }

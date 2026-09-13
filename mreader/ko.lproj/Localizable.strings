@@ -100,6 +100,11 @@
 "ocr.magnifySize" = "텍스트 확대 크기";
 "ocr.safeArea" = "가장자리 영역 무시";
 "ocr.aiTranslation" = "AI 번역";
+
+/* 审查 #15：同一个 key 曾同时承担 Section / Toggle / 导航标题三种语义 */
+"ocr.aiTranslation.sectionTitle" = "AI 번역";
+"ocr.aiTranslation.toggleTitle" = "AI 번역";
+"ocr.aiTranslation.navigationTitle" = "AI 번역";
 "ocr.translationMode" = "번역 모드";
 "ocr.translationMode.ocr" = "OCR 텍스트";
 "ocr.translationMode.vision" = "이미지 인식";
@@ -568,3 +573,12 @@
 "ocr.translationNeedsExpansion" = "번역을 펼쳐서 읽어야 합니다";
 "ocr.inPlaceTranslation" = "원위치 번역";
 "ocr.inPlaceTranslationDescription" = "신뢰할 수 있는 대사 말풍선만 되돌릴 수 있는 원위치 표시를 사용하고 효과음 원화는 유지합니다.";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "이 Vision 프롬프트 템플릿을 사용할 수 없어 내장 프로토콜 템플릿으로 대체했습니다.";
+"settings.visionPrompt.missingPlaceholders" = "누락된 자리 표시자: ";
+"settings.visionPrompt.missingTokens" = "누락된 프로토콜 필드: ";
+
+/* AI 诊断日志开关（审查 #10） */
+"settings.aiDiagnosticLogging" = "AI 진단 로깅";
+"settings.aiDiagnosticLoggingFooter" = "활성화하면 번역 문제를 조사할 때 모델 원본 응답과 원문 일부가 기기 시스템 로그에 기록됩니다. 평소에는 꺼 두세요. 꺼져 있으면 로그에는 모델, HTTP 상태, 오류 유형만 기록되며 원문이나 번역문은 포함되지 않습니다.";

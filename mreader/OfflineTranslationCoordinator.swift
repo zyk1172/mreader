@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Combine
+import os
 
 nonisolated private enum OfflineTranslationRunError: LocalizedError {
     case needsConfiguration(String)
@@ -1014,7 +1015,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 } catch {
                     localOCR = nil
                     localOCRError = error
-                    print("MReader offline geometry refinement skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
+                    MReaderLog.aiTranslation.notice("offline geometry refinement skipped page=\(work.page.index + 1, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
                 }
 
                 if case .noText = translationResult, let localOCRError {
@@ -1245,13 +1246,16 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         apiKey: configuration.apiKey,
                         baseURL: configuration.baseURL,
                         visionModel: configuration.visionModel,
+                        // 只用于对跨切片拼接 / 原文被修正的少数 block 定向重译，不做整页兜底。
+                        textModel: configuration.textModel,
                         sourceLanguage: sourceLanguage,
                         targetLanguage: targetLanguage,
                         styleInstructions: styleInstructions,
                         previousContext: previousContext,
                         isRightToLeft: isRightToLeft,
                         viewportAspect: viewportAspect,
-                        modelDescriptor: configuration.visionModelDescriptor
+                        modelDescriptor: configuration.visionModelDescriptor,
+                        textModelDescriptor: configuration.textModelDescriptor
                     )
                 }
                 return (result, retryCount: attempt)
@@ -1393,7 +1397,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
                     } catch is CancellationError {
                         return (work.page.index, "")
                     } catch {
-                        print("MReader offline source-context preflight skipped page=\(work.page.index + 1) reason=\(error.localizedDescription)")
+                        MReaderLog.aiTranslation.notice("offline source-context preflight skipped page=\(work.page.index + 1, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
                         return (work.page.index, "")
                     }
                 }

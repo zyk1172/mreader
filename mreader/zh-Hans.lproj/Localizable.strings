@@ -100,6 +100,11 @@
 "ocr.magnifySize" = "放大文字大小";
 "ocr.safeArea" = "忽略边缘区域";
 "ocr.aiTranslation" = "AI 翻译";
+
+/* 审查 #15：同一个 key 曾同时承担 Section / Toggle / 导航标题三种语义 */
+"ocr.aiTranslation.sectionTitle" = "AI 翻译";
+"ocr.aiTranslation.toggleTitle" = "AI 翻译";
+"ocr.aiTranslation.navigationTitle" = "AI 翻译";
 "ocr.translationMode" = "翻译模式";
 "ocr.translationMode.ocr" = "OCR 文本";
 "ocr.translationMode.vision" = "视觉图片";
@@ -575,3 +580,12 @@
 "ocr.translationNeedsExpansion" = "译文需要展开阅读";
 "ocr.inPlaceTranslation" = "原位译文";
 "ocr.inPlaceTranslationDescription" = "仅对可靠对白气泡启用可随时关闭的原位覆盖；拟声词仍保留原艺术字并使用注释。";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "当前视觉 Prompt 模板不可用，已自动回退为内置协议模板。";
+"settings.visionPrompt.missingPlaceholders" = "缺少占位符：";
+"settings.visionPrompt.missingTokens" = "缺少协议字段：";
+
+/* AI 诊断日志开关（审查 #10） */
+"settings.aiDiagnosticLogging" = "AI 诊断日志";
+"settings.aiDiagnosticLoggingFooter" = "开启后，排查翻译问题会把模型原始响应与原文片段写入本机系统日志。日常使用请保持关闭：关闭时日志只记录模型、HTTP 状态与错误类型，不含原文或译文。";

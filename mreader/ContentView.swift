@@ -276,6 +276,8 @@ struct ContentView: View {
     @AppStorage("ocr_debug_stage") private var ocrDebugStageRaw = OCRDebugStage.raw.rawValue
     @AppStorage("ocr_visual_verification_enabled") private var isOCRVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrLocalRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
+    /// AI 诊断日志：默认关闭。开启后才允许把模型原始响应 / 原文片段写进系统日志（审查 #10）。
+    @AppStorage(MReaderLog.contentLoggingDefaultsKey) private var isAIDiagnosticLoggingEnabled = false
     @AppStorage("reading_daily_page_goal") private var readingDailyPageGoal = 40.0
     @AppStorage("burn_in_protection_enabled") private var isBurnInProtectionEnabled = true
     @AppStorage(ICloudMetadataSyncService.enabledKey) private var isICloudMetadataSyncEnabled = false
@@ -953,6 +955,7 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 openAISettingsSection
+                aiDiagnosticsSection
                 mediaSourceSettingsSection
                 importServiceSection
                 interactionSettingsSection
@@ -1003,6 +1006,20 @@ struct ContentView: View {
                         Text("settings.visionPromptPlaceholder".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        // 缺少 {targetLanguage} / {readingOrder} 或 JSON 协议字段时，
+                        // 请求会自动回退内置模板；这里必须让用户当场看见（审查 #6）。
+                        if let warning = AITranslator.VisionPromptContract
+                            .validate(visionTranslationPromptTemplate)
+                            .warningMessage {
+                            Label {
+                                Text(warning)
+                            } icon: {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
                         TextEditor(text: $visionTranslationPromptTemplate)
                             .font(.footnote.monospaced())
                             .scrollContentBackground(.hidden)
@@ -1464,6 +1481,14 @@ struct ContentView: View {
                 }
             }
             .disabled(!isOCRDebugBoxesEnabled)
+        }
+    }
+
+    /// AI 诊断日志开关。关闭时日志只记录模型名、HTTP 状态与错误类型，
+    /// 绝不含原文 / 译文 / 原始响应（审查 #10）。
+    private var aiDiagnosticsSection: some View {
+        Section(footer: Text("settings.aiDiagnosticLoggingFooter".localized)) {
+            Toggle("settings.aiDiagnosticLogging".localized, isOn: $isAIDiagnosticLoggingEnabled)
         }
     }
 
@@ -2141,7 +2166,9 @@ struct ContentView: View {
             } else {
                 translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
             }
-            visionTranslationPromptTemplate = backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
+            visionTranslationPromptTemplate = AITranslator.VisionPromptContract.effectiveTemplate(
+                backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
+            )
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw
             isAITranslationBorderProgressEnabled = backup.isAITranslationBorderProgressEnabled ?? isAITranslationBorderProgressEnabled

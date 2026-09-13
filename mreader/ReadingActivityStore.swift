@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import Combine
+import UIKit
+import os
 
 nonisolated struct ReadingActivityIncrement: Equatable, Sendable {
     let seconds: Int
@@ -105,14 +107,135 @@ final class ReadingActivityStore: ObservableObject {
 
     @Published private(set) var days: [ReadingActivityDay] = []
 
+    /// 写盘防抖窗口：连续 record / merge 只落盘一次。
+    private static let writeDebounceInterval: TimeInterval = 0.8
+
+    /// 观察者在 box 析构时自动注销，避免在 deinit 里触碰主线程隔离的状态。
+    nonisolated private final class NotificationObserverBox {
+        var token: NSObjectProtocol?
+        deinit {
+            if let token {
+                NotificationCenter.default.removeObserver(token)
+            }
+        }
+    }
+
     private let storageURL: URL
     private let calendar: Calendar
+    /// 串行后台队列：JSON 编解码与读写盘全部在这里，绝不在主线程做同步 IO（审查 #8）。
+    private let ioQueue = DispatchQueue(label: "com.mreader.reading-activity.io", qos: .utility)
+    /// 磁盘快照是否已经应用。**在它变成 true 之前绝不落盘**：否则会把"还没包含
+    /// 磁盘历史"的快照写回去，用户在这一瞬间退出就会永久丢掉旧统计（审查 #6）。
+    private var isLoadedFromDisk = false
+    /// 读盘完成前累积的 mutation，读盘结束后统一落盘一次。
+    private var hasPendingWrite = false
+    private var pendingWriteWorkItem: DispatchWorkItem?
+    private let backgroundObserverBox = NotificationObserverBox()
 
     init(calendar: Calendar = .current, storageURL: URL? = nil) {
         self.calendar = calendar
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.storageURL = storageURL ?? support.appendingPathComponent("reading_activity.json")
-        load()
+        observeAppBackgrounding()
+        startLoading()
+    }
+
+    /// 启动路径不再阻塞主线程：读盘 + 解码在后台串行队列完成，结果回到 MainActor 应用。
+    private func startLoading() {
+        let url = storageURL
+        ioQueue.async { [weak self] in
+            let loaded = Self.readDays(from: url)
+            Task { @MainActor [weak self] in
+                self?.finishLoading(with: loaded)
+            }
+        }
+    }
+
+    /// 读盘完成：先合并磁盘历史，再统一落盘一次。
+    /// 期间发生的 mutation 只会累积成一次写入，不会用旧快照覆盖磁盘。
+    private func finishLoading(with loaded: [ReadingActivityDay]?) {
+        isLoadedFromDisk = true
+        if let loaded, !loaded.isEmpty {
+            if hasPendingWrite {
+                // 读盘完成前已经产生新数据：合并而不是覆盖。
+                mergeSyncedDays(loaded)
+            } else {
+                var normalized = loaded
+                for index in normalized.indices {
+                    normalizeDeviceCounters(&normalized[index])
+                }
+                days = normalized.sorted { $0.dateKey < $1.dateKey }
+            }
+        }
+        flushPendingWriteIfNeeded()
+    }
+
+    /// 立即把待写入的快照落盘（进入后台、或测试需要确定性落盘时调用）。
+    func flushPendingWrites() {
+        flushPendingWriteIfNeeded()
+    }
+
+    private func observeAppBackgrounding() {
+        // 防抖窗口内的改动不能在系统挂起时丢掉。
+        backgroundObserverBox.token = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.flushPendingWriteIfNeeded()
+            }
+        }
+    }
+
+    nonisolated private static func readDays(from url: URL) -> [ReadingActivityDay]? {
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
+            return nil
+        }
+        return decoded
+    }
+
+    nonisolated private static func writeDays(_ days: [ReadingActivityDay], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(days)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            MReaderLog.reader.error("saving reading activity failed reason=\(MReaderLog.describe(error), privacy: .public)")
+        }
+    }
+
+    private func flushPendingWriteIfNeeded() {
+        pendingWriteWorkItem?.cancel()
+        pendingWriteWorkItem = nil
+        // 读盘完成前绝不落盘，即使被显式 flush：写回"还没包含磁盘历史"的快照
+        // 会让用户在两步之间退出时永久丢掉旧统计（审查 #6）。
+        guard isLoadedFromDisk, hasPendingWrite else { return }
+        hasPendingWrite = false
+        // 只在主线程取快照；编码与写盘在串行后台队列执行。
+        let snapshot = days
+        let url = storageURL
+        ioQueue.async {
+            Self.writeDays(snapshot, to: url)
+        }
+    }
+
+    private func scheduleWrite() {
+        hasPendingWrite = true
+        // 读盘完成前只累积，不落盘。
+        guard isLoadedFromDisk else { return }
+        pendingWriteWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.flushPendingWriteIfNeeded()
+            }
+        }
+        pendingWriteWorkItem = work
+        ioQueue.asyncAfter(deadline: .now() + Self.writeDebounceInterval, execute: work)
     }
 
     func record(
@@ -309,18 +432,6 @@ final class ReadingActivityStore: ObservableObject {
         )
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: storageURL),
-              let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
-            return
-        }
-        var normalized = decoded
-        for index in normalized.indices {
-            normalizeDeviceCounters(&normalized[index])
-        }
-        days = normalized.sorted { $0.dateKey < $1.dateKey }
-    }
-
     private func normalizeDeviceCounters(_ day: inout ReadingActivityDay) {
         if day.syncedDeviceSeconds.isEmpty, day.seconds > 0 {
             day.syncedDeviceSeconds[ICloudSyncDeviceIdentity.legacyDeviceID] = day.seconds
@@ -333,16 +444,7 @@ final class ReadingActivityStore: ObservableObject {
     }
 
     private func save() {
-        do {
-            try FileManager.default.createDirectory(
-                at: storageURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONEncoder().encode(days)
-            try data.write(to: storageURL, options: .atomic)
-        } catch {
-            print("保存阅读统计失败: \(error.localizedDescription)")
-        }
+        scheduleWrite()
     }
 }
 

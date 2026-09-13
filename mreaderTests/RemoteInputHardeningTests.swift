@@ -128,4 +128,94 @@ struct RemoteInputHardeningTests {
             _ = try SettingsBackupCodec.decode(oversizedData)
         }
     }
+
+    // MARK: - 明文备份凭据校验（审查 #9）
+
+    /// 手工构造一个明文备份文件。直接喂 JSON 才能模拟“被篡改过的导入文件”，
+    /// 因为 `encodePlain` 本来就会拦截凭据。
+    private func plainBackupJSON(_ extraFields: String) -> Data {
+        Data("""
+        {
+          "version": 10,
+          "openAIBaseURL": "https://attacker.example/v1",
+          "openAIModel": "gpt-4o-mini",
+          "translationTargetLanguage": "简体中文",
+          "isHapticFeedbackEnabled": true\(extraFields.isEmpty ? "" : ",\n  " + extraFields)
+        }
+        """.utf8)
+    }
+
+    @Test
+    func plainBackupWithProviderAPIKeyIsRejectedOnDecode() {
+        let data = plainBackupJSON("\"openAIAPIKey\": \"sk-plain-injected\"")
+
+        #expect(throws: SettingsBackupCodecError.credentialsRequireEncryption) {
+            _ = try SettingsBackupCodec.decode(data)
+        }
+        #expect(throws: SettingsBackupCodecError.credentialsRequireEncryption) {
+            _ = try SettingsBackupService.decodePlain(data)
+        }
+    }
+
+    @Test
+    func plainBackupWithMediaSourceAPIKeyIsRejectedOnDecode() {
+        let data = plainBackupJSON(
+            """
+            "mediaSources": [
+                {
+                  "id": "11111111-1111-1111-1111-111111111111",
+                  "name": "NAS",
+                  "type": "komga",
+                  "baseURL": "http://192.168.1.10:8080",
+                  "createdAt": 0,
+                  "isEnabled": true,
+                  "apiKey": "injected-media-key"
+                }
+              ]
+            """
+        )
+
+        #expect(throws: SettingsBackupCodecError.credentialsRequireEncryption) {
+            _ = try SettingsBackupCodec.decode(data)
+        }
+    }
+
+    @Test
+    func plainBackupClaimingCredentialsIsRejectedEvenWithoutKeys() {
+        let data = plainBackupJSON("\"containsCredentials\": true")
+
+        #expect(throws: SettingsBackupCodecError.credentialsRequireEncryption) {
+            _ = try SettingsBackupCodec.decode(data)
+        }
+    }
+
+    @Test
+    func plainBackupWithoutCredentialsStillImports() throws {
+        let backup = try SettingsBackupCodec.decode(plainBackupJSON(""))
+
+        #expect(backup.openAIBaseURL == "https://attacker.example/v1")
+        #expect(backup.openAIAPIKey == nil)
+        #expect(!SettingsBackupCodec.backupContainsCredentials(backup))
+    }
+
+    @Test
+    func encryptedBackupMayCarryCredentials() throws {
+        let credentialJSON = Data("""
+        {
+          "version": 10,
+          "openAIAPIKey": "sk-secret",
+          "openAIBaseURL": "https://example.com/v1",
+          "openAIModel": "gpt-4o-mini",
+          "translationTargetLanguage": "简体中文",
+          "isHapticFeedbackEnabled": true
+        }
+        """.utf8)
+        let backup = try JSONDecoder().decode(MReaderSettingsBackup.self, from: credentialJSON)
+        #expect(SettingsBackupCodec.backupContainsCredentials(backup))
+
+        let encrypted = try SettingsBackupCodec.encodeEncrypted(backup, password: "valid-password")
+        let restored = try SettingsBackupCodec.decode(encrypted, password: "valid-password")
+        #expect(restored.openAIAPIKey == "sk-secret")
+        #expect(!(String(data: encrypted, encoding: .utf8) ?? "").contains("sk-secret"))
+    }
 }
