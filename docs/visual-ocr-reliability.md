@@ -14,6 +14,8 @@ The parser accepts the preferred coordinate-free JSON response and a plain-text 
 
 Full-page recognition still needs normalized geometry. Its system prompt and user contract now agree on `layoutSafeRegion`, and capable transports receive a dedicated recognition JSON Schema rather than only a generic JSON-object request. Existing fallback behavior remains available for providers that reject structured response formats.
 
+The prompt and strict schema now use the same optional-geometry representation: every item includes the geometry keys; `bubbleBox` / `layoutSafeRegion` use `null` when unavailable, while `textPolygon` / `bubblePolygon` use empty arrays when they cannot be determined reliably. This avoids telling the model to omit fields that structured output simultaneously requires.
+
 ## Vision connection probe
 
 The settings-page vision test now proves image ingestion instead of only proving HTTP connectivity. It renders a random six-character challenge code into an image, keeps the code out of the text prompt, and only reports success when the model reads the same code back. A text-only model that ignores the image can no longer pass by replying `OK`.
