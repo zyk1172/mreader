@@ -52,6 +52,28 @@ nonisolated enum AIProviderModelSelectionPolicy {
     }
 }
 
+nonisolated enum AIVisionConnectionProbe {
+    static let prompt = "读取图片中央的 6 位大写字母/数字验证码。答案只存在于图片中。只返回你看到的验证码，不要解释。"
+
+    static func makeChallengeCode(length: Int = 6) -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<max(length, 1)).compactMap { _ in alphabet.randomElement() })
+    }
+
+    static func response(_ response: String, contains challenge: String) -> Bool {
+        let expected = normalizedASCIIAlphanumerics(challenge)
+        guard !expected.isEmpty else { return false }
+        return normalizedASCIIAlphanumerics(response).contains(expected)
+    }
+
+    private static func normalizedASCIIAlphanumerics(_ value: String) -> String {
+        value.uppercased().unicodeScalars
+            .filter { $0.value < 128 && CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+    }
+}
+
 struct AIProviderSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var profiles: [AIProviderProfile] = []
@@ -490,19 +512,21 @@ private struct AIProviderEditorView: View {
             defer { testingKind = nil }
             do {
                 let request: AITransportRequest
+                let visionChallenge = kind == .vision ? AIVisionConnectionProbe.makeChallengeCode() : nil
                 let expectedItems = [
                     AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
                     AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
                 ]
                 if kind == .vision {
-                    guard let imageURL = tinyPNGDataURL() else {
+                    guard let challenge = visionChallenge,
+                          let imageURL = visionProbePNGDataURL(code: challenge) else {
                         throw AITranslationRequestError.invalidConfiguration("settings.imageEncodingFailed".localized)
                     }
                     request = AITransportRequest(
                         model: modelDescriptor,
-                        userPrompt: "Return OK.",
+                        userPrompt: AIVisionConnectionProbe.prompt,
                         imageDataURL: imageURL,
-                        maxTokens: 8,
+                        maxTokens: 32,
                         timeout: AITranslationRequestPolicy.connectionTestTimeout,
                         kind: .connectionTest
                     )
@@ -525,7 +549,30 @@ private struct AIProviderEditorView: View {
                     )
                 }
                 let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(request)
-                if kind == .text {
+                if kind == .vision {
+                    let decoded = AIChatResponseDecoder.decode(data)
+                    guard let challenge = visionChallenge,
+                          let content = decoded.content else {
+                        testFailed = true
+                        testMessage = "视觉请求已返回，但没有可验证的文本响应。请检查视觉模型和 API 协议。"
+                        HapticManager.shared.play(.error)
+                        return
+                    }
+                    guard AIVisionConnectionProbe.response(content, contains: challenge) else {
+                        testFailed = true
+                        let excerpt = String(content.prefix(160)).replacingOccurrences(of: "\n", with: " ")
+                        testMessage = "视觉接口可连接，但模型没有读出测试图片中的验证码。请检查视觉模型和 API 协议。返回：\(excerpt)"
+                        HapticManager.shared.play(.error)
+                        return
+                    }
+                    if modelDescriptor.supportsVision != true {
+                        modelDescriptors[model] = AIModelDescriptor(
+                            id: modelDescriptor.id,
+                            apiProtocol: modelDescriptor.apiProtocol,
+                            supportsVision: true
+                        )
+                    }
+                } else {
                     let decoded = AIChatResponseDecoder.decode(data)
                     guard let content = decoded.content else {
                         testFailed = true
@@ -564,12 +611,24 @@ private struct AIProviderEditorView: View {
         }
     }
 
-    private func tinyPNGDataURL() -> String? {
-        let size = 32
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+    private func visionProbePNGDataURL(code: String) -> String? {
+        let size = CGSize(width: 360, height: 180)
+        let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { context in
-            UIColor.gray.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 56, weight: .bold),
+                .foregroundColor: UIColor.black,
+                .paragraphStyle: paragraph
+            ]
+            (code as NSString).draw(
+                in: CGRect(x: 12, y: 52, width: size.width - 24, height: 76),
+                withAttributes: attributes
+            )
         }
         guard let data = image.pngData() else { return nil }
         return "data:image/png;base64,\(data.base64EncodedString())"

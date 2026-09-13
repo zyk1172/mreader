@@ -60,4 +60,15 @@ final class VisualOCRReliabilityTests: XCTestCase {
         XCTAssertEqual(reviewed.ocrSource, "visual-review-text")
         XCTAssertFalse(reviewed.isFiltered)
     }
+
+    func testVisionConnectionProbeAcceptsCodeReadFromImage() {
+        XCTAssertTrue(AIVisionConnectionProbe.response("7KQ9XZ", contains: "7KQ9XZ"))
+        XCTAssertTrue(AIVisionConnectionProbe.response("The code is: 7kq-9xz.", contains: "7KQ9XZ"))
+    }
+
+    func testVisionConnectionProbeRejectsTextOnlyOrWrongAnswers() {
+        XCTAssertFalse(AIVisionConnectionProbe.response("OK", contains: "7KQ9XZ"))
+        XCTAssertFalse(AIVisionConnectionProbe.response("无法读取图片", contains: "7KQ9XZ"))
+        XCTAssertFalse(AIVisionConnectionProbe.response("7KQ9XY", contains: "7KQ9XZ"))
+    }
 }
