@@ -104,9 +104,9 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     /// measuredText 表面使用的译文字号；这是显示参数，不参与 OCR/翻译缓存。
     /// 属性名保留旧版 Codable 字段名，以兼容已有阅读设置。
     var borderlessTranslationFontSize: Double
-    /// Minimum point size at which translation is rendered in-place. When a
-    /// region cannot fit at this size, layout returns `needsExpansion` instead
-    /// of silently shrinking to microscopic text.
+    /// Preferred readability floor for in-page translation. Extremely small
+    /// regions may shrink below this preference so the translation can remain
+    /// visible in place without an interactive expansion overlay.
     var minimumReadableTranslationFontSize: Double
     /// Opt-in, non-destructive original-position rendering for reliable dialogue bubbles.
     /// The image itself is never modified; disabling this immediately restores the artwork.
@@ -262,15 +262,10 @@ nonisolated enum ReadingProgressMergePolicy {
         let pageLimit = max(0, totalPages - 1)
         let usesIncoming = incoming.progressUpdatedAt > existing.progressUpdatedAt
         let selectedPage = usesIncoming ? incoming.currentPageIndex : existing.currentPageIndex
+        let selectedFurthest = usesIncoming ? incoming.furthestPageIndex : existing.furthestPageIndex
         return Resolution(
             currentPageIndex: min(max(selectedPage, 0), pageLimit),
-            furthestPageIndex: min(
-                max(
-                    max(existing.furthestPageIndex, incoming.furthestPageIndex),
-                    max(existing.currentPageIndex, incoming.currentPageIndex)
-                ),
-                pageLimit
-            ),
+            furthestPageIndex: min(max(max(selectedFurthest, selectedPage), 0), pageLimit),
             progressUpdatedAt: max(existing.progressUpdatedAt, incoming.progressUpdatedAt),
             usesIncomingLocation: usesIncoming
         )

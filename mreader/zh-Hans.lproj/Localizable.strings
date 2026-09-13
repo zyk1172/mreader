@@ -589,3 +589,8 @@
 /* AI 诊断日志开关（审查 #10） */
 "settings.aiDiagnosticLogging" = "AI 诊断日志";
 "settings.aiDiagnosticLoggingFooter" = "开启后，排查翻译问题会把模型原始响应与原文片段写入本机系统日志。日常使用请保持关闭：关闭时日志只记录模型、HTTP 状态与错误类型，不含原文或译文。";
+
+"comic.resetProgress" = "重置阅读进度";
+"comic.resetProgressConfirm" = "将《%@》的阅读进度归零？";
+"comic.resetProgressDescription" = "只会清除当前阅读位置和完成进度，历史阅读记录与统计不会删除。";
+"comic.resetProgressFailed" = "阅读进度已在本机归零，但同步到远端失败：%@";

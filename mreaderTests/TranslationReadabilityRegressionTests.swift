@@ -29,7 +29,7 @@ final class TranslationReadabilityRegressionTests: XCTestCase {
         XCTAssertLessThan(measurement.visibleUTF16Length, measurement.totalUTF16Length)
     }
 
-    func testTinyBubbleStopsAtReadableFloorAndRequiresExpansion() {
+    func testTinyBubbleShrinksBelowPreferredFloorWithoutExpansion() {
         let floor: CGFloat = 12
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: "这是一段明显无法塞进极小气泡但必须保留完整含义的长译文。",
@@ -42,11 +42,12 @@ final class TranslationReadabilityRegressionTests: XCTestCase {
             geometryStrategy: .detectedBubble,
             minimumReadableFontSize: floor
         )
-        XCTAssertGreaterThanOrEqual(choice.layout.fontSize, floor)
-        XCTAssertEqual(choice.layout.status, .needsExpansion)
+        XCTAssertLessThan(choice.layout.fontSize, floor)
+        XCTAssertGreaterThanOrEqual(choice.layout.fontSize, 2)
+        XCTAssertEqual(choice.layout.status, .fitted)
     }
 
-    func testVerticalTinyBubbleNeverFallsBackToMicroscopicText() {
+    func testVerticalTinyBubbleShrinksInPlaceWithoutExpansion() {
         let floor: CGFloat = 11
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: "第一列第二列第三列第四列第五列",
@@ -59,8 +60,9 @@ final class TranslationReadabilityRegressionTests: XCTestCase {
             geometryStrategy: .detectedBubble,
             minimumReadableFontSize: floor
         )
-        XCTAssertGreaterThanOrEqual(choice.layout.fontSize, floor)
-        XCTAssertEqual(choice.layout.status, .needsExpansion)
+        XCTAssertLessThan(choice.layout.fontSize, floor)
+        XCTAssertGreaterThanOrEqual(choice.layout.fontSize, 2)
+        XCTAssertEqual(choice.layout.status, .fitted)
     }
 
     func testCollisionAvoidanceCannotMoveDetectedBubbleOutsideItsBounds() {

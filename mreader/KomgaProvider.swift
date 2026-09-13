@@ -310,6 +310,19 @@ nonisolated enum KomgaProvider {
         )
     }
 
+    static func resetReadProgress(for comic: ComicBook) async throws {
+        guard comic.sourceType == .komga,
+              let sourceID = comic.mediaSourceID,
+              let bookID = comic.komgaBookID,
+              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
+            return
+        }
+        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
+        let resolvedURL = await resolveBestURL(source: source)
+        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
+        try await client.resetReadProgress(bookID: bookID)
+    }
+
     static func deleteBook(_ comic: ComicBook) async throws {
         guard comic.sourceType == .komga,
               let sourceID = comic.mediaSourceID,

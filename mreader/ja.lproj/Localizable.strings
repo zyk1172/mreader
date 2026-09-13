@@ -582,3 +582,8 @@
 /* AI 诊断日志开关（审查 #10） */
 "settings.aiDiagnosticLogging" = "AI 診断ログ";
 "settings.aiDiagnosticLoggingFooter" = "オンにすると、翻訳トラブルの調査時にモデルの生レスポンスと原文の断片を端末内のシステムログに記録します。通常はオフのままにしてください。オフの場合、ログにはモデル名・HTTP ステータス・エラー種別のみが記録され、原文や訳文は含まれません。";
+
+"comic.resetProgress" = "読書進捗をリセット";
+"comic.resetProgressConfirm" = "「%@」の読書進捗をリセットしますか？";
+"comic.resetProgressDescription" = "現在の読書位置と完了進捗のみをリセットします。読書履歴と統計は保持されます。";
+"comic.resetProgressFailed" = "読書進捗は端末上でリセットされましたが、リモート同期に失敗しました：%@";

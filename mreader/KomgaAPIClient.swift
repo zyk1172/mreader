@@ -90,6 +90,14 @@ nonisolated struct KomgaAPIClient: Sendable {
         try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)
     }
 
+    /// Explicit reset differs from a normal page-0 progress update: a one-page
+    /// book must become incomplete rather than immediately completed again.
+    func resetReadProgress(bookID: String) async throws {
+        let payload = KomgaReadProgressUpdateDTO(pageIndex: 0, completed: false)
+        let data = try JSONEncoder().encode(payload)
+        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)
+    }
+
     func deleteBook(bookID: String) async throws {
         try await sendNoContent(path: KomgaAPIEndpoint.deleteBookFile(bookID: bookID), method: "DELETE")
     }

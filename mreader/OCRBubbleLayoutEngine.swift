@@ -618,15 +618,29 @@ nonisolated enum OCRBubbleLayoutEngine {
             )
         }
 
-        // Never continue below the user-selected readability floor. The full
-        // canonical translation remains available through the expansion UI.
-        let p = effectivePadding(readableFloor)
+        // The configured readable size is a preference, not a trigger for an
+        // interactive magnifier. If it cannot fit, continue shrinking in place.
+        let inlineMinimumFontSize: CGFloat = 2
+        if let inlineFloor = fittedLayout(fontSize: inlineMinimumFontSize) {
+            var lower = inlineMinimumFontSize
+            var upper = readableFloor
+            for _ in 0..<14 {
+                let candidate = (lower + upper) / 2
+                if fittedLayout(fontSize: candidate) != nil {
+                    lower = candidate
+                } else {
+                    upper = candidate
+                }
+            }
+            return fittedLayout(fontSize: lower) ?? inlineFloor
+        }
+
+        let p = effectivePadding(inlineMinimumFontSize)
         return TranslationLayout(
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
-            fontSize: readableFloor,
-            contentPadding: p,
-            status: .needsExpansion
+            fontSize: inlineMinimumFontSize,
+            contentPadding: p
         )
     }
 
@@ -1022,13 +1036,27 @@ nonisolated enum OCRBubbleLayoutEngine {
             return fittedLayout(fontSize: lower) ?? floor
         }
 
-        let p = effectivePadding(readableFloor)
+        let inlineMinimumFontSize: CGFloat = 2
+        if let inlineFloor = fittedLayout(fontSize: inlineMinimumFontSize) {
+            var lower = inlineMinimumFontSize
+            var upper = readableFloor
+            for _ in 0..<16 {
+                let candidate = (lower + upper) / 2
+                if fittedLayout(fontSize: candidate) != nil {
+                    lower = candidate
+                } else {
+                    upper = candidate
+                }
+            }
+            return fittedLayout(fontSize: lower) ?? inlineFloor
+        }
+
+        let p = effectivePadding(inlineMinimumFontSize)
         return TranslationLayout(
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
-            fontSize: readableFloor,
-            contentPadding: p,
-            status: .needsExpansion
+            fontSize: inlineMinimumFontSize,
+            contentPadding: p
         )
     }
 

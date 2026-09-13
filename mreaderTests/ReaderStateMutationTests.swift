@@ -68,3 +68,66 @@ final class ReaderStateMutationTests: XCTestCase {
         XCTAssertEqual(original.currentPageIndex, 1, "the source value remains an independent input")
     }
 }
+
+
+final class ReadingProgressResetRegressionTests: XCTestCase {
+    func testNewerResetCanReduceCurrentAndFurthestProgressToZero() {
+        let older = Date(timeIntervalSince1970: 10)
+        let newer = Date(timeIntervalSince1970: 20)
+        let existing = ComicBook(
+            title: "Existing",
+            bookmarkData: Data(),
+            totalPages: 100,
+            currentPageIndex: 42,
+            furthestPageIndex: 70,
+            progressUpdatedAt: older,
+            hasBeenOpened: true
+        )
+        let incoming = ComicBook(
+            id: existing.id,
+            title: existing.title,
+            bookmarkData: existing.bookmarkData,
+            totalPages: 100,
+            currentPageIndex: 0,
+            furthestPageIndex: 0,
+            progressUpdatedAt: newer,
+            hasBeenOpened: false
+        )
+
+        let resolved = ReadingProgressMergePolicy.resolve(existing: existing, incoming: incoming, totalPages: 100)
+        XCTAssertTrue(resolved.usesIncomingLocation)
+        XCTAssertEqual(resolved.currentPageIndex, 0)
+        XCTAssertEqual(resolved.furthestPageIndex, 0)
+        XCTAssertEqual(resolved.progressUpdatedAt, newer)
+    }
+
+    func testOlderProgressCannotResurrectNewerReset() {
+        let resetAt = Date(timeIntervalSince1970: 30)
+        let staleAt = Date(timeIntervalSince1970: 20)
+        let reset = ComicBook(
+            title: "Reset",
+            bookmarkData: Data(),
+            totalPages: 80,
+            currentPageIndex: 0,
+            furthestPageIndex: 0,
+            progressUpdatedAt: resetAt,
+            hasBeenOpened: false
+        )
+        let stale = ComicBook(
+            id: reset.id,
+            title: reset.title,
+            bookmarkData: reset.bookmarkData,
+            totalPages: 80,
+            currentPageIndex: 35,
+            furthestPageIndex: 60,
+            progressUpdatedAt: staleAt,
+            hasBeenOpened: true
+        )
+
+        let resolved = ReadingProgressMergePolicy.resolve(existing: reset, incoming: stale, totalPages: 80)
+        XCTAssertFalse(resolved.usesIncomingLocation)
+        XCTAssertEqual(resolved.currentPageIndex, 0)
+        XCTAssertEqual(resolved.furthestPageIndex, 0)
+        XCTAssertEqual(resolved.progressUpdatedAt, resetAt)
+    }
+}
