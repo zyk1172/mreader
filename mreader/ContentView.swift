@@ -1720,7 +1720,7 @@ struct ContentView: View {
         guard updated.sourceType == .komga else { return }
         Task {
             do {
-                try await KomgaProvider.updateReadProgress(for: updated)
+                try await KomgaProvider.resetReadProgress(for: updated)
             } catch {
                 HapticManager.shared.play(.error)
                 importError = "comic.resetProgressFailed".localizedFormat(error.localizedDescription)
