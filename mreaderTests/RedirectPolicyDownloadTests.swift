@@ -9,6 +9,12 @@ final class RedirectPolicyDownloadTests: XCTestCase {
 
     private let trustedOrigin = URL(string: "https://library.example.com")!
     private let requestURL = URL(string: "https://library.example.com/file.cbz")!
+    // Redirect tests must not depend on the runner's DNS configuration. The
+    // production policy still performs a real lookup; this test only needs a
+    // deterministic public answer for the synthetic CDN hostname.
+    private static let publicResolver: RemoteDestinationPolicy.HostResolver = { _ in
+        ["203.0.113.10"]
+    }
 
     private var context: RemoteDestinationPolicy.Context {
         RemoteDestinationPolicy.Context(originURLs: [trustedOrigin])
@@ -34,7 +40,10 @@ final class RedirectPolicyDownloadTests: XCTestCase {
     private func makePolicy(
         origins: [URL] = []
     ) -> @Sendable (URL) -> RemoteDestinationPolicy.Decision {
-        let context = RemoteDestinationPolicy.Context(originURLs: origins.isEmpty ? [trustedOrigin] : origins)
+        let context = RemoteDestinationPolicy.Context(
+            originURLs: origins.isEmpty ? [trustedOrigin] : origins,
+            hostResolver: Self.publicResolver
+        )
         return { url in context.decision(for: url) }
     }
 
