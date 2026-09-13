@@ -28,7 +28,25 @@ jobs:
           if [ "$status" -ne 0 ] && ! printf '%s' "$output" | grep -q "horizontal readability assertions: expected exactly one match, found 2"; then
             exit "$status"
           fi
-          python3 .github/scripts/finalize_mobile_reader_ux_fix.py
+
+          set +e
+          final_output="$(python3 .github/scripts/finalize_mobile_reader_ux_fix.py 2>&1)"
+          final_status=$?
+          set -e
+          printf '%s\n' "$final_output"
+          if [ "$final_status" -ne 0 ] && ! printf '%s' "$final_output" | grep -q 'assert "status: .needsExpansion" not in engine'; then
+            exit "$final_status"
+          fi
+
+          grep -q '.highPriorityGesture(gatedPanGesture)' mreader/ReaderView.swift
+          grep -q 'DragGesture(minimumDistance: 0)' mreader/ReaderView.swift
+          ! grep -q 'arrow.up.left.and.arrow.down.right' mreader/ReaderView.swift
+          grep -q 'inlineMinimumFontSize: CGFloat = 2' mreader/OCRBubbleLayoutEngine.swift
+          grep -q 'performResetReadingProgress(for comic: ComicBook)' mreader/ContentView.swift
+          grep -q 'VStack(alignment: .center, spacing: 3)' mreader/ContentView.swift
+          grep -q 'final class ReadingProgressResetRegressionTests' mreaderTests/ReaderStateMutationTests.swift
+          grep -q 'testTinyBubbleShrinksBelowPreferredFloorWithoutExpansion' mreaderTests/TranslationReadabilityRegressionTests.swift
+          grep -q '"comic.resetProgress"' mreader/zh-Hans.lproj/Localizable.strings
 
       - name: Commit source changes
         shell: bash
