@@ -260,6 +260,7 @@ struct ContentView: View {
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
+    @State private var uiTestingFixtureComic = ReaderUITestFixture.makeComic()
     @State private var offlineTranslationStartComic: ComicBook?
     @State private var offlineTranslationManagerComic: ComicBook?
     @State private var backgroundTaskDestination: BackgroundTaskDestination?
@@ -286,7 +287,9 @@ struct ContentView: View {
     @State private var renamingSeries: ComicSeries?
 
     private var hasAnyLibrarySource: Bool {
-        hasLibraryRoot || mediaSources.contains { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
+        uiTestingFixtureComic != nil
+            || hasLibraryRoot
+            || mediaSources.contains { $0.isEnabled && ($0.type == .komga || $0.type == .opds) }
     }
 
     private var visibleComics: [ComicBook] {
@@ -296,20 +299,25 @@ struct ContentView: View {
             guard let hiddenKey = KomgaProvider.hiddenKey(for: comic) else { return true }
             return !hiddenKeys.contains(hiddenKey)
         }
+        let filteredComics: [ComicBook]
         switch shelfFilter {
         case .all:
-            return displayableComics
+            filteredComics = displayableComics
         case .inProgress:
-            return displayableComics.filter { $0.hasBeenOpened && !ComicReadingProgress.isFinished($0) }
+            filteredComics = displayableComics.filter { $0.hasBeenOpened && !ComicReadingProgress.isFinished($0) }
         case .locked:
-            return displayableComics.filter(\.isLocked)
+            filteredComics = displayableComics.filter(\.isLocked)
         case .local:
-            return displayableComics.filter { $0.sourceType == .local }
+            filteredComics = displayableComics.filter { $0.sourceType == .local }
         case .komga:
-            return displayableComics.filter { $0.sourceType == .komga }
+            filteredComics = displayableComics.filter { $0.sourceType == .komga }
         case .opds:
-            return displayableComics.filter { $0.sourceType == .opds }
+            filteredComics = displayableComics.filter { $0.sourceType == .opds }
         }
+        if let uiTestingFixtureComic {
+            return [uiTestingFixtureComic] + filteredComics.filter { $0.id != uiTestingFixtureComic.id }
+        }
+        return filteredComics
     }
 
     var body: some View {
@@ -1082,7 +1090,7 @@ struct ContentView: View {
     private func shelfPageContent(for page: MainShelfPage) -> some View {
         if !hasAnyLibrarySource {
             missingLibraryRootView
-        } else if library.comics.isEmpty && library.series.isEmpty {
+        } else if visibleComics.isEmpty && library.series.isEmpty {
             emptyShelfView
         } else if page == .continueReading {
             continueReadingPage
@@ -1707,8 +1715,15 @@ struct ContentView: View {
     }
 
     private func readerDestination(for comic: ComicBook) -> some View {
-        ReaderContainerView(comic: comic) { updatedComic in
-            library.update(updatedComic)
+        ReaderContainerView(
+            comic: comic,
+            showsControlsForTesting: uiTestingFixtureComic?.id == comic.id
+        ) { updatedComic in
+            if uiTestingFixtureComic?.id == updatedComic.id {
+                uiTestingFixtureComic = updatedComic
+            } else {
+                library.update(updatedComic)
+            }
         }
     }
 

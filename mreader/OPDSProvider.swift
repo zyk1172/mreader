@@ -176,7 +176,9 @@ nonisolated enum OPDSProvider {
             )
             return await ComicManager.loadDownloadedRemotePages(from: localURL)
         } catch {
-            print("OPDS 漫画下载失败 \(comic.title): \(error.localizedDescription)")
+            MReaderLog.aiTransport.error(
+                "OPDS comic download failed comic=\(comic.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
             return nil
         }
     }

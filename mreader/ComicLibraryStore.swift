@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 
 nonisolated enum StartupRemoteSyncOutcome: Equatable {
     case noRemoteSources
@@ -116,7 +117,7 @@ private actor ComicLibraryDiskStore {
             rotateBackups(beforeWriting: url)
             try data.write(to: url, options: .atomic)
         } catch {
-            print("保存书架失败: \(error)")
+            MReaderLog.reader.error("save library failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 
@@ -127,7 +128,7 @@ private actor ComicLibraryDiskStore {
             rotateBackups(beforeWriting: url)
             try data.write(to: url, options: .atomic)
         } catch {
-            print("保存系列失败: \(error)")
+            MReaderLog.reader.error("save series failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 
@@ -160,9 +161,9 @@ private actor ComicLibraryDiskStore {
                 try FileManager.default.removeItem(at: destination)
             }
             try FileManager.default.copyItem(at: url, to: destination)
-            print("书架数据文件损坏，已备份到 \(destination.path)")
+            MReaderLog.reader.notice("corrupt library file backed up path=\(destination.path, privacy: .public)")
         } catch {
-            print("书架数据文件损坏，但备份失败: \(error)")
+            MReaderLog.reader.error("corrupt library file backup failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 
@@ -186,7 +187,7 @@ private actor ComicLibraryDiskStore {
             }
             try FileManager.default.copyItem(at: source, to: destination)
         } catch {
-            print("书架备份轮换失败: \(error)")
+            MReaderLog.reader.error("library backup rotation failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 
@@ -651,8 +652,12 @@ final class ComicLibraryStore: ObservableObject {
         for result in results {
             if let error = result.error {
                 errors.append("\(result.source.name): \(error.localizedDescription)")
-                print("Komga 同步失败 \(result.source.name): \(error.localizedDescription)")
-                print("Komga 源暂时不可用，保留旧书架记录: \(result.source.name)")
+                MReaderLog.reader.error(
+                    "Komga sync failed source=\(result.source.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
+                MReaderLog.reader.notice(
+                    "Komga source unavailable; retaining existing library records source=\(result.source.id.uuidString, privacy: .public)"
+                )
                 continue
             }
             syncedCount += result.comics.count
@@ -665,7 +670,9 @@ final class ComicLibraryStore: ObservableObject {
                 changed = true
             }
             if !result.isAuthoritative {
-                print("Komga 同步结果不完整，跳过缺失项清理: \(result.source.name)")
+                MReaderLog.reader.notice(
+                    "Komga sync incomplete; skipped missing-item cleanup source=\(result.source.id.uuidString, privacy: .public)"
+                )
             }
         }
         let successfulSourceCount = results.filter { $0.error == nil && $0.isAuthoritative }.count
@@ -731,7 +738,9 @@ final class ComicLibraryStore: ObservableObject {
         for result in results {
             if let error = result.error {
                 errors.append("\(result.source.name): \(error.localizedDescription)")
-                print("OPDS 同步失败 \(result.source.name): \(error.localizedDescription)")
+                MReaderLog.reader.error(
+                    "OPDS sync failed source=\(result.source.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
                 continue
             }
             syncedCount += result.comics.count
@@ -971,7 +980,7 @@ final class ComicLibraryStore: ObservableObject {
         if !snapshot.loadIssues.isEmpty {
             libraryLoadIssues = snapshot.loadIssues.map(\.userMessage)
             for issue in snapshot.loadIssues {
-                print("书架加载异常: \(issue.userMessage)")
+                MReaderLog.reader.error("library load issue=\(issue.userMessage, privacy: .public)")
             }
         }
     }
@@ -1261,7 +1270,9 @@ final class ComicLibraryStore: ObservableObject {
             await removeLocalKomgaState(for: comic)
             HapticManager.shared.play(.success)
         } catch {
-            print("Komga 删除失败 \(comic.title): \(error.localizedDescription)")
+            MReaderLog.reader.error(
+                "Komga delete failed comic=\(comic.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
             HapticManager.shared.play(.error)
         }
     }
@@ -1287,7 +1298,9 @@ final class ComicLibraryStore: ObservableObject {
         do {
             try await KomgaProvider.updateReadProgress(for: comic)
         } catch {
-            print("Komga 阅读进度同步失败 \(comic.title): \(error.localizedDescription)")
+            MReaderLog.reader.error(
+                "Komga reading progress sync failed comic=\(comic.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
         }
     }
 

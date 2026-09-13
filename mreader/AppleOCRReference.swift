@@ -1,5 +1,6 @@
 import UIKit
 import VisionKit
+import os
 
 /// Apple Live Text is used as a page-level reference only. It supplies
 /// language/completeness evidence, not geometry for translation overlays.
@@ -120,11 +121,11 @@ nonisolated enum AppleOCRReferenceService {
             return nil
         }
         guard #available(iOS 16.0, *), ImageAnalyzer.isSupported else {
-            print("MReader OCR ImageAnalyzer unavailable")
+            MReaderLog.aiVision.notice("OCR ImageAnalyzer unavailable")
             return nil
         }
         guard !isProcessUnavailable() else {
-            print("MReader OCR ImageAnalyzer skipped after explicit unavailable error")
+            MReaderLog.aiVision.notice("OCR ImageAnalyzer skipped after explicit unavailable error")
             return nil
         }
 
@@ -138,7 +139,9 @@ nonisolated enum AppleOCRReferenceService {
             let analysis = try await ImageAnalyzer().analyze(image, configuration: configuration)
             markProcessAvailable()
             let reference = makeReference(from: analysis.transcript)
-            print("MReader OCR ImageAnalyzer chars=\(reference.characterCount) language=\(reference.detectedLanguage ?? "unknown") kana=\(reference.kanaCount) han=\(reference.hanCount)")
+            MReaderLog.aiVision.debug(
+                "OCR ImageAnalyzer chars=\(reference.characterCount, privacy: .public) language=\(reference.detectedLanguage ?? "unknown", privacy: .public) kana=\(reference.kanaCount, privacy: .public) han=\(reference.hanCount, privacy: .public)"
+            )
             return reference
         } catch is CancellationError {
             return nil
@@ -146,7 +149,7 @@ nonisolated enum AppleOCRReferenceService {
             if isExplicitUnavailableError(error) {
                 markProcessUnavailable()
             }
-            print("MReader OCR ImageAnalyzer failed: \(error.localizedDescription)")
+            MReaderLog.aiVision.error("OCR ImageAnalyzer failed reason=\(MReaderLog.describe(error), privacy: .public)")
             return nil
         }
     }

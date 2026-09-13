@@ -128,7 +128,9 @@ nonisolated struct KomgaAPIClient: Sendable {
         } while page < maximumPages
         if page >= maximumPages {
             #if DEBUG
-            print("Komga 分页达到安全上限 maximumPages=\(maximumPages)，结果可能被截断 path=\(path)")
+            MReaderLog.aiTransport.notice(
+                "Komga pagination reached safety limit maximumPages=\(maximumPages, privacy: .public) truncated=true path=\(path, privacy: .public)"
+            )
             #endif
         }
         return pagedItems

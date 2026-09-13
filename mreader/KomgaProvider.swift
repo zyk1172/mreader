@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 nonisolated struct HiddenKomgaComic: Codable, Identifiable, Hashable, Sendable {
     let key: String
@@ -201,7 +202,9 @@ nonisolated enum KomgaProvider {
                 group.addTask {
                     let url = await refreshResolvedURL(source: source, timeout: 4)
                     let isLan = source.lanURL == url
-                    print("MReader URL resolved source=\(source.name) url=\(url) isLAN=\(isLan)")
+                    MReaderLog.aiTransport.debug(
+                        "remote source URL resolved source=\(source.id.uuidString, privacy: .public) isLAN=\(isLan, privacy: .public) scheme=\(URL(string: url)?.scheme ?? "unknown", privacy: .public)"
+                    )
                 }
             }
         }
@@ -370,7 +373,9 @@ nonisolated enum KomgaProvider {
             do {
                 seriesList = try await client.series(libraryID: library.id)
             } catch {
-                print("Komga 书库 \(library.name) 拉取 series 失败: \(error.localizedDescription)")
+                MReaderLog.reader.error(
+                    "Komga library series request failed library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
                 hadPartialFailure = true
                 continue
             }
@@ -380,9 +385,13 @@ nonisolated enum KomgaProvider {
                 let books: [KomgaBookDTO]
                 do {
                     books = try await client.books(seriesID: series.id)
-                    print("Komga series \(series.displayTitle) books=\(books.count)")
+                    MReaderLog.reader.debug(
+                        "Komga series books loaded series=\(series.id, privacy: .public) books=\(books.count, privacy: .public)"
+                    )
                 } catch {
-                    print("Komga series \(series.displayTitle) 拉取 books 失败: \(error.localizedDescription)")
+                    MReaderLog.reader.error(
+                        "Komga series books request failed series=\(series.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                    )
                     hadPartialFailure = true
                     continue
                 }
@@ -393,12 +402,14 @@ nonisolated enum KomgaProvider {
                     do {
                         pageCount = try await resolvedPageCount(book: book, client: client)
                     } catch {
-                        print("Komga book \(book.displayTitle) pageCount 解析失败: \(error.localizedDescription)")
+                        MReaderLog.reader.error(
+                            "Komga page count resolution failed book=\(book.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                        )
                         hadPartialFailure = true
                         continue
                     }
                     guard pageCount > 0 else {
-                        print("Komga book \(book.displayTitle) pageCount=0，已跳过")
+                        MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\(book.id, privacy: .public)")
                         continue
                     }
                     seenBookIDs.insert(book.id)
@@ -419,10 +430,16 @@ nonisolated enum KomgaProvider {
                 let books: [KomgaBookDTO]
                 do {
                     books = try await client.books(libraryID: library.id)
-                    print("Komga 书库 \(library.name) fallback libraryBooks=\(books.count)")
+                    MReaderLog.reader.debug(
+                        "Komga library fallback books loaded library=\(library.id, privacy: .public) books=\(books.count, privacy: .public)"
+                    )
                 } catch {
-                    print("Komga 书库 \(library.name) fallback books 失败: \(error.localizedDescription)")
-                    print("Komga 同步书库 \(library.name): series=\(seriesList.count), books=\(libraryBookCount), comics=\(libraryComicCount)")
+                    MReaderLog.reader.error(
+                        "Komga library fallback books request failed library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                    )
+                    MReaderLog.reader.notice(
+                        "Komga library sync partial library=\(library.id, privacy: .public) series=\(seriesList.count, privacy: .public) books=\(libraryBookCount, privacy: .public) comics=\(libraryComicCount, privacy: .public)"
+                    )
                     hadPartialFailure = true
                     continue
                 }
@@ -433,12 +450,14 @@ nonisolated enum KomgaProvider {
                     do {
                         pageCount = try await resolvedPageCount(book: book, client: client)
                     } catch {
-                        print("Komga book \(book.displayTitle) pageCount 解析失败: \(error.localizedDescription)")
+                        MReaderLog.reader.error(
+                            "Komga page count resolution failed book=\(book.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                        )
                         hadPartialFailure = true
                         continue
                     }
                     guard pageCount > 0 else {
-                        print("Komga book \(book.displayTitle) pageCount=0，已跳过")
+                        MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\(book.id, privacy: .public)")
                         continue
                     }
                     seenBookIDs.insert(book.id)
@@ -454,7 +473,9 @@ nonisolated enum KomgaProvider {
                     libraryComicCount += 1
                 }
             }
-            print("Komga 同步书库 \(library.name): series=\(seriesList.count), books=\(libraryBookCount), comics=\(libraryComicCount)")
+            MReaderLog.reader.debug(
+                "Komga library sync completed library=\(library.id, privacy: .public) series=\(seriesList.count, privacy: .public) books=\(libraryBookCount, privacy: .public) comics=\(libraryComicCount, privacy: .public)"
+            )
         }
         return KomgaSourceSyncPayload(
             comics: comics,

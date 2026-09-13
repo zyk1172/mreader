@@ -1327,7 +1327,9 @@ class AITranslator {
 
     private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool, mergeSliceObservations: Bool = false) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
-        print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
+        MReaderLog.aiVision.debug(
+            "vision recognition sliced image=\(Int(image.size.width), privacy: .public)x\(Int(image.size.height), privacy: .public) slices=\(slices.count, privacy: .public) model=\(model, privacy: .public)"
+        )
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
         let maximumConcurrentSlices = 2
         var sliceBlocks: [Int: [TextBlock]] = [:]
@@ -1633,7 +1635,9 @@ class AITranslator {
                 )
                 let original = corrected[originalIndex]
                 corrected[originalIndex] = visualReviewedBlock(original: original, review: review)
-                print("MReader OCR visual text review corrected block=\(region.blockID) confidence=\(String(format: "%.2f", review.confidence))")
+                MReaderLog.aiVision.debug(
+                    "OCR visual text review corrected block=\(region.blockID, privacy: .public) confidence=\(String(format: "%.2f", review.confidence), privacy: .public)"
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -1704,7 +1708,7 @@ class AITranslator {
                     into: corrected,
                     isRightToLeft: isRightToLeft
                 )
-                print("MReader OCR visual page recovery blocks=\(marked.count)")
+                MReaderLog.aiVision.debug("OCR visual page recovery blocks=\(marked.count, privacy: .public)")
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -2228,7 +2232,9 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                     text: corrected
                 )
                 correctedIDs.append(region.blockID)
-                print("MReader vision source review corrected block=\(region.blockID) reason=\(region.reason)")
+                MReaderLog.aiVision.debug(
+                    "vision source review corrected block=\(region.blockID, privacy: .public) reason=\(region.reason, privacy: .public)"
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

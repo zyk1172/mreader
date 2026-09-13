@@ -1,4 +1,5 @@
 import UIKit
+import os
 
 nonisolated enum OCRDebugStage: String, CaseIterable, Codable, Sendable {
     case raw
@@ -388,7 +389,9 @@ nonisolated enum MangaOCRPipeline {
             ),
             quality: quality
         )
-        print("MReader OCR summary raw=\(rawBlocks.count) resolved=\(qualityGate.accepted.count) lines=\(segmentation.lines.count) bubbles=\(segmentation.bubbles.count) chars=\(quality.characterCount) language=\(result.detectedLanguage ?? "unknown") jpScript=\(String(format: "%.2f", quality.japaneseScriptRatio)) kana=\(quality.kanaCount) han=\(quality.hanCount) latin=\(quality.latinCount) visionKitChars=\(quality.visionKitCharacterCount) visionKitCoverage=\(String(format: "%.2f", quality.visionKitCoverage)) charsPerBlock=\(String(format: "%.2f", quality.charactersPerBlock)) coverage=\(String(format: "%.2f", quality.score)) suspicious=\(quality.isSuspicious) rejectedByQuality=\(qualityGate.rejected.count)")
+        MReaderLog.aiVision.debug(
+            "OCR summary raw=\(rawBlocks.count, privacy: .public) resolved=\(qualityGate.accepted.count, privacy: .public) lines=\(segmentation.lines.count, privacy: .public) bubbles=\(segmentation.bubbles.count, privacy: .public) chars=\(quality.characterCount, privacy: .public) language=\(result.detectedLanguage ?? "unknown", privacy: .public) jpScript=\(String(format: "%.2f", quality.japaneseScriptRatio), privacy: .public) kana=\(quality.kanaCount, privacy: .public) han=\(quality.hanCount, privacy: .public) latin=\(quality.latinCount, privacy: .public) visionKitChars=\(quality.visionKitCharacterCount, privacy: .public) visionKitCoverage=\(String(format: "%.2f", quality.visionKitCoverage), privacy: .public) charsPerBlock=\(String(format: "%.2f", quality.charactersPerBlock), privacy: .public) coverage=\(String(format: "%.2f", quality.score), privacy: .public) suspicious=\(quality.isSuspicious, privacy: .public) rejectedByQuality=\(qualityGate.rejected.count, privacy: .public)"
+        )
         return result
     }
 

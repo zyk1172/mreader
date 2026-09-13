@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import os
 
 nonisolated struct OfflineComicRecord: Codable, Equatable, Sendable {
     let comicID: UUID
@@ -392,7 +393,9 @@ final class OfflineDownloadManager: ObservableObject {
             HapticManager.shared.play(.warning)
         } catch {
             cleanupPartialDownload(for: comic)
-            print("MReader offline download failed comic=\(comic.title) reason=\(error.localizedDescription)")
+            MReaderLog.aiTransport.error(
+                "offline download failed comic=\(comic.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
             HapticManager.shared.play(.error)
         }
 

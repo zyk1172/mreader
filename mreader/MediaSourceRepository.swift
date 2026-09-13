@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated struct ResolvedURLLookup: Sendable {
     let url: String
@@ -118,7 +119,7 @@ actor MediaSourceRepository {
         do {
             try persistHiddenComics(sorted)
         } catch {
-            print("保存 Komga 隐藏列表失败: \(error.localizedDescription)")
+            MReaderLog.reader.error("save hidden Komga list failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 

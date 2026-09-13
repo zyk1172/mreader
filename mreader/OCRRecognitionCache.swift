@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import UIKit
+import os
 
 nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     let pageURL: URL
@@ -103,11 +104,13 @@ actor OCRRecognitionCache {
     func result(for request: OCRRecognitionCacheRequest) async throws -> OCRPipelineResult {
         let key = request.cacheKey
         if let cached = cachedResult(forKey: key, isRightToLeft: request.options.isRightToLeft) {
-            print("MReader local OCR cache hit key=\(key.prefix(10)) blocks=\(cached.resolvedBlocks.count)")
+            MReaderLog.aiVision.debug(
+                "local OCR cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.resolvedBlocks.count, privacy: .public)"
+            )
             return cached
         }
         if let existing = inFlight[key] {
-            print("MReader local OCR joined in-flight key=\(key.prefix(10))")
+            MReaderLog.aiVision.debug("local OCR joined in-flight key=\(key.prefix(10), privacy: .public)")
             return try await existing.value
         }
 
@@ -167,7 +170,9 @@ actor OCRRecognitionCache {
         guard let data = try? JSONEncoder().encode(page) else { return }
         try? data.write(to: fileURL(forKey: key), options: .atomic)
         pruneDiskCacheIfNeeded()
-        print("MReader local OCR cache stored key=\(key.prefix(10)) blocks=\(result.resolvedBlocks.count)")
+        MReaderLog.aiVision.debug(
+            "local OCR cache stored key=\(key.prefix(10), privacy: .public) blocks=\(result.resolvedBlocks.count, privacy: .public)"
+        )
     }
 
     private func insertIntoMemory(_ result: OCRPipelineResult, forKey key: String) {

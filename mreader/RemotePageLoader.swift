@@ -26,7 +26,7 @@ nonisolated enum RemoteImageLoader {
         guard FileManager.default.fileExists(atPath: legacyRoot.path) else { return }
         do {
             try FileManager.default.moveItem(at: legacyRoot, to: newRoot)
-            print("MReader migrated legacy cover cache to Application Support")
+            MReaderLog.reader.notice("migrated legacy cover cache to Application Support")
         } catch {
             MReaderLog.reader.error("cover cache migration failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
@@ -138,7 +138,9 @@ nonisolated enum RemotePageLoader {
             return nil
         }
         guard await KomgaProvider.loadSources().contains(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
-            print("Komga 源已禁用，拒绝打开远程漫画: \(comic.title)")
+            MReaderLog.reader.notice(
+                "Komga source disabled; refused to open remote comic source=\(sourceID.uuidString, privacy: .public) comic=\(comic.id.uuidString, privacy: .public)"
+            )
             return nil
         }
         let totalPages = max(comic.remotePageCount ?? comic.totalPages, 0)
@@ -161,7 +163,9 @@ nonisolated enum RemotePageLoader {
     static func imageData(forRemotePageURL url: URL) async -> Data? {
         guard let request = RemotePageRequest(url: url) else { return nil }
         if let offline = OfflinePageStore.data(for: request.cacheKey), !offline.isEmpty {
-            print("MReader offline page hit page=\(request.pageIndex) key=\(request.cacheKey.logDescription)")
+            MReaderLog.reader.debug(
+                "offline page cache hit page=\(request.pageIndex, privacy: .public) key=\(request.cacheKey.logDescription, privacy: .public)"
+            )
             return offline
         }
         return await RemotePageCache.shared.data(for: request.cacheKey, priority: .current)
@@ -321,13 +325,17 @@ actor RemotePageCache {
     /// 会持续积累 stale keys。
     func reduceMemoryPressure() {
         clearMemoryCache()
-        print("MReader remote cache cleared by memory warning memoryLimitMB=\(memoryLimitMB)")
+        MReaderLog.reader.notice(
+            "remote cache cleared by memory warning memoryLimitMB=\(self.memoryLimitMB, privacy: .public)"
+        )
     }
 
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {
         let cacheKey = memoryKey(for: key)
         if let cached = memoryCache.object(forKey: cacheKey as NSString) {
-            print("MReader remote cache memory hit page=\(key.pageIndex) key=\(key.logDescription) memoryLimitMB=\(memoryLimitMB)")
+            MReaderLog.reader.debug(
+                "remote cache memory hit page=\(key.pageIndex, privacy: .public) key=\(key.logDescription, privacy: .public) memoryLimitMB=\(self.memoryLimitMB, privacy: .public)"
+            )
             return cached as Data
         }
 
@@ -338,13 +346,17 @@ actor RemotePageCache {
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: candidate.path)
                 memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
                 cachedKeys.insert(cacheKey)
-                print("MReader remote cache disk hit page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
+                MReaderLog.reader.debug(
+                    "remote cache disk hit page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
+                )
                 return data
             }
         }
 
         if let task = activeDownloads[key] {
-            print("MReader remote cache join request page=\(key.pageIndex) priority=\(priority)")
+            MReaderLog.reader.debug(
+                "remote cache joined request page=\(key.pageIndex, privacy: .public) priority=\(String(describing: priority), privacy: .public)"
+            )
             return await task.value
         }
 
@@ -364,7 +376,9 @@ actor RemotePageCache {
         if let data {
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
             cachedKeys.insert(cacheKey)
-            print("MReader remote cache stored page=\(key.pageIndex) bytes=\(data.count) key=\(key.logDescription)")
+            MReaderLog.reader.debug(
+                "remote cache stored page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
+            )
         }
         return data
     }
@@ -372,7 +386,7 @@ actor RemotePageCache {
     func clearMemoryCache() {
         memoryCache.removeAllObjects()
         cachedKeys.removeAll()
-        print("MReader remote cache memory cleared")
+        MReaderLog.reader.debug("remote cache memory cleared")
     }
 
     func retainMemoryPages(_ keysToKeep: Set<PageCacheKey>) {
@@ -385,7 +399,9 @@ actor RemotePageCache {
             evictedCount += 1
         }
         if evictedCount > 0 {
-            print("MReader remote cache evicted \(evictedCount) old pages from memory")
+            MReaderLog.reader.debug(
+                "remote cache evicted old pages count=\(evictedCount, privacy: .public)"
+            )
         }
     }
 
@@ -406,7 +422,9 @@ actor RemotePageCache {
             activeDownloads[key] = nil
         }
         if !cancelling.isEmpty {
-            print("MReader remote cache cancelled downloads pages=\(cancelling.map { $0.pageIndex }.sorted())")
+            MReaderLog.reader.debug(
+                "remote cache cancelled downloads pages=\(String(describing: cancelling.map { $0.pageIndex }.sorted()), privacy: .public)"
+            )
         }
     }
 
@@ -442,7 +460,7 @@ actor RemotePageCache {
 
         var total = entries.reduce(Int64(0)) { $0 + $1.size }
         guard total > diskLimitBytes else {
-            print("MReader remote cache disk size=\(total)")
+            MReaderLog.reader.debug("remote cache disk size=\(total, privacy: .public)")
             return
         }
         for entry in entries.sorted(by: { $0.date < $1.date }) {
@@ -450,7 +468,7 @@ actor RemotePageCache {
             total -= entry.size
             if total <= diskLimitBytes { break }
         }
-        print("MReader remote cache pruned disk size=\(total)")
+        MReaderLog.reader.notice("remote cache pruned disk size=\(total, privacy: .public)")
     }
 
     private func memoryKey(for key: PageCacheKey) -> String {
@@ -464,7 +482,9 @@ actor RemotePageCache {
                   let apiKey = KomgaProvider.apiKey(for: key.sourceID) else {
                 return nil
             }
-            print("MReader remote cache network request page=\(key.pageIndex) key=\(key.logDescription)")
+            MReaderLog.aiTransport.debug(
+                "remote cache network request page=\(key.pageIndex, privacy: .public) key=\(key.logDescription, privacy: .public)"
+            )
             let resolvedURL = await KomgaProvider.resolveBestURL(source: source)
             let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
             let data = try await client.pageData(bookID: key.bookID, pageIndex: key.pageIndex)
@@ -473,7 +493,9 @@ actor RemotePageCache {
             try? data.write(to: diskURL, options: .atomic)
             return data
         } catch MediaSourceError.notFound {
-            print("Komga 页面不存在 book=\(key.bookID) page=\(key.pageIndex)")
+            MReaderLog.aiTransport.notice(
+                "Komga page not found book=\(key.bookID, privacy: .public) page=\(key.pageIndex, privacy: .public)"
+            )
             return nil
         } catch {
             await KomgaProvider.invalidateResolvedURL(for: key.sourceID)
@@ -521,7 +543,7 @@ final class RemotePagePrefetcher {
         Task {
             await RemotePageCache.shared.clearMemoryCache()
         }
-        print("MReader memory warning: cancelled in-flight preloads and cleared memory cache")
+        MReaderLog.reader.notice("memory warning: cancelled in-flight preloads and cleared memory cache")
     }
 
     func previewPrefetch(comics: [ComicBook]) {
@@ -531,7 +553,9 @@ final class RemotePagePrefetcher {
         for comic in remoteComics {
             prefetchPreviewPages(for: comic)
         }
-        print("MReader preview prefetch started for \(previewComicIDs.count) comics")
+        MReaderLog.reader.debug(
+            "preview prefetch started comics=\(self.previewComicIDs.count, privacy: .public)"
+        )
     }
 
     private func prefetchPreviewPages(for comic: ComicBook) {
@@ -560,7 +584,9 @@ final class RemotePagePrefetcher {
             cancelPreview(comicID: id)
         }
         previewComicIDs = previewComicIDs.filter { $0 == comicID }
-        print("MReader preview prefetch cancelled non-opened, kept comicID=\(comicID)")
+        MReaderLog.reader.debug(
+            "preview prefetch cancelled non-opened keptComic=\(comicID.uuidString, privacy: .public)"
+        )
     }
 
     func cancelAllPreview() {
@@ -600,7 +626,9 @@ final class RemotePagePrefetcher {
         }
         if !cancelled.isEmpty {
             let cancelledPages = cancelled.compactMap { RemotePageLoader.pageIndex(forRemotePageURL: $0) }.sorted()
-            print("MReader remote prefetch cancel pages=\(cancelledPages)")
+            MReaderLog.reader.debug(
+                "remote prefetch cancelled pages=\(String(describing: cancelledPages), privacy: .public)"
+            )
         }
 
         Task {
@@ -608,7 +636,9 @@ final class RemotePagePrefetcher {
             await RemotePageCache.shared.retainMemoryPages(keepKeys)
         }
 
-        print("MReader remote prefetch current=\(currentPageIndex) candidatePages=\(candidateIndices) budgetedPages=\(budgetedIndices) budgetBytes=\(prefetchBudgetBytes) mode=\(readingMode.rawValue) direction=\(readingDirection.rawValue)")
+        MReaderLog.reader.debug(
+            "remote prefetch current=\(currentPageIndex, privacy: .public) candidatePages=\(String(describing: candidateIndices), privacy: .public) budgetedPages=\(String(describing: budgetedIndices), privacy: .public) budgetBytes=\(self.prefetchBudgetBytes, privacy: .public) mode=\(readingMode.rawValue, privacy: .public) direction=\(readingDirection.rawValue, privacy: .public)"
+        )
         for url in urls where RemotePageLoader.pageIndex(forRemotePageURL: url) != currentPageIndex {
             guard tasks[url] == nil else { continue }
             tasks[url] = Task(priority: .utility) { [url] in
@@ -634,7 +664,9 @@ final class RemotePagePrefetcher {
             task.cancel()
         }
         tasks.removeAll()
-        print("MReader remote prefetch cancelAll pages=\(pages)")
+        MReaderLog.reader.debug(
+            "remote prefetch cancelAll pages=\(String(describing: pages), privacy: .public)"
+        )
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {

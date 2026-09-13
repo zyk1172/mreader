@@ -53,7 +53,9 @@ nonisolated enum LocalResourceAccessPolicy {
         let shouldLog = loggedDecisions.insert(logKey).inserted
         logLock.unlock()
         if shouldLog {
-            print("MReader resource-access location=\(location.rawValue) securityScope=\(shouldStart) path=\(url.standardizedFileURL.path)")
+            MReaderLog.reader.debug(
+                "resource access location=\(location.rawValue, privacy: .public) securityScope=\(shouldStart, privacy: .public) path=\(url.standardizedFileURL.path, privacy: .public)"
+            )
         }
         #endif
         return shouldStart && url.startAccessingSecurityScopedResource()

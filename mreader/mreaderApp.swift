@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import os
 
 @main
 struct mreaderApp: App {
@@ -38,7 +39,9 @@ struct mreaderApp: App {
                 defaults.removeObject(forKey: "ai_model_pool_current_model")
             }
         } catch {
-            print("MReader AI legacy configuration migration failed: \(error.localizedDescription)")
+            MReaderLog.aiTranslation.error(
+                "AI legacy configuration migration failed reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
         }
     }
 
@@ -68,7 +71,7 @@ struct mreaderApp: App {
         }
         defaults.removeObject(forKey: Self.legacyTranslationPromptKey)
         defaults.set(2, forKey: Self.translationPromptProtocolVersionKey)
-        print("MReader migrated translation prompt protocol (legacy -> style instructions)")
+        MReaderLog.aiTranslation.notice("migrated translation prompt protocol legacyToStyleInstructions=true")
     }
 
     var body: some Scene {
