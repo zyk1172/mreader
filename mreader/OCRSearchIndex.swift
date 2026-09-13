@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import SwiftUI
 import UIKit
+import os
 
 nonisolated struct OCRSearchRecord: Codable, Hashable, Sendable {
     let comicID: UUID
@@ -111,7 +112,7 @@ actor OCRSearchIndex {
         } catch {
             // Keep the dirty count so a later foreground/background transition
             // can retry after a transient disk or filesystem failure.
-            print("MReader OCR search index flush failed: \(error.localizedDescription)")
+            MReaderLog.aiVision.error("OCR search index flush failed reason=\(MReaderLog.describe(error), privacy: .public)")
         }
     }
 

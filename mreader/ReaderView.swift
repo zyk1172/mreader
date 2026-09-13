@@ -6,21 +6,30 @@ import os
 
 struct ReaderContainerView: View {
     @State private var comic: ComicBook
+    let showsControlsForTesting: Bool
     let onComicUpdate: (ComicBook) -> Void
     @State private var manager = ComicManager()
     @State private var isLoaded = false
     @State private var loadFailed = false
 
-    init(comic: ComicBook, onComicUpdate: @escaping (ComicBook) -> Void) {
+    init(
+        comic: ComicBook,
+        showsControlsForTesting: Bool = false,
+        onComicUpdate: @escaping (ComicBook) -> Void
+    ) {
         _comic = State(initialValue: comic)
+        self.showsControlsForTesting = showsControlsForTesting
         self.onComicUpdate = onComicUpdate
     }
     
     var body: some View {
         Group {
             if isLoaded {
-                ReaderView(manager: manager, comic: comic) { updatedComic in
-                    comic = updatedComic
+                ReaderView(
+                    manager: manager,
+                    comic: $comic,
+                    showsControlsForTesting: showsControlsForTesting
+                ) { updatedComic in
                     onComicUpdate(updatedComic)
                 }
             } else if loadFailed {
@@ -102,7 +111,9 @@ struct ReaderContainerView: View {
             for: result.pages[index].url,
             maxPixelSize: 8192
         )
-        print("MReader initial scrolling page prewarmed page=\(index) elapsed=\(start.duration(to: .now))")
+        MReaderLog.reader.debug(
+            "initial scrolling page prewarmed page=\(index, privacy: .public) elapsed=\(String(describing: start.duration(to: .now)), privacy: .public)"
+        )
     }
 }
 
@@ -158,6 +169,49 @@ nonisolated enum ZoomPanGeometry {
             width: min(max(proposed.width, -limits.width), limits.width),
             height: min(max(proposed.height, -limits.height), limits.height)
         )
+    }
+}
+
+/// Reader 手势之间的最小协调规则。
+///
+/// 放大状态由页内图片回传给外层翻页容器；单页使用一个 Bool，双页使用按页维护的
+/// Set。把门控规则集中在这里，避免 SwiftUI 手势组合的实现细节和阈值在多个 View
+/// 中漂移，也让“只要还有一页放大就不能翻整组”可以直接做单元测试。
+nonisolated enum ReaderGestureGate {
+    static let zoomedScaleThreshold: CGFloat = 1.05
+
+    static func isZoomed(scale: CGFloat) -> Bool {
+        scale > zoomedScaleThreshold
+    }
+
+    static func allowsSinglePageTurn(isZoomed: Bool) -> Bool {
+        !isZoomed
+    }
+
+    static func allowsDoublePageTurn(zoomedPageIndexes: Set<Int>) -> Bool {
+        zoomedPageIndexes.isEmpty
+    }
+}
+
+/// Reader 对 ComicBook 的一次 mutation 必须先产生唯一的最新值，再同时写回 Binding
+/// 和传给持久化 callback。这个纯函数让 callback 不会意外拿到 mutation 前的旧副本。
+nonisolated enum ReaderComicMutation {
+    static func applying(
+        _ mutate: (inout ComicBook) -> Void,
+        to comic: ComicBook,
+        now: Date
+    ) -> ComicBook {
+        var updatedComic = comic
+        mutate(&updatedComic)
+        updatedComic.metadataUpdatedAt = now
+        if !updatedComic.isOCREnabled {
+            updatedComic.isAutoOCRMagnificationEnabled = false
+        }
+        if !updatedComic.isAITranslationEnabled
+            || (updatedComic.aiTranslationMode == .ocr && !updatedComic.isOCREnabled) {
+            updatedComic.isAutoTranslationEnabled = false
+        }
+        return updatedComic
     }
 }
 
@@ -519,7 +573,9 @@ private final class ReaderImageCache {
         preloadQueue = candidates
         maximumConcurrentPreloads = max(1, maximumConcurrent)
         let queuedBytes = candidates.reduce(0) { $0 + $1.cost }
-        print("MReader decoded image preload budget=\(preloadBudgetBytes) queuedBytes=\(queuedBytes) queued=\(candidates.count)")
+        MReaderLog.reader.debug(
+            "decoded image preload budget=\(self.preloadBudgetBytes, privacy: .public) queuedBytes=\(queuedBytes, privacy: .public) queued=\(candidates.count, privacy: .public)"
+        )
         drainPreloadQueue()
     }
 
@@ -574,7 +630,7 @@ private final class ReaderImageCache {
         foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
-        print("MReader decoded image cache memory cleared")
+        MReaderLog.reader.debug("decoded image cache memory cleared")
     }
 
     private static func clearSharedMemoryCache() {
@@ -706,7 +762,8 @@ nonisolated private func imagePixelSize(from source: CGImageSource) -> CGSize? {
 
 struct ReaderView: View {
     var manager: ComicManager
-    @State private var comic: ComicBook
+    @Binding var comic: ComicBook
+    let showsControlsForTesting: Bool
     let onComicUpdate: (ComicBook) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -738,6 +795,9 @@ struct ReaderView: View {
     @State private var lastPrefetchPageIndex: Int
     @State private var activeTranslationCount = 0
     private var isAITranslationInProgress: Bool { activeTranslationCount > 0 }
+    private var areReaderControlsVisible: Bool {
+        showControls || showsControlsForTesting
+    }
     @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
@@ -817,16 +877,23 @@ struct ReaderView: View {
         )
     }
 
-    init(manager: ComicManager, comic: ComicBook, onComicUpdate: @escaping (ComicBook) -> Void) {
+    init(
+        manager: ComicManager,
+        comic: Binding<ComicBook>,
+        showsControlsForTesting: Bool = false,
+        onComicUpdate: @escaping (ComicBook) -> Void
+    ) {
+        let initialComic = comic.wrappedValue
         self.manager = manager
+        self._comic = comic
+        self.showsControlsForTesting = showsControlsForTesting
         self.onComicUpdate = onComicUpdate
-        _comic = State(initialValue: comic)
         let maxIndex = max(0, manager.pages.count - 1)
-        _currentPageIndex = State(initialValue: min(max(comic.currentPageIndex, 0), maxIndex))
-        _lastSavedScrollProgress = State(initialValue: comic.scrollProgress)
-        _lastSavedScrollPageProgress = State(initialValue: comic.scrollPageProgress)
-        _lastPrefetchPageIndex = State(initialValue: min(max(comic.currentPageIndex, 0), maxIndex))
-        _activityLastPageIndex = State(initialValue: min(max(comic.currentPageIndex, 0), maxIndex))
+        _currentPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
+        _lastSavedScrollProgress = State(initialValue: initialComic.scrollProgress)
+        _lastSavedScrollPageProgress = State(initialValue: initialComic.scrollPageProgress)
+        _lastPrefetchPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
+        _activityLastPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
     }
 
     var body: some View {
@@ -847,7 +914,7 @@ struct ReaderView: View {
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
                     onTranslationStateChange: updateAITranslationProgress,
-                    areControlsVisible: showControls,
+                    areControlsVisible: areReaderControlsVisible,
                     onShowControls: showControlsIfNeeded,
                     onHideControls: hideControls
                 )
@@ -867,7 +934,7 @@ struct ReaderView: View {
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
                     onTranslationStateChange: updateAITranslationProgress,
-                    areControlsVisible: showControls,
+                    areControlsVisible: areReaderControlsVisible,
                     onShowControls: showControlsIfNeeded,
                     onHideControls: hideControls
                 )
@@ -887,7 +954,7 @@ struct ReaderView: View {
                     isOCRMagnificationVisible: isOCRMagnificationActive,
                     targetLanguage: selectedTranslationTarget.rawValue,
                     onTranslationStateChange: updateAITranslationProgress,
-                    areControlsVisible: showControls,
+                    areControlsVisible: areReaderControlsVisible,
                     onShowControls: showControlsIfNeeded,
                     onHideControls: hideControls
                 )
@@ -909,7 +976,7 @@ struct ReaderView: View {
                     scrollPageProgress: comic.scrollPageProgress,
                     onScrollPositionChange: saveScrollPosition,
                     onTranslationStateChange: updateAITranslationProgress,
-                    areControlsVisible: showControls,
+                    areControlsVisible: areReaderControlsVisible,
                     onShowControls: showControlsIfNeeded,
                     onHideControls: hideControls
                 )
@@ -966,7 +1033,7 @@ struct ReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
 
-            if showControls {
+            if areReaderControlsVisible {
                 GeometryReader { proxy in
                     VStack(spacing: 0) {
                         readerTopControlBar
@@ -982,7 +1049,7 @@ struct ReaderView: View {
                 .zIndex(20)
             }
 
-            if showControls {
+            if areReaderControlsVisible {
                 VStack {
                     Spacer()
                     HStack(spacing: 10) {
@@ -1067,6 +1134,7 @@ struct ReaderView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationTitle("")
         .navigationBarBackButtonHidden(true) // 核心：拦截原生左侧边缘的滑动返回手势
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mreader.reader.root")
         .defersSystemGestures(on: .horizontal) // 将水平滑动优先级完全交给翻页
         .toolbar(.hidden, for: .navigationBar)
@@ -1113,6 +1181,9 @@ struct ReaderView: View {
             let migratedLanguage = selectedTranslationTarget.rawValue
             if translationTargetLanguage != migratedLanguage {
                 translationTargetLanguage = migratedLanguage
+            }
+            if showsControlsForTesting {
+                showControls = true
             }
             recordReaderInteraction()
             applyEPUBPresetBeforeFirstOpen()
@@ -1161,7 +1232,9 @@ struct ReaderView: View {
             } else {
                 translationPrefetchTask?.cancel()
                 translationPrefetchTask = nil
-                print("MReader AI translation prefetch disabled comic=\(comic.id)")
+                MReaderLog.aiTranslation.debug(
+                    "AI translation prefetch disabled comic=\(comic.id.uuidString, privacy: .public)"
+                )
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -1241,6 +1314,7 @@ struct ReaderView: View {
                 .monospacedDigit()
                 .foregroundStyle(.white)
                 .frame(minWidth: 76, minHeight: 40)
+                .accessibilityIdentifier("mreader.reader.progress")
 
             Spacer(minLength: 4)
 
@@ -1596,7 +1670,9 @@ struct ReaderView: View {
             comic.isAutoTranslationEnabled = false
             comic.hasInitializedReadingPreset = true
             comic.metadataUpdatedAt = Date()
-            print("MReader initial preset comic=\(comic.id) mode=\(comic.readingModeRaw) animation=\(comic.pageTurnAnimationRaw) fit=\(comic.imageFitModeRaw) reason=\(preset.reason)")
+            MReaderLog.reader.debug(
+                "initial preset comic=\(comic.id.uuidString, privacy: .public) mode=\(comic.readingModeRaw, privacy: .public) animation=\(comic.pageTurnAnimationRaw, privacy: .public) fit=\(comic.imageFitModeRaw, privacy: .public) reason=\(preset.reason, privacy: .public)"
+            )
             onComicUpdate(comic)
         }
     }
@@ -1630,20 +1706,26 @@ struct ReaderView: View {
         }
         let sampleIndices = ReadingPresetSamplePagePolicy.pageIndices(totalPages: manager.pages.count)
         guard !sampleIndices.isEmpty else {
-            print("MReader initial preset fallback: no sample pages for comic=\(comic.id)")
+            MReaderLog.reader.notice(
+                "initial preset fallback reason=noSamplePages comic=\(comic.id.uuidString, privacy: .public)"
+            )
             return InitialReadingPreset.normalPage
         }
         var ratios: [CGFloat] = []
         for index in sampleIndices {
             guard manager.pages.indices.contains(index),
                   let size = await pagePixelSize(for: manager.pages[index].url) else {
-                print("MReader initial preset sample skipped comic=\(comic.id) page=\(index + 1)")
+                MReaderLog.reader.notice(
+                    "initial preset sample skipped comic=\(comic.id.uuidString, privacy: .public) page=\(index + 1, privacy: .public)"
+                )
                 continue
             }
             ratios.append(size.height / max(size.width, 1))
         }
         guard let medianRatio = medianRatio(ratios) else {
-            print("MReader initial preset fallback: cannot read sample page sizes comic=\(comic.id) samples=\(sampleIndices.map { $0 + 1 })")
+            MReaderLog.reader.notice(
+                "initial preset fallback reason=samplePageSizeUnavailable comic=\(comic.id.uuidString, privacy: .public) samples=\(String(describing: sampleIndices.map { $0 + 1 }), privacy: .public)"
+            )
             return InitialReadingPreset.normalPage
         }
         if medianRatio > 1.8 {
@@ -1719,17 +1801,12 @@ struct ReaderView: View {
 
     private func updateComic(_ mutate: (inout ComicBook) -> Void) {
         HapticManager.shared.play(.light)
-        mutate(&comic)
-        comic.metadataUpdatedAt = Date()
-        if !comic.isOCREnabled {
-            comic.isAutoOCRMagnificationEnabled = false
+        let updatedComic = ReaderComicMutation.applying(mutate, to: comic, now: Date())
+        comic = updatedComic
+        if !updatedComic.isOCREnabled {
             isOCRMagnificationVisible = false
         }
-        if !comic.isAITranslationEnabled ||
-            (comic.aiTranslationMode == .ocr && !comic.isOCREnabled) {
-            comic.isAutoTranslationEnabled = false
-        }
-        onComicUpdate(comic)
+        onComicUpdate(updatedComic)
     }
 
     private var ocrMinimumPreviewFontSize: CGFloat {
@@ -1807,7 +1884,9 @@ struct ReaderView: View {
         activityLastRecordedAt = Date()
         activityLastPageIndex = currentPageIndex
         let clampedValue = min(max(currentPageIndex, 0), max(0, manager.pages.count - 1))
-        print("MReader progress open comic=\(comic.id) restoredPage=\(clampedValue) storedPage=\(comic.currentPageIndex) mode=\(comic.readingModeRaw)")
+        MReaderLog.reader.debug(
+            "progress open comic=\(comic.id.uuidString, privacy: .public) restoredPage=\(clampedValue, privacy: .public) storedPage=\(comic.currentPageIndex, privacy: .public) mode=\(comic.readingModeRaw, privacy: .public)"
+        )
         persistReadingProgress(pageIndex: clampedValue, reason: "readerOpen", force: true)
     }
 
@@ -1856,7 +1935,9 @@ struct ReaderView: View {
         comic.scrollProgress = clampedProgress
         comic.scrollPageProgress = clampedPageProgress
         comic.lastReadAt = Date()
-        print("MReader progress persist reason=\(reason) comic=\(comic.id) page=\(clampedPageIndex) global=\(String(format: "%.4f", clampedProgress)) pageProgress=\(String(format: "%.4f", clampedPageProgress))")
+        MReaderLog.reader.debug(
+            "progress persist reason=\(reason, privacy: .public) comic=\(comic.id.uuidString, privacy: .public) page=\(clampedPageIndex, privacy: .public) global=\(String(format: "%.4f", clampedProgress), privacy: .public) pageProgress=\(String(format: "%.4f", clampedPageProgress), privacy: .public)"
+        )
         onComicUpdate(comic)
     }
 
@@ -1979,10 +2060,14 @@ struct ReaderView: View {
                         pageIndex: pageIndex
                     )
                     _ = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
-                    print("MReader AI translation prefetched comic=\(comicID) page=\(pageIndex)")
+                    MReaderLog.aiTranslation.debug(
+                        "AI translation prefetched comic=\(comicID.uuidString, privacy: .public) page=\(pageIndex, privacy: .public)"
+                    )
                 }
             } catch is CancellationError {
-                print("MReader AI translation prefetch cancelled comic=\(comicID)")
+                MReaderLog.aiTranslation.debug(
+                    "AI translation prefetch cancelled comic=\(comicID.uuidString, privacy: .public)"
+                )
             } catch {
                 MReaderLog.aiTranslation.notice("translation prefetch failed comic=\(comicID, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
             }
@@ -2826,9 +2911,8 @@ struct ContinuousScrollReader: View {
             let minOffsetY = -scrollView.adjustedContentInset.top
             let isStillBelowTop = scrollView.contentOffset.y > minOffsetY + max(visibleSize.height * 0.42, 140)
             if isStillBelowTop {
-                print(
-                    "MReader scroll ignored stale page-zero frame current=\(currentPageIndex) " +
-                    "offsetY=\(Int(scrollView.contentOffset.y)) frames=\(frames.count)"
+                MReaderLog.reader.debug(
+                    "scroll ignored stale page-zero frame current=\(currentPageIndex, privacy: .public) offsetY=\(Int(scrollView.contentOffset.y), privacy: .public) frames=\(frames.count, privacy: .public)"
                 )
                 scheduleVisiblePageUpdate(delay: 0.06)
                 return
@@ -2836,7 +2920,9 @@ struct ContinuousScrollReader: View {
         }
         let didChangePage = currentPageIndex != visiblePageIndex
         if didChangePage {
-            print("MReader scroll currentPageIndex update old=\(currentPageIndex) new=\(visiblePageIndex) frames=\(frames.count)")
+            MReaderLog.reader.debug(
+                "scroll currentPageIndex update old=\(currentPageIndex, privacy: .public) new=\(visiblePageIndex, privacy: .public) frames=\(frames.count, privacy: .public)"
+            )
             currentPageIndex = visiblePageIndex
         }
 
@@ -2885,7 +2971,9 @@ struct ContinuousScrollReader: View {
 
         let maxOffsetY = max(minOffsetY, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
         let restoreY = min(max(lastStableContentOffsetY, minOffsetY), maxOffsetY)
-        print("MReader scroll prevented unexpected top jump page=\(currentPageIndex) restoreY=\(Int(restoreY))")
+        MReaderLog.reader.notice(
+            "scroll prevented unexpected top jump page=\(currentPageIndex, privacy: .public) restoreY=\(Int(restoreY), privacy: .public)"
+        )
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: restoreY), animated: false)
         scheduleVisiblePageUpdate(delay: 0.04)
         return true
@@ -3111,11 +3199,11 @@ struct AnimatedPageReader: View {
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
-                        guard !isPageZoomed else { return }
+                        guard ReaderGestureGate.allowsSinglePageTurn(isZoomed: isPageZoomed) else { return }
                         state = readingMode == .verticalPage ? value.translation.height : value.translation.width
                     }
                     .onEnded { value in
-                        guard !isPageZoomed else { return }
+                        guard ReaderGestureGate.allowsSinglePageTurn(isZoomed: isPageZoomed) else { return }
                         let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
                         let threshold = max(axisLength * 0.2, 72)
                         let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
@@ -3318,11 +3406,11 @@ struct DoublePageReader: View {
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
-                        guard zoomedPageIndexes.isEmpty else { return }
+                        guard ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPageIndexes) else { return }
                         state = value.translation.width
                     }
                     .onEnded { value in
-                        guard zoomedPageIndexes.isEmpty else { return }
+                        guard ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPageIndexes) else { return }
                         let threshold = max(geo.size.width * 0.2, 72)
                         let logicalDelta = isRTL ? value.translation.width : -value.translation.width
                         if logicalDelta > threshold {
@@ -4442,7 +4530,9 @@ struct LocalImageView: View {
             minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
         )
         #if DEBUG
-        print("MReader translation-layout sourceOrientation=\(block.textOrientation.rawValue) translationOrientation=\(translationOrientation.rawValue) role=\(block.layoutRole.rawValue) sourceFont=\(String(format: "%.1f", requestedFontSize)) chosenFont=\(String(format: "%.1f", choice.layout.fontSize)) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding)) sourceRect=\(String(describing: textRect)) allowedBounds=\(String(describing: allowedBounds)) layoutBounds=\(String(describing: layoutBounds)) bubble=\(hasReliableBubble) surface=\(surfaceStyle.rawValue) layoutRect=\(String(describing: choice.layout.rect))")
+        MReaderLog.aiTranslation.debug(
+            "translation layout sourceOrientation=\(block.textOrientation.rawValue, privacy: .public) translationOrientation=\(translationOrientation.rawValue, privacy: .public) role=\(block.layoutRole.rawValue, privacy: .public) sourceFont=\(String(format: "%.1f", requestedFontSize), privacy: .public) chosenFont=\(String(format: "%.1f", choice.layout.fontSize), privacy: .public) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding), privacy: .public) sourceRect=\(String(describing: textRect), privacy: .public) allowedBounds=\(String(describing: allowedBounds), privacy: .public) layoutBounds=\(String(describing: layoutBounds), privacy: .public) bubble=\(hasReliableBubble, privacy: .public) surface=\(surfaceStyle.rawValue, privacy: .public) layoutRect=\(String(describing: choice.layout.rect), privacy: .public)"
+        )
         #endif
         return (
             sourceRect: textRect,
@@ -4850,7 +4940,9 @@ struct LocalImageView: View {
 
     /// scale > 1.05 视为“已放大”。与点击/长按手势的门控阈值保持一致，
     /// 单指拖动只有在放大态才被当作平移消费。
-    private var isZoomedIn: Bool { scale > 1.05 }
+    private var isZoomedIn: Bool {
+        ReaderGestureGate.isZoomed(scale: scale)
+    }
 
     private var zoomGesture: some Gesture {
         MagnificationGesture()
@@ -4862,7 +4954,7 @@ struct LocalImageView: View {
             }
             .onEnded { _ in
                 lastScale = scale
-                if scale <= 1.02 {
+                if !ReaderGestureGate.isZoomed(scale: scale) {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
                         scale = 1
                         lastScale = 1
@@ -4881,7 +4973,7 @@ struct LocalImageView: View {
     private var panGesture: some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
-                guard scale > 1.02 else { return }
+                guard ReaderGestureGate.isZoomed(scale: scale) else { return }
                 offset = clampedOffset(
                     CGSize(
                         width: lastOffset.width + value.translation.width,
@@ -4891,7 +4983,7 @@ struct LocalImageView: View {
                 )
             }
             .onEnded { _ in
-                guard scale > 1.02 else { return }
+                guard ReaderGestureGate.isZoomed(scale: scale) else { return }
                 lastOffset = offset
             }
     }
@@ -4924,7 +5016,7 @@ struct LocalImageView: View {
         SpatialTapGesture(count: 1, coordinateSpace: .local)
             .onEnded { value in
                 guard isPageTapGestureEnabled else { return }
-                guard scale <= 1.05 else { return }
+                guard !ReaderGestureGate.isZoomed(scale: scale) else { return }
                 guard Date().timeIntervalSince(lastDoubleTapTime) > 0.28 else { return }
 
                 pendingSingleTapWorkItem?.cancel()
@@ -4946,7 +5038,7 @@ struct LocalImageView: View {
     private var longPressTranslationGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.55, maximumDistance: 18)
             .onEnded { _ in
-                guard isLongPressTranslationEnabled, canTranslate, scale <= 1.05 else { return }
+                guard isLongPressTranslationEnabled, canTranslate, !ReaderGestureGate.isZoomed(scale: scale) else { return }
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
                 HapticManager.shared.play(.medium)

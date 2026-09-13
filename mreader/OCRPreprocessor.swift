@@ -3,6 +3,7 @@ import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
 @preconcurrency import Vision
+import os
 
 nonisolated enum OCRRecognitionMode: String, Codable, CaseIterable, Sendable {
     case adaptive
@@ -94,7 +95,9 @@ struct OCRPreprocessor {
         }
 
         let slices = sliceImage(normalizedImage, fullPixelSize: fullSize)
-        print("MReader OCR preprocess slices=\(slices.count) strategy=\(options.recognitionMode.rawValue) image=\(Int(fullSize.width))x\(Int(fullSize.height))")
+        MReaderLog.aiVision.debug(
+            "OCR preprocess slices=\(slices.count, privacy: .public) strategy=\(options.recognitionMode.rawValue, privacy: .public) image=\(Int(fullSize.width), privacy: .public)x\(Int(fullSize.height), privacy: .public)"
+        )
         var allBlocks: [TextBlock] = []
         for slice in slices {
             try Task.checkCancellation()
@@ -132,7 +135,9 @@ struct OCRPreprocessor {
                     // primary Vision pass to Japanese recovery.
                     verticalEvidence: JapaneseVerticalOCRService.verticalColumnCount(in: locatorBlocks) >= 2
                 )
-                print("MReader OCR locator rect=\(Int(slice.rect.minY))-\(Int(slice.rect.maxY)) blocks=\(locatorBlocks.count) primary=\(plan.primary.name)")
+                MReaderLog.aiVision.debug(
+                    "OCR locator rect=\(Int(slice.rect.minY), privacy: .public)-\(Int(slice.rect.maxY), privacy: .public) blocks=\(locatorBlocks.count, privacy: .public) primary=\(plan.primary.name, privacy: .public)"
+                )
                 sliceBlocks = await recognize(
                     original,
                     options: options,
@@ -220,7 +225,7 @@ struct OCRPreprocessor {
             options: options,
             image: normalizedImage
         ) {
-            print("MReader OCR ImageAnalyzer indicates Japanese coverage gap; running ja-JP accurate pass")
+            MReaderLog.aiVision.notice("OCR ImageAnalyzer indicates Japanese coverage gap; running ja-JP accurate pass")
             for slice in slices {
                 try Task.checkCancellation()
                 let original = OCRImageVariant(
@@ -239,7 +244,7 @@ struct OCRPreprocessor {
             }
         }
 
-        print("MReader OCR raw candidates=\(allBlocks.count)")
+        MReaderLog.aiVision.debug("OCR raw candidates=\(allBlocks.count, privacy: .public)")
         return OCRCandidateRecognitionResult(
             blocks: allBlocks,
             visionKitReference: visionKitReference
@@ -268,10 +273,14 @@ struct OCRPreprocessor {
                     maximumCandidates: maximumCandidates,
                     minimumTextHeightScale: minimumTextHeightScale
                 )
-                print("MReader OCR variant=\(variant.name) languagePass=\(pass.name) rect=\(Int(variant.sliceRect.minY))-\(Int(variant.sliceRect.maxY)) blocks=\(result.count) avgConfidence=\(String(format: "%.2f", averageConfidence(result)))")
+                MReaderLog.aiVision.debug(
+                    "OCR variant=\(variant.name, privacy: .public) languagePass=\(pass.name, privacy: .public) rect=\(Int(variant.sliceRect.minY), privacy: .public)-\(Int(variant.sliceRect.maxY), privacy: .public) blocks=\(result.count, privacy: .public) avgConfidence=\(String(format: "%.2f", averageConfidence(result)), privacy: .public)"
+                )
                 blocks.append(contentsOf: result)
             } catch {
-                print("MReader OCR variant failed name=\(variant.name) languagePass=\(pass.name) error=\(error.localizedDescription)")
+                MReaderLog.aiVision.error(
+                    "OCR variant failed name=\(variant.name, privacy: .public) languagePass=\(pass.name, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
             }
         }
         return blocks

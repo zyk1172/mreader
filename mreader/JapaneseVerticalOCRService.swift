@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import TesseractSwift
+import os
 
 /// A small, deliberately conservative coverage summary used to decide whether
 /// the vertical Japanese fallback is worth the extra local OCR pass.
@@ -116,7 +117,7 @@ nonisolated enum JapaneseVerticalOCRService {
               let rotated = rotatedForVerticalOCR(normalized),
               let imageData = rotated.pngData(),
               let dataPath = tessdataParentPath() else {
-            print("MReader Japanese vertical OCR unavailable: jpn_vert resource is missing")
+            MReaderLog.aiVision.error("Japanese vertical OCR unavailable reason=missingModelResource")
             return []
         }
 
@@ -131,7 +132,9 @@ nonisolated enum JapaneseVerticalOCRService {
                 referenceCharacterCount: visionKitReference?.characterCount,
                 visionBlockCount: existingBlocks.count
             ) else {
-                print("MReader Japanese vertical OCR rejected fragmented output raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun)) referenceChars=\(visionKitReference?.characterCount ?? 0) visionBlocks=\(existingBlocks.count)")
+                MReaderLog.aiVision.notice(
+                    "Japanese vertical OCR rejected fragmented output raw=\(fragmentation.rawWordCount, privacy: .public) grouped=\(fragmentation.groupedRunCount, privacy: .public) chars=\(fragmentation.totalCharacterCount, privacy: .public) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun), privacy: .public) referenceChars=\(visionKitReference?.characterCount ?? 0, privacy: .public) visionBlocks=\(existingBlocks.count, privacy: .public)"
+                )
                 return []
             }
 
@@ -170,7 +173,9 @@ nonisolated enum JapaneseVerticalOCRService {
                     textOrientation: .vertical
                 )
             }
-            print("MReader Japanese vertical OCR fallback blocks=\(blocks.count) raw=\(fragmentation.rawWordCount) grouped=\(fragmentation.groupedRunCount) chars=\(fragmentation.totalCharacterCount) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun))")
+            MReaderLog.aiVision.debug(
+                "Japanese vertical OCR fallback blocks=\(blocks.count, privacy: .public) raw=\(fragmentation.rawWordCount, privacy: .public) grouped=\(fragmentation.groupedRunCount, privacy: .public) chars=\(fragmentation.totalCharacterCount, privacy: .public) charsPerRun=\(String(format: "%.2f", fragmentation.averageCharactersPerRun), privacy: .public)"
+            )
             return blocks
         } catch is CancellationError {
             return []
@@ -178,7 +183,7 @@ nonisolated enum JapaneseVerticalOCRService {
             // The fallback must never turn a successful Vision page into a
             // failed page.  Keep the diagnostic and let Vision's blocks flow
             // through the existing candidate resolver.
-            print("MReader Japanese vertical OCR failed: \(error.localizedDescription)")
+            MReaderLog.aiVision.error("Japanese vertical OCR failed reason=\(MReaderLog.describe(error), privacy: .public)")
             return []
         }
     }
@@ -502,7 +507,7 @@ nonisolated enum JapaneseVerticalOCRService {
                 }
                 return tessdataDirectory.path
             } catch {
-                print("MReader Japanese vertical OCR resource staging failed: \(error.localizedDescription)")
+                MReaderLog.aiVision.error("Japanese vertical OCR resource staging failed reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
         return nil

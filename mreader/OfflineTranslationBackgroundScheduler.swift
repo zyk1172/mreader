@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import os
 
 nonisolated enum OfflineTranslationPendingRecoveryDecision: Equatable, Sendable {
     case waitForLibrary
@@ -86,10 +87,14 @@ final class OfflineTranslationBackgroundScheduler {
         }
         startupRecoveryTask = Task { @MainActor in
             if let count = try? await OfflineTranslationJobStore.shared.markRunningJobsInterrupted(), count > 0 {
-                print("MReader marked \(count) offline translation jobs interrupted after relaunch")
+                MReaderLog.aiTranslation.notice(
+                    "offline translation jobs interrupted after relaunch count=\(count, privacy: .public)"
+                )
             }
             if let reconciled = try? await OfflineTranslationStorageManager.shared.reconcileAllManifests(), reconciled > 0 {
-                print("MReader reconciled \(reconciled) offline translation manifests after relaunch")
+                MReaderLog.aiTranslation.notice(
+                    "offline translation manifests reconciled after relaunch count=\(reconciled, privacy: .public)"
+                )
             }
         }
     }
@@ -151,7 +156,9 @@ final class OfflineTranslationBackgroundScheduler {
                 try BGTaskScheduler.shared.submit(request)
             } catch {
                 // 前台执行仍会继续；记录失败便于定位系统未接受后台续行的原因。
-                print("MReader failed to submit continued offline translation job \(job.id): \(error.localizedDescription)")
+                MReaderLog.aiTranslation.error(
+                    "submit continued offline translation job failed job=\(job.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
             }
         } else {
             let request = BGProcessingTaskRequest(identifier: processingIdentifier)
@@ -160,7 +167,9 @@ final class OfflineTranslationBackgroundScheduler {
             do {
                 try BGTaskScheduler.shared.submit(request)
             } catch {
-                print("MReader failed to submit processing offline translation job \(job.id): \(error.localizedDescription)")
+                MReaderLog.aiTranslation.error(
+                    "submit processing offline translation job failed job=\(job.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
             }
         }
     }

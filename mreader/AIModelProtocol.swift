@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated enum AIAPIProtocol: String, Codable, CaseIterable, Sendable {
     case openAIChatCompletions
@@ -234,7 +235,9 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
                     throw error
                 }
                 let delay = AITranslationRequestPolicy.retryDelay(for: error)
-                print("MReader AI retry model=\(request.model.id) protocol=\(request.model.apiProtocol.rawValue) kind=\(request.kind.rawValue) attempt=\(attempt + 1) delay=\(String(format: "%.1f", delay))s")
+                MReaderLog.aiTransport.debug(
+                    "AI retry model=\(request.model.id, privacy: .public) protocol=\(request.model.apiProtocol.rawValue, privacy: .public) kind=\(request.kind.rawValue, privacy: .public) attempt=\(attempt + 1, privacy: .public) delay=\(String(format: "%.1f", delay), privacy: .public)s"
+                )
                 try await Task.sleep(nanoseconds: UInt64(max(delay, 0) * 1_000_000_000))
                 attempt += 1
             }
@@ -253,7 +256,9 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
         let errorCode = urlErrorCode.map(String.init) ?? "-"
         // Only the path is logged.  The full request (including Authorization)
         // remains available to injected test observers, never to production logs.
-        print("MReader AI request model=\(request.model.id) protocol=\(request.model.apiProtocol.rawValue) kind=\(request.kind.rawValue) timeout=\(String(format: "%.1f", request.timeout))s attempt=\(attempt) elapsed=\(String(format: "%.2f", elapsed))s status=\(status) urlError=\(errorCode) endpoint=\(endpoint.path)")
+        MReaderLog.aiTransport.debug(
+            "AI request model=\(request.model.id, privacy: .public) protocol=\(request.model.apiProtocol.rawValue, privacy: .public) kind=\(request.kind.rawValue, privacy: .public) timeout=\(String(format: "%.1f", request.timeout), privacy: .public)s attempt=\(attempt, privacy: .public) elapsed=\(String(format: "%.2f", elapsed), privacy: .public)s status=\(status, privacy: .public) urlError=\(errorCode, privacy: .public) endpoint=\(endpoint.path, privacy: .public)"
+        )
     }
 
     private func addAuthenticationHeaders(

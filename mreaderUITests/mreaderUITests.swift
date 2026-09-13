@@ -64,18 +64,22 @@ final class mreaderUITests: XCTestCase {
     func testReaderProgressModeAndOfflineTranslationEntryWhenBookIsAvailable() throws {
         let app = launchApp()
         let openReader = element("mreader.shelf.openReader", in: app)
-        guard openReader.waitForExistence(timeout: 3) else {
-            throw XCTSkip("CI fixture has no local or remote book; reader path is covered by device smoke fixtures.")
-        }
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
         openReader.tap()
 
-        XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.reader.progress", in: app).exists)
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.reader.progress", in: app).waitForExistence(timeout: timeout))
         let settings = element("mreader.reader.settings", in: app)
         XCTAssertTrue(settings.waitForExistence(timeout: timeout))
         settings.tap()
         XCTAssertTrue(element("mreader.reader.settings.sheet", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.reader.modePicker", in: app).exists)
+        let modePicker = element("mreader.reader.modePicker", in: app)
+        for _ in 0..<4 {
+            guard !modePicker.exists else { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(modePicker.waitForExistence(timeout: timeout))
 
         let done = element("mreader.reader.settings.done", in: app)
         XCTAssertTrue(done.waitForExistence(timeout: timeout))
