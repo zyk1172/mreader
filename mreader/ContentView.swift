@@ -261,6 +261,7 @@ struct ContentView: View {
     @State private var settingsRestoreNotice: SettingsRestoreNotice?
     @State private var libraryLoadNotice: SettingsRestoreNotice?
     @State private var selectedReaderComic: ComicBook?
+    @State private var selectedSeriesReaderComic: ComicBook?
     @State private var uiTestingFixtureComic = ReaderUITestFixture.makeComic()
     @State private var offlineTranslationStartComic: ComicBook?
     @State private var offlineTranslationManagerComic: ComicBook?
@@ -324,7 +325,6 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             shelfRootContent
-            .navigationTitle(navigationTitle)
             .navigationDestination(item: $selectedReaderComic) { comic in
                 readerDestination(for: comic)
                     .transaction { transaction in
@@ -1082,6 +1082,8 @@ struct ContentView: View {
     private var shelfRootContent: some View {
         TabView(selection: $selectedPage) {
             shelfPageContent(for: .continueReading)
+                .navigationTitle("tab.continueReading".localized)
+                .navigationBarTitleDisplayMode(.large)
                 .tabItem {
                     Label("tab.continueReading".localized, systemImage: "book")
                         .accessibilityIdentifier("mreader.tab.continueReading")
@@ -1089,6 +1091,8 @@ struct ContentView: View {
                 .tag(MainShelfPage.continueReading)
 
             shelfPageContent(for: .library)
+                .navigationTitle("shelf.title".localized)
+                .navigationBarTitleDisplayMode(.large)
                 .tabItem {
                     Label("tab.library".localized, systemImage: "books.vertical")
                         .accessibilityIdentifier("mreader.tab.library")
@@ -1096,6 +1100,8 @@ struct ContentView: View {
                 .tag(MainShelfPage.library)
 
             shelfPageContent(for: .statistics)
+                .navigationTitle("tab.statistics".localized)
+                .navigationBarTitleDisplayMode(.large)
                 .tabItem {
                     Label("tab.statistics".localized, systemImage: "chart.bar.doc.horizontal")
                         .accessibilityIdentifier("mreader.tab.statistics")
@@ -1120,17 +1126,6 @@ struct ContentView: View {
             readingStatisticsPage
         } else {
             libraryPage
-        }
-    }
-
-    private var navigationTitle: String {
-        switch selectedPage {
-        case .continueReading:
-            return "tab.continueReading".localized
-        case .library:
-            return "shelf.title".localized
-        case .statistics:
-            return "tab.statistics".localized
         }
     }
 
@@ -1318,11 +1313,18 @@ struct ContentView: View {
                         importingSeriesID = series.id
                         beginImport(.folder)
                     } onOpen: { comic in
-                        openReader(comic)
+                        openSeriesReader(comic)
                     } managementMenu: { comic in
                         AnyView(Group {
                             comicManagementMenu(for: comic)
                         })
+                    }
+                    .navigationDestination(item: $selectedSeriesReaderComic) { comic in
+                        readerDestination(for: comic)
+                            .transaction { transaction in
+                                transaction.animation = nil
+                                transaction.disablesAnimations = true
+                            }
                     }
                     .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
                 } label: {
@@ -1433,11 +1435,18 @@ struct ContentView: View {
                         importingSeriesID = series.id
                         beginImport(.folder)
                     } onOpen: { comic in
-                        openReader(comic)
+                        openSeriesReader(comic)
                     } managementMenu: { comic in
                         AnyView(Group {
                             comicManagementMenu(for: comic)
                         })
+                    }
+                    .navigationDestination(item: $selectedSeriesReaderComic) { comic in
+                        readerDestination(for: comic)
+                            .transaction { transaction in
+                                transaction.animation = nil
+                                transaction.disablesAnimations = true
+                            }
                     }
                     .navigationTransition(.zoom(sourceID: series.id, in: seriesAnimationNamespace))
                 } label: {
@@ -1790,12 +1799,31 @@ struct ContentView: View {
         openAuthorizedReader(comic)
     }
 
+    private func openSeriesReader(_ comic: ComicBook) {
+        if comic.isLocked {
+            authenticateLockedComic(comic) {
+                openAuthorizedSeriesReader(comic)
+            }
+            return
+        }
+        openAuthorizedSeriesReader(comic)
+    }
+
     private func openAuthorizedReader(_ comic: ComicBook) {
         RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             selectedReaderComic = comic
+        }
+    }
+
+    private func openAuthorizedSeriesReader(_ comic: ComicBook) {
+        RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            selectedSeriesReaderComic = comic
         }
     }
 

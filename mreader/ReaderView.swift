@@ -192,6 +192,27 @@ nonisolated enum ReaderGestureGate {
     }
 }
 
+/// Downward reader dismissal is deliberately a two-finger-only gesture. The
+/// UIKit recognizer can remain in a recognized state after one finger of a
+/// two-finger gesture lifts, so every active update must revalidate touch count.
+nonisolated enum ReaderDismissGestureGate {
+    static let requiredTouchCount = 2
+
+    static func hasRequiredTouches(_ touchCount: Int) -> Bool {
+        touchCount == requiredTouchCount
+    }
+
+    static func isMostlyDownward(translation: CGPoint) -> Bool {
+        translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
+    }
+
+    static func shouldBegin(touchCount: Int, velocity: CGPoint) -> Bool {
+        hasRequiredTouches(touchCount)
+            && velocity.y > 0
+            && abs(velocity.y) > abs(velocity.x)
+    }
+}
+
 /// Reader 对 ComicBook 的一次 mutation 必须先产生唯一的最新值，再同时写回 Binding
 /// 和传给持久化 callback。这个纯函数让 callback 不会意外拿到 mutation 前的旧副本。
 nonisolated enum ReaderComicMutation {
@@ -3665,6 +3686,7 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
         var onSwipe: () -> Void
         let recognizer = UIPanGestureRecognizer()
         private var hasTriggered = false
+        private var maintainedExactlyTwoTouches = false
 
         init(
             onProgress: @escaping (CGFloat) -> Void,
@@ -3689,8 +3711,20 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 hasTriggered = false
+                maintainedExactlyTwoTouches = ReaderDismissGestureGate.hasRequiredTouches(recognizer.numberOfTouches)
+                guard maintainedExactlyTwoTouches else {
+                    onCancel()
+                    return
+                }
             case .changed:
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
+                guard maintainedExactlyTwoTouches,
+                      ReaderDismissGestureGate.hasRequiredTouches(recognizer.numberOfTouches) else {
+                    maintainedExactlyTwoTouches = false
+                    hasTriggered = false
+                    onCancel()
+                    return
+                }
+                let isMostlyVertical = ReaderDismissGestureGate.isMostlyDownward(translation: translation)
                 onProgress(isMostlyVertical ? min(max(translation.y / 320, 0), 1) : 0)
                 guard !hasTriggered else { return }
                 let isDownward = translation.y > 110 && velocity.y > 220
@@ -3700,8 +3734,17 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                 }
             case .ended:
                 guard !hasTriggered else { return }
-                let isMostlyVertical = translation.y > 0 && abs(translation.x) < max(translation.y * 0.8, 40)
+                // A recognizer whose touch count fell from two to one can end
+                // while that remaining finger is still moving. Never treat that
+                // transition as a two-finger dismissal.
+                guard maintainedExactlyTwoTouches, recognizer.numberOfTouches == 0 else {
+                    maintainedExactlyTwoTouches = false
+                    onCancel()
+                    return
+                }
+                let isMostlyVertical = ReaderDismissGestureGate.isMostlyDownward(translation: translation)
                 let shouldDismiss = isMostlyVertical && (translation.y > 160 || velocity.y > 720)
+                maintainedExactlyTwoTouches = false
                 if shouldDismiss {
                     hasTriggered = true
                     onSwipe()
@@ -3710,10 +3753,19 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                 }
             case .cancelled, .failed:
                 hasTriggered = false
+                maintainedExactlyTwoTouches = false
                 onCancel()
             default:
                 break
             }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard gestureRecognizer === recognizer, let view = recognizer.view else { return true }
+            return ReaderDismissGestureGate.shouldBegin(
+                touchCount: recognizer.numberOfTouches,
+                velocity: recognizer.velocity(in: view)
+            )
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -4690,31 +4742,13 @@ struct LocalImageView: View {
                 bounds: movementBounds,
                 margin: 0
             )
-            let collisionRemains = occupiedRects.contains { $0.intersects(rect) }
-            let escapedBubble = item.surfaceStyle == .detectedBubble
-                && !movementBounds.insetBy(dx: -0.5, dy: -0.5).contains(rect)
-            let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus =
-                item.layoutStatus == .needsExpansion || collisionRemains || escapedBubble
-                    ? .needsExpansion
-                    : .fitted
-
-            let presentationRect: CGRect
-            if layoutStatus == .needsExpansion {
-                let compactPreview = TranslationOverflowPresentationPolicy.compactPreviewRect(
-                    sourceRect: mappedSourceRect,
-                    allowedBounds: movementBounds,
-                    orientation: item.textOrientation
-                )
-                presentationRect = OCRBubbleLayoutEngine.nonOverlappingRect(
-                    compactPreview,
-                    anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
-                    occupiedRects: occupiedRects,
-                    bounds: movementBounds,
-                    margin: 0
-                )
-            } else {
-                presentationRect = rect
-            }
+            // The expansion UI was removed. Collision handling must therefore
+            // never collapse a fitted translation into the old compact preview:
+            // that preview becomes an opaque material card with clipped/no text.
+            let presentationRect = rect
+            let layoutStatus = item.layoutStatus == .needsExpansion
+                ? OCRBubbleLayoutEngine.TranslationLayoutStatus.fitted
+                : item.layoutStatus
 
             occupiedRects.append(presentationRect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(
@@ -5544,7 +5578,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 1
+    static let layoutRevision = 2
 
     struct Key: Equatable {
         let scope: String
@@ -5653,48 +5687,34 @@ private struct TranslationSurfaceRenderer: View {
 
     @ViewBuilder
     var body: some View {
-        if layoutStatus == .needsExpansion {
-            // Overflow is a compact, low-obstruction preview. The full text is
-            // opened only after the user taps this specific region.
-            RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
+        // There is no expansion interaction anymore, so every translation uses
+        // its normal inline surface. Never draw the legacy grey preview card.
+        switch displayMode {
+        case .inPlace:
+            RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
+                .fill(Color.white.opacity(0.94))
+                .frame(width: layoutSize.width, height: layoutSize.height)
+        case .assistOverlay:
+            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay {
-                    RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
-                        .fill(Color.white.opacity(0.18))
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: min(max(surfaceStyle.cornerRadius * 0.6, 4), 8), style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.6)
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
                 }
                 .frame(width: layoutSize.width, height: layoutSize.height)
-        } else {
-            switch displayMode {
-            case .inPlace:
-                RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
-                    .fill(Color.white.opacity(0.94))
-                    .frame(width: layoutSize.width, height: layoutSize.height)
-            case .assistOverlay:
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-                    }
-                    .frame(width: layoutSize.width, height: layoutSize.height)
-            case .annotation:
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(.thinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.white.opacity(0.30))
-                    }
-                    .frame(width: layoutSize.width, height: layoutSize.height)
-            }
+        case .annotation:
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(.thinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.30))
+                }
+                .frame(width: layoutSize.width, height: layoutSize.height)
         }
     }
 }
@@ -5714,8 +5734,7 @@ private struct TranslationTextRenderer: View {
     }
 
     var body: some View {
-        // 译文覆盖层始终只是被动绘制。即使极小区域触发 needsExpansion，
-        // 也不再生成 Button / Sheet，避免阅读时误触“放大查看”。
+        // 译文覆盖层始终只是被动绘制，不生成 Button / Sheet。
         CoreTextTranslationView(
             text: fullText,
             fontSize: fontSize,
@@ -5723,7 +5742,7 @@ private struct TranslationTextRenderer: View {
             textOrientation: textOrientation,
             lineSpacing: 2
         )
-        .padding(layoutStatus == .needsExpansion ? min(contentPadding, 3) : contentPadding)
+        .padding(contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
         .clipped()
         .allowsHitTesting(false)
