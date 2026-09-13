@@ -14,6 +14,12 @@ The parser accepts the preferred coordinate-free JSON response and a plain-text 
 
 Full-page recognition still needs normalized geometry. Its system prompt and user contract now agree on `layoutSafeRegion`, and capable transports receive a dedicated recognition JSON Schema rather than only a generic JSON-object request. Existing fallback behavior remains available for providers that reject structured response formats.
 
+## Vision connection probe
+
+The settings-page vision test now proves image ingestion instead of only proving HTTP connectivity. It renders a random six-character challenge code into an image, keeps the code out of the text prompt, and only reports success when the model reads the same code back. A text-only model that ignores the image can no longer pass by replying `OK`.
+
+A successful probe also upgrades an `unknown` model descriptor to `supportsVision = true` in the current editor state. A failed probe does not automatically mark the model unsupported because provider outages and temporary model failures can produce false negatives.
+
 ## Validation boundary
 
-Unit/CI coverage can verify parsing, geometry preservation and request-contract behavior, but it cannot prove that a specific external provider/model actually receives or understands image input. After merge, the real configured vision model must be retested in the app.
+Unit/CI coverage can verify parsing, geometry preservation, request-contract behavior and the challenge-response verifier. It still cannot prove that a specific external provider/model works until the user runs the visual connection probe and then retests a real manga page in the app.
