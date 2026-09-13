@@ -15,7 +15,7 @@ import Darwin
 /// 4. **非用户配置目标**的 loopback / link-local / 私网 / CGNAT 地址（包括 DNS 解析结果）→ 拒绝，
 ///    避免恶意 feed 把客户端当成内网探测跳板（SSRF / DNS rebinding）。
 ///
-/// `Context.decision(for:)` 是生产入口：每次初始请求和每一跳重定向都必须重新判定。
+/// `decision(...)` / `Context.decision(for:)` 是生产入口：初始请求与每一跳重定向都必须重新判定。
 nonisolated enum RemoteDestinationPolicy {
 
     typealias HostResolver = @Sendable (String) throws -> [String]
@@ -95,7 +95,7 @@ nonisolated enum RemoteDestinationPolicy {
         /// 生产请求的完整判定：非可信跨源 hostname 必须先解析 DNS，
         /// 任意一个解析结果落入私网 / 回环 / link-local / CGNAT 都拒绝。
         func decision(for url: URL) -> Decision {
-            RemoteDestinationPolicy.resolvedDecision(
+            RemoteDestinationPolicy.decision(
                 for: url,
                 originURLs: originURLs,
                 allowlistHosts: allowlistHosts,
@@ -105,7 +105,7 @@ nonisolated enum RemoteDestinationPolicy {
 
         /// 仅按 URL / origin / 字面 IP 判断，不触发 DNS。只供诊断和纯逻辑测试使用。
         func urlDecision(for url: URL) -> Decision {
-            RemoteDestinationPolicy.decision(
+            RemoteDestinationPolicy.urlDecision(
                 for: url,
                 originURLs: originURLs,
                 allowlistHosts: allowlistHosts
@@ -118,43 +118,15 @@ nonisolated enum RemoteDestinationPolicy {
         }
     }
 
-    /// 第一层：只根据 URL 本身判断。hostname 看起来是公网时暂时返回 `.crossOriginPublic`，
-    /// 生产网络路径还必须继续调用 `resolvedDecision`。
+    /// 生产入口。先做 URL / origin / 字面 IP 判定；只有未配置的跨源 hostname
+    /// 才会触发 DNS 解析。任一解析结果为私网即拒绝，解析失败也 fail closed。
     static func decision(
-        for url: URL,
-        originURLs: [URL],
-        allowlistHosts: Set<String> = []
-    ) -> Decision {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            return .denied(.unsupportedScheme)
-        }
-        guard let host = normalizedHost(of: url), !host.isEmpty else {
-            return .denied(.invalidURL)
-        }
-        if originURLs.contains(where: { matchesOrigin($0, url) }) {
-            return .trustedOrigin
-        }
-        if allowlistHosts.contains(host) {
-            return .trustedOrigin
-        }
-        if isPrivateNetworkHost(host) {
-            return .denied(.privateNetwork)
-        }
-        return .crossOriginPublic
-    }
-
-    /// 第二层：对非可信跨源 hostname 解析 DNS 后再判定。
-    ///
-    /// 这里采用“任一地址私网即拒绝”而不是“只要有一个公网就允许”，避免攻击者返回
-    /// public + private 混合记录后让系统连接选择落到内网地址。解析失败也 fail closed；
-    /// 用户显式配置的 NAS/LAN origin 在第一层已是 `.trustedOrigin`，不会经过 DNS 阻断。
-    static func resolvedDecision(
         for url: URL,
         originURLs: [URL],
         allowlistHosts: Set<String> = [],
         hostResolver: HostResolver = { try RemoteHostResolver.shared.resolve($0) }
     ) -> Decision {
-        let initial = decision(
+        let initial = urlDecision(
             for: url,
             originURLs: originURLs,
             allowlistHosts: allowlistHosts
@@ -178,7 +150,33 @@ nonisolated enum RemoteDestinationPolicy {
         guard !resolvedAddresses.isEmpty else {
             return .denied(.hostResolutionFailed)
         }
+        // 攻击者可能返回 public + private 混合记录；只要存在一个私网候选就拒绝，
+        // 避免系统连接选择与策略检查选择不一致。
         if resolvedAddresses.contains(where: isPrivateNetworkHost) {
+            return .denied(.privateNetwork)
+        }
+        return .crossOriginPublic
+    }
+
+    /// 第一层纯 URL 判定。hostname 看起来是公网时只暂定 `.crossOriginPublic`，不做 DNS I/O。
+    static func urlDecision(
+        for url: URL,
+        originURLs: [URL],
+        allowlistHosts: Set<String> = []
+    ) -> Decision {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return .denied(.unsupportedScheme)
+        }
+        guard let host = normalizedHost(of: url), !host.isEmpty else {
+            return .denied(.invalidURL)
+        }
+        if originURLs.contains(where: { matchesOrigin($0, url) }) {
+            return .trustedOrigin
+        }
+        if allowlistHosts.contains(host) {
+            return .trustedOrigin
+        }
+        if isPrivateNetworkHost(host) {
             return .denied(.privateNetwork)
         }
         return .crossOriginPublic
