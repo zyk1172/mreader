@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import XCTest
 @testable import mreader
 
 @MainActor
