@@ -1,0 +1,29 @@
+name: Temporary mobile reader regression patch
+
+on:
+  push:
+    branches:
+      - fix/mobile-reader-regressions-20260913
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply fixes and tests
+        shell: bash
+        run: python3 .github/scripts/_tmp_apply_mobile_reader_regressions.py
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mreader mreaderTests
+          git commit -m 'fix: address reader navigation and gesture regressions'
+          git push
