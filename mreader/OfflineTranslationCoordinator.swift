@@ -1246,13 +1246,16 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         apiKey: configuration.apiKey,
                         baseURL: configuration.baseURL,
                         visionModel: configuration.visionModel,
+                        // 只用于对跨切片拼接 / 原文被修正的少数 block 定向重译，不做整页兜底。
+                        textModel: configuration.textModel,
                         sourceLanguage: sourceLanguage,
                         targetLanguage: targetLanguage,
                         styleInstructions: styleInstructions,
                         previousContext: previousContext,
                         isRightToLeft: isRightToLeft,
                         viewportAspect: viewportAspect,
-                        modelDescriptor: configuration.visionModelDescriptor
+                        modelDescriptor: configuration.visionModelDescriptor,
+                        textModelDescriptor: configuration.textModelDescriptor
                     )
                 }
                 return (result, retryCount: attempt)

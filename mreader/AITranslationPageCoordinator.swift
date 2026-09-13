@@ -353,6 +353,8 @@ nonisolated enum AITranslationPagePipeline {
                 isComplete: result.missingBlockIDs.isEmpty
             )
         case .vision:
+            // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
+            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与离线共用同一条链路。
             let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
@@ -368,45 +370,9 @@ nonisolated enum AITranslationPagePipeline {
                 visionModelDescriptor: request.configuration.visionModelDescriptor,
                 textFallbackModelDescriptor: request.configuration.textModelDescriptor
             )
-            // Vision 的 sourceText 与 textBox 出自同一个模型，没有独立证据源。
-            // 对可疑 block 做一次局部 text-first 复核，只重译被修正的 block（审查 #3）。
-            var blocks = result.blocks
-            var missingBlockIDs = result.missingBlockIDs
-            do {
-                let review = try await TranslationRuntimeService.reverifyVisionSourceTexts(
-                    image: request.image,
-                    blocks: blocks,
-                    apiKey: request.configuration.apiKey,
-                    baseURL: request.configuration.baseURL,
-                    visionModel: request.configuration.visionModel,
-                    visionModelDescriptor: request.configuration.visionModelDescriptor,
-                    sourceLanguagePreference: request.sourceLanguagePreference,
-                    maximumRegionCount: AITranslator.VisionSourceReviewPolicy.maximumRegionCount
-                )
-                if !review.correctedBlockIDs.isEmpty {
-                    blocks = review.blocks
-                    let correctedIndexes = blocks.indices.filter {
-                        review.correctedBlockIDs.contains(blocks[$0].id)
-                    }
-                    try await applyBatchTranslationSafely(
-                        to: &blocks,
-                        indexes: correctedIndexes,
-                        request: request
-                    )
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                MReaderLog.aiVision.notice("vision source review fallback reason=\(MReaderLog.describe(error), privacy: .public)")
-            }
-            missingBlockIDs = blocks.compactMap { block in
-                (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? block.id
-                    : nil
-            }
             return AITranslationPipelineResult(
-                blocks: blocks,
-                isComplete: result.failedSlices == 0 && missingBlockIDs.isEmpty
+                blocks: result.blocks,
+                isComplete: result.isComplete
             )
         }
     }

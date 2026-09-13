@@ -431,15 +431,13 @@ nonisolated private struct OPDSClient: Sendable {
         request.timeoutInterval = 120
         // 命中本地缓存直接返回；未命中才需要走网络，此时必须先过目标策略。
         try requireAllowedDestination(url)
-        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
-        // URLSession.download 不带重定向委托，因此用最终 URL 再校验一次落点。
-        if let finalURL = response.url, case .denied(let denial) = destination.decision(for: finalURL) {
-            try? FileManager.default.removeItem(at: temporaryURL)
-            throw RemoteDestinationPolicyError.denied(
-                denial,
-                host: RemoteDestinationPolicy.normalizedHost(of: finalURL) ?? ""
-            )
-        }
+        // 策略感知下载：302 在**跟随之前**逐跳判定，被禁止的内网地址不会被请求；
+        // 允许的跨源跳转会显式剥离 Authorization（审查 #5）。
+        let (temporaryURL, response) = try await PolicyCheckedDownloader.download(
+            for: request,
+            maximumBytes: OPDSResponseLimits.downloadBytes,
+            redirectPolicy: { destination.decision(for: $0) }
+        )
         try validate(response, maximumBytes: OPDSResponseLimits.downloadBytes)
         guard let values = try? temporaryURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true,

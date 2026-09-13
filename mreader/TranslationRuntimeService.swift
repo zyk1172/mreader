@@ -114,29 +114,8 @@ nonisolated enum TranslationRuntimeService {
     }
 
     /// 视觉链路原文真实性复核：对可疑 block 裁剪局部图片做 text-first 复核，
-    /// 只重新确认 sourceText；被修正的 block 由调用方单独重译（审查 #3）。
-    static func reverifyVisionSourceTexts(
-        image: UIImage,
-        blocks: [TextBlock],
-        apiKey: String,
-        baseURL: String,
-        visionModel: String,
-        visionModelDescriptor: AIModelDescriptor? = nil,
-        sourceLanguagePreference: TranslationSourceLanguage? = nil,
-        maximumRegionCount: Int = 6
-    ) async throws -> AITranslator.VisionSourceReviewResult {
-        try await AITranslator.reverifyVisionSourceText(
-            image: image,
-            blocks: blocks,
-            apiKey: apiKey,
-            baseURL: baseURL,
-            model: visionModel,
-            modelDescriptor: visionModelDescriptor,
-            sourceLanguagePreference: sourceLanguagePreference,
-            maximumRegionCount: maximumRegionCount
-        )
-    }
-
+    /// 只重新确认 sourceText。已并入 `translateVisionPageWithStatus` 的收尾链路
+    /// （实时与整本离线翻译共用），这里不再单独对外暴露入口。
     static func translateVisionPageWithStatus(
         image: UIImage,
         apiKey: String,

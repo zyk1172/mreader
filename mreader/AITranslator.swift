@@ -626,9 +626,12 @@ nonisolated struct AIVisionTranslationResult: Sendable {
     let blocks: [TextBlock]
     let failedSlices: Int
     let missingBlockIDs: [UUID]
+    /// 跨切片拼接 / 原文被修正后**定向重译失败**的 block id。
+    /// 这些 block 可能带着一半的临时译文，因此页面不能算完整。
+    var retranslationFailedBlockIDs: [UUID] = []
 
     var isComplete: Bool {
-        failedSlices == 0 && missingBlockIDs.isEmpty
+        failedSlices == 0 && missingBlockIDs.isEmpty && retranslationFailedBlockIDs.isEmpty
     }
 }
 
@@ -1108,54 +1111,29 @@ class AITranslator {
                 previousContext: previousContext
             ),
             strictTranslationGeometry: false,
-            // 实时路径：长条页切片必须先把跨切片半句拼回完整原文，
-            // 缺译文的新 block 会在下面走文本模型重新翻译（审查 #2）。
+            // 实时路径：长条页切片必须先拼回完整原文，再对拼接 / 被修正的 block 定向重译。
             mergeSliceObservations: true
         )
-        try Task.checkCancellation()
-
-        var translated = recognition.blocks
-        let missingIndexes = translated.indices.filter {
-            (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        if !missingIndexes.isEmpty {
-            let missingBlocks = missingIndexes.map { translated[$0] }
-            let pageResult = try await translatePage(
-                blocks: missingBlocks,
-                apiKey: apiKey,
-                baseURL: baseURL,
-                model: textFallbackModel,
-                target: target,
-                promptTemplate: defaultTranslationPromptTemplate,
-                sourceLanguage: sourceLanguage,
-                previousContext: TranslationContextBuilder.promptContext(
-                    previousContext: previousContext,
-                    pageBlocks: translated,
-                    requestedIndexes: missingIndexes
-                ),
-                modelDescriptor: textFallbackModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: textFallbackModel)
-            )
-            for (position, index) in missingIndexes.enumerated() {
-                if let result = pageResult.translation(for: "b\(position)") {
-                    translated[index].translation = result.translation
-                    translated[index].translationLines = result.translationLines
-                }
-            }
-        }
-
-        let completed = translated.filter {
+        let result = try await finalizeVisionRecognition(
+            recognition,
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            visionModel: visionModel,
+            visionModelDescriptor: visionModelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel),
+            textModel: textFallbackModel,
+            textModelDescriptor: textFallbackModelDescriptor
+                ?? AIModelProtocolCatalog.descriptor(for: textFallbackModel),
+            target: target,
+            sourceLanguage: sourceLanguage,
+            previousContext: previousContext,
+            isRightToLeft: isRightToLeft
+        )
+        let hasUsableTranslation = result.blocks.contains {
             !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        guard !completed.isEmpty else { throw VisionTranslationError.emptyResult }
-        let missingBlockIDs = translated.compactMap { block -> UUID? in
-            let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return translation.isEmpty ? block.id : nil
-        }
-        return AIVisionTranslationResult(
-            blocks: translated,
-            failedSlices: recognition.failedSlices,
-            missingBlockIDs: missingBlockIDs
-        )
+        guard hasUsableTranslation else { throw VisionTranslationError.emptyResult }
+        return result
     }
 
     static func recognizeVisionPage(
@@ -1186,20 +1164,25 @@ class AITranslator {
         )
     }
 
-    /// 整本离线翻译专用入口：只调用 Vision 识别/翻译，不进入 `translatePage` 文本模型兜底。
+    /// 整本离线翻译专用入口：识别与翻译只走 Vision 模型，不进入整页 `translatePage` 兜底。
     /// 固定协议由 OfflineTranslationPromptBuilder 生成，用户自定义内容只作为风格说明。
+    ///
+    /// 与实时阅读共用同一条收尾链路（跨切片拼接 + 原文复核 + 定向重译）；
+    /// `textModel` 只用于对"拼接 / 被修正的那几个 block"定向重译，不做整页兜底（审查 #2）。
     static func recognizeOfflineVisionPage(
         image: UIImage,
         apiKey: String,
         baseURL: String,
         visionModel: String,
+        textModel: String,
         sourceLanguage: TranslationSourceLanguage,
         targetLanguage: TranslationTargetLanguage,
         styleInstructions: String,
         previousContext: String,
         isRightToLeft: Bool = false,
         viewportAspect: CGFloat = 2.0,
-        modelDescriptor: AIModelDescriptor? = nil
+        modelDescriptor: AIModelDescriptor? = nil,
+        textModelDescriptor: AIModelDescriptor? = nil
     ) async throws -> OfflineVisionPageResult {
         let prompt = OfflineTranslationPromptBuilder.make(
             sourceLanguage: sourceLanguage,
@@ -1208,7 +1191,7 @@ class AITranslator {
             styleInstructions: styleInstructions,
             previousContext: previousContext
         )
-        let result = try await recognizeVisionPageUsingModelWithStats(
+        let recognition = try await recognizeVisionPageUsingModelWithStats(
             image: image,
             apiKey: apiKey,
             baseURL: baseURL,
@@ -1219,18 +1202,44 @@ class AITranslator {
             additionalInstructions: "",
             translationTarget: targetLanguage,
             translationPromptTemplate: prompt,
-            strictTranslationGeometry: true
+            strictTranslationGeometry: true,
+            // 与实时阅读一致：长条页先拼回完整原文（审查 #2）。
+            mergeSliceObservations: true
         )
-        guard !result.blocks.isEmpty else { return .noText }
-        return result.failedSlices > 0
-            ? .partial(result.blocks, failedSlices: result.failedSlices)
-            : .translated(result.blocks)
+        guard !recognition.blocks.isEmpty else { return .noText }
+
+        let visionDescriptor = modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: visionModel)
+        let finalized = try await finalizeVisionRecognition(
+            recognition,
+            image: image,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            visionModel: visionModel,
+            visionModelDescriptor: visionDescriptor,
+            textModel: textModel,
+            textModelDescriptor: textModelDescriptor
+                ?? AIModelProtocolCatalog.descriptor(for: textModel),
+            target: targetLanguage,
+            // .automatic 表示"由 MReader 判断"，不能把 auto 当成具体源语言传给文本模型。
+            sourceLanguage: sourceLanguage == .automatic ? nil : sourceLanguage,
+            previousContext: previousContext,
+            isRightToLeft: isRightToLeft
+        )
+        guard !finalized.blocks.isEmpty else { return .noText }
+        // 拼接 / 复核后定向重译失败时，页面必须保持 .partial 以便重试，
+        // 不能把一半的临时译文当成完整结果保存下来。
+        let failedSlices = max(recognition.failedSlices, finalized.retranslationFailedBlockIDs.count)
+        return failedSlices > 0
+            ? .partial(finalized.blocks, failedSlices: failedSlices)
+            : .translated(finalized.blocks)
     }
 
     private struct VisionPageRecognitionResult {
         let blocks: [TextBlock]
         let successfulSlices: Int
         let failedSlices: Int
+        /// 跨切片拼接产生的 block：它们的译文只是临时兜底，必须定向重译。
+        var retranslationRequiredBlockIDs: [UUID] = []
     }
 
     private static func recognizeVisionPageUsingModel(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
@@ -1384,6 +1393,7 @@ class AITranslator {
         // 先跨切片拼回完整原文，再交给 OCRCandidateResolver 去重（审查 #2）。
         // 拼接产生的 block translation 为 nil，由调用方重新翻译完整原文。
         let mergedBlocks: [TextBlock]
+        var retranslationRequired: [UUID] = []
         if mergeSliceObservations, slices.count > 1 {
             let observations = slices.enumerated().map { index, slice in
                 VisionSliceObservation(
@@ -1394,9 +1404,10 @@ class AITranslator {
             }
             let outcome = VisionSliceMerger.merge(observations: observations, isRightToLeft: isRightToLeft)
             if !outcome.retranslationRequiredBlockIDs.isEmpty {
-                print("MReader vision slice merge joined blocks=\(outcome.retranslationRequiredBlockIDs.count)")
+                MReaderLog.aiVision.notice("vision slice merge joined blocks=\(outcome.retranslationRequiredBlockIDs.count, privacy: .public)")
             }
             mergedBlocks = outcome.blocks
+            retranslationRequired = outcome.retranslationRequiredBlockIDs
         } else {
             mergedBlocks = orderedBlocks
         }
@@ -1411,11 +1422,165 @@ class AITranslator {
         guard !deduped.isEmpty else {
             throw lastError ?? VisionTranslationError.emptyResult
         }
+        // 去重后仍存在的拼接 block 才需要定向重译（被去重掉的候选无需再翻译）。
+        let resolvedIDs = Set(deduped.map(\.id))
         return VisionPageRecognitionResult(
             blocks: sortedTextBlocks(deduped, isRightToLeft: isRightToLeft),
             successfulSlices: successfulSlices,
-            failedSlices: failedSlices
+            failedSlices: failedSlices,
+            retranslationRequiredBlockIDs: retranslationRequired.filter { resolvedIDs.contains($0) }
         )
+    }
+
+    /// Vision 收尾链路：**实时阅读与整本离线翻译共用**。
+    ///
+    /// 顺序：切片拼接（已在上游完成）→ 去重（已在上游完成）→ 补齐缺失 / 拼接产生的译文
+    /// → 可疑 block 的 text-first 原文复核 → 对被修正的 block 定向重译。
+    ///
+    /// 抽成单一入口是为了避免"实时修好了、离线还是旧行为"这类分叉（审查 #2）。
+    /// 注意：拼接产生的 block 自带一半的临时译文，所以这里**必须**按
+    /// `retranslationRequiredBlockIDs` 定向重译，不能只靠"译文为空"来兜底。
+    private static func finalizeVisionRecognition(
+        _ recognition: VisionPageRecognitionResult,
+        image: UIImage,
+        apiKey: String,
+        baseURL: String,
+        visionModel: String,
+        visionModelDescriptor: AIModelDescriptor,
+        textModel: String,
+        textModelDescriptor: AIModelDescriptor,
+        target: TranslationTargetLanguage,
+        sourceLanguage: TranslationSourceLanguage?,
+        previousContext: String,
+        isRightToLeft: Bool,
+        performsSourceReview: Bool = true
+    ) async throws -> AIVisionTranslationResult {
+        try Task.checkCancellation()
+        var blocks = recognition.blocks
+        var retranslationFailed: [UUID] = []
+
+        func pendingIDs() -> Set<UUID> {
+            var ids = Set<UUID>()
+            for block in blocks
+            where (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ids.insert(block.id)
+            }
+            return ids
+        }
+
+        // 1. 拼接产生的 block + 模型漏掉译文的 block，一次性定向重译。
+        var firstPass = pendingIDs()
+        firstPass.formUnion(recognition.retranslationRequiredBlockIDs)
+        if !firstPass.isEmpty {
+            retranslationFailed.append(contentsOf: try await translateVisionBlocks(
+                ids: firstPass,
+                blocks: &blocks,
+                apiKey: apiKey,
+                baseURL: baseURL,
+                textModel: textModel,
+                textModelDescriptor: textModelDescriptor,
+                target: target,
+                sourceLanguage: sourceLanguage,
+                previousContext: previousContext
+            ))
+        }
+
+        // 2. 文字真实性复核：只重新确认 sourceText。
+        if performsSourceReview, !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let review = try await reverifyVisionSourceText(
+                image: image,
+                blocks: blocks,
+                apiKey: apiKey,
+                baseURL: baseURL,
+                model: visionModel,
+                modelDescriptor: visionModelDescriptor,
+                sourceLanguagePreference: sourceLanguage
+            )
+            if !review.correctedBlockIDs.isEmpty {
+                blocks = review.blocks
+                retranslationFailed.append(contentsOf: try await translateVisionBlocks(
+                    ids: Set(review.correctedBlockIDs),
+                    blocks: &blocks,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    textModel: textModel,
+                    textModelDescriptor: textModelDescriptor,
+                    target: target,
+                    sourceLanguage: sourceLanguage,
+                    previousContext: previousContext
+                ))
+            }
+        }
+
+        let missingBlockIDs = blocks.compactMap { block -> UUID? in
+            (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? block.id
+                : nil
+        }
+        return AIVisionTranslationResult(
+            blocks: blocks,
+            failedSlices: recognition.failedSlices,
+            missingBlockIDs: missingBlockIDs,
+            // 同一 block 可能先失败又被复核修正，去重避免重复计数。
+            retranslationFailedBlockIDs: Array(Set(retranslationFailed)).sorted { $0.uuidString < $1.uuidString }
+        )
+    }
+
+    /// 对指定 block 定向重译：只发这些文本的整页请求，不做整页兜底。
+    /// 返回重译失败的 block id（调用方据此把页面标记为未完成，而不是伪装成功）。
+    private static func translateVisionBlocks(
+        ids: Set<UUID>,
+        blocks: inout [TextBlock],
+        apiKey: String,
+        baseURL: String,
+        textModel: String,
+        textModelDescriptor: AIModelDescriptor,
+        target: TranslationTargetLanguage,
+        sourceLanguage: TranslationSourceLanguage?,
+        previousContext: String
+    ) async throws -> [UUID] {
+        let indexes = blocks.indices.filter { ids.contains(blocks[$0].id) }
+        guard !indexes.isEmpty else { return [] }
+        let requested = indexes.map { blocks[$0] }
+        do {
+            let pageResult = try await translatePage(
+                blocks: requested,
+                apiKey: apiKey,
+                baseURL: baseURL,
+                model: textModel,
+                target: target,
+                promptTemplate: defaultTranslationPromptTemplate,
+                sourceLanguage: sourceLanguage,
+                previousContext: TranslationContextBuilder.promptContext(
+                    previousContext: previousContext,
+                    pageBlocks: blocks,
+                    requestedIndexes: indexes
+                ),
+                modelDescriptor: textModelDescriptor
+            )
+            try Task.checkCancellation()
+            var failed: [UUID] = []
+            for (position, index) in indexes.enumerated() {
+                guard let value = pageResult.translation(for: "b\(position)"),
+                      !value.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    failed.append(blocks[index].id)
+                    continue
+                }
+                blocks[index].translation = value.translation
+                blocks[index].translationLines = value.translationLines
+            }
+            if !failed.isEmpty {
+                MReaderLog.aiVision.notice("vision targeted retranslation incomplete blocks=\(failed.count, privacy: .public)/\(indexes.count, privacy: .public)")
+            }
+            return failed
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // 定向重译失败：保留既有（可能是临时）译文，但把这些 block 记为未完成，
+            // 让页面进入重试而不是把一半的译文当成完整结果缓存下来。
+            MReaderLog.aiVision.notice("vision targeted retranslation failed blocks=\(indexes.count, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
+            return indexes.map { blocks[$0].id }
+        }
     }
 
     static func visualVerifyOCRRegions(

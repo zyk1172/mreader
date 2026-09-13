@@ -152,4 +152,28 @@ struct RemoteDestinationPolicyTests {
         let error = RemoteDestinationPolicyError.denied(.privateNetwork, host: "192.168.1.1")
         #expect(error.errorDescription?.contains("192.168.1.1") == true)
     }
+
+    // MARK: - 跨源跳转的凭据剥离
+
+    @Test
+    func sanitizedRedirectRequestStripsCredentialsForCrossOrigin() {
+        var request = URLRequest(url: URL(string: "https://cdn.example.org/a.jpg")!)
+        request.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        request.setValue("session=1", forHTTPHeaderField: "Cookie")
+        request.setValue("Basic abc", forHTTPHeaderField: "Proxy-Authorization")
+
+        let sanitized = RemoteDestinationPolicy.sanitizedRedirectRequest(request, for: .crossOriginPublic)
+        #expect(sanitized.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(sanitized.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(sanitized.value(forHTTPHeaderField: "Proxy-Authorization") == nil)
+    }
+
+    @Test
+    func sanitizedRedirectRequestKeepsCredentialsForTrustedOrigin() {
+        var request = URLRequest(url: URL(string: "https://library.example.com/a.jpg")!)
+        request.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+
+        let trusted = RemoteDestinationPolicy.sanitizedRedirectRequest(request, for: .trustedOrigin)
+        #expect(trusted.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+    }
 }

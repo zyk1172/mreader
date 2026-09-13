@@ -2,6 +2,7 @@ import SwiftUI
 import ImageIO
 import UIKit
 import Combine
+import os
 
 struct ReaderContainerView: View {
     @State private var comic: ComicBook
@@ -131,6 +132,33 @@ nonisolated enum ImageFitMode: String, CaseIterable {
     case fitWidth
     case fitHeight
     case original
+}
+
+/// 缩放 / 平移的纯几何计算，独立于视图以便直接测试。
+///
+/// 关键点：图片**不一定**铺满 viewport。`fitScreen` / `fitHeight` 会留下上下或左右留白，
+/// `original` 甚至允许真实图片矩形小于容器。因此边界不能写成 `imageRect * (scale - 1) / 2`，
+/// 必须看“缩放后的图片有没有超出 viewport”。
+nonisolated enum ZoomPanGeometry {
+    /// 各轴允许的最大平移距离。缩放后仍未铺满 viewport 的轴不允许平移（避免拖出空白）。
+    static func panLimits(imageRect: CGRect, containerSize: CGSize, scale: CGFloat) -> CGSize {
+        guard scale > 1,
+              imageRect.width > 0, imageRect.height > 0,
+              containerSize.width > 0, containerSize.height > 0 else {
+            return .zero
+        }
+        return CGSize(
+            width: max((imageRect.width * scale - containerSize.width) / 2, 0),
+            height: max((imageRect.height * scale - containerSize.height) / 2, 0)
+        )
+    }
+
+    static func clampedOffset(_ proposed: CGSize, limits: CGSize) -> CGSize {
+        CGSize(
+            width: min(max(proposed.width, -limits.width), limits.width),
+            height: min(max(proposed.height, -limits.height), limits.height)
+        )
+    }
 }
 
 nonisolated enum ScrollSpeed: String, CaseIterable {
@@ -1956,7 +1984,7 @@ struct ReaderView: View {
             } catch is CancellationError {
                 print("MReader AI translation prefetch cancelled comic=\(comicID)")
             } catch {
-                print("MReader AI translation prefetch failed comic=\(comicID) reason=\(error.localizedDescription)")
+                MReaderLog.aiTranslation.notice("translation prefetch failed comic=\(comicID, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
     }
@@ -3256,8 +3284,9 @@ struct DoublePageReader: View {
     let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
-    /// 任一页处于放大态时，单指拖动属于平移，屏蔽跨页拖拽。
-    @State private var isPageZoomed = false
+    /// 左/右两页可以各自放大：必须按页记录，任何一个 Bool 都会被另一页的回调覆盖。
+    /// 只有集合为空（两页都是 1x）才允许跨页拖拽。
+    @State private var zoomedPageIndexes: Set<Int> = []
 
     private var leftPageIndex: Int {
         currentPageIndex - currentPageIndex % 2
@@ -3289,11 +3318,11 @@ struct DoublePageReader: View {
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
-                        guard !isPageZoomed else { return }
+                        guard zoomedPageIndexes.isEmpty else { return }
                         state = value.translation.width
                     }
                     .onEnded { value in
-                        guard !isPageZoomed else { return }
+                        guard zoomedPageIndexes.isEmpty else { return }
                         let threshold = max(geo.size.width * 0.2, 72)
                         let logicalDelta = isRTL ? value.translation.width : -value.translation.width
                         if logicalDelta > threshold {
@@ -3303,7 +3332,7 @@ struct DoublePageReader: View {
                         }
                     }
             )
-            .onChange(of: leftPageIndex) { _, _ in isPageZoomed = false }
+            .onChange(of: leftPageIndex) { _, _ in zoomedPageIndexes.removeAll() }
         }
     }
 
@@ -3332,7 +3361,12 @@ struct DoublePageReader: View {
             onTranslationStateChange: onTranslationStateChange,
             onZoomChange: { zoomed in
                 guard index == leftPageIndex || index == rightPageIndex else { return }
-                isPageZoomed = zoomed
+                // 按页登记：左页回到 1x 不能把右页的放大状态一起清掉。
+                if zoomed {
+                    zoomedPageIndexes.insert(index)
+                } else {
+                    zoomedPageIndexes.remove(index)
+                }
             },
             onPreviousPage: {},
             onNextPage: {},
@@ -4875,15 +4909,15 @@ struct LocalImageView: View {
         let container = zoomContentSize
         guard container.width > 1, container.height > 1, currentScale > 1 else { return .zero }
         // 覆盖层与图片共用同一套 scaleEffect/offset，坐标映射仍按 1x 计算；
-        // 因此 clamp 边界直接用 1x 的图片显示矩形。
+        // 因此边界由 1x 的图片显示矩形推导。letterbox / original 下图片小于容器，
+        // 缩放后未铺满的轴不允许平移。
         let imageRect = ocrDisplayTransform(in: container).imageRect
-        guard imageRect.width > 1, imageRect.height > 1 else { return .zero }
-        let maximumX = imageRect.width * (currentScale - 1) / 2
-        let maximumY = imageRect.height * (currentScale - 1) / 2
-        return CGSize(
-            width: min(max(proposed.width, -maximumX), maximumX),
-            height: min(max(proposed.height, -maximumY), maximumY)
+        let limits = ZoomPanGeometry.panLimits(
+            imageRect: imageRect,
+            containerSize: container,
+            scale: currentScale
         )
+        return ZoomPanGeometry.clampedOffset(proposed, limits: limits)
     }
 
     private var tapPageGesture: some Gesture {
@@ -5084,7 +5118,7 @@ struct LocalImageView: View {
                 }
             } catch {
                 if !Task.isCancelled {
-                    print("翻译异常: \(error)")
+                    MReaderLog.aiTranslation.error("translation failed reason=\(MReaderLog.describe(error), privacy: .public)")
                     await MainActor.run {
                         guard self.translationGeneration == generation else { return }
                         self.translationErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -5266,7 +5300,7 @@ struct LocalImageView: View {
                     blocks: self.textBlocks
                 )
             } catch {
-                print("Apple 翻译云端兜底失败: \(error.localizedDescription)")
+                MReaderLog.aiTranslation.notice("Apple translation cloud fallback failed reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
     }

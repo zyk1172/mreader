@@ -1,30 +1,28 @@
 import XCTest
 @testable import mreader
 
-/// `VisionSliceMerger` 回归：长条页跨切片半句必须拼回完整原文，
-/// 且不得把不同气泡、不同方向或相距过远的文字误拼成一句。
+/// `VisionSliceMerger` 回归。
+///
+/// 夹具刻意使用**真实切片几何**：相邻切片的重叠带是 0.45~0.50，
+/// 上切片的裁剪底边 = 0.50、下切片的裁剪顶边 = 0.45。
+/// 被切开的一半，其 textBox / bubbleBox 必然触及对应的裁剪边缘；
+/// 完整落在切片内部的气泡则达不到，这正是区分「同一句话」与「两个不同气泡」的关键证据。
 final class VisionSliceMergeTests: XCTestCase {
 
-    // MARK: - 夹具
-
-    /// 两个相邻切片：slice 0 覆盖 0.00~0.50，slice 1 覆盖 0.45~1.00，
-    /// 重叠带 = 0.45~0.50（高度 0.05）。
-    private var adjacentSlices: (upper: CGRect, lower: CGRect) {
-        (
-            upper: CGRect(x: 0, y: 0, width: 1, height: 0.50),
-            lower: CGRect(x: 0, y: 0.45, width: 1, height: 0.55)
-        )
-    }
+    /// sliceA 覆盖 0.00~0.50，sliceB 覆盖 0.45~1.00。
+    private var sliceA: CGRect { CGRect(x: 0, y: 0, width: 1, height: 0.50) }
+    private var sliceB: CGRect { CGRect(x: 0, y: 0.45, width: 1, height: 0.55) }
 
     private func block(
         _ text: String,
         y: CGFloat,
-        height: CGFloat = 0.04,
+        height: CGFloat,
         x: CGFloat = 0.20,
         width: CGFloat = 0.30,
         translation: String? = nil,
         bubbleBox: CGRect? = nil,
         orientation: TextOrientation = .horizontal,
+        layoutRole: TranslationLayoutRole = .dialogue,
         fontScale: Double? = nil
     ) -> TextBlock {
         TextBlock(
@@ -36,205 +34,294 @@ final class VisionSliceMergeTests: XCTestCase {
             estimatedFontScale: fontScale ?? Double(height),
             bubbleBox: bubbleBox,
             textOrientation: orientation,
-            layoutRole: .dialogue
+            layoutRole: layoutRole
         )
     }
 
-    // MARK: - 正向
+    /// 被上切片切开的半句：底边正好落在上切片裁剪底边上。
+    private func upperHalf(
+        _ text: String,
+        bottom: CGFloat = 0.50,
+        height: CGFloat = 0.06,
+        translation: String? = nil,
+        bubbleBox: CGRect? = nil,
+        orientation: TextOrientation = .horizontal,
+        layoutRole: TranslationLayoutRole = .dialogue,
+        x: CGFloat = 0.20,
+        width: CGFloat = 0.30,
+        fontScale: Double? = nil
+    ) -> TextBlock {
+        block(
+            text,
+            y: bottom - height,
+            height: height,
+            x: x,
+            width: width,
+            translation: translation,
+            bubbleBox: bubbleBox,
+            orientation: orientation,
+            layoutRole: layoutRole,
+            fontScale: fontScale
+        )
+    }
 
-    func testAdjacentSlicesJoinSplitHalvesIntoOneBlock() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
+    /// 被下切片切开的半句：顶边正好落在下切片裁剪顶边上。
+    private func lowerHalf(
+        _ text: String,
+        top: CGFloat = 0.45,
+        height: CGFloat = 0.07,
+        translation: String? = nil,
+        bubbleBox: CGRect? = nil,
+        orientation: TextOrientation = .horizontal,
+        layoutRole: TranslationLayoutRole = .dialogue,
+        x: CGFloat = 0.20,
+        width: CGFloat = 0.30,
+        fontScale: Double? = nil
+    ) -> TextBlock {
+        block(
+            text,
+            y: top,
+            height: height,
+            x: x,
+            width: width,
+            translation: translation,
+            bubbleBox: bubbleBox,
+            orientation: orientation,
+            layoutRole: layoutRole,
+            fontScale: fontScale
+        )
+    }
+
+    private func merge(_ upperBlocks: [TextBlock], _ lowerBlocks: [TextBlock]) -> VisionSliceMergeOutcome {
+        VisionSliceMerger.merge(
             observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("今日は", y: 0.44, translation: "今天")]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("いい天気", y: 0.48, translation: "天气真好")]
-                )
+                VisionSliceObservation(index: 0, sourceRect: sliceA, blocks: upperBlocks),
+                VisionSliceObservation(index: 1, sourceRect: sliceB, blocks: lowerBlocks)
             ],
             isRightToLeft: false
+        )
+    }
+
+    // MARK: - 纯文本拼接
+
+    func testJoinedSourceTextRemovesSuffixPrefixOverlap() {
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "今日はいい", lower: "いい天気"),
+            "今日はいい天気",
+            "重叠部分只能出现一次，不能退化成「今日はいいいい天気」"
+        )
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "Hello wor", lower: "world"),
+            "Hello world"
+        )
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "今日は", lower: "いい天気"),
+            "今日はいい天気"
+        )
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "Hello, wor", lower: "world!"),
+            "Hello, world!"
+        )
+    }
+
+    func testJoinedSourceTextAddsSpaceForNonOverlappingLatinText() {
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "Hello", lower: "world"),
+            "Hello world",
+            "拉丁文没有重叠时不能直接粘连"
+        )
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "Hello ", lower: "world"),
+            "Hello world"
+        )
+        XCTAssertEqual(
+            VisionSliceMerger.joinedSourceText(upper: "今日は", lower: "いい天気"),
+            "今日はいい天気",
+            "中日文不补空格"
+        )
+    }
+
+    func testOverlapLengthReportsCoveredPrefix() {
+        XCTAssertEqual(VisionSliceMerger.overlappedPrefixLength(upper: "今日はいい", lower: "いい天気"), 2)
+        XCTAssertEqual(VisionSliceMerger.overlappedPrefixLength(upper: "Hello wor", lower: "world"), 3)
+        XCTAssertEqual(VisionSliceMerger.overlappedPrefixLength(upper: "おはよう", lower: "ございます"), 0)
+    }
+
+    // MARK: - 正向：切开的半句必须拼回一句
+
+    func testAdjacentSlicesJoinSplitHalvesIntoOneBlock() {
+        let outcome = merge(
+            [upperHalf("今日は", translation: "今天")],
+            [lowerHalf("いい天気", translation: "天气真好")]
         )
 
         XCTAssertEqual(outcome.blocks.count, 1, "半句必须合并成一个 translation unit")
-        let merged = try? XCTUnwrap(outcome.blocks.first)
-        XCTAssertEqual(merged?.text, "今日はいい天気", "sourceText 必须拼成完整原文")
-        XCTAssertNil(merged?.translation, "不得直接拼两段旧译文，必须重新翻译")
+        let merged = outcome.blocks.first
+        XCTAssertEqual(merged?.text, "今日はいい天気")
         XCTAssertEqual(outcome.retranslationRequiredBlockIDs.count, 1)
         XCTAssertEqual(merged?.id, outcome.retranslationRequiredBlockIDs.first)
+        // 拼接后的译文只是最长一半的临时兜底，必须由调用方对完整原文定向重译。
+        XCTAssertEqual(merged?.translation, "天气真好")
     }
 
-    func testMergedGeometryIsUnionOfBothHalves() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("上", y: 0.44, height: 0.04)]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("下", y: 0.48, height: 0.06)]
-                )
-            ],
-            isRightToLeft: false
-        )
-
-        let merged = outcome.blocks.first
-        XCTAssertEqual(merged?.boundingBox.minY ?? 0, 0.44, accuracy: 0.0001)
-        XCTAssertEqual(merged?.boundingBox.maxY ?? 0, 0.54, accuracy: 0.0001)
-    }
-
-    func testMergedBubbleBoxIsUnionWhenBothSlicesReportedOne() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("上", y: 0.43, bubbleBox: CGRect(x: 0.17, y: 0.41, width: 0.36, height: 0.08))]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("下", y: 0.47, bubbleBox: CGRect(x: 0.17, y: 0.45, width: 0.36, height: 0.10))]
-                )
-            ],
-            isRightToLeft: false
+    func testPartiallyOverlappingHalvesAreJoinedWithoutDuplication() {
+        let outcome = merge(
+            [upperHalf("今日はいい", translation: "今天很")],
+            [lowerHalf("いい天気", translation: "天气好")]
         )
 
         XCTAssertEqual(outcome.blocks.count, 1)
-        XCTAssertEqual(outcome.blocks.first?.bubbleBox?.minY ?? 0, 0.41, accuracy: 0.0001)
-        XCTAssertEqual(outcome.blocks.first?.bubbleBox?.maxY ?? 0, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(outcome.blocks.first?.text, "今日はいい天気")
+        XCTAssertEqual(outcome.retranslationRequiredBlockIDs.count, 1)
+    }
+
+    func testEnglishHalvesJoinWithoutDoublingTheOverlap() {
+        let outcome = merge(
+            [upperHalf("Hello wor", translation: "你好 wo")],
+            [lowerHalf("world", translation: "世界")]
+        )
+
+        XCTAssertEqual(outcome.blocks.count, 1)
+        XCTAssertEqual(outcome.blocks.first?.text, "Hello world")
+    }
+
+    func testMergedGeometryAndBubbleAreUnions() {
+        let outcome = merge(
+            [
+                upperHalf(
+                    "上",
+                    bottom: 0.50,
+                    height: 0.06,
+                    bubbleBox: CGRect(x: 0.17, y: 0.40, width: 0.36, height: 0.10)
+                )
+            ],
+            [
+                lowerHalf(
+                    "下",
+                    top: 0.45,
+                    height: 0.07,
+                    bubbleBox: CGRect(x: 0.17, y: 0.44, width: 0.36, height: 0.12)
+                )
+            ]
+        )
+
+        XCTAssertEqual(outcome.blocks.count, 1)
+        XCTAssertEqual(outcome.blocks.first?.boundingBox.minY ?? 0, 0.44, accuracy: 0.0001)
+        XCTAssertEqual(outcome.blocks.first?.boundingBox.maxY ?? 0, 0.52, accuracy: 0.0001)
+        XCTAssertEqual(outcome.blocks.first?.bubbleBox?.minY ?? 0, 0.40, accuracy: 0.0001)
+        XCTAssertEqual(outcome.blocks.first?.bubbleBox?.maxY ?? 0, 0.56, accuracy: 0.0001)
     }
 
     func testOverlappingDuplicateKeepsLongerTextWithoutDuplicatingIt() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("おはよう", y: 0.44, translation: "早上好")]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("おはようございます", y: 0.46, translation: "早上好呀")]
-                )
-            ],
-            isRightToLeft: false
+        let outcome = merge(
+            [upperHalf("おはよう", translation: "早上好")],
+            [lowerHalf("おはようございます", translation: "早上好呀")]
         )
 
         XCTAssertEqual(outcome.blocks.count, 1)
         XCTAssertEqual(outcome.blocks.first?.text, "おはようございます", "前缀重复应取更全的一侧")
-        XCTAssertEqual(outcome.blocks.first?.translation, "早上好呀", "重复不是拼接，保留已有译文")
+        XCTAssertEqual(outcome.blocks.first?.translation, "早上好呀", "重复不是拼接，可沿用已有译文")
         XCTAssertTrue(outcome.retranslationRequiredBlockIDs.isEmpty)
     }
 
     // MARK: - 反向：不允许合并
 
+    func testCompleteBubblesNearTheSliceBoundaryAreNotMerged() {
+        // 两个完整气泡分别落在切片内部（没有触及裁剪边缘），即便位置很近也不能拼。
+        let outcome = merge(
+            [upperHalf("こんにちは", bottom: 0.47)],
+            [lowerHalf("さようなら", top: 0.47)]
+        )
+
+        XCTAssertEqual(outcome.blocks.count, 2, "完整气泡没有被切开，不能拼成一句")
+        XCTAssertTrue(outcome.retranslationRequiredBlockIDs.isEmpty)
+    }
+
+    func testBubbleEvidenceBlocksMergeWhenBubblesWereNotCut() {
+        // 文字框看似被切开，但两侧气泡都是完整的 → 属于两个不同气泡。
+        let outcome = merge(
+            [
+                upperHalf(
+                    "今日はいい",
+                    bubbleBox: CGRect(x: 0.17, y: 0.34, width: 0.36, height: 0.13)
+                )
+            ],
+            [
+                lowerHalf(
+                    "いい天気",
+                    bubbleBox: CGRect(x: 0.17, y: 0.47, width: 0.36, height: 0.09)
+                )
+            ]
+        )
+
+        XCTAssertEqual(outcome.blocks.count, 2, "bubbleBox 必须和 textBox 一样被切开才允许合并")
+    }
+
     func testNonAdjacentSlicesAreNotMerged() {
-        let slices = adjacentSlices
         let outcome = VisionSliceMerger.merge(
             observations: [
-                VisionSliceObservation(index: 0, sourceRect: slices.upper, blocks: [block("今日は", y: 0.44)]),
-                VisionSliceObservation(index: 2, sourceRect: slices.lower, blocks: [block("いい天気", y: 0.48)])
+                VisionSliceObservation(index: 0, sourceRect: sliceA, blocks: [upperHalf("今日は")]),
+                VisionSliceObservation(index: 2, sourceRect: sliceB, blocks: [lowerHalf("いい天気")])
             ],
             isRightToLeft: false
         )
 
         XCTAssertEqual(outcome.blocks.count, 2, "只有相邻切片允许合并")
-        XCTAssertTrue(outcome.retranslationRequiredBlockIDs.isEmpty)
     }
 
-    func testBlocksFarOutsideOverlapBandAreNotMerged() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(index: 0, sourceRect: slices.upper, blocks: [block("今日は", y: 0.10)]),
-                VisionSliceObservation(index: 1, sourceRect: slices.lower, blocks: [block("いい天気", y: 0.80)])
-            ],
-            isRightToLeft: false
+    func testBlocksFarOutsideTheSliceBoundaryAreNotMerged() {
+        let outcome = merge(
+            [block("今日は", y: 0.10, height: 0.05)],
+            [block("いい天気", y: 0.80, height: 0.05)]
         )
 
         XCTAssertEqual(outcome.blocks.count, 2, "相距很远的文字不能拼成一句")
     }
 
     func testMismatchedTextOrientationIsNotMerged() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("今日は", y: 0.44, orientation: .vertical)]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("いい天気", y: 0.48, orientation: .horizontal)]
-                )
-            ],
-            isRightToLeft: false
+        let outcome = merge(
+            [upperHalf("今日は", orientation: .vertical)],
+            [lowerHalf("いい天気", orientation: .horizontal)]
         )
 
         XCTAssertEqual(outcome.blocks.count, 2, "阅读方向不一致不得合并")
     }
 
+    func testMismatchedLayoutRoleIsNotMerged() {
+        let outcome = merge(
+            [upperHalf("今日は", layoutRole: .dialogue)],
+            [lowerHalf("いい天気", layoutRole: .standalone)]
+        )
+
+        XCTAssertEqual(outcome.blocks.count, 2, "对白与拟声词 / 旁白不能拼成一句")
+    }
+
     func testMismatchedFontScaleIsNotMerged() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("今日は", y: 0.44, fontScale: 0.02)]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("いい天気", y: 0.48, fontScale: 0.09)]
-                )
-            ],
-            isRightToLeft: false
+        let outcome = merge(
+            [upperHalf("今日は", fontScale: 0.02)],
+            [lowerHalf("いい天気", fontScale: 0.09)]
         )
 
         XCTAssertEqual(outcome.blocks.count, 2, "字号差异过大（大标题 / 小对白）不得合并")
     }
 
     func testHorizontallyDisplacedBlocksAreNotMerged() {
-        let slices = adjacentSlices
-        let outcome = VisionSliceMerger.merge(
-            observations: [
-                VisionSliceObservation(
-                    index: 0,
-                    sourceRect: slices.upper,
-                    blocks: [block("左", y: 0.44, x: 0.05, width: 0.20)]
-                ),
-                VisionSliceObservation(
-                    index: 1,
-                    sourceRect: slices.lower,
-                    blocks: [block("右", y: 0.48, x: 0.65, width: 0.20)]
-                )
-            ],
-            isRightToLeft: false
+        let outcome = merge(
+            [upperHalf("左", x: 0.05, width: 0.20)],
+            [lowerHalf("右", x: 0.65, width: 0.20)]
         )
 
         XCTAssertEqual(outcome.blocks.count, 2, "中轴偏移过大不得合并")
     }
 
     func testSingleSliceReturnsInputUnchanged() {
-        let slice = CGRect(x: 0, y: 0, width: 1, height: 1)
         let outcome = VisionSliceMerger.merge(
             observations: [
-                VisionSliceObservation(index: 0, sourceRect: slice, blocks: [block("一行", y: 0.30)])
+                VisionSliceObservation(
+                    index: 0,
+                    sourceRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+                    blocks: [block("一行", y: 0.30, height: 0.05)]
+                )
             ],
             isRightToLeft: false
         )
@@ -245,7 +332,6 @@ final class VisionSliceMergeTests: XCTestCase {
     }
 
     func testBlockConsumedOnceAcrossThreeSlices() {
-        // 三个切片：0(0~0.40) / 1(0.36~0.72) / 2(0.68~1.00)。
         let slices = [
             CGRect(x: 0, y: 0, width: 1, height: 0.40),
             CGRect(x: 0, y: 0.36, width: 1, height: 0.36),
@@ -256,26 +342,26 @@ final class VisionSliceMergeTests: XCTestCase {
                 VisionSliceObservation(
                     index: 0,
                     sourceRect: slices[0],
-                    blocks: [block("あ", y: 0.34, translation: "a")]
+                    // 被 slice0 底边（0.40）切开。
+                    blocks: [block("あ", y: 0.34, height: 0.06, translation: "a")]
                 ),
                 VisionSliceObservation(
                     index: 1,
                     sourceRect: slices[1],
-                    blocks: [block("い", y: 0.38, translation: "i")]
+                    // 被 slice1 顶边（0.36）切开。
+                    blocks: [block("い", y: 0.36, height: 0.06, translation: "i")]
                 ),
                 VisionSliceObservation(
                     index: 2,
                     sourceRect: slices[2],
-                    blocks: [block("う", y: 0.70, translation: "u")]
+                    blocks: [block("う", y: 0.70, height: 0.06, translation: "u")]
                 )
             ],
             isRightToLeft: false
         )
 
-        // 0/1 在 overlap(0.36~0.40) 处拼接；2 远离 overlap 不参与。
-        XCTAssertEqual(outcome.blocks.count, 2)
+        XCTAssertEqual(outcome.blocks.count, 2, "0/1 拼接，2 不参与")
         XCTAssertEqual(outcome.blocks.first?.text, "あい")
-        XCTAssertNil(outcome.blocks.first?.translation)
         XCTAssertEqual(outcome.blocks.last?.text, "う")
         XCTAssertEqual(outcome.retranslationRequiredBlockIDs.count, 1)
     }

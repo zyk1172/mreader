@@ -33,6 +33,12 @@ nonisolated enum RemoteDestinationPolicy {
         var mayUseCredentials: Bool {
             self == .trustedOrigin
         }
+
+        /// 被拒绝时的原因，便于构造错误（允许时返回 nil）。
+        var denial: Denial? {
+            if case .denied(let denial) = self { return denial }
+            return nil
+        }
     }
 
     enum Denial: String, Equatable, Sendable {
@@ -102,6 +108,19 @@ nonisolated enum RemoteDestinationPolicy {
             return .denied(.privateNetwork)
         }
         return .crossOriginPublic
+    }
+
+    /// 跨源跳转必须**显式**剥离凭据，不能依赖 URLSession 的隐式行为（审查 #5）。
+    static func sanitizedRedirectRequest(
+        _ request: URLRequest,
+        for decision: Decision
+    ) -> URLRequest {
+        guard !decision.mayUseCredentials else { return request }
+        var sanitized = request
+        for header in ["Authorization", "Proxy-Authorization", "Cookie", "Cookie2"] {
+            sanitized.setValue(nil, forHTTPHeaderField: header)
+        }
+        return sanitized
     }
 
     /// scheme + host + effective port 完全相同才算同源。
