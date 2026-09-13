@@ -447,13 +447,13 @@ nonisolated private struct OPDSClient: Sendable {
             throw MediaSourceError.serverError(413, "OPDS 响应超过安全上限")
         }
         let extensionValue = resolvedFileExtension(url: url, response: response)
-        let destination = root
+        let cacheDestinationURL = root
             .appendingPathComponent(safeID)
             .appendingPathExtension(extensionValue)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        return destination
+        try? FileManager.default.removeItem(at: cacheDestinationURL)
+        try FileManager.default.moveItem(at: temporaryURL, to: cacheDestinationURL)
+        return cacheDestinationURL
     }
 
     private func resolvedFileExtension(url: URL, response: URLResponse) -> String {
