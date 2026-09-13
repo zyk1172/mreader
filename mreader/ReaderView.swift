@@ -44,18 +44,17 @@ struct ReaderContainerView: View {
                 let result = await ReaderPageSourceService.loadPages(for: comic)
                 if let result {
                     if comic.sourceType == .komga,
-                       let remoteProgress = try? await KomgaProvider.remoteReadingProgressSnapshot(for: comic) {
-                        let maxIndex = max(0, result.pages.count - 1)
-                        comic.furthestPageIndex = min(
-                            max(comic.furthestPageIndex, remoteProgress.pageIndex),
-                            maxIndex
-                        )
-                        if remoteProgress.updatedAt > comic.progressUpdatedAt {
-                            comic.currentPageIndex = min(remoteProgress.pageIndex, maxIndex)
-                            comic.progressUpdatedAt = remoteProgress.updatedAt
-                            comic.scrollProgress = 0
-                            comic.scrollPageProgress = 0
-                        }
+                       let remoteProgress = try? await KomgaProvider.remoteReadingProgressSnapshot(for: comic),
+                       remoteProgress.updatedAt > comic.progressUpdatedAt {
+                        // Progress is a timestamped state, not a monotonic maximum. A newer
+                        // explicit reset to page 0 must not be resurrected by an older local
+                        // furthest-page value.
+                        let remoteIndex = min(max(remoteProgress.pageIndex, 0), max(0, result.pages.count - 1))
+                        comic.currentPageIndex = remoteIndex
+                        comic.furthestPageIndex = remoteIndex
+                        comic.progressUpdatedAt = remoteProgress.updatedAt
+                        comic.scrollProgress = 0
+                        comic.scrollPageProgress = 0
                         onComicUpdate(comic)
                     }
                     if comic.sourceType == .opds, comic.totalPages != result.pages.count {
@@ -3880,7 +3879,8 @@ struct LocalImageView: View {
                     // 放大后把图片裁剪在自身布局框内，避免溢出到相邻页面与翻页过渡叠加。
                     .clipped()
                     .gesture(zoomGesture)
-                    .gesture(gatedPanGesture)
+                    // 放大后页内平移优先于外层翻页拖拽，避免拖动被父级手势反复截断。
+                    .highPriorityGesture(gatedPanGesture)
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
@@ -4971,7 +4971,7 @@ struct LocalImageView: View {
     /// 单指平移：只在放大态生效，位移按图片实际显示矩形做边界 clamp，
     /// 保证放大后图片始终铺满自身布局框（不露出空白）。
     private var panGesture: some Gesture {
-        DragGesture(minimumDistance: 6)
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard ReaderGestureGate.isZoomed(scale: scale) else { return }
                 offset = clampedOffset(
@@ -5708,75 +5708,25 @@ private struct TranslationTextRenderer: View {
     let textOrientation: TextOrientation
     let displayMode: TranslationDisplayMode
     let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
-    @State private var isExpansionPresented = false
 
     private var fullText: String {
         segments.joined(separator: "\n\n")
     }
 
     var body: some View {
-        Group {
-            if layoutStatus == .needsExpansion {
-                Button {
-                    isExpansionPresented = true
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        // Keep a real translation preview visible at the readable
-                        // floor. The preview may clip, but it must never degrade
-                        // into an icon-only card.
-                        CoreTextTranslationView(
-                            text: fullText,
-                            fontSize: fontSize,
-                            color: displayMode == .inPlace ? UIColor.label : style.coreTextColor,
-                            textOrientation: textOrientation,
-                            lineSpacing: 2
-                        )
-                        .allowsHitTesting(false)
-
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(style.coreTextColor.swiftUIColor)
-                            .padding(3)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .padding(2)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("ocr.translationNeedsExpansion".localized)
-                .accessibilityValue(fullText)
-            } else {
-                CoreTextTranslationView(
-                    text: fullText,
-                    fontSize: fontSize,
-                    color: displayMode == .inPlace ? UIColor.label : style.coreTextColor,
-                    textOrientation: textOrientation,
-                    lineSpacing: 2
-                )
-            }
-        }
+        // 译文覆盖层始终只是被动绘制。即使极小区域触发 needsExpansion，
+        // 也不再生成 Button / Sheet，避免阅读时误触“放大查看”。
+        CoreTextTranslationView(
+            text: fullText,
+            fontSize: fontSize,
+            color: displayMode == .inPlace ? UIColor.label : style.coreTextColor,
+            textOrientation: textOrientation,
+            lineSpacing: 2
+        )
         .padding(layoutStatus == .needsExpansion ? min(contentPadding, 3) : contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
         .clipped()
-        .sheet(isPresented: $isExpansionPresented) {
-            NavigationStack {
-                ScrollView {
-                    Text(fullText)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(20)
-                        .textSelection(.enabled)
-                }
-                .navigationTitle("ocr.aiTranslation.navigationTitle".localized)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("nav.done".localized) {
-                            isExpansionPresented = false
-                        }
-                    }
-                }
-            }
-        }
+        .allowsHitTesting(false)
     }
 
     static let palette: [Color] = [

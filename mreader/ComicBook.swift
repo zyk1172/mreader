@@ -262,15 +262,10 @@ nonisolated enum ReadingProgressMergePolicy {
         let pageLimit = max(0, totalPages - 1)
         let usesIncoming = incoming.progressUpdatedAt > existing.progressUpdatedAt
         let selectedPage = usesIncoming ? incoming.currentPageIndex : existing.currentPageIndex
+        let selectedFurthest = usesIncoming ? incoming.furthestPageIndex : existing.furthestPageIndex
         return Resolution(
             currentPageIndex: min(max(selectedPage, 0), pageLimit),
-            furthestPageIndex: min(
-                max(
-                    max(existing.furthestPageIndex, incoming.furthestPageIndex),
-                    max(existing.currentPageIndex, incoming.currentPageIndex)
-                ),
-                pageLimit
-            ),
+            furthestPageIndex: min(max(selectedFurthest, selectedPage, 0), pageLimit),
             progressUpdatedAt: max(existing.progressUpdatedAt, incoming.progressUpdatedAt),
             usesIncomingLocation: usesIncoming
         )

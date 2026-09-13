@@ -253,6 +253,7 @@ struct ContentView: View {
     @State private var importingSeriesID: UUID?
     @State private var deleteRequest: DeleteRequest?
     @State private var hideKomgaRequest: ComicBook?
+    @State private var resetProgressRequest: ComicBook?
     @State private var hiddenKomgaVersion = 0
     @State private var mediaSources: [MediaSource] = []
     @State private var hiddenKomgaComics: [HiddenKomgaComic] = []
@@ -359,6 +360,27 @@ struct ContentView: View {
             }
             .eraseToAnyView()
             .modifier(alertModifiers)
+            .confirmationDialog(
+                resetProgressRequest.map { "comic.resetProgressConfirm".localizedFormat($0.title) }
+                    ?? "comic.resetProgress".localized,
+                isPresented: Binding(
+                    get: { resetProgressRequest != nil },
+                    set: { if !$0 { resetProgressRequest = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("comic.resetProgress".localized, role: .destructive) {
+                    if let comic = resetProgressRequest {
+                        resetProgressRequest = nil
+                        performResetReadingProgress(for: comic)
+                    }
+                }
+                Button("nav.cancel".localized, role: .cancel) {
+                    resetProgressRequest = nil
+                }
+            } message: {
+                Text("comic.resetProgressDescription".localized)
+            }
             .task(id: library.libraryLoadIssues) {
                 guard !library.libraryLoadIssues.isEmpty else { return }
                 libraryLoadNotice = SettingsRestoreNotice(
@@ -1675,6 +1697,37 @@ struct ContentView: View {
         deleteRequest = .selection(comics: selectedComicIDs, series: selectedSeriesIDs)
     }
 
+    private func performResetReadingProgress(for comic: ComicBook) {
+        var updated = comic
+        updated.currentPageIndex = 0
+        updated.furthestPageIndex = 0
+        updated.scrollProgress = 0
+        updated.scrollPageProgress = 0
+        updated.progressUpdatedAt = Date()
+        updated.hasBeenOpened = false
+        updated.lastReadAt = .distantPast
+
+        if uiTestingFixtureComic?.id == updated.id {
+            uiTestingFixtureComic = updated
+        } else {
+            library.update(updated)
+        }
+        HapticManager.shared.play(.success)
+
+        // Komga has a second copy of reading progress. Reset it too. A failed
+        // network write does not undo the local reset; the new local timestamp
+        // prevents stale remote progress from winning the next merge.
+        guard updated.sourceType == .komga else { return }
+        Task {
+            do {
+                try await KomgaProvider.updateReadProgress(for: updated)
+            } catch {
+                HapticManager.shared.play(.error)
+                importError = "comic.resetProgressFailed".localizedFormat(error.localizedDescription)
+            }
+        }
+    }
+
     private func performConfirmedDelete() {
         guard let request = deleteRequest else { return }
         HapticManager.shared.play(.heavy)
@@ -1815,6 +1868,18 @@ struct ContentView: View {
                 Label("comic.markAsRead".localized, systemImage: "checkmark.circle")
             }
         }
+
+        Button(role: .destructive) {
+            HapticManager.shared.play(.medium)
+            resetProgressRequest = comic
+        } label: {
+            Label("comic.resetProgress".localized, systemImage: "arrow.counterclockwise")
+        }
+        .disabled(!comic.hasBeenOpened
+                  && comic.currentPageIndex == 0
+                  && comic.furthestPageIndex == 0
+                  && comic.scrollProgress == 0
+                  && comic.scrollPageProgress == 0)
 
         Button {
             HapticManager.shared.play(.medium)
@@ -3149,7 +3214,7 @@ private struct TodayMetric: View {
     let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .center, spacing: 3) {
             Text(value)
                 .font(.system(size: 34, weight: .bold, design: .rounded))
                 .foregroundStyle(color)
@@ -3157,8 +3222,9 @@ private struct TodayMetric: View {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(FitnessPalette.secondaryText)
+                .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
