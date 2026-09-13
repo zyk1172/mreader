@@ -15,7 +15,7 @@ import Darwin
 /// 4. **非用户配置目标**的 loopback / link-local / 私网 / CGNAT 地址（包括 DNS 解析结果）→ 拒绝，
 ///    避免恶意 feed 把客户端当成内网探测跳板（SSRF / DNS rebinding）。
 ///
-/// 重定向必须逐跳重新判定，见 `Context.resolvedDecision(for:)`。
+/// `Context.decision(for:)` 是生产入口：每次初始请求和每一跳重定向都必须重新判定。
 nonisolated enum RemoteDestinationPolicy {
 
     typealias HostResolver = @Sendable (String) throws -> [String]
@@ -92,18 +92,9 @@ nonisolated enum RemoteDestinationPolicy {
             )
         }
 
-        /// 只做 URL / origin / 字面 IP 判定，不触发 DNS。保留给纯逻辑测试与无需网络解析的场景。
-        func decision(for url: URL) -> Decision {
-            RemoteDestinationPolicy.decision(
-                for: url,
-                originURLs: originURLs,
-                allowlistHosts: allowlistHosts
-            )
-        }
-
-        /// 生产请求使用的完整判定：非可信跨源 hostname 必须先解析 DNS，
+        /// 生产请求的完整判定：非可信跨源 hostname 必须先解析 DNS，
         /// 任意一个解析结果落入私网 / 回环 / link-local / CGNAT 都拒绝。
-        func resolvedDecision(for url: URL) -> Decision {
+        func decision(for url: URL) -> Decision {
             RemoteDestinationPolicy.resolvedDecision(
                 for: url,
                 originURLs: originURLs,
@@ -112,14 +103,18 @@ nonisolated enum RemoteDestinationPolicy {
             )
         }
 
-        /// 旧的同步 URL 级 helper 保留原语义，避免把测试/展示层意外变成 DNS I/O。
-        func allowsRequest(to url: URL) -> Bool {
-            decision(for: url).isAllowed
+        /// 仅按 URL / origin / 字面 IP 判断，不触发 DNS。只供诊断和纯逻辑测试使用。
+        func urlDecision(for url: URL) -> Decision {
+            RemoteDestinationPolicy.decision(
+                for: url,
+                originURLs: originURLs,
+                allowlistHosts: allowlistHosts
+            )
         }
 
-        /// 真正发起网络请求前使用此 helper。
-        func allowsResolvedRequest(to url: URL) -> Bool {
-            resolvedDecision(for: url).isAllowed
+        /// 单跳判定；重定向的每一跳都要各自调用一次。
+        func allowsRequest(to url: URL) -> Bool {
+            decision(for: url).isAllowed
         }
     }
 
