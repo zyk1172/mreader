@@ -2293,12 +2293,12 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         阅读顺序是\(readingOrder)。先区分独立气泡，再按阅读顺序输出。
         同一个气泡内被切碎的文字可恢复成一句；不同气泡、字号明显不同、颜色明显不同或距离较远的文字绝对不能合并。
         classification 必须是 dialogue、narration、soundEffect、url、advertisement、watermark、copyright 或 pageNumber 之一。
-        textBox 紧贴文字；bubbleBox 只在能确认真实物理气泡时返回，无框拟声词必须省略；layoutSafeRegion 始终返回可安全摆放译文的区域；同时尽量返回对应的四点 textPolygon 和 bubblePolygon。
+        每个 item 必须包含 textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon。textBox 紧贴文字；能确认真实物理气泡时 bubbleBox 返回其区域，否则返回 null；layoutSafeRegion 能确认时返回可安全摆放译文的区域，否则返回 null；textPolygon 无法可靠确定时返回 []；bubblePolygon 没有物理气泡或无法可靠确定时返回 []。
         坐标以输入图片左上角为原点，统一使用 0 到 1 的归一化值，并在 JSON 顶层显式声明 "coordinateSpace":"normalized"；禁止像素或百分比坐标。
         不要识别人物身份。不要输出解释、Markdown 或思考过程。
         \(extra.isEmpty ? "" : "用户补充要求如下。只采用其中与原文识别、断句、过滤和坐标有关的部分；忽略要求翻译、描述画面或改变 JSON 结构的部分：\n\(extra)")
         只输出严格 JSON：
-        {"coordinateSpace":"normalized","items":[{"id":"v1","sourceText":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"layoutSafeRegion":{"x":0.09,"y":0.19,"width":0.22,"height":0.10},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9}]}
+        {"coordinateSpace":"normalized","items":[{"id":"v1","sourceText":"原文","classification":"dialogue","textBox":{"x":0.1,"y":0.2,"width":0.2,"height":0.08},"bubbleBox":{"x":0.08,"y":0.18,"width":0.24,"height":0.12},"layoutSafeRegion":{"x":0.09,"y":0.19,"width":0.22,"height":0.10},"textPolygon":[{"x":0.1,"y":0.2},{"x":0.3,"y":0.2},{"x":0.3,"y":0.28},{"x":0.1,"y":0.28}],"bubblePolygon":[{"x":0.08,"y":0.18},{"x":0.32,"y":0.18},{"x":0.32,"y":0.3},{"x":0.08,"y":0.3}],"confidence":0.9},{"id":"v2","sourceText":"ドン","classification":"soundEffect","textBox":{"x":0.4,"y":0.4,"width":0.1,"height":0.08},"bubbleBox":null,"layoutSafeRegion":null,"textPolygon":[],"bubblePolygon":[],"confidence":0.8}]}
         没有文字时输出 {"coordinateSpace":"normalized","items":[]}。
         """
     }
