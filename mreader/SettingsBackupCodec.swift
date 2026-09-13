@@ -111,10 +111,24 @@ nonisolated enum SettingsBackupCodec {
             }
         }
         do {
-            return try JSONDecoder().decode(MReaderSettingsBackup.self, from: data)
+            let backup = try JSONDecoder().decode(MReaderSettingsBackup.self, from: data)
+            // 导入侧必须与导出侧对称：明文备份一旦携带凭据就拒绝，否则恶意构造的备份
+            // 可以把 apiKey / baseURL 直接写进 Keychain 与 Provider（审查 #9）。
+            // 判定放在 Codec 层而不是 UI，任何调用点都无法绕过。
+            guard !containsCredentials(backup) else {
+                throw SettingsBackupCodecError.credentialsRequireEncryption
+            }
+            return backup
+        } catch let error as SettingsBackupCodecError {
+            throw error
         } catch {
             throw SettingsBackupCodecError.invalidFormat
         }
+    }
+
+    /// 导出与导入共用同一份凭据判定，便于测试与诊断直接引用。
+    nonisolated static func backupContainsCredentials(_ backup: MReaderSettingsBackup) -> Bool {
+        containsCredentials(backup)
     }
 
     static func decodeInBackground(_ data: Data, password: String? = nil) async throws -> MReaderSettingsBackup {

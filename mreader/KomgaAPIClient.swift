@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated enum KomgaAPIEndpoint {
     static func book(bookID: String) -> String {
@@ -163,7 +164,12 @@ nonisolated struct KomgaAPIClient: Sendable {
         do {
             let (data, response) = try await BoundedHTTPResponseReader.data(
                 for: request,
-                maximumBytes: maximumBytes
+                maximumBytes: maximumBytes,
+                // Komga 源自身的 origin 是可信目标；重定向逐跳判定，
+                // 不允许跳转把带凭据的请求引到未配置的内网地址（审查 #11）。
+                redirectPolicy: { url in
+                    RemoteDestinationPolicy.decision(for: url, originURLs: [baseURL])
+                }
             )
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MediaSourceError.invalidResponse
@@ -172,8 +178,10 @@ nonisolated struct KomgaAPIClient: Sendable {
                 throw MediaSourceError.serverError(413, "Komga 响应超过安全上限")
             }
             #if DEBUG
+            MReaderLog.aiTransport.debug("Komga HTTP \(httpResponse.statusCode, privacy: .public) \(request.url?.absoluteString ?? "<unknown>", privacy: .public) bytes=\(data.count, privacy: .public)")
+            // 响应体只在用户主动开启诊断日志后才记录（审查 #10）。
             let preview = String(data: data.prefix(500), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-            print("Komga HTTP \(httpResponse.statusCode) \(request.url?.absoluteString ?? "<unknown>") response=\(preview)")
+            MReaderLog.content("Komga response preview=\(preview)", logger: MReaderLog.aiTransport)
             #endif
             switch httpResponse.statusCode {
             case 200..<300:

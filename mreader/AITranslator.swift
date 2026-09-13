@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import os
 
 private enum VisionResponseFormatMode: String {
     case jsonSchema
@@ -865,7 +866,7 @@ class AITranslator {
                       isUnsupportedResponseFormat(error) else {
                     throw error
                 }
-                print("MReader AI page response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
+                MReaderLog.aiPage.notice("page response_format fallback model=\(model, privacy: .public) from=\(mode.rawValue, privacy: .public) to=\(fallback.rawValue, privacy: .public)")
                 mode = fallback
                 PageResponseFormatCache.shared.set(mode, for: cacheKey)
                 continue
@@ -876,13 +877,15 @@ class AITranslator {
             let malformed = content
                 ?? (String(data: data.prefix(12_000), encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>")
             guard let content, !content.isEmpty else {
-                print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page classification=pureProse mode=\(mode.rawValue) excerpt=\(malformed.replacingOccurrences(of: "\n", with: " ").prefix(300))")
+                MReaderLog.aiPage.error("page translation invalid response model=\(model, privacy: .public) protocol=\(modelDescriptor.apiProtocol.rawValue, privacy: .public) kind=page classification=pureProse mode=\(mode.rawValue, privacy: .public) bytes=\(malformed.utf8.count, privacy: .public)")
+                // 原始响应只在用户主动开启诊断日志后才记录。
+                MReaderLog.content("page invalid response excerpt=\(malformed.replacingOccurrences(of: "\n", with: " ").prefix(300))", logger: MReaderLog.aiPage)
                 if let fallback = mode.fallback, !semanticDowngradeUsed {
                     let previousMode = mode
                     semanticDowngradeUsed = true
                     mode = fallback
                     PageResponseFormatCache.shared.set(mode, for: cacheKey)
-                    print("MReader AI page semantic response_format downgrade model=\(model) from=\(previousMode.rawValue) to=\(mode.rawValue)")
+                    MReaderLog.aiPage.notice("page semantic response_format downgrade model=\(model, privacy: .public) from=\(previousMode.rawValue, privacy: .public) to=\(mode.rawValue, privacy: .public)")
                     continue
                 }
                 if decoded.hasReasoningOnly {
@@ -913,7 +916,8 @@ class AITranslator {
                     expectedItems: items
                 )
                 let excerpt = malformed.replacingOccurrences(of: "\n", with: " ").prefix(300)
-                print("MReader AI page translation invalid response model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=page mode=\(mode.rawValue) classification=\(classification.rawValue) excerpt=\(excerpt)")
+                MReaderLog.aiPage.error("page translation invalid response model=\(model, privacy: .public) protocol=\(modelDescriptor.apiProtocol.rawValue, privacy: .public) kind=page mode=\(mode.rawValue, privacy: .public) classification=\(classification.rawValue, privacy: .public) bytes=\(excerpt.utf8.count, privacy: .public)")
+                MReaderLog.content("page invalid response excerpt=\(excerpt)", logger: MReaderLog.aiPage)
 
                 // A prose/reasoning response with HTTP 200 means the server
                 // ignored the requested structured-output capability. Downgrade
@@ -926,7 +930,7 @@ class AITranslator {
                     semanticDowngradeUsed = true
                     mode = fallback
                     PageResponseFormatCache.shared.set(mode, for: cacheKey)
-                    print("MReader AI page semantic response_format downgrade model=\(model) from=\(previousMode.rawValue) to=\(mode.rawValue)")
+                    MReaderLog.aiPage.notice("page semantic response_format downgrade model=\(model, privacy: .public) from=\(previousMode.rawValue, privacy: .public) to=\(mode.rawValue, privacy: .public)")
                     continue
                 }
 
@@ -972,7 +976,7 @@ class AITranslator {
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    print("MReader AI page translation JSON repair failed model=\(model) protocol=\(modelDescriptor.apiProtocol.rawValue) kind=jsonRepair reason=\(error.localizedDescription)")
+                    MReaderLog.aiPage.error("page translation JSON repair failed model=\(model, privacy: .public) protocol=\(modelDescriptor.apiProtocol.rawValue, privacy: .public) kind=jsonRepair reason=\(MReaderLog.describe(error), privacy: .public)")
                     throw AITranslationRequestError.invalidTranslationJSON(
                         model: model,
                         excerpt: String(excerpt)
@@ -1294,7 +1298,7 @@ class AITranslator {
             guard slices.count > 1 else {
                 throw error
             }
-            print("MReader vision full-page recognition fallback: \(error.localizedDescription)")
+            MReaderLog.aiVision.notice("vision full-page recognition fallback reason=\(MReaderLog.describe(error), privacy: .public)")
             return try await recognizeVisionSlicesWithStats(
                 image: image,
                 apiKey: apiKey,
@@ -1368,7 +1372,7 @@ class AITranslator {
                 case .failure(let error):
                     lastError = error
                     failedSlices += 1
-                    print("MReader vision slice recognition failed index=\(index) model=\(model) reason=\(error.localizedDescription)")
+                    MReaderLog.aiVision.error("vision slice recognition failed index=\(index, privacy: .public) model=\(model, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
                 }
                 if nextIndex < slices.count {
                     submit(nextIndex)
@@ -1468,7 +1472,7 @@ class AITranslator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                print("MReader OCR visual review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
+                MReaderLog.aiVision.notice("OCR visual review fallback block=\(region.blockID, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
 
@@ -1539,7 +1543,7 @@ class AITranslator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                print("MReader OCR visual page recovery fallback reason=\(error.localizedDescription)")
+                MReaderLog.aiVision.notice("OCR visual page recovery fallback reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
         return corrected
@@ -2063,7 +2067,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                print("MReader vision source review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
+                MReaderLog.aiVision.notice("vision source review fallback block=\(region.blockID, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)")
             }
         }
 
@@ -2236,14 +2240,16 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")
                 .prefix(500)
-            print("MReader vision recognition protocol error=\(error.localizedDescription) excerpt=\(excerpt)")
+            MReaderLog.aiVision.error("vision recognition protocol error=\(MReaderLog.describe(error), privacy: .public) bytes=\(excerpt.utf8.count, privacy: .public)")
+            MReaderLog.content("vision recognition protocol error excerpt=\(excerpt)", logger: MReaderLog.aiVision)
             // 坐标越界/缺少 textBox 是可诊断的协议问题，不能被误报为泛化 JSON 错误。
             throw error
         } catch {
             let excerpt = content
                 .replacingOccurrences(of: "\n", with: " ")
                 .prefix(500)
-            print("MReader vision recognition invalid JSON excerpt=\(excerpt)")
+            MReaderLog.aiVision.error("vision recognition invalid JSON bytes=\(excerpt.utf8.count, privacy: .public)")
+            MReaderLog.content("vision recognition invalid JSON excerpt=\(excerpt)", logger: MReaderLog.aiVision)
             throw VisionTranslationError.invalidJSON
         }
         if blocks.isEmpty, strictTranslationGeometry {
@@ -2298,7 +2304,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                       isUnsupportedResponseFormat(error) else {
                     throw error
                 }
-                print("MReader vision response_format fallback model=\(model) from=\(mode.rawValue) to=\(fallback.rawValue)")
+                MReaderLog.aiVision.notice("vision response_format fallback model=\(model, privacy: .public) from=\(mode.rawValue, privacy: .public) to=\(fallback.rawValue, privacy: .public)")
                 VisionResponseFormatCache.shared.set(fallback, for: cacheKey)
                 mode = fallback
             }
@@ -2743,7 +2749,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         )
     }
 
-    private enum VisionTranslationError: LocalizedError {
+    enum VisionTranslationError: LocalizedError {
         case api(String)
         case imageEncodingFailed
         case invalidJSON
@@ -3279,7 +3285,8 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             let compactClassification = classification.replacingOccurrences(of: " ", with: "")
             guard !ignoredClassifications.contains(compactClassification),
                   !looksLikeNonContentText(text) else {
-                print("MReader vision recognition filtered type=\(classification) text=\(text.prefix(80))")
+                MReaderLog.aiVision.debug("vision recognition filtered type=\(classification, privacy: .public) characters=\(text.count, privacy: .public)")
+                MReaderLog.content("vision recognition filtered text=\(text.prefix(80))", logger: MReaderLog.aiVision)
                 return nil
             }
             return RawRecognitionItem(
@@ -3726,13 +3733,15 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             if !safeRect.contains(CGPoint(x: block.boundingBox.midX, y: block.boundingBox.midY)) {
                 annotated.isFiltered = true
                 annotated.filterReason = "安全区外"
-                print("MReader OCR filter text=\(text) reason=安全区外 box=\(block.boundingBox)")
+                MReaderLog.aiVision.debug("OCR filter reason=safe-area box=\(String(describing: block.boundingBox), privacy: .public)")
+                MReaderLog.content("OCR filter text=\(text) reason=safe-area", logger: MReaderLog.aiVision)
                 return annotated
             }
             if let noiseReason = edgeNoiseReason(text) {
                 annotated.isFiltered = true
                 annotated.filterReason = noiseReason
-                print("MReader OCR filter text=\(text) reason=\(noiseReason)")
+                MReaderLog.aiVision.debug("OCR filter reason=\(noiseReason, privacy: .public)")
+                MReaderLog.content("OCR filter text=\(text) reason=\(noiseReason)", logger: MReaderLog.aiVision)
                 return annotated
             }
 
@@ -3741,13 +3750,15 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             if text.count <= 2 && height < minimumHeight * 1.55 {
                 annotated.isFiltered = true
                 annotated.filterReason = "短文本过小"
-                print("MReader OCR filter text=\(text) reason=短文本过小 height=\(height)")
+                MReaderLog.aiVision.debug("OCR filter reason=short-text-too-small height=\(height, privacy: .public)")
+                MReaderLog.content("OCR filter text=\(text) reason=short-text-too-small", logger: MReaderLog.aiVision)
                 return annotated
             }
             if height < minimumHeight || area < minimumArea {
                 annotated.isFiltered = true
                 annotated.filterReason = "字号/面积过小"
-                print("MReader OCR filter text=\(text) reason=字号/面积过小 height=\(height) area=\(area)")
+                MReaderLog.aiVision.debug("OCR filter reason=font-or-area-too-small height=\(height, privacy: .public) area=\(area, privacy: .public)")
+                MReaderLog.content("OCR filter text=\(text) reason=font-or-area-too-small", logger: MReaderLog.aiVision)
                 return annotated
             }
             annotated.isFiltered = false

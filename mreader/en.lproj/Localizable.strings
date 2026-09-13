@@ -100,6 +100,11 @@
 "ocr.magnifySize" = "Magnify Text Size";
 "ocr.safeArea" = "Ignore Edge Area";
 "ocr.aiTranslation" = "AI Translation";
+
+/* 审查 #15：同一个 key 曾同时承担 Section / Toggle / 导航标题三种语义 */
+"ocr.aiTranslation.sectionTitle" = "AI Translation";
+"ocr.aiTranslation.toggleTitle" = "AI Translation";
+"ocr.aiTranslation.navigationTitle" = "AI Translation";
 "ocr.translationMode" = "Translation Mode";
 "ocr.translationMode.ocr" = "OCR Text";
 "ocr.translationMode.vision" = "Vision Image";
@@ -580,3 +585,7 @@
 "settings.visionPrompt.invalid" = "This Vision prompt template is unusable; MReader falls back to the built-in protocol template.";
 "settings.visionPrompt.missingPlaceholders" = "Missing placeholders: ";
 "settings.visionPrompt.missingTokens" = "Missing protocol fields: ";
+
+/* AI 诊断日志开关（审查 #10） */
+"settings.aiDiagnosticLogging" = "AI diagnostic logging";
+"settings.aiDiagnosticLoggingFooter" = "When enabled, troubleshooting writes raw model responses and source-text snippets to the on-device system log. Keep it off for everyday use: with it disabled, logs contain only the model, HTTP status, and error type — never source text or translations.";

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import UIKit
+import os
 
 nonisolated enum AITranslationPrefetchPolicy {
     static func pageIndices(
@@ -216,7 +217,7 @@ actor AITranslationPageCoordinator {
         )
         let key = contextualRequest.cacheKey
         if let cached = cachedBlocks(forKey: key) {
-            print("MReader AI translation cache hit key=\(key.prefix(10)) blocks=\(cached.count)")
+            MReaderLog.aiTranslation.debug("translation cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.count, privacy: .public)")
             await TranslationContextRegistry.shared.record(
                 scopeID: contextualRequest.contextScopeID,
                 pageIndex: contextualRequest.pageIndex,
@@ -225,7 +226,7 @@ actor AITranslationPageCoordinator {
             return cached
         }
         if let existing = inFlight[key] {
-            print("MReader AI translation joined in-flight key=\(key.prefix(10))")
+            MReaderLog.aiTranslation.debug("translation joined in-flight key=\(key.prefix(10), privacy: .public)")
             return try await existing.value.blocks
         }
 
@@ -244,7 +245,7 @@ actor AITranslationPageCoordinator {
                     blocks: result.blocks
                 )
             } else {
-                print("MReader AI translation cache skipped explicit partial key=\(key.prefix(10)) blocks=\(result.blocks.count)")
+                MReaderLog.aiTranslation.notice("translation cache skipped explicit partial key=\(key.prefix(10), privacy: .public) blocks=\(result.blocks.count, privacy: .public)")
             }
             return result.blocks
         } catch {
@@ -289,7 +290,7 @@ actor AITranslationPageCoordinator {
             !(block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         guard isComplete else {
-            print("MReader AI translation cache skipped partial key=\(key.prefix(10)) blocks=\(blocks.count)")
+            MReaderLog.aiTranslation.notice("translation cache skipped partial key=\(key.prefix(10), privacy: .public) blocks=\(blocks.count, privacy: .public)")
             return
         }
         insertIntoMemory(blocks, forKey: key)
@@ -300,7 +301,7 @@ actor AITranslationPageCoordinator {
         guard let data = try? JSONEncoder().encode(page) else { return }
         try? data.write(to: fileURL(forKey: key), options: .atomic)
         pruneDiskCacheIfNeeded()
-        print("MReader AI translation cache stored key=\(key.prefix(10)) blocks=\(blocks.count)")
+        MReaderLog.aiTranslation.debug("translation cache stored key=\(key.prefix(10), privacy: .public) blocks=\(blocks.count, privacy: .public)")
     }
 
     private func insertIntoMemory(_ blocks: [TextBlock], forKey key: String) {
@@ -396,7 +397,7 @@ nonisolated enum AITranslationPagePipeline {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                print("MReader vision source review fallback reason=\(error.localizedDescription)")
+                MReaderLog.aiVision.notice("vision source review fallback reason=\(MReaderLog.describe(error), privacy: .public)")
             }
             missingBlockIDs = blocks.compactMap { block in
                 (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -515,9 +516,6 @@ nonisolated enum AITranslationPagePipeline {
         if !missing.isEmpty {
             try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: request)
         }
-        let completed = translated.filter {
-            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
         let missingBlockIDs = translated.compactMap { block in
             let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return translation.isEmpty ? block.id : nil
@@ -555,7 +553,7 @@ nonisolated enum AITranslationPagePipeline {
             try await applyBatchTranslation(to: &blocks, indexes: indexes, request: request)
         } catch let error as AITranslationRequestError
             where error.isFormatFailure || error.isTranslationContentFailure {
-            print("MReader OCR 整页翻译需要逐气泡恢复: \(error.localizedDescription)")
+            MReaderLog.aiPage.notice("OCR page translation needs per-bubble recovery reason=\(MReaderLog.describe(error), privacy: .public)")
             try await applyPerBubbleTranslation(to: &blocks, indexes: indexes, request: request)
         }
     }

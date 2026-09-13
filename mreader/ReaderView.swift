@@ -1257,7 +1257,7 @@ struct ReaderView: View {
     private var comicSettingsSheet: some View {
         NavigationStack {
             Form {
-                Section(header: Text("ocr.aiTranslation".localized)) {
+                Section(header: Text("ocr.aiTranslation.sectionTitle".localized)) {
                     Toggle("ocr.enable".localized, isOn: Binding(
                         get: { comic.isOCREnabled },
                         set: { newValue in updateComic { $0.isOCREnabled = newValue } }
@@ -1293,7 +1293,7 @@ struct ReaderView: View {
                     }
                     .disabled(!comic.isOCREnabled)
 
-                    Toggle("ocr.aiTranslation".localized, isOn: Binding(
+                    Toggle("ocr.aiTranslation.toggleTitle".localized, isOn: Binding(
                         get: { comic.isAITranslationEnabled },
                         set: { newValue in updateComic { $0.isAITranslationEnabled = newValue } }
                     ))
@@ -5641,7 +5641,7 @@ private struct TranslationTextRenderer: View {
                         .padding(20)
                         .textSelection(.enabled)
                 }
-                .navigationTitle("ocr.aiTranslation".localized)
+                .navigationTitle("ocr.aiTranslation.navigationTitle".localized)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("nav.done".localized) {
