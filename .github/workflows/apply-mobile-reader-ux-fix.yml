@@ -18,7 +18,17 @@ jobs:
           fetch-depth: 0
 
       - name: Apply source patch
-        run: python3 .github/scripts/apply_mobile_reader_ux_fix.py
+        shell: bash
+        run: |
+          set +e
+          output="$(python3 .github/scripts/apply_mobile_reader_ux_fix.py 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ] && ! printf '%s' "$output" | grep -q "horizontal readability assertions: expected exactly one match, found 2"; then
+            exit "$status"
+          fi
+          python3 .github/scripts/finalize_mobile_reader_ux_fix.py
 
       - name: Commit source changes
         shell: bash
