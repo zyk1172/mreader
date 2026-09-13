@@ -22,7 +22,9 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    static let translationCacheRevision = "translation-v21-context-recovery"
+    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核，
+    /// 会改写 sourceText 与 translation unit 数量，旧缓存必须失效。
+    static let translationCacheRevision = "translation-v22-vision-slice-merge-and-source-review"
     static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
 
     let pageURL: URL
@@ -365,9 +367,45 @@ nonisolated enum AITranslationPagePipeline {
                 visionModelDescriptor: request.configuration.visionModelDescriptor,
                 textFallbackModelDescriptor: request.configuration.textModelDescriptor
             )
+            // Vision 的 sourceText 与 textBox 出自同一个模型，没有独立证据源。
+            // 对可疑 block 做一次局部 text-first 复核，只重译被修正的 block（审查 #3）。
+            var blocks = result.blocks
+            var missingBlockIDs = result.missingBlockIDs
+            do {
+                let review = try await TranslationRuntimeService.reverifyVisionSourceTexts(
+                    image: request.image,
+                    blocks: blocks,
+                    apiKey: request.configuration.apiKey,
+                    baseURL: request.configuration.baseURL,
+                    visionModel: request.configuration.visionModel,
+                    visionModelDescriptor: request.configuration.visionModelDescriptor,
+                    sourceLanguagePreference: request.sourceLanguagePreference,
+                    maximumRegionCount: AITranslator.VisionSourceReviewPolicy.maximumRegionCount
+                )
+                if !review.correctedBlockIDs.isEmpty {
+                    blocks = review.blocks
+                    let correctedIndexes = blocks.indices.filter {
+                        review.correctedBlockIDs.contains(blocks[$0].id)
+                    }
+                    try await applyBatchTranslationSafely(
+                        to: &blocks,
+                        indexes: correctedIndexes,
+                        request: request
+                    )
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("MReader vision source review fallback reason=\(error.localizedDescription)")
+            }
+            missingBlockIDs = blocks.compactMap { block in
+                (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? block.id
+                    : nil
+            }
             return AITranslationPipelineResult(
-                blocks: result.blocks,
-                isComplete: result.isComplete
+                blocks: blocks,
+                isComplete: result.failedSlices == 0 && missingBlockIDs.isEmpty
             )
         }
     }

@@ -575,3 +575,8 @@
 "ocr.translationNeedsExpansion" = "译文需要展开阅读";
 "ocr.inPlaceTranslation" = "原位译文";
 "ocr.inPlaceTranslationDescription" = "仅对可靠对白气泡启用可随时关闭的原位覆盖；拟声词仍保留原艺术字并使用注释。";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "当前视觉 Prompt 模板不可用，已自动回退为内置协议模板。";
+"settings.visionPrompt.missingPlaceholders" = "缺少占位符：";
+"settings.visionPrompt.missingTokens" = "缺少协议字段：";

@@ -568,3 +568,8 @@
 "ocr.translationNeedsExpansion" = "翻訳を展開して読む必要があります";
 "ocr.inPlaceTranslation" = "インプレース翻訳";
 "ocr.inPlaceTranslationDescription" = "信頼できる吹き出しだけを可逆なインプレース表示にし、効果音の原画は保持します。";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "この Vision プロンプトは使用できないため、組み込みプロトコルテンプレートに切り替えました。";
+"settings.visionPrompt.missingPlaceholders" = "不足しているプレースホルダー：";
+"settings.visionPrompt.missingTokens" = "不足しているプロトコル項目：";

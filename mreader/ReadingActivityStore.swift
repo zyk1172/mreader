@@ -107,12 +107,62 @@ final class ReadingActivityStore: ObservableObject {
 
     private let storageURL: URL
     private let calendar: Calendar
+    /// 串行后台队列：JSON 编解码与读写盘全部在这里，绝不在主线程做同步 IO（审查 #8）。
+    private let ioQueue = DispatchQueue(label: "com.mreader.reading-activity.io", qos: .utility)
+    /// 磁盘快照是否已应用；在它之前发生的写盘要靠合并而不是覆盖。
+    private var didMutateSinceLoad = false
 
     init(calendar: Calendar = .current, storageURL: URL? = nil) {
         self.calendar = calendar
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.storageURL = storageURL ?? support.appendingPathComponent("reading_activity.json")
-        load()
+        startLoading()
+    }
+
+    /// 启动路径不再阻塞主线程：读盘 + 解码在后台串行队列完成，结果回到 MainActor 应用。
+    private func startLoading() {
+        let url = storageURL
+        ioQueue.async { [weak self] in
+            let loaded = Self.readDays(from: url)
+            Task { @MainActor [weak self] in
+                self?.applyLoadedDays(loaded)
+            }
+        }
+    }
+
+    private func applyLoadedDays(_ loaded: [ReadingActivityDay]?) {
+        guard let loaded, !loaded.isEmpty else { return }
+        guard !didMutateSinceLoad else {
+            // 读盘完成前已经有新数据落盘：合并而不是覆盖，避免丢掉磁盘上的历史天数。
+            mergeSyncedDays(loaded)
+            return
+        }
+        var normalized = loaded
+        for index in normalized.indices {
+            normalizeDeviceCounters(&normalized[index])
+        }
+        days = normalized.sorted { $0.dateKey < $1.dateKey }
+    }
+
+    nonisolated private static func readDays(from url: URL) -> [ReadingActivityDay]? {
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
+            return nil
+        }
+        return decoded
+    }
+
+    nonisolated private static func writeDays(_ days: [ReadingActivityDay], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(days)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            print("保存阅读统计失败: \(error.localizedDescription)")
+        }
     }
 
     func record(
@@ -309,18 +359,6 @@ final class ReadingActivityStore: ObservableObject {
         )
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: storageURL),
-              let decoded = try? JSONDecoder().decode([ReadingActivityDay].self, from: data) else {
-            return
-        }
-        var normalized = decoded
-        for index in normalized.indices {
-            normalizeDeviceCounters(&normalized[index])
-        }
-        days = normalized.sorted { $0.dateKey < $1.dateKey }
-    }
-
     private func normalizeDeviceCounters(_ day: inout ReadingActivityDay) {
         if day.syncedDeviceSeconds.isEmpty, day.seconds > 0 {
             day.syncedDeviceSeconds[ICloudSyncDeviceIdentity.legacyDeviceID] = day.seconds
@@ -333,15 +371,12 @@ final class ReadingActivityStore: ObservableObject {
     }
 
     private func save() {
-        do {
-            try FileManager.default.createDirectory(
-                at: storageURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONEncoder().encode(days)
-            try data.write(to: storageURL, options: .atomic)
-        } catch {
-            print("保存阅读统计失败: \(error.localizedDescription)")
+        // 只在主线程取快照；编码与写盘在串行后台队列执行，避免每次记录都阻塞 UI。
+        didMutateSinceLoad = true
+        let snapshot = days
+        let url = storageURL
+        ioQueue.async {
+            Self.writeDays(snapshot, to: url)
         }
     }
 }

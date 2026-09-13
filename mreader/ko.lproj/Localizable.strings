@@ -568,3 +568,8 @@
 "ocr.translationNeedsExpansion" = "번역을 펼쳐서 읽어야 합니다";
 "ocr.inPlaceTranslation" = "원위치 번역";
 "ocr.inPlaceTranslationDescription" = "신뢰할 수 있는 대사 말풍선만 되돌릴 수 있는 원위치 표시를 사용하고 효과음 원화는 유지합니다.";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "이 Vision 프롬프트 템플릿을 사용할 수 없어 내장 프로토콜 템플릿으로 대체했습니다.";
+"settings.visionPrompt.missingPlaceholders" = "누락된 자리 표시자: ";
+"settings.visionPrompt.missingTokens" = "누락된 프로토콜 필드: ";

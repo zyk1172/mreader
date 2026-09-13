@@ -1103,7 +1103,10 @@ class AITranslator {
                 basePrompt: promptTemplate,
                 previousContext: previousContext
             ),
-            strictTranslationGeometry: false
+            strictTranslationGeometry: false,
+            // 实时路径：长条页切片必须先把跨切片半句拼回完整原文，
+            // 缺译文的新 block 会在下面走文本模型重新翻译（审查 #2）。
+            mergeSliceObservations: true
         )
         try Task.checkCancellation()
 
@@ -1242,7 +1245,7 @@ class AITranslator {
         ).blocks
     }
 
-    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionPageUsingModelWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool, mergeSliceObservations: Bool = false) async throws -> VisionPageRecognitionResult {
         if shouldSliceBeforeVision(image, viewportAspect: viewportAspect) {
             return try await recognizeVisionSlicesWithStats(
                 image: image,
@@ -1255,7 +1258,8 @@ class AITranslator {
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
                 translationPromptTemplate: translationPromptTemplate,
-                strictTranslationGeometry: strictTranslationGeometry
+                strictTranslationGeometry: strictTranslationGeometry,
+                mergeSliceObservations: mergeSliceObservations
             )
         }
         do {
@@ -1302,17 +1306,18 @@ class AITranslator {
                 additionalInstructions: additionalInstructions,
                 translationTarget: translationTarget,
                 translationPromptTemplate: translationPromptTemplate,
-                strictTranslationGeometry: strictTranslationGeometry
+                strictTranslationGeometry: strictTranslationGeometry,
+                mergeSliceObservations: mergeSliceObservations
             )
         }
     }
 
-    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> VisionPageRecognitionResult {
+    private static func recognizeVisionSlicesWithStats(image: UIImage, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, viewportAspect: CGFloat, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool, mergeSliceObservations: Bool = false) async throws -> VisionPageRecognitionResult {
         let slices = visionSlices(from: image, viewportAspect: viewportAspect)
         print("MReader vision recognition sliced image=\(Int(image.size.width))x\(Int(image.size.height)) slices=\(slices.count) model=\(model)")
         // 有限并发处理切片：2 路并发显著降低总耗时，同时避免并发过高触发限流。
         let maximumConcurrentSlices = 2
-        var fallbackBlocks: [TextBlock] = []
+        var sliceBlocks: [Int: [TextBlock]] = [:]
         var lastError: Error?
         var successfulSlices = 0
         var failedSlices = 0
@@ -1357,7 +1362,8 @@ class AITranslator {
                 }
                 switch result {
                 case .success(let blocks):
-                    fallbackBlocks.append(contentsOf: blocks)
+                    // 按切片下标归档：跨切片拼接必须知道每一块来自哪个切片。
+                    sliceBlocks[index, default: []].append(contentsOf: blocks)
                     successfulSlices += 1
                 case .failure(let error):
                     lastError = error
@@ -1370,7 +1376,27 @@ class AITranslator {
                 }
             }
         }
-        let deduped = deduplicatedMangaTextBlocks(fallbackBlocks, isRightToLeft: isRightToLeft)
+        let orderedBlocks = sliceBlocks.keys.sorted().flatMap { sliceBlocks[$0] ?? [] }
+        // 先跨切片拼回完整原文，再交给 OCRCandidateResolver 去重（审查 #2）。
+        // 拼接产生的 block translation 为 nil，由调用方重新翻译完整原文。
+        let mergedBlocks: [TextBlock]
+        if mergeSliceObservations, slices.count > 1 {
+            let observations = slices.enumerated().map { index, slice in
+                VisionSliceObservation(
+                    index: index,
+                    sourceRect: slice.sourceRect,
+                    blocks: sliceBlocks[index] ?? []
+                )
+            }
+            let outcome = VisionSliceMerger.merge(observations: observations, isRightToLeft: isRightToLeft)
+            if !outcome.retranslationRequiredBlockIDs.isEmpty {
+                print("MReader vision slice merge joined blocks=\(outcome.retranslationRequiredBlockIDs.count)")
+            }
+            mergedBlocks = outcome.blocks
+        } else {
+            mergedBlocks = orderedBlocks
+        }
+        let deduped = deduplicatedMangaTextBlocks(mergedBlocks, isRightToLeft: isRightToLeft)
         if deduped.isEmpty,
            strictTranslationGeometry,
            failedSlices == 0,
@@ -1830,6 +1856,327 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
     visualReviewedBlock(original: original, review: review)
 }
 
+    // MARK: - Vision 原文真实性复核（审查 #3）
+    //
+    // 完整 Vision 模式下 sourceText / translation / textBox 出自同一个模型，
+    // 没有任何独立证据源确认“模型的文字就是框里的文字”。这里只对最可疑的一小部分
+    // block 裁剪局部图片做一次 text-first 复核：只重新确认 sourceText，被修正的
+    // block 由调用方单独重译。绝不是每页再跑一次整页 OCR。
+
+    /// 需要复核的可疑 block 及其局部裁剪区域（整页归一化坐标）。
+    nonisolated struct VisionSourceReviewRegion: Sendable, Equatable {
+        let blockID: UUID
+        let sourceRect: CGRect
+        let reason: String
+    }
+
+    nonisolated struct VisionSourceReviewResult: Sendable {
+        /// 复核后的 block 集合（顺序与 id 保持不变）。
+        let blocks: [TextBlock]
+        /// 原文被修正的 block id。其 `translation` 已被清空，必须重新翻译。
+        let correctedBlockIDs: [UUID]
+        /// 实际成功完成复核的 block id。
+        let reviewedBlockIDs: [UUID]
+    }
+
+    /// 可疑判据的阈值。集中定义，便于测试直接引用。
+    nonisolated enum VisionSourceReviewPolicy {
+        static let confidenceThreshold: Double = 0.75
+        static let maximumRegionCount = 6
+        /// 相邻 block 交叠面积 / 较小 block 面积 超过此值即视为“可能看错行/看错气泡”。
+        static let neighborOverlapRatio: CGFloat = 0.55
+        static let extremeAspectRatio: CGFloat = 12
+        static let minimumNormalizedArea: CGFloat = 0.000_05
+    }
+
+    static func visionSourceReviewRegionsForDiagnostics(
+        _ blocks: [TextBlock],
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        confidenceThreshold: Double = VisionSourceReviewPolicy.confidenceThreshold,
+        maximumCount: Int = VisionSourceReviewPolicy.maximumRegionCount
+    ) -> [VisionSourceReviewRegion] {
+        visionSourceReviewRegions(
+            blocks,
+            sourceLanguagePreference: sourceLanguagePreference,
+            confidenceThreshold: confidenceThreshold,
+            maximumCount: maximumCount
+        )
+    }
+
+    private static func visionSourceReviewRegions(
+        _ blocks: [TextBlock],
+        sourceLanguagePreference: TranslationSourceLanguage?,
+        confidenceThreshold: Double,
+        maximumCount: Int
+    ) -> [VisionSourceReviewRegion] {
+        let visible = blocks.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !visible.isEmpty, maximumCount > 0 else { return [] }
+
+        // 相邻 block 大面积重叠：两侧都可能错行/错气泡，必须一起进复核。
+        var overlappedIDs = Set<UUID>()
+        for outer in visible.indices {
+            for inner in visible.indices where inner > outer {
+                let intersection = visible[outer].boundingBox.intersection(visible[inner].boundingBox)
+                guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { continue }
+                let intersectionArea = intersection.width * intersection.height
+                let smallerArea = min(
+                    area(visible[outer].boundingBox),
+                    area(visible[inner].boundingBox)
+                )
+                guard smallerArea > 0,
+                      intersectionArea / smallerArea >= VisionSourceReviewPolicy.neighborOverlapRatio else {
+                    continue
+                }
+                overlappedIDs.insert(visible[outer].id)
+                overlappedIDs.insert(visible[inner].id)
+            }
+        }
+
+        struct Suspicion {
+            let id: UUID
+            let reason: String
+            let priority: Int
+            let confidence: Double
+            let minY: CGFloat
+        }
+
+        var suspicions: [Suspicion] = []
+        for block in visible {
+            let reason: String
+            let priority: Int
+            if overlappedIDs.contains(block.id) {
+                reason = "overlap"; priority = 0
+            } else if block.confidence < confidenceThreshold {
+                reason = "low-confidence"; priority = 1
+            } else if isAnomalousVisionGeometry(block.boundingBox) {
+                reason = "geometry"; priority = 2
+            } else if appearsGarbled(block.text) {
+                reason = "garbled"; priority = 3
+            } else if visionSourceLanguageConflicts(block.text, preference: sourceLanguagePreference) {
+                reason = "language"; priority = 4
+            } else if block.ocrSource.contains("slice-merge") {
+                // 跨切片拼接的结果本身缺少独立证据，优先复核。
+                reason = "slice-overlap"; priority = 5
+            } else {
+                continue
+            }
+            suspicions.append(Suspicion(
+                id: block.id,
+                reason: reason,
+                priority: priority,
+                confidence: block.confidence,
+                minY: block.boundingBox.minY
+            ))
+        }
+
+        suspicions.sort { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+            if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }
+            if lhs.minY != rhs.minY { return lhs.minY < rhs.minY }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+
+        return suspicions.prefix(maximumCount).compactMap { suspicion in
+            guard let block = visible.first(where: { $0.id == suspicion.id }) else { return nil }
+            // 竖排裁剪需要看到相邻列，否则永远只复核孤立的一列。
+            let paddingX = block.textOrientation == .vertical
+                ? max(block.boundingBox.width * 1.25, 0.04)
+                : max(block.boundingBox.width * 0.20, 0.010)
+            let paddingY = max(block.boundingBox.height * 0.20, 0.008)
+            let padded = block.boundingBox
+                .insetBy(dx: -paddingX, dy: -paddingY)
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard padded.width > 0, padded.height > 0 else { return nil }
+            return VisionSourceReviewRegion(
+                blockID: suspicion.id,
+                sourceRect: padded,
+                reason: suspicion.reason
+            )
+        }
+    }
+
+    /// 只重新确认 sourceText 的局部复核。返回被修正原文的 block（translation 已清空）。
+    static func reverifyVisionSourceText(
+        image: UIImage,
+        blocks: [TextBlock],
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        modelDescriptor: AIModelDescriptor? = nil,
+        sourceLanguagePreference: TranslationSourceLanguage? = nil,
+        maximumRegionCount: Int = VisionSourceReviewPolicy.maximumRegionCount
+    ) async throws -> VisionSourceReviewResult {
+        let regions = visionSourceReviewRegions(
+            blocks,
+            sourceLanguagePreference: sourceLanguagePreference,
+            confidenceThreshold: VisionSourceReviewPolicy.confidenceThreshold,
+            maximumCount: maximumRegionCount
+        )
+        guard !regions.isEmpty else {
+            return VisionSourceReviewResult(blocks: blocks, correctedBlockIDs: [], reviewedBlockIDs: [])
+        }
+        guard let cgImage = image.cgImage else {
+            return VisionSourceReviewResult(blocks: blocks, correctedBlockIDs: [], reviewedBlockIDs: [])
+        }
+
+        let descriptor = modelDescriptor ?? AIModelProtocolCatalog.descriptor(for: model)
+        let pagePixelBounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+        var reviewedBlocks = blocks
+        var correctedIDs: [UUID] = []
+        var completedReviewIDs: [UUID] = []
+
+        for region in regions {
+            try Task.checkCancellation()
+            guard let index = reviewedBlocks.firstIndex(where: { $0.id == region.blockID }) else { continue }
+            let pixelRect = CGRect(
+                x: region.sourceRect.minX * CGFloat(cgImage.width),
+                y: region.sourceRect.minY * CGFloat(cgImage.height),
+                width: region.sourceRect.width * CGFloat(cgImage.width),
+                height: region.sourceRect.height * CGFloat(cgImage.height)
+            ).integral.intersection(pagePixelBounds)
+            guard pixelRect.width >= 8,
+                  pixelRect.height >= 8,
+                  let crop = cgImage.cropping(to: pixelRect) else { continue }
+
+            do {
+                let review = try await recognizeVisionRegionText(
+                    image: UIImage(cgImage: crop, scale: 1, orientation: .up),
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    model: model,
+                    modelDescriptor: descriptor
+                )
+                completedReviewIDs.append(region.blockID)
+                let current = reviewedBlocks[index].text
+                guard let corrected = correctedVisionSourceText(original: current, review: review),
+                      visionReviewNormalizedText(corrected) != visionReviewNormalizedText(current) else {
+                    continue
+                }
+                reviewedBlocks[index] = visionSourceCorrectedBlock(
+                    original: reviewedBlocks[index],
+                    text: corrected
+                )
+                correctedIDs.append(region.blockID)
+                print("MReader vision source review corrected block=\(region.blockID) reason=\(region.reason)")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("MReader vision source review fallback block=\(region.blockID) reason=\(error.localizedDescription)")
+            }
+        }
+
+        return VisionSourceReviewResult(
+            blocks: reviewedBlocks,
+            correctedBlockIDs: correctedIDs,
+            reviewedBlockIDs: completedReviewIDs
+        )
+    }
+
+    static func correctedVisionSourceTextForDiagnostics(
+        original: String,
+        review: VisionRegionTextCandidate
+    ) -> String? {
+        correctedVisionSourceText(original: original, review: review)
+    }
+
+    static func visionSourceReviewNormalizedTextForDiagnostics(_ text: String) -> String {
+        visionReviewNormalizedText(text)
+    }
+
+    static func visionSourceCorrectedBlockForDiagnostics(original: TextBlock, text: String) -> TextBlock {
+        visionSourceCorrectedBlock(original: original, text: text)
+    }
+
+    static func visionSourceLanguageConflictsForDiagnostics(
+        _ text: String,
+        preference: TranslationSourceLanguage?
+    ) -> Bool {
+        visionSourceLanguageConflicts(text, preference: preference)
+    }
+
+    /// 只有在复核证据更强时才允许覆盖原文：不能用一个更差的猜测污染 sourceText。
+    private static func correctedVisionSourceText(
+        original: String,
+        review: VisionRegionTextCandidate
+    ) -> String? {
+        let candidate = review.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty, !looksLikeVisionRefusal(candidate) else { return nil }
+        let similarity = visualVerificationTextSimilarity(original, candidate)
+        // 文字一致：保留模型原文。
+        if similarity >= 0.92 { return nil }
+        // 原文本身就是乱码：只要复核有基本可信度就采纳。
+        if appearsGarbled(original), review.confidence >= 0.55 { return candidate }
+        // 明显冲突：必须复核置信度足够高。
+        if similarity < 0.55 {
+            return review.confidence >= 0.65 ? candidate : nil
+        }
+        // 部分一致：需要显著更高的置信度。
+        return review.confidence >= 0.80 ? candidate : nil
+    }
+
+    private static func visionSourceCorrectedBlock(original: TextBlock, text: String) -> TextBlock {
+        TextBlock(
+            id: original.id,
+            text: text,
+            boundingBox: original.boundingBox,
+            // 原文被修正：旧译文对应的是错误原文，必须清空后只重译这一个 block。
+            translation: nil,
+            confidence: max(original.confidence, VisionSourceReviewPolicy.confidenceThreshold),
+            ocrSource: "vision-source-review",
+            isFiltered: false,
+            filterReason: nil,
+            estimatedFontScale: original.estimatedFontScale,
+            textColorHex: original.textColorHex,
+            bubbleBox: original.bubbleBox,
+            layoutSafeRegion: original.layoutSafeRegion,
+            polygon: original.polygon,
+            bubblePolygon: original.bubblePolygon,
+            translationLines: [],
+            textOrientation: original.textOrientation,
+            layoutRole: original.layoutRole,
+            sourceLineCount: original.sourceLineCount
+        )
+    }
+
+    private static func visionReviewNormalizedText(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+    }
+
+    private static func isAnomalousVisionGeometry(_ box: CGRect) -> Bool {
+        guard box.width > 0, box.height > 0 else { return true }
+        guard box.minX >= -0.002, box.minY >= -0.002,
+              box.maxX <= 1.002, box.maxY <= 1.002 else { return true }
+        let boxArea = box.width * box.height
+        guard boxArea >= VisionSourceReviewPolicy.minimumNormalizedArea else { return true }
+        let longSide = max(box.width, box.height)
+        let shortSide = max(min(box.width, box.height), 0.0001)
+        return longSide / shortSide > VisionSourceReviewPolicy.extremeAspectRatio
+    }
+
+    /// 用户已明确原文语言时，模型返回明显不属于该语言的长串即视为冲突。
+    private static func visionSourceLanguageConflicts(
+        _ text: String,
+        preference: TranslationSourceLanguage?
+    ) -> Bool {
+        let scalars = text.unicodeScalars.filter { !$0.properties.isWhitespace }
+        guard scalars.count >= 8 else { return false }
+        let isLatinOnly = scalars.allSatisfy { $0.value < 0x0250 }
+        switch preference {
+        case .japanese, .korean, .simplifiedChinese, .traditionalChinese, .thai, .arabic:
+            // 非拉丁语言的页面里出现纯拉丁长串：多半是把画面英文当成正文或识别错语言。
+            return isLatinOnly && scalars.contains { CharacterSet.letters.contains($0) }
+        default:
+            return false
+        }
+    }
+
+    /// 面积工具（与候选解析保持同一语义）。
+    private static func area(_ rect: CGRect) -> CGFloat {
+        max(rect.width, 0) * max(rect.height, 0)
+    }
+
     private static func recognizeVisionImage(image: UIImage, sourceRect: CGRect, apiKey: String, baseURL: String, model: String, modelDescriptor: AIModelDescriptor, isRightToLeft: Bool, additionalInstructions: String, translationTarget: TranslationTargetLanguage?, translationPromptTemplate: String, strictTranslationGeometry: Bool) async throws -> [TextBlock] {
         guard !apiKey.isEmpty else { throw VisionTranslationError.api("未配置 API Key") }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionTranslationError.api("未配置模型") }
@@ -2273,8 +2620,91 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         String(format: "%.4f", Double(value))
     }
 
+    /// Vision 提示词协议契约。
+    ///
+    /// 用户可编辑的模板必须保留这些锚点：缺 `{targetLanguage}` 模型无从得知目标语言，
+    /// 缺 `{readingOrder}` 无法排序，缺 JSON 字段/`coordinateSpace` 直接导致整页失败。
+    /// 校验必须在“发出请求之前”发生，而不是等模型返回不可解析 JSON（审查 #6）。
+    nonisolated enum VisionPromptContract {
+        static let requiredPlaceholders = ["{targetLanguage}", "{readingOrder}"]
+        static let requiredProtocolTokens = [
+            "coordinateSpace",
+            "sourceText",
+            "translation",
+            "textBox",
+            "bubbleBox",
+            "layoutSafeRegion",
+            "confidence",
+            "classification"
+        ]
+
+        static func validate(_ template: String) -> VisionPromptValidation {
+            var issues: [VisionPromptValidation.Issue] = []
+            let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return VisionPromptValidation(issues: [.empty])
+            }
+            let lowered = trimmed.lowercased()
+            for placeholder in requiredPlaceholders where !trimmed.contains(placeholder) {
+                issues.append(.missingPlaceholder(placeholder))
+            }
+            for token in requiredProtocolTokens where !lowered.contains(token.lowercased()) {
+                issues.append(.missingProtocolToken(token))
+            }
+            return VisionPromptValidation(issues: issues)
+        }
+
+        /// 不可用的模板一律回退默认模板，绝不让坏协议进入请求。
+        static func effectiveTemplate(_ template: String) -> String {
+            validate(template).isUsable
+                ? template
+                : AITranslator.defaultVisionTranslationPromptTemplate
+        }
+    }
+
+    nonisolated struct VisionPromptValidation: Equatable, Sendable {
+        nonisolated enum Issue: Equatable, Sendable {
+            case empty
+            case missingPlaceholder(String)
+            case missingProtocolToken(String)
+        }
+
+        let issues: [Issue]
+
+        var isUsable: Bool { issues.isEmpty }
+
+        /// 面向用户的提示文案；可用时返回 nil。
+        var warningMessage: String? {
+            guard !issues.isEmpty else { return nil }
+            var parts: [String] = []
+            let missingPlaceholders = issues.compactMap { issue -> String? in
+                if case .missingPlaceholder(let value) = issue { return value }
+                return nil
+            }
+            let missingTokens = issues.compactMap { issue -> String? in
+                if case .missingProtocolToken(let value) = issue { return value }
+                return nil
+            }
+            if missingPlaceholders.isEmpty, missingTokens.isEmpty {
+                return "settings.visionPrompt.invalid".localized
+            }
+            if !missingPlaceholders.isEmpty {
+                parts.append("settings.visionPrompt.missingPlaceholders".localized + missingPlaceholders.joined(separator: " "))
+            }
+            if !missingTokens.isEmpty {
+                parts.append("settings.visionPrompt.missingTokens".localized + missingTokens.joined(separator: ", "))
+            }
+            return parts.joined(separator: "\n")
+        }
+    }
+
+    static func visionPromptValidationForDiagnostics(_ template: String) -> VisionPromptValidation {
+        VisionPromptContract.validate(template)
+    }
+
     private static func renderVisionPrompt(template: String, targetLanguage: String, isRightToLeft: Bool) -> String {
-        let usableTemplate = template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultVisionTranslationPromptTemplate : template
+        // 自定义模板缺少协议锚点时回退默认模板；坏协议不再被送到模型。
+        let usableTemplate = VisionPromptContract.effectiveTemplate(template)
         return usableTemplate
             .replacingOccurrences(of: "{targetLanguage}", with: targetLanguage)
             .replacingOccurrences(of: "{readingOrder}", with: isRightToLeft ? "从右到左、从上到下（右开本日漫）" : "从左到右、从上到下")

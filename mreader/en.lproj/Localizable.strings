@@ -575,3 +575,8 @@
 "ocr.translationNeedsExpansion" = "Translation needs expanded reading";
 "ocr.inPlaceTranslation" = "In-place translation";
 "ocr.inPlaceTranslationDescription" = "Use reversible in-place coverage only for reliable dialogue bubbles; sound effects keep their original artwork and use annotations.";
+
+/* Vision Prompt 协议校验（审查 #6） */
+"settings.visionPrompt.invalid" = "This Vision prompt template is unusable; MReader falls back to the built-in protocol template.";
+"settings.visionPrompt.missingPlaceholders" = "Missing placeholders: ";
+"settings.visionPrompt.missingTokens" = "Missing protocol fields: ";

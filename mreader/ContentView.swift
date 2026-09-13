@@ -1003,6 +1003,20 @@ struct ContentView: View {
                         Text("settings.visionPromptPlaceholder".localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        // 缺少 {targetLanguage} / {readingOrder} 或 JSON 协议字段时，
+                        // 请求会自动回退内置模板；这里必须让用户当场看见（审查 #6）。
+                        if let warning = AITranslator.VisionPromptContract
+                            .validate(visionTranslationPromptTemplate)
+                            .warningMessage {
+                            Label {
+                                Text(warning)
+                            } icon: {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
                         TextEditor(text: $visionTranslationPromptTemplate)
                             .font(.footnote.monospaced())
                             .scrollContentBackground(.hidden)
@@ -2141,7 +2155,9 @@ struct ContentView: View {
             } else {
                 translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
             }
-            visionTranslationPromptTemplate = backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
+            visionTranslationPromptTemplate = AITranslator.VisionPromptContract.effectiveTemplate(
+                backup.visionTranslationPromptTemplate ?? AITranslator.defaultVisionTranslationPromptTemplate
+            )
             isHapticFeedbackEnabled = backup.isHapticFeedbackEnabled
             translationColorStyleRaw = backup.translationColorStyle ?? translationColorStyleRaw
             isAITranslationBorderProgressEnabled = backup.isAITranslationBorderProgressEnabled ?? isAITranslationBorderProgressEnabled

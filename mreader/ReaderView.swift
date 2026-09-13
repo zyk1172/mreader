@@ -3049,6 +3049,8 @@ struct AnimatedPageReader: View {
     let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
+    /// 当前页是否处于放大态：放大时单指拖动属于平移，必须屏蔽翻页拖拽。
+    @State private var isPageZoomed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -3081,9 +3083,11 @@ struct AnimatedPageReader: View {
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
+                        guard !isPageZoomed else { return }
                         state = readingMode == .verticalPage ? value.translation.height : value.translation.width
                     }
                     .onEnded { value in
+                        guard !isPageZoomed else { return }
                         let axisLength = readingMode == .verticalPage ? geo.size.height : geo.size.width
                         let threshold = max(axisLength * 0.2, 72)
                         let rawDelta = readingMode == .verticalPage ? value.translation.height : value.translation.width
@@ -3095,6 +3099,7 @@ struct AnimatedPageReader: View {
                         }
                     }
             )
+            .onChange(of: currentPageIndex) { _, _ in isPageZoomed = false }
         }
     }
 
@@ -3200,6 +3205,10 @@ struct AnimatedPageReader: View {
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
             onTranslationStateChange: onTranslationStateChange,
+            onZoomChange: { zoomed in
+                guard index == currentPageIndex else { return }
+                isPageZoomed = zoomed
+            },
             onPreviousPage: previousPage,
             onNextPage: nextPage,
             areControlsVisible: areControlsVisible,
@@ -3247,6 +3256,8 @@ struct DoublePageReader: View {
     let onHideControls: () -> Void
 
     @GestureState private var dragOffset: CGFloat = 0
+    /// 任一页处于放大态时，单指拖动属于平移，屏蔽跨页拖拽。
+    @State private var isPageZoomed = false
 
     private var leftPageIndex: Int {
         currentPageIndex - currentPageIndex % 2
@@ -3278,9 +3289,11 @@ struct DoublePageReader: View {
             .gesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
+                        guard !isPageZoomed else { return }
                         state = value.translation.width
                     }
                     .onEnded { value in
+                        guard !isPageZoomed else { return }
                         let threshold = max(geo.size.width * 0.2, 72)
                         let logicalDelta = isRTL ? value.translation.width : -value.translation.width
                         if logicalDelta > threshold {
@@ -3290,6 +3303,7 @@ struct DoublePageReader: View {
                         }
                     }
             )
+            .onChange(of: leftPageIndex) { _, _ in isPageZoomed = false }
         }
     }
 
@@ -3316,6 +3330,10 @@ struct DoublePageReader: View {
             isPageTapGestureEnabled: false,
             isLongPressTranslationEnabled: areControlsVisible,
             onTranslationStateChange: onTranslationStateChange,
+            onZoomChange: { zoomed in
+                guard index == leftPageIndex || index == rightPageIndex else { return }
+                isPageZoomed = zoomed
+            },
             onPreviousPage: {},
             onNextPage: {},
             areControlsVisible: areControlsVisible,
@@ -3638,6 +3656,8 @@ struct LocalImageView: View {
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
     var onTranslationStateChange: (Bool) -> Void = { _ in }
+    /// 缩放态回传：外层翻页容器据此在 scale > 1 时屏蔽翻页拖拽。
+    var onZoomChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
     let areControlsVisible: Bool
@@ -3649,6 +3669,12 @@ struct LocalImageView: View {
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
+    /// 单指平移的基准位移：拖动开始时 offset 的取值，避免每次 onChanged 累积抖动。
+    @State private var lastOffset: CGSize = .zero
+    /// 覆盖层 GeometryReader 报告的未缩放内容尺寸，用于平移边界 clamp。
+    @State private var zoomContentSize: CGSize = .zero
+    /// 覆盖层布局缓存：只有排版输入真正变化时才重算整页 O(n²) 布局（审查 #7）。
+    @State private var layoutStore = TranslationLayoutStore()
     @State private var pendingSingleTapWorkItem: DispatchWorkItem?
     @State private var lastDoubleTapTime = Date.distantPast
     @State private var viewportWidth: CGFloat = 0
@@ -3723,11 +3749,16 @@ struct LocalImageView: View {
                                 ocrMagnificationOverlay(in: geo.size)
                                 ocrDebugOverlay(in: geo.size)
                             }
+                            .onAppear { zoomContentSize = geo.size }
+                            .onChange(of: geo.size) { _, newValue in zoomContentSize = newValue }
                         }
                     )
                     .scaleEffect(scale)
                     .offset(offset)
+                    // 放大后把图片裁剪在自身布局框内，避免溢出到相邻页面与翻页过渡叠加。
+                    .clipped()
                     .gesture(zoomGesture)
+                    .gesture(gatedPanGesture)
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
@@ -3860,6 +3891,18 @@ struct LocalImageView: View {
                 isTranslating = false
                 onTranslationStateChange(false)
             }
+            if isZoomedIn {
+                onZoomChange(false)
+            }
+        }
+        .onChange(of: isZoomedIn) { _, zoomed in
+            if !zoomed {
+                // 回到 1x：清空平移残留，避免下次放大沿用旧位移。
+                offset = .zero
+                lastOffset = .zero
+                lastScale = 1
+            }
+            onZoomChange(zoomed)
         }
         .onChange(of: translateRequestID) { _, _ in
             startTranslation(force: true)
@@ -4092,6 +4135,8 @@ struct LocalImageView: View {
                     .cornerRadius(6)
                     .frame(width: item.rect.size.width)
                     .position(x: item.rect.midX, y: item.rect.midY)
+                    // 放大镜是纯展示层：白卡不得吞掉其下方的翻页/长按/缩放手势。
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -4416,7 +4461,86 @@ struct LocalImageView: View {
         return bounds.isNull || bounds.width <= 0 || bounds.height <= 0 ? textRect : bounds
     }
 
+    // MARK: - 布局缓存键（审查 #7）
+
+    private func translationLayoutCacheKey(in size: CGSize) -> TranslationLayoutStore.Key {
+        TranslationLayoutStore.Key(
+            scope: "translation",
+            content: layoutContentFingerprint(visibleTranslationBlocks),
+            width: size.width,
+            height: size.height,
+            image: layoutImagePixelToken,
+            style: layoutStyleToken
+        )
+    }
+
+    private func ocrLayoutCacheKey(in size: CGSize) -> TranslationLayoutStore.Key {
+        TranslationLayoutStore.Key(
+            scope: "ocr-magnification",
+            content: layoutContentFingerprint(ocrTextBlocks),
+            width: size.width,
+            height: size.height,
+            image: layoutImagePixelToken,
+            style: layoutStyleToken
+        )
+    }
+
+    /// 排版输入指纹。只组合真正影响布局的 block 字段，O(n) 且不触碰 CoreText。
+    /// `Hasher` 在进程内稳定，用于缓存相等性判断足够。
+    private func layoutContentFingerprint(_ blocks: [TextBlock]) -> String {
+        var hasher = Hasher()
+        hasher.combine(blocks.count)
+        for block in blocks {
+            hasher.combine(block.id)
+            hasher.combine(block.text)
+            hasher.combine(block.translation ?? "")
+            hasher.combine(block.translationLines)
+            hasher.combine(block.textOrientation)
+            hasher.combine(block.layoutRole)
+            hasher.combine(block.translationContentRole)
+            hasher.combine(block.boundingBox)
+            hasher.combine(block.bubbleBox)
+            hasher.combine(block.layoutSafeRegion)
+            hasher.combine(block.estimatedFontScale)
+            hasher.combine(block.confidence)
+            hasher.combine(block.isFiltered)
+        }
+        return String(hasher.finalize())
+    }
+
+    private var layoutImagePixelToken: String {
+        if let cgImage = uiImage?.cgImage {
+            return "\(cgImage.width)x\(cgImage.height)"
+        }
+        if let uiImage {
+            return "\(Int(uiImage.size.width * uiImage.scale))x\(Int(uiImage.size.height * uiImage.scale))"
+        }
+        return "none"
+    }
+
+    private var layoutStyleToken: String {
+        [
+            "layout-v\(TranslationLayoutStore.layoutRevision)",
+            imageFitMode.rawValue,
+            targetLanguage,
+            isRightToLeftReading ? "rtl" : "ltr",
+            (comic?.prefersInPlaceTranslation ?? false) ? "in-place" : "overlay",
+            String(format: "%.4f", ocrTextScale),
+            String(format: "%.4f", ocrSafeAreaInset),
+            String(format: "%.5f", ocrMinimumTextHeight),
+            String(format: "%.4f", normalizedOCRScale),
+            String(format: "%.4f", uniformOCRFontSize),
+            String(format: "%.2f", measuredTextTranslationFontSize)
+        ].joined(separator: "|")
+    }
+
     private func translationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
+        layoutStore.translationItems(for: translationLayoutCacheKey(in: size)) {
+            computeTranslationLayoutItems(in: size)
+        }
+    }
+
+    private func computeTranslationLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
         let initialItems = visibleTranslationBlocks.map { translationLayoutItem(for: $0, in: size) }
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
@@ -4514,6 +4638,12 @@ struct LocalImageView: View {
     }
 
     private func ocrLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
+        layoutStore.ocrItems(for: ocrLayoutCacheKey(in: size)) {
+            computeOCRLayoutItems(in: size)
+        }
+    }
+
+    private func computeOCRLayoutItems(in size: CGSize) -> [TranslationLayoutItem] {
         var occupiedRects: [CGRect] = []
         var items: [TranslationLayoutItem] = []
         let transform = ocrDisplayTransform(in: size)
@@ -4586,6 +4716,7 @@ struct LocalImageView: View {
                 scale = 1
                 lastScale = 1
                 offset = .zero
+                lastOffset = .zero
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
             }
@@ -4683,10 +4814,17 @@ struct LocalImageView: View {
         }
     }
 
+    /// scale > 1.05 视为“已放大”。与点击/长按手势的门控阈值保持一致，
+    /// 单指拖动只有在放大态才被当作平移消费。
+    private var isZoomedIn: Bool { scale > 1.05 }
+
     private var zoomGesture: some Gesture {
         MagnificationGesture()
             .onChanged { value in
-                scale = min(max(lastScale * value, 1), 5)
+                let updated = min(max(lastScale * value, 1), 5)
+                scale = updated
+                // 缩小过程中同步收敛位移，避免图片被推出可视区域。
+                offset = clampedOffset(offset, scale: updated)
             }
             .onEnded { _ in
                 lastScale = scale
@@ -4695,9 +4833,57 @@ struct LocalImageView: View {
                         scale = 1
                         lastScale = 1
                         offset = .zero
+                        lastOffset = .zero
                     }
+                } else {
+                    offset = clampedOffset(offset, scale: scale)
+                    lastOffset = offset
                 }
             }
+    }
+
+    /// 单指平移：只在放大态生效，位移按图片实际显示矩形做边界 clamp，
+    /// 保证放大后图片始终铺满自身布局框（不露出空白）。
+    private var panGesture: some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                guard scale > 1.02 else { return }
+                offset = clampedOffset(
+                    CGSize(
+                        width: lastOffset.width + value.translation.width,
+                        height: lastOffset.height + value.translation.height
+                    ),
+                    scale: scale
+                )
+            }
+            .onEnded { _ in
+                guard scale > 1.02 else { return }
+                lastOffset = offset
+            }
+    }
+
+    /// 未放大时挂一个永不识别的拖拽，避免子视图手势抢占外层翻页拖拽；
+    /// 放大后切换为真正的平移手势（子视图手势优先于父级翻页手势）。
+    private var gatedPanGesture: AnyGesture<Void> {
+        guard isZoomedIn else {
+            return AnyGesture(DragGesture(minimumDistance: .infinity).map { _ in () })
+        }
+        return AnyGesture(panGesture.map { _ in () })
+    }
+
+    private func clampedOffset(_ proposed: CGSize, scale currentScale: CGFloat) -> CGSize {
+        let container = zoomContentSize
+        guard container.width > 1, container.height > 1, currentScale > 1 else { return .zero }
+        // 覆盖层与图片共用同一套 scaleEffect/offset，坐标映射仍按 1x 计算；
+        // 因此 clamp 边界直接用 1x 的图片显示矩形。
+        let imageRect = ocrDisplayTransform(in: container).imageRect
+        guard imageRect.width > 1, imageRect.height > 1 else { return .zero }
+        let maximumX = imageRect.width * (currentScale - 1) / 2
+        let maximumY = imageRect.height * (currentScale - 1) / 2
+        return CGSize(
+            width: min(max(proposed.width, -maximumX), maximumX),
+            height: min(max(proposed.height, -maximumY), maximumY)
+        )
     }
 
     private var tapPageGesture: some Gesture {
@@ -4879,9 +5065,8 @@ struct LocalImageView: View {
 
         translationTask = Task {
             do {
-                if aiTranslationMode == .ocr && ocrShowDebugBoxes {
-                    try await startOCRTextTranslation(image: image, pageURL: pageURL, generation: generation)
-                } else if useAppleLowLatency, aiTranslationMode == .ocr {
+                // 翻译执行路径只由模式 / 低延迟策略决定，调试开关不得参与选择（审查 #5）。
+                if useAppleLowLatency, aiTranslationMode == .ocr {
                     try await startAppleLowLatencyTranslation(image: image, pageURL: pageURL, generation: generation)
                 } else {
                     let request = try makeTranslationPageRequest(image: image)
@@ -4891,6 +5076,11 @@ struct LocalImageView: View {
                         guard self.translationGeneration == generation, self.url == pageURL else { return }
                         self.textBlocks = blocks
                     }
+                }
+                // Debug 只负责“数据采集 / 渲染”：在真实 pipeline 之外独立抓取中间 blocks，
+                // 既不影响调用哪条翻译路径，也不影响生产结果。
+                if ocrShowDebugBoxes, aiTranslationMode == .ocr {
+                    await captureOCRDebugBlocks(image: image, pageURL: pageURL, generation: generation)
                 }
             } catch {
                 if !Task.isCancelled {
@@ -5092,7 +5282,8 @@ struct LocalImageView: View {
             configuration: activeConfiguration,
             target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage),
             translationPromptTemplate: translationStyleInstructions,
-            visionPromptTemplate: visionTranslationPromptTemplate,
+            // 自定义模板缺少协议锚点时回退默认模板：坏协议不进请求，也进不了缓存 key。
+            visionPromptTemplate: AITranslator.VisionPromptContract.effectiveTemplate(visionTranslationPromptTemplate),
             isRightToLeft: isRightToLeftReading,
             minimumTextHeight: ocrMinimumTextHeight,
             ocrRecognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive,
@@ -5110,138 +5301,17 @@ struct LocalImageView: View {
         )
     }
 
-    private func startOCRTextTranslation(image: UIImage, pageURL: URL, generation: UUID) async throws {
-        let recognizedResult = try await recognizedPipelineResult(for: image)
-        try Task.checkCancellation()
-        let blocks = preparedOCRResult(from: recognizedResult).bubbleBlocks
+    /// 调试数据采集：只在 `ocrShowDebugBoxes` 打开时额外抓取一次 OCR 中间结果，
+    /// 用于渲染 raw / candidate / filtered / bubble 框。
+    /// 它不参与翻译 pipeline 选择，也不写回 `textBlocks`，因此调试与生产结果一致。
+    private func captureOCRDebugBlocks(image: UIImage, pageURL: URL, generation: UUID) async {
+        guard ocrShowDebugBoxes, isOCREnabled else { return }
+        guard let recognizedResult = try? await recognizedPipelineResult(for: image) else { return }
+        guard !Task.isCancelled else { return }
         await MainActor.run {
-            guard self.translationGeneration == generation else { return }
-            self.textBlocks = blocks
+            guard self.url == pageURL, self.translationGeneration == generation else { return }
+            _ = self.preparedOCRResult(from: recognizedResult)
         }
-        guard !blocks.isEmpty else { return }
-
-        guard let activeConfiguration = AIProviderStore.shared.activeConfiguration() else {
-            throw AIProviderStoreError.missingProfile
-        }
-        let requestAPIKey = activeConfiguration.apiKey
-        let requestBaseURL = activeConfiguration.baseURL
-        let requestModelName = activeConfiguration.textModel
-        let requestTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
-        let requestPromptTemplate = translationStyleInstructions
-        let contextScopeID = TranslationContextBuilder.scopeID(comicID: comicID, target: requestTarget)
-        let inheritedContext = await TranslationContextRegistry.shared.context(
-            scopeID: contextScopeID,
-            pageIndex: pageIndex
-        )
-        var translatedIndexes = Set<Int>()
-
-        if AITranslationRequestPolicy.shouldUsePageTranslation(blockCount: blocks.count) {
-            do {
-                let pageResult = try await TranslationRuntimeService.translatePage(
-                    blocks: blocks,
-                    apiKey: requestAPIKey,
-                    baseURL: requestBaseURL,
-                    model: requestModelName,
-                    target: requestTarget,
-                    promptTemplate: requestPromptTemplate,
-                    sourceLanguage: comicTranslationSourceLanguage,
-                    previousContext: TranslationContextBuilder.promptContext(
-                        previousContext: inheritedContext,
-                        pageBlocks: blocks,
-                        requestedIndexes: Array(blocks.indices)
-                    ),
-                    modelDescriptor: activeConfiguration.textModelDescriptor
-                )
-                try Task.checkCancellation()
-                await MainActor.run {
-                    guard self.translationGeneration == generation, self.url == pageURL else { return }
-                    // 线上 ID 是 b0/b1/...，顺序 = blocks 中的位置
-                    for index in blocks.indices {
-                        guard let translated = pageResult.translation(for: "b\(index)"),
-                              !translated.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                              self.textBlocks.indices.contains(index) else {
-                            continue
-                        }
-                        self.textBlocks[index].translation = translated.translation
-                        self.textBlocks[index].translationLines = translated.translationLines
-                        translatedIndexes.insert(index)
-                    }
-                }
-            } catch {
-                print("MReader OCR page translation fallback reason=\(error.localizedDescription)")
-            }
-        }
-
-        try Task.checkCancellation()
-        let missingIndexes = blocks.indices.filter { !translatedIndexes.contains($0) }
-        guard !missingIndexes.isEmpty else { return }
-        let maximumConcurrentRequests = min(2, missingIndexes.count)
-
-        await withTaskGroup(of: (Int, String?, String?).self) { group in
-            var nextIndex = 0
-
-            func submit(_ missingIndex: Int) {
-                let blockIndex = missingIndexes[missingIndex]
-                let block = blocks[blockIndex]
-                // 整页对白按阅读顺序作为上下文，帮助模型正确断句、统一称呼和语气
-                let pageContext = TranslationContextBuilder.promptContext(
-                    previousContext: inheritedContext,
-                    pageBlocks: blocks,
-                    requestedIndexes: [blockIndex]
-                )
-                group.addTask {
-                    do {
-                        let translatedText = try await TranslationRuntimeService.translate(
-                            text: block.text,
-                            ocrMetadata: AITranslator.ocrMetadata(for: block),
-                            pageContext: pageContext,
-                            apiKey: requestAPIKey,
-                            baseURL: requestBaseURL,
-                            model: requestModelName,
-                            targetLanguage: requestTarget,
-                            promptTemplate: requestPromptTemplate,
-                            requestTimeout: AITranslationRequestPolicy.bubbleRequestTimeout,
-                            modelDescriptor: activeConfiguration.textModelDescriptor
-                        )
-                        return (blockIndex, translatedText, nil)
-                    } catch {
-                        let message = (error as? LocalizedError)?.errorDescription
-                            ?? error.localizedDescription
-                        return (blockIndex, nil, message)
-                    }
-                }
-            }
-
-            while nextIndex < maximumConcurrentRequests {
-                submit(nextIndex)
-                nextIndex += 1
-            }
-
-            while let (index, translatedText, errorMessage) = await group.next() {
-                if Task.isCancelled {
-                    group.cancelAll()
-                    return
-                }
-                await MainActor.run {
-                    guard self.translationGeneration == generation, self.url == pageURL, textBlocks.indices.contains(index) else { return }
-                    if let translatedText {
-                        textBlocks[index].translation = translatedText
-                    } else if let errorMessage {
-                        translationErrorMessage = errorMessage
-                    }
-                }
-                if nextIndex < missingIndexes.count {
-                    submit(nextIndex)
-                    nextIndex += 1
-                }
-            }
-        }
-        try Task.checkCancellation()
-        await TranslationContextRegistry.shared.record(
-            scopeID: contextScopeID,
-            pageIndex: pageIndex,
-            blocks: textBlocks
-        )
     }
 
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
@@ -5332,7 +5402,64 @@ private struct TranslationLayoutItem: Identifiable {
     let surfaceStyle: TranslationSurfaceStyle
     let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
 
-    var id: UUID { blocks.first?.id ?? UUID() }
+    var id: UUID { blocks.first?.id ?? Self.emptyBlockIdentity }
+
+    /// 空 blocks 是异常路径；仍必须返回稳定 id，否则 ForEach 每帧都会重建整页视图。
+    private static let emptyBlockIdentity = UUID()
+}
+
+/// 翻译 / OCR 放大覆盖层的布局缓存层。
+///
+/// `translationLayoutItems` / `ocrLayoutItems` 内部对每个 block 跑 `nonOverlappingRect`
+/// （48 个候选 × 遍历已占用矩形）与多次 CoreText 测量，整体是 O(n²)。它们原本由
+/// `body` 直接调用，任何无关 State 变化、动画帧或手势都会重算整页布局（审查 #7）。
+///
+/// 缓存键只包含真正影响排版的输入：页面内容指纹、覆盖层尺寸、图片像素尺寸、目标语言、
+/// 字体与布局样式。命中缓存时直接复用上一次的结果。
+private final class TranslationLayoutStore {
+    /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
+    static let layoutRevision = 1
+
+    struct Key: Equatable {
+        let scope: String
+        let content: String
+        let width: CGFloat
+        let height: CGFloat
+        let image: String
+        let style: String
+    }
+
+    private var translationKey: Key?
+    private var translationItems: [TranslationLayoutItem] = []
+    private var ocrKey: Key?
+    private var ocrItems: [TranslationLayoutItem] = []
+
+    #if DEBUG
+    private(set) var translationRecomputeCount = 0
+    private(set) var ocrRecomputeCount = 0
+    #endif
+
+    func translationItems(for key: Key, build: () -> [TranslationLayoutItem]) -> [TranslationLayoutItem] {
+        if translationKey == key { return translationItems }
+        let built = build()
+        translationKey = key
+        translationItems = built
+        #if DEBUG
+        translationRecomputeCount += 1
+        #endif
+        return built
+    }
+
+    func ocrItems(for key: Key, build: () -> [TranslationLayoutItem]) -> [TranslationLayoutItem] {
+        if ocrKey == key { return ocrItems }
+        let built = build()
+        ocrKey = key
+        ocrItems = built
+        #if DEBUG
+        ocrRecomputeCount += 1
+        #endif
+        return built
+    }
 }
 
 private struct OCRTranslationDebugItem: Identifiable {
