@@ -33,14 +33,12 @@ jobs:
 
           patch(
               'mreader/ComicBook.swift',
-              '''    /// Minimum point size at which translation is rendered in-place. When a
-    /// region cannot fit at this size, layout returns `needsExpansion` instead
-    /// of silently shrinking to microscopic text.
-''',
-              '''    /// Preferred readability floor for in-page translation. Extremely small
-    /// regions may shrink below this preference so the translation can remain
-    /// visible in place without an interactive expansion overlay.
-''',
+              '    /// Minimum point size at which translation is rendered in-place. When a\n'
+              '    /// region cannot fit at this size, layout returns `needsExpansion` instead\n'
+              '    /// of silently shrinking to microscopic text.\n',
+              '    /// Preferred readability floor for in-page translation. Extremely small\n'
+              '    /// regions may shrink below this preference so the translation can remain\n'
+              '    /// visible in place without an interactive expansion overlay.\n',
               'translation font comment'
           )
 
@@ -51,92 +49,52 @@ jobs:
               'nested max compile fix'
           )
 
-          patch(
-              'mreader/KomgaAPIClient.swift',
-              '''    func updateReadProgress(bookID: String, pageIndex: Int, totalPages: Int) async throws {
-        let completed = pageIndex >= max(totalPages - 1, 0)
-        let payload = KomgaReadProgressUpdateDTO(pageIndex: pageIndex, completed: completed)
-        let data = try JSONEncoder().encode(payload)
-        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)
-    }
-
-    func deleteBook(bookID: String) async throws {
-''',
-              '''    func updateReadProgress(bookID: String, pageIndex: Int, totalPages: Int) async throws {
-        let completed = pageIndex >= max(totalPages - 1, 0)
-        let payload = KomgaReadProgressUpdateDTO(pageIndex: pageIndex, completed: completed)
-        let data = try JSONEncoder().encode(payload)
-        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)
-    }
-
-    /// Explicit reset differs from a normal page-0 progress update: a one-page
-    /// book must become incomplete rather than immediately completed again.
-    func resetReadProgress(bookID: String) async throws {
-        let payload = KomgaReadProgressUpdateDTO(pageIndex: 0, completed: false)
-        let data = try JSONEncoder().encode(payload)
-        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)
-    }
-
-    func deleteBook(bookID: String) async throws {
-''',
-              'Komga explicit reset client'
+          old_client = (
+              '    func updateReadProgress(bookID: String, pageIndex: Int, totalPages: Int) async throws {\n'
+              '        let completed = pageIndex >= max(totalPages - 1, 0)\n'
+              '        let payload = KomgaReadProgressUpdateDTO(pageIndex: pageIndex, completed: completed)\n'
+              '        let data = try JSONEncoder().encode(payload)\n'
+              '        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)\n'
+              '    }\n\n'
+              '    func deleteBook(bookID: String) async throws {\n'
           )
-
-          patch(
-              'mreader/KomgaProvider.swift',
-              '''    static func updateReadProgress(for comic: ComicBook) async throws {
-        guard comic.sourceType == .komga,
-              let sourceID = comic.mediaSourceID,
-              let bookID = comic.komgaBookID,
-              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
-            return
-        }
-        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let resolvedURL = await resolveBestURL(source: source)
-        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
-        try await client.updateReadProgress(
-            bookID: bookID,
-            pageIndex: ReadingProgressMergePolicy.serverPageIndex(for: comic),
-            totalPages: comic.totalPages
-        )
-    }
-
-    static func deleteBook(_ comic: ComicBook) async throws {
-''',
-              '''    static func updateReadProgress(for comic: ComicBook) async throws {
-        guard comic.sourceType == .komga,
-              let sourceID = comic.mediaSourceID,
-              let bookID = comic.komgaBookID,
-              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
-            return
-        }
-        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let resolvedURL = await resolveBestURL(source: source)
-        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
-        try await client.updateReadProgress(
-            bookID: bookID,
-            pageIndex: ReadingProgressMergePolicy.serverPageIndex(for: comic),
-            totalPages: comic.totalPages
-        )
-    }
-
-    static func resetReadProgress(for comic: ComicBook) async throws {
-        guard comic.sourceType == .komga,
-              let sourceID = comic.mediaSourceID,
-              let bookID = comic.komgaBookID,
-              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {
-            return
-        }
-        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }
-        let resolvedURL = await resolveBestURL(source: source)
-        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)
-        try await client.resetReadProgress(bookID: bookID)
-    }
-
-    static func deleteBook(_ comic: ComicBook) async throws {
-''',
-              'Komga reset provider'
+          new_client = (
+              '    func updateReadProgress(bookID: String, pageIndex: Int, totalPages: Int) async throws {\n'
+              '        let completed = pageIndex >= max(totalPages - 1, 0)\n'
+              '        let payload = KomgaReadProgressUpdateDTO(pageIndex: pageIndex, completed: completed)\n'
+              '        let data = try JSONEncoder().encode(payload)\n'
+              '        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)\n'
+              '    }\n\n'
+              '    /// Explicit reset differs from a normal page-0 progress update: a one-page\n'
+              '    /// book must become incomplete rather than immediately completed again.\n'
+              '    func resetReadProgress(bookID: String) async throws {\n'
+              '        let payload = KomgaReadProgressUpdateDTO(pageIndex: 0, completed: false)\n'
+              '        let data = try JSONEncoder().encode(payload)\n'
+              '        try await sendNoContent(path: KomgaAPIEndpoint.readProgress(bookID: bookID), method: "PATCH", body: data)\n'
+              '    }\n\n'
+              '    func deleteBook(bookID: String) async throws {\n'
           )
+          patch('mreader/KomgaAPIClient.swift', old_client, new_client, 'Komga explicit reset client')
+
+          old_provider = (
+              '    static func deleteBook(_ comic: ComicBook) async throws {\n'
+          )
+          new_provider = (
+              '    static func resetReadProgress(for comic: ComicBook) async throws {\n'
+              '        guard comic.sourceType == .komga,\n'
+              '              let sourceID = comic.mediaSourceID,\n'
+              '              let bookID = comic.komgaBookID,\n'
+              '              let source = await loadSources().first(where: { $0.id == sourceID && $0.type == .komga && $0.isEnabled }) else {\n'
+              '            return\n'
+              '        }\n'
+              '        guard let apiKey = apiKey(for: source.id) else { throw MediaSourceError.apiKeyMissing }\n'
+              '        let resolvedURL = await resolveBestURL(source: source)\n'
+              '        let client = try KomgaAPIClient(baseURLString: resolvedURL, apiKey: apiKey)\n'
+              '        try await client.resetReadProgress(bookID: bookID)\n'
+              '    }\n\n'
+              '    static func deleteBook(_ comic: ComicBook) async throws {\n'
+          )
+          patch('mreader/KomgaProvider.swift', old_provider, new_provider, 'Komga reset provider')
 
           patch(
               'mreader/ContentView.swift',
