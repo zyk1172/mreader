@@ -396,18 +396,32 @@ final class ComicLibraryStore: ObservableObject {
         guard let index = comics.firstIndex(where: { $0.id == comic.id }) else { return }
         let existing = comics[index]
         var merged = comic
-        merged.currentPageIndex = min(max(comic.currentPageIndex, 0), max(0, comic.totalPages - 1))
-        merged.furthestPageIndex = min(
-            max(existing.furthestPageIndex, max(comic.furthestPageIndex, merged.currentPageIndex)),
-            max(0, comic.totalPages - 1)
+        let progressResolution = ReadingProgressMergePolicy.resolve(
+            existing: existing,
+            incoming: comic,
+            totalPages: comic.totalPages
         )
-        merged.progressUpdatedAt = max(existing.progressUpdatedAt, comic.progressUpdatedAt)
+        merged.currentPageIndex = progressResolution.currentPageIndex
+        merged.furthestPageIndex = progressResolution.furthestPageIndex
+        merged.progressUpdatedAt = progressResolution.progressUpdatedAt
+        if progressResolution.usesIncomingLocation {
+            // A newer explicit reset is a real state transition. Do not OR/max
+            // the old opened/furthest state back into the new zero-progress state.
+            merged.hasBeenOpened = comic.hasBeenOpened
+            merged.scrollProgress = comic.scrollProgress
+            merged.scrollPageProgress = comic.scrollPageProgress
+            merged.lastReadAt = comic.lastReadAt
+        } else {
+            merged.hasBeenOpened = existing.hasBeenOpened
+            merged.scrollProgress = existing.scrollProgress
+            merged.scrollPageProgress = existing.scrollPageProgress
+            merged.lastReadAt = existing.lastReadAt
+        }
         merged.metadataUpdatedAt = max(existing.metadataUpdatedAt, comic.metadataUpdatedAt)
         if Self.syncMetadataChanged(existing: existing, incoming: comic),
            comic.metadataUpdatedAt <= existing.metadataUpdatedAt {
             merged.metadataUpdatedAt = Date()
         }
-        merged.hasBeenOpened = existing.hasBeenOpened || comic.hasBeenOpened
         comics[index] = merged
         sortAndSave()
         if merged.sourceType == .komga {
@@ -1296,7 +1310,16 @@ final class ComicLibraryStore: ObservableObject {
 
     private func syncKomgaProgressNow(for comic: ComicBook) async {
         do {
-            try await KomgaProvider.updateReadProgress(for: comic)
+            if !comic.hasBeenOpened,
+               comic.currentPageIndex == 0,
+               comic.furthestPageIndex == 0,
+               comic.scrollProgress == 0,
+               comic.scrollPageProgress == 0 {
+                // A reset must stay incomplete even for a one-page Komga book.
+                try await KomgaProvider.resetReadProgress(for: comic)
+            } else {
+                try await KomgaProvider.updateReadProgress(for: comic)
+            }
         } catch {
             MReaderLog.reader.error(
                 "Komga reading progress sync failed comic=\(comic.id.uuidString, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"

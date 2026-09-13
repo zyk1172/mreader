@@ -28,6 +28,36 @@ final class ReaderStateMutationTests: XCTestCase {
         XCTAssertTrue(ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPages))
     }
 
+    func testDismissGestureRequiresExactlyTwoTouches() {
+        XCTAssertFalse(ReaderDismissGestureGate.hasRequiredTouches(1))
+        XCTAssertTrue(ReaderDismissGestureGate.hasRequiredTouches(2))
+        XCTAssertFalse(ReaderDismissGestureGate.hasRequiredTouches(3))
+
+        XCTAssertFalse(
+            ReaderDismissGestureGate.shouldBegin(
+                touchCount: 1,
+                velocity: CGPoint(x: 0, y: 900)
+            )
+        )
+        XCTAssertTrue(
+            ReaderDismissGestureGate.shouldBegin(
+                touchCount: 2,
+                velocity: CGPoint(x: 20, y: 900)
+            )
+        )
+        XCTAssertFalse(
+            ReaderDismissGestureGate.shouldBegin(
+                touchCount: 2,
+                velocity: CGPoint(x: 900, y: 20)
+            )
+        )
+        XCTAssertFalse(
+            ReaderDismissGestureGate.isMostlyDownward(
+                translation: CGPoint(x: 80, y: 40)
+            )
+        )
+    }
+
     func testComicMutationProducesTheValueThatPersistenceReceives() {
         let original = ComicBook(
             title: "Reader state test",

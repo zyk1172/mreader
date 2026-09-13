@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import XCTest
 @testable import mreader
 
 @MainActor
@@ -334,5 +335,25 @@ struct ReadingActivityStoreTests {
         while !condition(), Date() < deadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+}
+
+
+final class ReadingProgressDisplayRegressionTests: XCTestCase {
+    func testResetComicReportsZeroCompletedPages() {
+        let comic = ComicBook(
+            title: "Reset display",
+            bookmarkData: Data(),
+            totalPages: 120,
+            currentPageIndex: 0,
+            furthestPageIndex: 0,
+            progressUpdatedAt: Date(),
+            hasBeenOpened: false,
+            scrollProgress: 0,
+            scrollPageProgress: 0,
+            lastReadAt: .distantPast
+        )
+        XCTAssertEqual(ComicReadingProgress.completedPages(for: comic), 0)
+        XCTAssertFalse(ComicReadingProgress.isFinished(comic))
     }
 }
