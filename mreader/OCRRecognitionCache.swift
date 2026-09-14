@@ -7,6 +7,8 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     let pageURL: URL
     let fallbackImage: UIImage
     let options: OCRPreprocessor.Options
+    var comicID: UUID? = nil
+    var pageIndex: Int? = nil
 
     var cacheKey: String {
         let sourceIdentity: String
@@ -20,7 +22,8 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             // OCR geometry, the Japanese vertical fallback and the bubble
             // grouping (visual bubble identity) changed; do not reuse pages
             // written before this pipeline revision.
-            "local-ocr-v9-canonical-bubble-region-borderless",
+            "local-ocr-v10-manga-vision-roi-panel-order",
+            MangaVisionService.analysisRevision,
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
@@ -107,6 +110,18 @@ actor OCRRecognitionCache {
             MReaderLog.aiVision.debug(
                 "local OCR cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.resolvedBlocks.count, privacy: .public)"
             )
+            if let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: request.comicID,
+                pageIndex: request.pageIndex,
+                pageURL: request.pageURL,
+                image: request.fallbackImage
+            ) {
+                return MangaVisionOCROrdering.applyingReadingOrder(
+                    to: cached,
+                    analysis: analysis,
+                    isRightToLeft: request.options.isRightToLeft
+                )
+            }
             return cached
         }
         if let existing = inFlight[key] {
@@ -119,7 +134,17 @@ actor OCRRecognitionCache {
                 from: request.pageURL,
                 fallback: request.fallbackImage
             ) ?? request.fallbackImage
-            return try await MangaOCRPipeline.recognize(in: image, options: request.options)
+            let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: request.comicID,
+                pageIndex: request.pageIndex,
+                pageURL: request.pageURL,
+                image: image
+            )
+            return try await MangaOCRPipeline.recognize(
+                in: image,
+                options: request.options,
+                mangaAnalysis: analysis
+            )
         }
         inFlight[key] = task
         do {

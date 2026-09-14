@@ -43,6 +43,8 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     let viewportAspect: CGFloat
     let sourceLanguagePreference: TranslationSourceLanguage?
     var previousContext: String
+    /// Optional business identity used to join Manga Vision inference with Guided Panel/OCR.
+    var comicID: UUID? = nil
     /// Stable scope/page identity for chapter-local context. Existing callers
     /// remain source-compatible because both additions have defaults.
     var contextScopeID: String? = nil
@@ -366,7 +368,10 @@ nonisolated enum AITranslationPagePipeline {
                 isRightToLeft: request.isRightToLeft,
                 viewportAspect: request.viewportAspect,
                 sourceLanguage: request.sourceLanguagePreference,
-                previousContext: request.previousContext,
+                previousContext: await MangaVisionTranslationContext.context(
+                    for: request,
+                    blocks: []
+                ),
                 visionModelDescriptor: request.configuration.visionModelDescriptor,
                 textFallbackModelDescriptor: request.configuration.textModelDescriptor
             )
@@ -388,10 +393,15 @@ nonisolated enum AITranslationPagePipeline {
             return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
         }
 
+        var contextualRequest = request
+        contextualRequest.previousContext = await MangaVisionTranslationContext.context(
+            for: request,
+            blocks: translated
+        )
         try await applyBatchTranslationSafely(
             to: &translated,
             indexes: Array(translated.indices),
-            request: request
+            request: contextualRequest
         )
         let missing = translated.indices.filter {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -400,7 +410,7 @@ nonisolated enum AITranslationPagePipeline {
             try await applyBatchTranslationSafely(
                 to: &translated,
                 indexes: missing,
-                request: request
+                request: contextualRequest
             )
         }
         let completed = translated.filter {
@@ -430,7 +440,9 @@ nonisolated enum AITranslationPagePipeline {
         let cacheRequest = OCRRecognitionCacheRequest(
             pageURL: request.pageURL,
             fallbackImage: request.image,
-            options: options
+            options: options,
+            comicID: request.comicID,
+            pageIndex: request.pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
         let resolvedBlocks: [TextBlock]
@@ -475,7 +487,16 @@ nonisolated enum AITranslationPagePipeline {
             return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
         }
 
-        try await applyBatchTranslationSafely(to: &translated, indexes: Array(translated.indices), request: request)
+        var contextualRequest = request
+        contextualRequest.previousContext = await MangaVisionTranslationContext.context(
+            for: request,
+            blocks: translated
+        )
+        try await applyBatchTranslationSafely(
+            to: &translated,
+            indexes: Array(translated.indices),
+            request: contextualRequest
+        )
         let missing = translated.indices.filter {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }

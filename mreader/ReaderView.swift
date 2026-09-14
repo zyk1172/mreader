@@ -870,6 +870,7 @@ struct ReaderView: View {
         showControls || showsControlsForTesting
     }
     @State private var translationPrefetchTask: Task<Void, Never>?
+    @State private var mangaVisionPreanalysisTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
@@ -1246,6 +1247,8 @@ struct ReaderView: View {
             RemotePagePrefetcher.shared.cancelAll()
             translationPrefetchTask?.cancel()
             translationPrefetchTask = nil
+            mangaVisionPreanalysisTask?.cancel()
+            mangaVisionPreanalysisTask = nil
             recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
         }
@@ -2247,6 +2250,26 @@ struct ReaderView: View {
             maximumConcurrent: isContinuous ? 2 : 3,
             delay: isContinuous ? 0.05 : 0.1
         )
+
+        mangaVisionPreanalysisTask?.cancel()
+        mangaVisionPreanalysisTask = nil
+        let shouldPreanalyze = readingMode == .guidedPanel
+            || comic.isOCREnabled
+            || comic.isAITranslationEnabled
+        if shouldPreanalyze {
+            let comicID = comic.id
+            let pages = manager.pages
+            // Feed the same already-computed Reader prefetch ordering into Manga Vision.
+            // The service itself caps work at three pages, so this can never expand to a book scan.
+            let visionIndices = [index] + preferredIndices
+            mangaVisionPreanalysisTask = Task(priority: .utility) {
+                await MangaVisionService.shared.preanalyze(
+                    comicID: comicID,
+                    pages: pages,
+                    indices: visionIndices
+                )
+            }
+        }
     }
 
     private func scheduleTranslationPrefetch(around index: Int) {
@@ -2309,6 +2332,7 @@ struct ReaderView: View {
                         viewportAspect: 2.0,
                         sourceLanguagePreference: comic.translationSourceLanguage,
                         previousContext: "",
+                        comicID: comicID,
                         contextScopeID: TranslationContextBuilder.scopeID(
                             comicID: comicID,
                             target: target
@@ -3360,7 +3384,9 @@ struct GuidedPanelReader: View {
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
         )
         let detectedLayout = await PanelDetectionService.shared.layout(
-            for: pageURL,
+            comicID: comic.id,
+            pageIndex: page.index,
+            pageURL: pageURL,
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
         )
@@ -4198,6 +4224,14 @@ struct LocalImageView: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
     @State private var uiImage: UIImage? = nil
+#if DEBUG
+    @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
+    @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
+    @AppStorage("manga_vision_debug_texts") private var mangaVisionDebugTexts = true
+    @AppStorage("manga_vision_debug_faces") private var mangaVisionDebugFaces = true
+    @AppStorage("manga_vision_debug_bodies") private var mangaVisionDebugBodies = true
+    @AppStorage("manga_vision_debug_relations") private var mangaVisionDebugRelations = true
+#endif
     @State private var isLoadingImage = true
     @State private var loadFailed = false
     @State private var scale: CGFloat = 1
@@ -4282,6 +4316,9 @@ struct LocalImageView: View {
                                 translationOverlay(in: geo.size)
                                 ocrMagnificationOverlay(in: geo.size)
                                 ocrDebugOverlay(in: geo.size)
+#if DEBUG
+                                mangaVisionDebugOverlay(in: geo.size)
+#endif
                             }
                             .onAppear { zoomContentSize = geo.size }
                             .onChange(of: geo.size) { _, newValue in zoomContentSize = newValue }
@@ -4675,6 +4712,29 @@ struct LocalImageView: View {
             }
         }
     }
+
+#if DEBUG
+    @ViewBuilder
+    private func mangaVisionDebugOverlay(in size: CGSize) -> some View {
+        if ocrShowDebugBoxes, let analysis = mangaVisionDebugAnalysis {
+            MangaVisionDebugOverlay(
+                analysis: analysis,
+                semanticPage: MangaSemanticAnalyzer.makeSemanticPage(
+                    from: analysis,
+                    isRightToLeft: isRightToLeftReading
+                ),
+                imageRect: ocrDisplayTransform(in: size).imageRect,
+                configuration: MangaVisionDebugOverlayConfiguration(
+                    showsPanels: mangaVisionDebugPanels,
+                    showsTexts: mangaVisionDebugTexts,
+                    showsFaces: mangaVisionDebugFaces,
+                    showsBodies: mangaVisionDebugBodies,
+                    showsRelations: mangaVisionDebugRelations
+                )
+            )
+        }
+    }
+#endif
 
     @ViewBuilder
     private func ocrDebugOverlay(in size: CGSize) -> some View {
@@ -5814,6 +5874,7 @@ struct LocalImageView: View {
                 ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25),
             sourceLanguagePreference: comicTranslationSourceLanguage,
             previousContext: "",
+            comicID: comicID,
             contextScopeID: TranslationContextBuilder.scopeID(
                 comicID: comicID,
                 target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
@@ -5851,9 +5912,24 @@ struct LocalImageView: View {
         let cacheRequest = OCRRecognitionCacheRequest(
             pageURL: url,
             fallbackImage: image,
-            options: options
+            options: options,
+            comicID: comicID,
+            pageIndex: pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
+#if DEBUG
+        if ocrShowDebugBoxes,
+           let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                pageURL: url,
+                image: image
+           ) {
+            await MainActor.run {
+                self.mangaVisionDebugAnalysis = analysis
+            }
+        }
+#endif
         if let comicID, let pageIndex {
             await OCRRuntimeService.index(
                 comicID: comicID,

@@ -100,18 +100,17 @@ struct GuidedPanelFoundationTests {
         #expect(PanelLayoutQuality.isUsable(processed))
     }
 
-    @Test func coreMLDecoderKeepsFramesAndRejectsTextAndBalloons() throws {
-        let output = try MLMultiArray(shape: [1, 3, 38], dataType: .float32)
+    @Test func mangaVisionDecoderPreservesPanelGeometryWhileSeparatingText() throws {
+        let output = try MLMultiArray(shape: [1, 3, 6], dataType: .float32)
 
         func set(_ instance: Int, _ feature: Int, _ value: Double) {
-            let flatIndex = instance * 38 + feature
-            output[flatIndex] = NSNumber(value: value)
+            output[instance * 6 + feature] = NSNumber(value: value)
         }
 
-        set(0, 0, 176)
-        set(0, 1, 64)
-        set(0, 2, 464)
-        set(0, 3, 320)
+        set(0, 0, 160)
+        set(0, 1, 80)
+        set(0, 2, 480)
+        set(0, 3, 400)
         set(0, 4, 0.93)
         set(0, 5, 0)
 
@@ -129,22 +128,23 @@ struct GuidedPanelFoundationTests {
         set(2, 4, 0.98)
         set(2, 5, 2)
 
-        let panels = CoreMLPanelDetector.decodedPanelsForDiagnostics(
+        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
             output,
-            imageSize: CGSize(width: 400, height: 800)
+            analysisImageSize: CGSize(width: 640, height: 640),
+            labelsByClassID: [0: "frame", 1: "text", 2: "balloon"]
         )
+        let panels = regions.filter { $0.type == .panel }
+        let texts = regions.filter { $0.type == .text }
 
         #expect(panels.count == 1)
-        #expect(panels[0].source == .coreML)
+        #expect(texts.count == 1)
         #expect(abs(panels[0].confidence - 0.93) < 0.001)
-        #expect(panels[0].rect.minX >= 0)
-        #expect(panels[0].rect.maxX <= 1)
-        #expect(panels[0].rect.minY >= 0)
-        #expect(panels[0].rect.maxY <= 1)
+        #expect(abs(panels[0].normalizedRect.width - 0.5) < 0.001)
+        #expect(regions.count == 2)
     }
 
-    @Test func coreMLDecoderAcceptsTransposedDetectionTensor() throws {
-        let output = try MLMultiArray(shape: [1, 38, 1], dataType: .float32)
+    @Test func mangaVisionDecoderAcceptsTransposedDetectionTensor() throws {
+        let output = try MLMultiArray(shape: [1, 6, 1], dataType: .float32)
 
         func set(_ feature: Int, _ value: Double) {
             output[feature] = NSNumber(value: value)
@@ -157,13 +157,15 @@ struct GuidedPanelFoundationTests {
         set(4, 0.88)
         set(5, 0)
 
-        let panels = CoreMLPanelDetector.decodedPanelsForDiagnostics(
+        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
             output,
-            imageSize: CGSize(width: 640, height: 640)
+            analysisImageSize: CGSize(width: 640, height: 640),
+            labelsByClassID: [0: "frame"]
         )
 
-        #expect(panels.count == 1)
-        #expect(abs(panels[0].rect.width - 0.5) < 0.001)
+        #expect(regions.count == 1)
+        #expect(regions[0].type == .panel)
+        #expect(abs(regions[0].normalizedRect.width - 0.5) < 0.001)
     }
 
     @Test func layoutQualityRejectsImplausibleResults() {

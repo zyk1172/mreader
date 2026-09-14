@@ -86,7 +86,8 @@ struct OCRPreprocessor {
 
     nonisolated static func recognizeCandidatesWithReference(
         in image: UIImage,
-        options: Options
+        options: Options,
+        visionTextRegions: [MangaVisionRegion] = []
     ) async throws -> OCRCandidateRecognitionResult {
         let normalizedImage = normalizedOrientationImage(image)
         let fullSize = pixelSize(for: normalizedImage)
@@ -94,9 +95,16 @@ struct OCRPreprocessor {
             return OCRCandidateRecognitionResult(blocks: [], visionKitReference: nil)
         }
 
-        let slices = sliceImage(normalizedImage, fullPixelSize: fullSize)
+        let plannedRegions = MangaVisionTextROIPlanner.recognitionRegions(from: visionTextRegions)
+        let slices = plannedRegions.isEmpty
+            ? sliceImage(normalizedImage, fullPixelSize: fullSize)
+            : cropImage(
+                normalizedImage,
+                fullPixelSize: fullSize,
+                normalizedRegions: plannedRegions
+            )
         MReaderLog.aiVision.debug(
-            "OCR preprocess slices=\(slices.count, privacy: .public) strategy=\(options.recognitionMode.rawValue, privacy: .public) image=\(Int(fullSize.width), privacy: .public)x\(Int(fullSize.height), privacy: .public)"
+            "OCR preprocess slices=\(slices.count, privacy: .public) mangaVisionROI=\(plannedRegions.count, privacy: .public) fallbackFullPage=\(plannedRegions.isEmpty, privacy: .public) strategy=\(options.recognitionMode.rawValue, privacy: .public) image=\(Int(fullSize.width), privacy: .public)x\(Int(fullSize.height), privacy: .public)"
         )
         var allBlocks: [TextBlock] = []
         for slice in slices {
@@ -301,6 +309,29 @@ struct OCRPreprocessor {
         let totalCharacterCount = resolved.reduce(0) { $0 + $1.text.unicodeScalars.count }
         let usefulRatio = Double(usefulCharacterCount) / Double(max(totalCharacterCount, 1))
         return confidence < 0.58 || usefulRatio < 0.42
+    }
+
+    nonisolated private static func cropImage(
+        _ image: UIImage,
+        fullPixelSize: CGSize,
+        normalizedRegions: [CGRect]
+    ) -> [(image: UIImage, rect: CGRect)] {
+        guard let cgImage = image.cgImage else { return [] }
+        let bounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+        return normalizedRegions.compactMap { normalized -> (UIImage, CGRect)? in
+            var pixelRect = MangaPageCoordinateSpace.pixelRect(
+                fromNormalized: normalized,
+                imageSize: fullPixelSize
+            ).integral.intersection(bounds)
+            guard !pixelRect.isNull, pixelRect.width >= 4, pixelRect.height >= 4 else { return nil }
+            // Integral rounding can leave maxX/maxY one pixel outside on fractional source sizes.
+            pixelRect = pixelRect.intersection(bounds)
+            guard let cropped = cgImage.cropping(to: pixelRect) else { return nil }
+            return (
+                UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation),
+                pixelRect
+            )
+        }
     }
 
     nonisolated private static func sliceImage(_ image: UIImage, fullPixelSize: CGSize) -> [(image: UIImage, rect: CGRect)] {
@@ -519,12 +550,15 @@ struct OCRPreprocessor {
     }
 
     nonisolated private static func mapVisionRect(_ visionRect: CGRect, sliceRect: CGRect, fullPixelSize: CGSize) -> CGRect {
-        let x = (sliceRect.minX + visionRect.minX * sliceRect.width) / fullPixelSize.width
-        let yInSliceFromTop = (1 - visionRect.maxY) * sliceRect.height
-        let y = (sliceRect.minY + yInSliceFromTop) / fullPixelSize.height
-        let width = visionRect.width * sliceRect.width / fullPixelSize.width
-        let height = visionRect.height * sliceRect.height / fullPixelSize.height
-        return CGRect(x: x, y: y, width: width, height: height)
+        let localTopLeft = MangaPageCoordinateSpace.topLeftNormalizedRect(fromVisionRect: visionRect)
+        let cropNormalized = MangaPageCoordinateSpace.normalizedRect(
+            fromPixel: sliceRect,
+            imageSize: fullPixelSize
+        )
+        return MangaPageCoordinateSpace.normalizedPageRect(
+            forCropLocalRect: localTopLeft,
+            cropRect: cropNormalized
+        )
     }
 
     nonisolated private static func representativeTextColorHex(in image: CGImage, visionRect: CGRect) -> String? {

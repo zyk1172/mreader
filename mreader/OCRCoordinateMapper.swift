@@ -79,11 +79,9 @@ enum OCRCoordinateMapper {
         forSliceRect rect: CGRect,
         sourceRect: CGRect
     ) -> CGRect {
-        CGRect(
-            x: sourceRect.minX + rect.minX * sourceRect.width,
-            y: sourceRect.minY + rect.minY * sourceRect.height,
-            width: rect.width * sourceRect.width,
-            height: rect.height * sourceRect.height
+        MangaPageCoordinateSpace.normalizedPageRect(
+            forCropLocalRect: rect,
+            cropRect: sourceRect
         )
     }
 }
