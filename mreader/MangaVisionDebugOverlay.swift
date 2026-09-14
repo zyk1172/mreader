@@ -4,6 +4,7 @@ import SwiftUI
 struct MangaVisionDebugOverlayConfiguration: Sendable, Equatable {
     var showsPanels = true
     var showsTexts = true
+    var showsBalloons = true
     var showsFaces = true
     var showsBodies = true
     var showsRelations = true
@@ -26,6 +27,9 @@ struct MangaVisionDebugOverlay: View {
             }
             if configuration.showsTexts {
                 regionLayer(analysis.texts, lineWidth: 1.5)
+            }
+            if configuration.showsBalloons {
+                regionLayer(analysis.balloons, lineWidth: 1.8)
             }
             if configuration.showsFaces {
                 regionLayer(analysis.faces, lineWidth: 1.5)
@@ -104,6 +108,7 @@ struct MangaVisionDebugOverlay: View {
         switch type {
         case .panel: []
         case .text: [5, 2]
+        case .balloon: [10, 2, 2, 2]
         case .face: [2, 2]
         case .body: [8, 3]
         }
