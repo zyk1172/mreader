@@ -85,6 +85,11 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
             imageSize: sourceImageSize,
             panels: grouped[.panel] ?? [],
             texts: MangaVisionRegionPostProcessor.deduplicated(grouped[.text] ?? []),
+            balloons: MangaVisionRegionPostProcessor.deduplicated(
+                grouped[.balloon] ?? [],
+                iouThreshold: 0.58,
+                containmentThreshold: 0.90
+            ),
             faces: MangaVisionRegionPostProcessor.deduplicated(grouped[.face] ?? []),
             bodies: MangaVisionRegionPostProcessor.deduplicated(grouped[.body] ?? []),
             modelIdentifier: runtime.descriptor.modelIdentifier,
@@ -113,7 +118,9 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let supported = Set(labels.values.compactMap(Self.semanticRegionType(forLabel:)))
         let descriptor = MangaVisionProviderDescriptor(
             modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
-            modelVersion: 2,
+            // v3 is the adapter/business contract: the bundled model is unchanged,
+            // but class 2 `balloon` is now preserved instead of discarded.
+            modelVersion: 3,
             inputSize: CGSize(width: 640, height: 640),
             supportedRegionTypes: supported
         )
@@ -138,14 +145,18 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
 
     private static let fallbackDescriptor = MangaVisionProviderDescriptor(
         modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
-        modelVersion: 2,
+        modelVersion: 3,
         inputSize: CGSize(width: 640, height: 640),
-        supportedRegionTypes: [.panel, .text]
+        supportedRegionTypes: [.panel, .text, .balloon]
     )
 
     private static let defaultConfidenceThresholds: [MangaRegionType: Float] = [
         .panel: 0.24,
         .text: 0.18,
+        // Balloon geometry changes grouping and layout, so keep a slightly
+        // stricter floor than text ROI discovery while still accepting normal
+        // Manga109 detections.
+        .balloon: 0.20,
         .face: 0.20,
         .body: 0.20
     ]
@@ -206,6 +217,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         switch normalized {
         case "frame", "panel", "comic_panel": return .panel
         case "text", "text_region", "textbox", "text_box": return .text
+        case "balloon", "bubble", "speech_balloon", "speech_bubble": return .balloon
         case "face", "head": return .face
         case "body", "person_body", "character_body": return .body
         default: return nil
