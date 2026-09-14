@@ -1,0 +1,32 @@
+name: Patch ComicManager concurrency
+
+on:
+  push:
+    branches:
+      - feat/guided-panel-vision-motion-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/guided-panel-vision-motion-v2
+          fetch-depth: 0
+      - name: Patch locked shared state
+        shell: bash
+        run: |
+          python3 -c 'from pathlib import Path; p=Path("mreader/ComicManager.swift"); s=p.read_text(); old="    private static var loggedDecisions: Set<String> = []\n"; new="    nonisolated(unsafe) private static var loggedDecisions: Set<String> = []\n"; assert s.count(old)==1; p.write_text(s.replace(old,new,1))'
+          git diff --check
+      - name: Commit if changed
+        shell: bash
+        run: |
+          if git diff --quiet -- mreader/ComicManager.swift; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mreader/ComicManager.swift
+          git commit -m "fix: mark locked library log state externally synchronized"
+          git push origin HEAD:feat/guided-panel-vision-motion-v2
