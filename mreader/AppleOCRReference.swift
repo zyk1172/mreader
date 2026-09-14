@@ -20,7 +20,7 @@ nonisolated struct AppleOCRReference: Equatable, Sendable {
 
 nonisolated enum AppleOCRReferenceService {
     private static let capabilityLock = NSLock()
-    private static var processCapability: ProcessCapability = .unknown
+    nonisolated(unsafe) private static var processCapability: ProcessCapability = .unknown
 
     private enum ProcessCapability {
         case unknown
