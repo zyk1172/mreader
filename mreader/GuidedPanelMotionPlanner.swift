@@ -33,20 +33,23 @@ nonisolated enum GuidedPanelMotionPlanner {
         crossesPageBoundary: Bool = false
     ) -> GuidedPanelMotionProfile {
         if crossesPageBoundary {
+            // Page changes deliberately breathe longer than an in-page move. The
+            // bridge exposes page context before the existing directional page
+            // transition and the new page then performs its own focus entry.
             return GuidedPanelMotionProfile(
                 kind: .pageBoundary,
-                duration: 0.90,
-                bridgeDuration: 0.20,
-                settleDuration: 0.54,
+                duration: 1.55,
+                bridgeDuration: 0.68,
+                settleDuration: 0.87,
                 usesContextBridge: true
             )
         }
         guard let source, let destination else {
             return GuidedPanelMotionProfile(
                 kind: .focusEntry,
-                duration: 0.58,
+                duration: 0.92,
                 bridgeDuration: 0,
-                settleDuration: 0.58,
+                settleDuration: 0.92,
                 usesContextBridge: false
             )
         }
@@ -66,46 +69,50 @@ nonisolated enum GuidedPanelMotionPlanner {
         let scaleChange = abs(estimatedScale(for: destination) - estimatedScale(for: source))
 
         if verticalOverlap >= 0.48, abs(source.midY - destination.midY) <= 0.16 {
-            let duration = clamp(0.52 + Double(distance) * 0.16 + Double(scaleChange) * 0.025, 0.52, 0.62)
+            let duration = clamp(1.18 + Double(distance) * 0.20 + Double(scaleChange) * 0.035, 1.20, 1.32)
+            let bridgeDuration = duration * 0.34
             return GuidedPanelMotionProfile(
                 kind: .sameRow,
                 duration: duration,
-                bridgeDuration: 0,
-                settleDuration: duration,
-                usesContextBridge: false
+                bridgeDuration: bridgeDuration,
+                settleDuration: duration - bridgeDuration,
+                usesContextBridge: true
             )
         }
 
         if distance >= 0.56 || scaleChange >= 1.8 {
-            let duration = clamp(0.74 + Double(distance) * 0.16 + Double(scaleChange) * 0.018, 0.76, 0.88)
+            let duration = clamp(1.48 + Double(distance) * 0.18 + Double(scaleChange) * 0.025, 1.54, 1.68)
+            let bridgeDuration = duration * 0.31
             return GuidedPanelMotionProfile(
                 kind: .farJump,
                 duration: duration,
-                bridgeDuration: min(duration * 0.38, 0.31),
-                settleDuration: max(duration * 0.62, 0.44),
+                bridgeDuration: bridgeDuration,
+                settleDuration: duration - bridgeDuration,
                 usesContextBridge: true
             )
         }
 
         let movesDownward = destination.midY > source.midY + 0.05
         if movesDownward, verticalOverlap < 0.32 {
-            let duration = clamp(0.64 + Double(distance) * 0.16 + Double(scaleChange) * 0.02, 0.66, 0.78)
+            let duration = clamp(1.36 + Double(distance) * 0.18 + Double(scaleChange) * 0.03, 1.40, 1.54)
+            let bridgeDuration = duration * 0.32
             return GuidedPanelMotionProfile(
                 kind: .nextRow,
                 duration: duration,
-                bridgeDuration: min(duration * 0.34, 0.27),
-                settleDuration: max(duration * 0.66, 0.42),
+                bridgeDuration: bridgeDuration,
+                settleDuration: duration - bridgeDuration,
                 usesContextBridge: true
             )
         }
 
-        let duration = clamp(0.58 + Double(distance) * 0.14 + Double(scaleChange) * 0.02, 0.58, 0.70)
+        let duration = clamp(1.28 + Double(distance) * 0.16 + Double(scaleChange) * 0.03, 1.30, 1.42)
+        let bridgeDuration = duration * 0.33
         return GuidedPanelMotionProfile(
             kind: .nearby,
             duration: duration,
-            bridgeDuration: 0,
-            settleDuration: duration,
-            usesContextBridge: false
+            bridgeDuration: bridgeDuration,
+            settleDuration: duration - bridgeDuration,
+            usesContextBridge: true
         )
     }
 
@@ -122,12 +129,26 @@ nonisolated enum GuidedPanelMotionPlanner {
     }
 
     static func bridgeRect(from source: CGRect, to destination: CGRect) -> CGRect {
-        let union = source.union(destination)
-        let dx = max(union.width * 0.06, 0.012)
-        let dy = max(union.height * 0.06, 0.012)
-        return MangaPageCoordinateSpace.clampedNormalizedRect(
-            union.insetBy(dx: -dx, dy: -dy)
+        // The first stage moves only a small fraction toward the destination.
+        // ReaderView already follows it with the longer settle stage, so this
+        // produces a joystick-like acceleration profile: a slow, visible launch
+        // from the source followed by faster travel along the same path. Using an
+        // interpolated rect rather than source.union(destination) also prevents
+        // the old zoom-out/zoom-in detour that made direction hard to perceive.
+        let sourceCenter = CGPoint(x: source.midX, y: source.midY)
+        let destinationCenter = CGPoint(x: destination.midX, y: destination.midY)
+        let distance = hypot(
+            destinationCenter.x - sourceCenter.x,
+            destinationCenter.y - sourceCenter.y
         )
+        let progress = min(max(0.075 + distance * 0.035, 0.075), 0.11)
+        let rect = CGRect(
+            x: source.minX + (destination.minX - source.minX) * progress,
+            y: source.minY + (destination.minY - source.minY) * progress,
+            width: source.width + (destination.width - source.width) * progress,
+            height: source.height + (destination.height - source.height) * progress
+        )
+        return MangaPageCoordinateSpace.clampedNormalizedRect(rect)
     }
 
     private static func estimatedScale(for panel: CGRect) -> CGFloat {
