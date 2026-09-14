@@ -130,17 +130,17 @@ struct GuidedPanelVisionV2Tests {
 
     @Test func directSegmentationMaskProducesPageContour() throws {
         let detections = try MLMultiArray(shape: [1, 1, 6], dataType: .float32)
-        detections[[0, 0, 0] as [NSNumber]] = 80
-        detections[[0, 0, 1] as [NSNumber]] = 80
-        detections[[0, 0, 2] as [NSNumber]] = 560
-        detections[[0, 0, 3] as [NSNumber]] = 560
-        detections[[0, 0, 4] as [NSNumber]] = 0.95
-        detections[[0, 0, 5] as [NSNumber]] = 0
+        detections[0] = 80
+        detections[1] = 80
+        detections[2] = 560
+        detections[3] = 560
+        detections[4] = 0.95
+        detections[5] = 0
 
         let masks = try MLMultiArray(shape: [1, 1, 8, 8], dataType: .float32)
         for y in 2...5 {
             for x in 2...5 {
-                masks[[0, 0, NSNumber(value: y), NSNumber(value: x)]] = 1
+                masks[y * 8 + x] = 1
             }
         }
 
