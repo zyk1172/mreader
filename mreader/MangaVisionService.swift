@@ -182,6 +182,10 @@ actor MangaVisionService {
         }
     }
 
+    func providerDescriptor() async -> MangaVisionProviderDescriptor {
+        await provider.descriptor
+    }
+
     func performanceSnapshot() async -> MangaVisionPerformanceSnapshot {
         let descriptor = await provider.descriptor
         return MangaVisionPerformanceSnapshot(
@@ -281,14 +285,15 @@ actor MangaVisionService {
     }
 
     nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {
-        let size = image.cgImage.map { "\($0.width)x\($0.height)" }
-            ?? "\(Int(image.size.width * image.scale))x\(Int(image.size.height * image.scale))"
+        // Cache identity belongs to the source page, not to a particular 640/4096/6144
+        // decode. This is what lets Guided Panel and OCR join the same inference.
+        _ = image
         let source: String
         if pageURL.isFileURL {
             let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            source = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)#\(size)"
+            source = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         } else {
-            source = "\(pageURL.absoluteString)#\(size)"
+            source = pageURL.absoluteString
         }
         return sha256(source)
     }

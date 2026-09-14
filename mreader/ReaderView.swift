@@ -2307,6 +2307,7 @@ struct ReaderView: View {
                         viewportAspect: 2.0,
                         sourceLanguagePreference: comic.translationSourceLanguage,
                         previousContext: "",
+                        comicID: comicID,
                         contextScopeID: TranslationContextBuilder.scopeID(
                             comicID: comicID,
                             target: target
@@ -3358,7 +3359,9 @@ struct GuidedPanelReader: View {
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
         )
         let detectedLayout = await PanelDetectionService.shared.layout(
-            for: pageURL,
+            comicID: comic.id,
+            pageIndex: page.index,
+            pageURL: pageURL,
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
         )
@@ -5812,6 +5815,7 @@ struct LocalImageView: View {
                 ?? max(viewportSize.height / max(viewportSize.width, 1), 1.25),
             sourceLanguagePreference: comicTranslationSourceLanguage,
             previousContext: "",
+            comicID: comicID,
             contextScopeID: TranslationContextBuilder.scopeID(
                 comicID: comicID,
                 target: TranslationTargetLanguage.migrateLegacyValue(targetLanguage)

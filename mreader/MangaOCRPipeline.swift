@@ -336,9 +336,14 @@ nonisolated struct OCRPipelineResult: Sendable {
 nonisolated enum MangaOCRPipeline {
     static func recognize(
         in image: UIImage,
-        options: OCRPreprocessor.Options
+        options: OCRPreprocessor.Options,
+        mangaAnalysis: MangaPageAnalysis? = nil
     ) async throws -> OCRPipelineResult {
-        let candidateResult = try await OCRPreprocessor.recognizeCandidatesWithReference(in: image, options: options)
+        let candidateResult = try await OCRPreprocessor.recognizeCandidatesWithReference(
+            in: image,
+            options: options,
+            visionTextRegions: mangaAnalysis?.texts ?? []
+        )
         let visionBlocks = candidateResult.blocks
         let verticalBlocks = await JapaneseVerticalOCRService.recognizeIfNeeded(
             in: image,
@@ -347,11 +352,17 @@ nonisolated enum MangaOCRPipeline {
             visionKitReference: candidateResult.visionKitReference
         )
         let rawBlocks = visionBlocks + verticalBlocks
-        return resolveForDiagnostics(
+        let result = resolveForDiagnostics(
             rawBlocks,
             isRightToLeft: options.isRightToLeft,
             sourceLanguagePreference: options.sourceLanguagePreference,
             visionKitReference: candidateResult.visionKitReference
+        )
+        guard let mangaAnalysis else { return result }
+        return MangaVisionOCROrdering.applyingReadingOrder(
+            to: result,
+            analysis: mangaAnalysis,
+            isRightToLeft: options.isRightToLeft
         )
     }
 

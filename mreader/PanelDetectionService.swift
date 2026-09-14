@@ -1,4 +1,3 @@
-import CoreML
 import CryptoKit
 import Foundation
 import UIKit
@@ -30,7 +29,7 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     static let schemaVersion = 2
-    static let modelVersion = 2
+    static let modelVersion = 3
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -97,170 +96,6 @@ nonisolated struct VisionRectanglePanelDetector: PanelDetecting {
         }
     }
 }
-
-nonisolated struct CoreMLPanelDetector: PanelDetecting, @unchecked Sendable {
-    let identifier: String
-    private let model: VNCoreMLModel
-
-    private static let frameClassID = 0
-    private static let minimumFrameConfidence: Float = 0.24
-    private static let modelInputDimension: CGFloat = 640
-
-    private init(model: VNCoreMLModel, identifier: String) {
-        self.model = model
-        self.identifier = identifier
-    }
-
-    static func bundled(bundle: Bundle = .main) -> CoreMLPanelDetector? {
-        guard let modelURL = bundle.url(forResource: "PanelDetector", withExtension: "mlmodelc") else {
-            return nil
-        }
-        let configuration = MLModelConfiguration()
-        configuration.computeUnits = .cpuAndNeuralEngine
-        guard let mlModel = try? MLModel(contentsOf: modelURL, configuration: configuration),
-              let visionModel = try? VNCoreMLModel(for: mlModel) else {
-            return nil
-        }
-        return CoreMLPanelDetector(
-            model: visionModel,
-            identifier: "manga109-yolo26s-seg-coreml-fp16-640-v1"
-        )
-    }
-
-    func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
-        let request = VNCoreMLRequest(model: model)
-        request.imageCropAndScaleOption = .scaleFit
-        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        try handler.perform([request])
-
-        let featureObservations = (request.results ?? []).compactMap {
-            $0 as? VNCoreMLFeatureValueObservation
-        }
-        guard let output = featureObservations
-            .compactMap({ $0.featureValue.multiArrayValue })
-            .first(where: Self.looksLikeDetectionTensor) else {
-            return []
-        }
-
-        return Self.decodeFrames(
-            output,
-            imageSize: CGSize(width: image.width, height: image.height)
-        )
-    }
-
-    nonisolated static func decodedPanelsForDiagnostics(
-        _ output: MLMultiArray,
-        imageSize: CGSize
-    ) -> [DetectedPanel] {
-        decodeFrames(output, imageSize: imageSize)
-    }
-
-    private static func looksLikeDetectionTensor(_ output: MLMultiArray) -> Bool {
-        let shape = output.shape.map(\.intValue)
-        guard shape.count == 3, shape.first == 1 else { return false }
-        let dimensions = Array(shape.dropFirst())
-        return dimensions.contains(where: { $0 >= 6 && $0 <= 128 })
-            && dimensions.contains(where: { $0 >= 1 && $0 <= 1000 })
-    }
-
-    private static func decodeFrames(
-        _ output: MLMultiArray,
-        imageSize: CGSize
-    ) -> [DetectedPanel] {
-        let shape = output.shape.map(\.intValue)
-        guard shape.count == 3,
-              shape[0] == 1,
-              imageSize.width > 0,
-              imageSize.height > 0 else {
-            return []
-        }
-
-        let rowMajor: Bool
-        let instanceCount: Int
-        let featureCount: Int
-        if shape[2] >= 6, shape[2] <= 128 {
-            rowMajor = true
-            instanceCount = shape[1]
-            featureCount = shape[2]
-        } else if shape[1] >= 6, shape[1] <= 128 {
-            rowMajor = false
-            instanceCount = shape[2]
-            featureCount = shape[1]
-        } else {
-            return []
-        }
-        guard featureCount >= 6 else { return [] }
-
-        func value(instance: Int, feature: Int) -> Double {
-            let indices: [NSNumber]
-            if rowMajor {
-                indices = [0, NSNumber(value: instance), NSNumber(value: feature)]
-            } else {
-                indices = [0, NSNumber(value: feature), NSNumber(value: instance)]
-            }
-            return output[indices].doubleValue
-        }
-
-        let inputSize = modelInputDimension
-        let sourceWidth = imageSize.width
-        let sourceHeight = imageSize.height
-        let scale = min(inputSize / sourceWidth, inputSize / sourceHeight)
-        let scaledWidth = sourceWidth * scale
-        let scaledHeight = sourceHeight * scale
-        let padX = (inputSize - scaledWidth) / 2
-        let padY = (inputSize - scaledHeight) / 2
-        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-
-        var panels: [DetectedPanel] = []
-        panels.reserveCapacity(min(instanceCount, 32))
-
-        for index in 0..<instanceCount {
-            let confidence = Float(value(instance: index, feature: 4))
-            guard confidence.isFinite, confidence >= minimumFrameConfidence else { continue }
-
-            let classID = Int(value(instance: index, feature: 5).rounded())
-            guard classID == frameClassID else { continue }
-
-            var x1 = CGFloat(value(instance: index, feature: 0))
-            var y1 = CGFloat(value(instance: index, feature: 1))
-            var x2 = CGFloat(value(instance: index, feature: 2))
-            var y2 = CGFloat(value(instance: index, feature: 3))
-            guard x1.isFinite, y1.isFinite, x2.isFinite, y2.isFinite else { continue }
-
-            let maximumCoordinate = max(abs(x1), abs(y1), abs(x2), abs(y2))
-            if maximumCoordinate <= 2 {
-                x1 *= inputSize
-                y1 *= inputSize
-                x2 *= inputSize
-                y2 *= inputSize
-            }
-
-            let rect = CGRect(
-                x: (x1 - padX) / scaledWidth,
-                y: (y1 - padY) / scaledHeight,
-                width: (x2 - x1) / scaledWidth,
-                height: (y2 - y1) / scaledHeight
-            ).standardized.intersection(unit)
-
-            guard !rect.isNull,
-                  rect.width > 0.01,
-                  rect.height > 0.01 else {
-                continue
-            }
-
-            panels.append(
-                DetectedPanel(
-                    rect: rect,
-                    confidence: confidence,
-                    source: .coreML
-                )
-            )
-        }
-
-        return panels
-    }
-}
-
 
 nonisolated enum PanelPostProcessor {
     private static let smallFloatingAreaThreshold: CGFloat = 0.07
@@ -471,21 +306,18 @@ actor PanelDetectionService {
 
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
-    private let primaryDetector: any PanelDetecting
+    private let visionService: MangaVisionService
     private let fallbackDetector: any PanelDetecting
     private var memoryCache: [String: PanelPageLayout] = [:]
 
-    init(detector: (any PanelDetecting)? = nil) {
+    init(
+        visionService: MangaVisionService = .shared,
+        fallbackDetector: any PanelDetecting = VisionRectanglePanelDetector()
+    ) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
-        fallbackDetector = VisionRectanglePanelDetector()
-        if let detector {
-            primaryDetector = detector
-        } else if let coreMLDetector = CoreMLPanelDetector.bundled() {
-            primaryDetector = coreMLDetector
-        } else {
-            primaryDetector = VisionRectanglePanelDetector()
-        }
+        self.visionService = visionService
+        self.fallbackDetector = fallbackDetector
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
@@ -497,8 +329,10 @@ actor PanelDetectionService {
             scope: "legacy-\(Self.sha256(scopeSource))",
             pageComponent: Self.sha256(pageURL.absoluteString)
         )
-        return layout(
+        return await layout(
             cacheIdentity: identity,
+            comicID: nil,
+            pageIndex: nil,
             pageURL: pageURL,
             image: image,
             isRightToLeft: isRightToLeft
@@ -517,8 +351,10 @@ actor PanelDetectionService {
             scope: comicID.uuidString.lowercased(),
             pageComponent: String(format: "%04d", max(pageIndex, 0) + 1)
         )
-        return layout(
+        return await layout(
             cacheIdentity: identity,
+            comicID: comicID,
+            pageIndex: pageIndex,
             pageURL: pageURL,
             image: image,
             isRightToLeft: isRightToLeft
@@ -550,19 +386,23 @@ actor PanelDetectionService {
 
     private func layout(
         cacheIdentity: CacheIdentity,
+        comicID: UUID?,
+        pageIndex: Int?,
         pageURL: URL,
         image: UIImage,
         isRightToLeft: Bool
-    ) -> PanelPageLayout {
+    ) async -> PanelPageLayout {
+        let descriptor = await visionService.providerDescriptor()
+        let primaryIdentifier = "manga-vision:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
         let direction = isRightToLeft ? "rightToLeft" : "leftToRight"
         let sourceFingerprint = Self.sourceFingerprint(pageURL: pageURL, image: image)
-        let memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryDetector.identifier)|\(sourceFingerprint)"
+        let memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
             return cached
         }
 
         let diskURL = cacheURL(for: cacheIdentity)
-        let validDetectorIdentifiers = Set([primaryDetector.identifier, fallbackDetector.identifier])
+        let validDetectorIdentifiers = Set([primaryIdentifier, fallbackDetector.identifier])
         if let data = try? Data(contentsOf: diskURL),
            let cached = try? JSONDecoder().decode(PanelPageLayout.self, from: data),
            Self.isCacheValid(
@@ -580,19 +420,30 @@ actor PanelDetectionService {
                 bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
                 direction: direction,
                 sourceFingerprint: sourceFingerprint,
-                detectorIdentifier: primaryDetector.identifier
+                detectorIdentifier: primaryIdentifier
             )
             store(fallback, memoryKey: memoryKey, diskURL: diskURL)
             return fallback
         }
 
         let contentBounds = Self.detectedContentBounds(analysisImage)
-        let primaryPanels = (try? primaryDetector.detectPanels(in: analysisImage)) ?? []
+        let mangaAnalysis = try? await visionService.analysis(
+            comicID: comicID,
+            pageIndex: pageIndex,
+            pageURL: pageURL,
+            image: image
+        )
+        let primaryPanels = (mangaAnalysis?.panels ?? []).map {
+            DetectedPanel(
+                rect: $0.normalizedRect,
+                confidence: $0.confidence,
+                source: .coreML
+            )
+        }
         var processed = PanelPostProcessor.process(primaryPanels)
-        var detectorIdentifier = primaryDetector.identifier
+        var detectorIdentifier = primaryIdentifier
 
-        if !PanelLayoutQuality.isUsable(processed),
-           primaryDetector.identifier != fallbackDetector.identifier {
+        if !PanelLayoutQuality.isUsable(processed) {
             let fallbackPanels = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
             let fallbackProcessed = PanelPostProcessor.process(fallbackPanels)
             if PanelLayoutQuality.isUsable(fallbackProcessed) {
