@@ -23,6 +23,16 @@ nonisolated struct MangaPageStructureGraph: Sendable {
         unassignedTexts: []
     )
 
+    private init(
+        nodes: [MangaPanelStructureNode],
+        unassignedBalloons: [CGRect],
+        unassignedTexts: [CGRect]
+    ) {
+        self.nodes = nodes
+        self.unassignedBalloons = unassignedBalloons
+        self.unassignedTexts = unassignedTexts
+    }
+
     init(
         panels: [DetectedPanel],
         analysis: MangaPageAnalysis?,
