@@ -28,6 +28,18 @@ final class ReaderStateMutationTests: XCTestCase {
         XCTAssertTrue(ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPages))
     }
 
+    func testProgressStripClampsAndMapsFractions() {
+        XCTAssertEqual(ReaderProgressStripPolicy.clampedPageIndex(-5, totalPages: 201), 0)
+        XCTAssertEqual(ReaderProgressStripPolicy.clampedPageIndex(999, totalPages: 201), 200)
+        XCTAssertEqual(ReaderProgressStripPolicy.clampedPageIndex(5, totalPages: 0), 0)
+
+        XCTAssertEqual(ReaderProgressStripPolicy.pageIndex(forFraction: 0, totalPages: 201), 0)
+        XCTAssertEqual(ReaderProgressStripPolicy.pageIndex(forFraction: 0.5, totalPages: 201), 100)
+        XCTAssertEqual(ReaderProgressStripPolicy.pageIndex(forFraction: 1, totalPages: 201), 200)
+        XCTAssertEqual(ReaderProgressStripPolicy.pageIndex(forFraction: -1, totalPages: 201), 0)
+        XCTAssertEqual(ReaderProgressStripPolicy.pageIndex(forFraction: 2, totalPages: 201), 200)
+    }
+
     func testDismissGestureRequiresExactlyTwoTouches() {
         XCTAssertFalse(ReaderDismissGestureGate.hasRequiredTouches(1))
         XCTAssertTrue(ReaderDismissGestureGate.hasRequiredTouches(2))

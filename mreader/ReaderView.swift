@@ -195,6 +195,22 @@ nonisolated enum ReaderGestureGate {
 /// Downward reader dismissal is deliberately a two-finger-only gesture. The
 /// UIKit recognizer can remain in a recognized state after one finger of a
 /// two-finger gesture lifts, so every active update must revalidate touch count.
+nonisolated enum ReaderProgressStripPolicy {
+    static func clampedPageIndex(_ pageIndex: Int, totalPages: Int) -> Int {
+        guard totalPages > 0 else { return 0 }
+        return min(max(pageIndex, 0), totalPages - 1)
+    }
+
+    static func pageIndex(forFraction fraction: CGFloat, totalPages: Int) -> Int {
+        guard totalPages > 1 else { return 0 }
+        let normalized = min(max(fraction, 0), 1)
+        return clampedPageIndex(
+            Int((normalized * CGFloat(totalPages - 1)).rounded()),
+            totalPages: totalPages
+        )
+    }
+}
+
 nonisolated enum ReaderDismissGestureGate {
     static let requiredTouchCount = 2
 
@@ -394,6 +410,38 @@ final class PageGeometryStore {
 
     func size(for url: URL) -> CGSize? {
         sizes[url.absoluteString]
+    }
+}
+
+@MainActor
+private final class ReaderProgressThumbnailCache {
+    static let shared = ReaderProgressThumbnailCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+
+    private init() {
+        cache.countLimit = 32
+    }
+
+    func image(for url: URL) async -> UIImage? {
+        let key = url.absoluteString
+        if let cached = cache.object(forKey: key as NSString) {
+            return cached
+        }
+        if let task = inFlight[key] {
+            return await task.value
+        }
+        let task = Task {
+            await decodeReaderImage(from: url, maxPixelSize: 640)
+        }
+        inFlight[key] = task
+        let image = await task.value
+        inFlight[key] = nil
+        if let image {
+            cache.setObject(image, forKey: key as NSString)
+        }
+        return image
     }
 }
 
@@ -798,6 +846,7 @@ struct ReaderView: View {
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @State private var currentPageIndex: Int
+    @State private var progressScrubPageIndex: Int?
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
     @State private var showOfflineTranslationStart = false
@@ -910,6 +959,7 @@ struct ReaderView: View {
         self.onComicUpdate = onComicUpdate
         let maxIndex = max(0, manager.pages.count - 1)
         _currentPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
+        _progressScrubPageIndex = State(initialValue: nil)
         _lastSavedScrollProgress = State(initialValue: initialComic.scrollProgress)
         _lastSavedScrollPageProgress = State(initialValue: initialComic.scrollPageProgress)
         _lastPrefetchPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
@@ -1069,6 +1119,19 @@ struct ReaderView: View {
                 .zIndex(20)
             }
 
+            if areReaderControlsVisible && !manager.pages.isEmpty {
+                GeometryReader { proxy in
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        readerProgressOverlay
+                            .padding(.bottom, max(proxy.safeAreaInsets.bottom, 6))
+                    }
+                    .ignoresSafeArea(edges: .bottom)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(22)
+            }
+
             if areReaderControlsVisible {
                 VStack {
                     Spacer()
@@ -1118,7 +1181,7 @@ struct ReaderView: View {
                         }
                     }
                     .padding(.trailing, 18)
-                    .padding(.bottom, 18)
+                    .padding(.bottom, manager.pages.isEmpty ? 18 : 238)
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
             }
@@ -1264,54 +1327,71 @@ struct ReaderView: View {
         }
     }
 
-    private var bottomControlBar: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 18) {
-                Button(action: previousPage) {
-                    Image(systemName: readingDirection == .rightToLeft ? "chevron.right" : "chevron.left")
-                        .frame(width: 36, height: 36)
+    private var displayedProgressPageIndex: Int {
+        ReaderProgressStripPolicy.clampedPageIndex(
+            progressScrubPageIndex ?? currentPageIndex,
+            totalPages: manager.pages.count
+        )
+    }
+
+    private var readerProgressOverlay: some View {
+        VStack(spacing: 10) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 10) {
+                        ForEach(manager.pages.indices, id: \.self) { index in
+                            ReaderProgressThumbnail(
+                                url: manager.pages[index].url,
+                                pageNumber: index + 1,
+                                isSelected: index == displayedProgressPageIndex
+                            ) {
+                                progressScrubPageIndex = nil
+                                jumpToPageIndex(index, dismissSettings: false)
+                            }
+                            .id(index)
+                        }
+                    }
+                    .padding(.horizontal, 16)
                 }
-                .disabled(currentPageIndex <= 0)
-                .accessibilityIdentifier("mreader.reader.previousPage")
-
-                Spacer()
-
-                Text("\(currentPageIndex + 1) / \(manager.pages.count)")
-                    .font(.system(.headline, design: .rounded))
-                    .monospacedDigit()
-                    .accessibilityIdentifier("mreader.reader.progress")
-
-                Spacer()
-
-                Button(action: nextPage) {
-                    Image(systemName: readingDirection == .rightToLeft ? "chevron.left" : "chevron.right")
-                        .frame(width: 36, height: 36)
+                .frame(height: 178)
+                .onAppear {
+                    proxy.scrollTo(displayedProgressPageIndex, anchor: .center)
                 }
-                .disabled(currentPageIndex >= max(0, manager.pages.count - 1))
-                .accessibilityIdentifier("mreader.reader.nextPage")
+                .onChange(of: displayedProgressPageIndex) { _, newValue in
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        proxy.scrollTo(newValue, anchor: .center)
+                    }
+                }
             }
 
-            let sliderBinding = Binding<Double>(get: { Double(currentPageIndex) }, set: { currentPageIndex = Int($0) })
-            Slider(value: sliderBinding, in: 0...Double(max(0, manager.pages.count - 1)), step: 1.0).tint(.white)
-                .environment(\.layoutDirection, readingDirection == .rightToLeft ? .rightToLeft : .leftToRight)
+            HStack(spacing: 12) {
+                Text("1")
+                    .font(.headline.monospacedDigit())
+                    .frame(minWidth: 24, alignment: .leading)
 
-            HStack {
-                Picker("reader.mode".localized, selection: readingModeRaw) {
-                    Label("翻页", systemImage: "book").tag(ReadingMode.horizontalPage.rawValue)
-                    Label("滚动", systemImage: "scroll").tag(ReadingMode.continuousScroll.rawValue)
-                }
-                .pickerStyle(.segmented)
+                ReaderPageScrubber(
+                    pageIndex: displayedProgressPageIndex,
+                    totalPages: manager.pages.count,
+                    onScrub: { progressScrubPageIndex = $0 },
+                    onCommit: { index in
+                        progressScrubPageIndex = nil
+                        jumpToPageIndex(index, dismissSettings: false)
+                    }
+                )
+                .frame(height: 54)
 
-                Picker("reader.direction".localized, selection: readingDirectionRaw) {
-                    Image(systemName: "arrow.left").tag(ReadingDirection.rightToLeft.rawValue)
-                    Image(systemName: "arrow.right").tag(ReadingDirection.leftToRight.rawValue)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 120)
+                Text("\(manager.pages.count)")
+                    .font(.headline.monospacedDigit())
+                    .frame(minWidth: 36, alignment: .trailing)
             }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
         }
-        .padding(.horizontal, 20).padding(.vertical, 16)
-        .background(.ultraThinMaterial).environment(\.colorScheme, .dark)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background(.ultraThinMaterial)
+        .environment(\.colorScheme, .dark)
+        .accessibilityIdentifier("mreader.reader.progressOverlay")
     }
 
     private var readerTopControlBar: some View {
@@ -1859,15 +1939,30 @@ struct ReaderView: View {
             HapticManager.shared.play(.warning)
             return
         }
-        let targetIndex = min(max(pageNumber - 1, 0), max(0, manager.pages.count - 1))
+        jumpToPageIndex(pageNumber - 1, dismissSettings: true)
+        jumpPageText = ""
+    }
+
+    private func jumpToPageIndex(_ requestedIndex: Int, dismissSettings: Bool) {
+        let targetIndex = ReaderProgressStripPolicy.clampedPageIndex(
+            requestedIndex,
+            totalPages: manager.pages.count
+        )
         HapticManager.shared.play(.medium)
         currentPageIndex = targetIndex
         lastSavedScrollProgress = 0
         lastSavedScrollPageProgress = 0
-        persistReadingProgress(pageIndex: targetIndex, scrollProgress: 0, scrollPageProgress: 0, reason: "jumpToPage", force: true)
+        persistReadingProgress(
+            pageIndex: targetIndex,
+            scrollProgress: 0,
+            scrollPageProgress: 0,
+            reason: "jumpToPage",
+            force: true
+        )
         scrollJumpRequestID = UUID()
-        jumpPageText = ""
-        showComicSettings = false
+        if dismissSettings {
+            showComicSettings = false
+        }
     }
 
     private func addBookmark() {
@@ -3798,6 +3893,113 @@ struct TwoFingerSwipeDownDismissView: UIViewRepresentable {
                 if let recognizer = coordinator?.recognizer {
                     recognizer.view?.removeGestureRecognizer(recognizer)
                 }
+            }
+        }
+    }
+}
+
+private struct ReaderProgressThumbnail: View {
+    let url: URL
+    let pageNumber: Int
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Color.black.opacity(0.42)
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                    } else {
+                        ProgressView()
+                            .tint(.white)
+                    }
+                }
+                .frame(width: 106, height: 140)
+                .clipped()
+
+                Text("\(pageNumber)")
+                    .font(.system(size: 20, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(width: 106, height: 174)
+            .background(Color.black.opacity(0.76))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        isSelected ? Color.white : Color.white.opacity(0.22),
+                        lineWidth: isSelected ? 3 : 1
+                    )
+            }
+            .scaleEffect(isSelected ? 1.025 : 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(pageNumber)")
+        .task(id: url.absoluteString) {
+            image = await ReaderProgressThumbnailCache.shared.image(for: url)
+        }
+    }
+}
+
+private struct ReaderPageScrubber: View {
+    let pageIndex: Int
+    let totalPages: Int
+    let onScrub: (Int) -> Void
+    let onCommit: (Int) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let knobDiameter: CGFloat = 54
+            let availableWidth = max(proxy.size.width - knobDiameter, 1)
+            let fraction = totalPages > 1
+                ? CGFloat(pageIndex) / CGFloat(totalPages - 1)
+                : 0
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.48))
+                    .frame(height: 24)
+                    .padding(.horizontal, knobDiameter / 2)
+
+                Circle()
+                    .fill(Color.black.opacity(0.82))
+                    .frame(width: knobDiameter, height: knobDiameter)
+                    .offset(x: min(max(fraction, 0), 1) * availableWidth)
+                    .shadow(color: .black.opacity(0.34), radius: 4, y: 1)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let rawFraction = (value.location.x - knobDiameter / 2) / availableWidth
+                        onScrub(ReaderProgressStripPolicy.pageIndex(forFraction: rawFraction, totalPages: totalPages))
+                    }
+                    .onEnded { value in
+                        let rawFraction = (value.location.x - knobDiameter / 2) / availableWidth
+                        onCommit(ReaderProgressStripPolicy.pageIndex(forFraction: rawFraction, totalPages: totalPages))
+                    }
+            )
+        }
+        .accessibilityElement()
+        .accessibilityLabel("reader.jumpToPage".localized)
+        .accessibilityValue("\(pageIndex + 1) / \(max(totalPages, 1))")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                onCommit(ReaderProgressStripPolicy.clampedPageIndex(pageIndex + 1, totalPages: totalPages))
+            case .decrement:
+                onCommit(ReaderProgressStripPolicy.clampedPageIndex(pageIndex - 1, totalPages: totalPages))
+            @unknown default:
+                break
             }
         }
     }
