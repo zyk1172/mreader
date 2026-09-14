@@ -433,21 +433,40 @@ nonisolated enum PanelReadingOrder {
     }
 
     private static func segmentsIntersect(
-        _ a: CGPoint,
-        _ b: CGPoint,
-        _ c: CGPoint,
-        _ d: CGPoint
-    ) -> Bool {
-        func orientation(_ p: CGPoint, _ q: CGPoint, _ r: CGPoint) -> CGFloat {
-            (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-        }
-        let o1 = orientation(a, b, c)
-        let o2 = orientation(a, b, d)
-        let o3 = orientation(c, d, a)
-        let o4 = orientation(c, d, b)
-        return (o1 == 0 || o2 == 0 || (o1 > 0) != (o2 > 0))
-            && (o3 == 0 || o4 == 0 || (o3 > 0) != (o4 > 0))
+    _ a: CGPoint,
+    _ b: CGPoint,
+    _ c: CGPoint,
+    _ d: CGPoint
+) -> Bool {
+    let epsilon: CGFloat = 0.000_001
+
+    func orientation(_ p: CGPoint, _ q: CGPoint, _ r: CGPoint) -> CGFloat {
+        (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
     }
+
+    func isOnSegment(_ point: CGPoint, from start: CGPoint, to end: CGPoint) -> Bool {
+        point.x >= min(start.x, end.x) - epsilon
+            && point.x <= max(start.x, end.x) + epsilon
+            && point.y >= min(start.y, end.y) - epsilon
+            && point.y <= max(start.y, end.y) + epsilon
+    }
+
+    let o1 = orientation(a, b, c)
+    let o2 = orientation(a, b, d)
+    let o3 = orientation(c, d, a)
+    let o4 = orientation(c, d, b)
+    let abStraddles = (o1 > epsilon && o2 < -epsilon)
+        || (o1 < -epsilon && o2 > epsilon)
+    let cdStraddles = (o3 > epsilon && o4 < -epsilon)
+        || (o3 < -epsilon && o4 > epsilon)
+    if abStraddles && cdStraddles { return true }
+
+    if abs(o1) <= epsilon, isOnSegment(c, from: a, to: b) { return true }
+    if abs(o2) <= epsilon, isOnSegment(d, from: a, to: b) { return true }
+    if abs(o3) <= epsilon, isOnSegment(a, from: c, to: d) { return true }
+    if abs(o4) <= epsilon, isOnSegment(b, from: c, to: d) { return true }
+    return false
+}
 
     private static func pointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
         guard polygon.count >= 3 else { return false }
