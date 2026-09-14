@@ -848,6 +848,7 @@ struct ReaderView: View {
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @State private var currentPageIndex: Int
     @State private var progressScrubPageIndex: Int?
+    @State private var isProgressScrubbing = false
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
     @State private var showOfflineTranslationStart = false
@@ -1133,60 +1134,6 @@ struct ReaderView: View {
                 .zIndex(22)
             }
 
-            if areReaderControlsVisible {
-                VStack {
-                    Spacer()
-                    HStack(spacing: 10) {
-                        Spacer()
-                        if comic.isOCREnabled {
-                        Button {
-                            HapticManager.shared.play(.light)
-                            isOCRMagnificationVisible.toggle()
-                            if isOCRMagnificationVisible {
-                                ocrMagnifyRequestID = UUID()
-                            }
-                        } label: {
-                            Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(.white.opacity(0.22), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("reader.ocrMagnify".localized)
-                        }
-
-                        if comic.isAITranslationEnabled {
-                        Button {
-                            HapticManager.shared.play(.light)
-                            translateRequestID = UUID()
-                        } label: {
-                            Text("AI")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(.white.opacity(0.22), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("reader.aiTranslationLabel".localized)
-                        }
-                    }
-                    .padding(.trailing, 18)
-                    .padding(.bottom, manager.pages.isEmpty ? 18 : 190)
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
-            }
-
             if isBurnInProtectionLocked {
                 Color.black
                     .ignoresSafeArea()
@@ -1339,16 +1286,20 @@ struct ReaderView: View {
         Binding(
             get: { Double(displayedProgressPageIndex) },
             set: { newValue in
-                progressScrubPageIndex = ReaderProgressStripPolicy.clampedPageIndex(
+                let nextIndex = ReaderProgressStripPolicy.clampedPageIndex(
                     Int(newValue.rounded()),
                     totalPages: manager.pages.count
                 )
+                let previousIndex = progressScrubPageIndex ?? currentPageIndex
+                guard nextIndex != previousIndex else { return }
+                progressScrubPageIndex = nextIndex
+                HapticManager.shared.play(.selection)
             }
         )
     }
 
     private var readerProgressOverlay: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
@@ -1377,35 +1328,135 @@ struct ReaderView: View {
                 }
             }
 
-            HStack(spacing: 10) {
+            HStack(alignment: .bottom, spacing: 10) {
                 Text("\(displayedProgressPageIndex + 1)")
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white)
                     .frame(minWidth: 42, alignment: .trailing)
+                    .padding(.bottom, 9)
 
-                Slider(
-                    value: progressSliderValue,
-                    in: 0...Double(max(manager.pages.count - 1, 1)),
-                    step: 1,
-                    onEditingChanged: { isEditing in
-                        guard !isEditing, let targetIndex = progressScrubPageIndex else { return }
-                        progressScrubPageIndex = nil
-                        jumpToPageIndex(targetIndex, dismissSettings: false)
+                GeometryReader { proxy in
+                    let totalPages = max(manager.pages.count, 1)
+                    let fraction = totalPages > 1
+                        ? CGFloat(displayedProgressPageIndex) / CGFloat(totalPages - 1)
+                        : 0
+                    let thumbInset: CGFloat = 14
+                    let bubbleWidth: CGFloat = 52
+                    let trackWidth = max(proxy.size.width - thumbInset * 2, 0)
+                    let rawBubbleX = thumbInset + min(max(fraction, 0), 1) * trackWidth
+                    let minimumBubbleX = min(bubbleWidth / 2, proxy.size.width / 2)
+                    let maximumBubbleX = max(proxy.size.width - bubbleWidth / 2, minimumBubbleX)
+                    let bubbleX = min(max(rawBubbleX, minimumBubbleX), maximumBubbleX)
+
+                    ZStack(alignment: .topLeading) {
+                        Slider(
+                            value: progressSliderValue,
+                            in: 0...Double(max(manager.pages.count - 1, 1)),
+                            step: 1,
+                            onEditingChanged: { isEditing in
+                                if isEditing {
+                                    isProgressScrubbing = true
+                                    HapticManager.shared.prepare()
+                                    return
+                                }
+
+                                isProgressScrubbing = false
+                                guard let targetIndex = progressScrubPageIndex else { return }
+                                progressScrubPageIndex = nil
+                                guard targetIndex != currentPageIndex else { return }
+                                jumpToPageIndex(targetIndex, dismissSettings: false)
+                            }
+                        )
+                        .tint(.white)
+                        .disabled(manager.pages.count <= 1)
+                        .frame(height: 44)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .accessibilityLabel("reader.jumpToPage".localized)
+                        .accessibilityValue("\(displayedProgressPageIndex + 1) / \(max(manager.pages.count, 1))")
+                        .accessibilityIdentifier("mreader.reader.progressSlider")
+
+                        if isProgressScrubbing {
+                            Text("\(displayedProgressPageIndex + 1)")
+                                .font(.caption.weight(.semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.primary)
+                                .frame(minWidth: 32)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(.regularMaterial, in: Capsule())
+                                .overlay {
+                                    Capsule()
+                                        .strokeBorder(.primary.opacity(0.10), lineWidth: 0.5)
+                                }
+                                .contentTransition(.numericText())
+                                .position(x: bubbleX, y: 12)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                     }
-                )
-                .tint(.white)
-                .disabled(manager.pages.count <= 1)
-                .accessibilityLabel("reader.jumpToPage".localized)
-                .accessibilityValue("\(displayedProgressPageIndex + 1) / \(max(manager.pages.count, 1))")
+                    .animation(.easeOut(duration: 0.12), value: isProgressScrubbing)
+                }
+                .frame(height: 62)
 
                 Text("\(manager.pages.count)")
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.82))
                     .frame(minWidth: 42, alignment: .leading)
+                    .padding(.bottom, 9)
             }
-            .frame(minHeight: 44)
+
+            if comic.isOCREnabled || comic.isAITranslationEnabled {
+                HStack(spacing: 10) {
+                    Spacer()
+
+                    if comic.isOCREnabled {
+                        Button {
+                            HapticManager.shared.play(.light)
+                            isOCRMagnificationVisible.toggle()
+                            if isOCRMagnificationVisible {
+                                ocrMagnifyRequestID = UUID()
+                            }
+                        } label: {
+                            Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.thinMaterial, in: Circle())
+                                .overlay {
+                                    Circle()
+                                        .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("reader.ocrMagnify".localized)
+                        .accessibilityIdentifier("mreader.reader.ocrAction")
+                    }
+
+                    if comic.isAITranslationEnabled {
+                        Button {
+                            HapticManager.shared.play(.light)
+                            translateRequestID = UUID()
+                        } label: {
+                            Text("AI")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.thinMaterial, in: Circle())
+                                .overlay {
+                                    Circle()
+                                        .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("reader.aiTranslationLabel".localized)
+                        .accessibilityIdentifier("mreader.reader.aiAction")
+                    }
+                }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("mreader.reader.progressActions")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
