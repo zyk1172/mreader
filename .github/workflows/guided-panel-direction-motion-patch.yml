@@ -1,0 +1,36 @@
+name: Guided Panel Direction Motion Patch
+
+on:
+  push:
+    branches:
+      - feature/guided-panel-v1
+    paths:
+      - .github/workflows/guided-panel-direction-motion-patch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-guided-panel-direction-motion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/guided-panel-v1
+          fetch-depth: 0
+
+      - name: Apply Guided Panel direction and motion changes
+        run: python3 .github/scripts/patch_guided_panel_direction_motion.py
+
+      - name: Commit patch and remove one-shot helpers
+        run: |
+          rm .github/scripts/patch_guided_panel_direction_motion.py
+          rm .github/workflows/guided-panel-direction-motion-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "feat: add Guided Panel direction and camera motion"
+          git push origin feature/guided-panel-v1
