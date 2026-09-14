@@ -1504,6 +1504,7 @@ struct ReaderView: View {
                 }
             }
             .frame(minHeight: 44)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("mreader.reader.progressActions")
         }
         .padding(.horizontal, 12)
@@ -1517,6 +1518,7 @@ struct ReaderView: View {
         .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
         .padding(.horizontal, 10)
         .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mreader.reader.progressOverlay")
     }
 
