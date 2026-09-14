@@ -10,14 +10,14 @@ struct GuidedPanelFoundationTests {
         let panels = twoByTwoPanels()
         let ordered = PanelReadingOrder.ordered(panels, isRightToLeft: true)
         #expect(ordered.map(\.rect.midX) == [0.75, 0.25, 0.75, 0.25])
-        #expect(ordered.map(\.rect.midY) == [0.20, 0.20, 0.70, 0.70])
+        expectRowCenters(ordered)
     }
 
     @Test func readingOrderUsesLeftToRightWithinRows() {
         let panels = twoByTwoPanels()
         let ordered = PanelReadingOrder.ordered(panels, isRightToLeft: false)
         #expect(ordered.map(\.rect.midX) == [0.25, 0.75, 0.25, 0.75])
-        #expect(ordered.map(\.rect.midY) == [0.20, 0.20, 0.70, 0.70])
+        expectRowCenters(ordered)
     }
 
     @Test func recursiveOrderKeepsFullWidthMiddlePanelBetweenRows() {
@@ -91,6 +91,14 @@ struct GuidedPanelFoundationTests {
         #expect(transform.scale <= GuidedPanelViewport.defaultMaximumScale)
         #expect(transform.focusedRect.width > 0)
         #expect(transform.focusedRect.height > 0)
+    }
+
+    private func expectRowCenters(_ ordered: [DetectedPanel]) {
+        let expected: [CGFloat] = [0.20, 0.20, 0.70, 0.70]
+        #expect(ordered.count == expected.count)
+        for (panel, expectedY) in zip(ordered, expected) {
+            #expect(abs(panel.rect.midY - expectedY) < 0.0001)
+        }
     }
 
     private func twoByTwoPanels() -> [DetectedPanel] {
