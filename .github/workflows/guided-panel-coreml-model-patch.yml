@@ -27,7 +27,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install exporter
-        run: python -m pip install 'ultralytics>=8.4.43,<8.5' coremltools
+        run: python -m pip install 'numpy==2.3.5' 'ultralytics>=8.4.43,<8.5' 'coremltools==9.0'
 
       - name: Download checkpoint
         run: curl -L --fail --retry 3 'https://huggingface.co/ShadowB/Manga109-panel-balloon-text-yolov26-segmentation/resolve/main/best.pt?download=true' -o /tmp/manga109-panel-yolo26s-best.pt
