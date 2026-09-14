@@ -122,8 +122,9 @@ actor MangaVisionService {
             insertIntoMemory(result, forKey: key)
             write(result, to: diskURL)
             lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
+            let inferenceLabel = String(format: "%.1f", inferenceMS)
             MReaderLog.aiVision.debug(
-                "MangaVision analyze model=\(descriptor.modelIdentifier, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) face=\(result.faces.count, privacy: .public) body=\(result.bodies.count, privacy: .public) inferenceMs=\(String(format: \"%.1f\", inferenceMS), privacy: .public)"
+                "MangaVision analyze model=\(descriptor.modelIdentifier, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) face=\(result.faces.count, privacy: .public) body=\(result.bodies.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
             )
             return result
         } catch {
