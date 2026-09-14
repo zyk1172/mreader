@@ -23,10 +23,11 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核，
-    /// 会改写 sourceText 与 translation unit 数量，旧缓存必须失效。
-    static let translationCacheRevision = "translation-v22-vision-slice-merge-and-source-review"
-    static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
+    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核。
+    /// v23：Manga Vision balloon 成为 OCR translation-unit 边界，并恢复 ROI 后的
+    /// 页面尺度小字过滤；旧缓存缺少这些几何，必须失效。
+    static let translationCacheRevision = "translation-v23-manga-vision-balloon-geometry"
+    static let ocrGeometryRevision = "physical-axis-v12-manga-balloon-page-scale-filter"
 
     let pageURL: URL
     let image: UIImage
@@ -357,6 +358,8 @@ nonisolated enum AITranslationPagePipeline {
         case .vision:
             // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
             // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与离线共用同一条链路。
+            // Manga Vision balloon 只 enrich 本地 OCR；Vision 模式继续保留视觉模型自己
+            // 生成的 translation unit，避免把已经翻译完的视觉 block 二次错误合并。
             let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
@@ -453,7 +456,8 @@ nonisolated enum AITranslationPagePipeline {
             ) ?? request.image
             // Rejected candidates retain geometry/reason and must remain visible
             // to visual review; otherwise weak but real text can never re-enter the
-            // translation pipeline.
+            // translation pipeline. Page-scale size policy is re-applied below so
+            // visual recovery cannot resurrect tiny ROI-only text.
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
             resolvedBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
@@ -472,8 +476,12 @@ nonisolated enum AITranslationPagePipeline {
         } else {
             resolvedBlocks = localResult.resolvedBlocks
         }
-        let annotated = AITranslator.annotatedMangaTextBlocks(
+        let pageScale = OCRPageScaleFilter.partition(
             resolvedBlocks,
+            minimumTextHeight: request.minimumTextHeight
+        )
+        let annotated = AITranslator.annotatedMangaTextBlocks(
+            pageScale.accepted,
             safeAreaInset: request.safeAreaInset,
             minimumTextHeight: request.minimumTextHeight,
             isRightToLeft: request.isRightToLeft
@@ -517,8 +525,12 @@ nonisolated enum AITranslationPagePipeline {
         minimumTextHeight: Double,
         isRightToLeft: Bool
     ) -> [TextBlock] {
-        let annotated = AITranslator.annotatedMangaTextBlocks(
+        let pageScale = OCRPageScaleFilter.partition(
             localResult.resolvedBlocks,
+            minimumTextHeight: minimumTextHeight
+        )
+        let annotated = AITranslator.annotatedMangaTextBlocks(
+            pageScale.accepted,
             safeAreaInset: 0,
             minimumTextHeight: minimumTextHeight,
             isRightToLeft: isRightToLeft
@@ -572,7 +584,7 @@ nonisolated enum AITranslationPagePipeline {
                 )
                 group.addTask {
                     do {
-                let text = try await TranslationRuntimeService.translate(
+                        let text = try await TranslationRuntimeService.translate(
                             text: block.text,
                             ocrMetadata: AITranslator.ocrMetadata(for: block),
                             pageContext: pageContext,
