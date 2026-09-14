@@ -5,6 +5,7 @@ enum HapticLevel {
     case light
     case medium
     case heavy
+    case selection
     case success
     case warning
     case error
@@ -21,6 +22,7 @@ final class HapticManager {
     private let lightGenerator = UIImpactFeedbackGenerator(style: .light)
     private let mediumGenerator = UIImpactFeedbackGenerator(style: .medium)
     private let heavyGenerator = UIImpactFeedbackGenerator(style: .heavy)
+    private let selectionGenerator = UISelectionFeedbackGenerator()
     private let notificationGenerator = UINotificationFeedbackGenerator()
 
     private init() {
@@ -40,6 +42,8 @@ final class HapticManager {
             mediumGenerator.impactOccurred(intensity: 0.7)
         case .heavy:
             heavyGenerator.impactOccurred(intensity: 0.9)
+        case .selection:
+            selectionGenerator.selectionChanged()
         case .success:
             notificationGenerator.notificationOccurred(.success)
         case .warning:
@@ -56,6 +60,7 @@ final class HapticManager {
         lightGenerator.prepare()
         mediumGenerator.prepare()
         heavyGenerator.prepare()
+        selectionGenerator.prepare()
         notificationGenerator.prepare()
 #endif
     }
