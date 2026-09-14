@@ -1,0 +1,118 @@
+import CoreGraphics
+import Foundation
+import Testing
+@testable import mreader
+
+@Suite(.serialized)
+@MainActor
+struct GuidedPanelFoundationTests {
+    @Test func readingOrderUsesRightToLeftWithinRows() {
+        let panels = twoByTwoPanels()
+        let ordered = PanelReadingOrder.ordered(panels, isRightToLeft: true)
+        #expect(ordered.map(\.rect.midX) == [0.75, 0.25, 0.75, 0.25])
+        #expect(ordered.map(\.rect.midY) == [0.20, 0.20, 0.70, 0.70])
+    }
+
+    @Test func readingOrderUsesLeftToRightWithinRows() {
+        let panels = twoByTwoPanels()
+        let ordered = PanelReadingOrder.ordered(panels, isRightToLeft: false)
+        #expect(ordered.map(\.rect.midX) == [0.25, 0.75, 0.25, 0.75])
+        #expect(ordered.map(\.rect.midY) == [0.20, 0.20, 0.70, 0.70])
+    }
+
+    @Test func recursiveOrderKeepsFullWidthMiddlePanelBetweenRows() {
+        let panels = [
+            panel(x: 0.53, y: 0.04, width: 0.41, height: 0.20),
+            panel(x: 0.06, y: 0.04, width: 0.41, height: 0.20),
+            panel(x: 0.06, y: 0.32, width: 0.88, height: 0.24),
+            panel(x: 0.53, y: 0.64, width: 0.41, height: 0.25),
+            panel(x: 0.06, y: 0.64, width: 0.41, height: 0.25)
+        ]
+        let ordered = PanelReadingOrder.ordered(panels, isRightToLeft: true)
+        #expect(ordered[0].rect.minX > ordered[1].rect.minX)
+        #expect(ordered[2].rect.width > 0.8)
+        #expect(ordered[3].rect.minX > ordered[4].rect.minX)
+    }
+
+    @Test func postProcessorRemovesNearDuplicateBoxes() {
+        let candidates = [
+            panel(x: 0.08, y: 0.08, width: 0.40, height: 0.30, confidence: 0.91),
+            panel(x: 0.09, y: 0.09, width: 0.39, height: 0.29, confidence: 0.62),
+            panel(x: 0.54, y: 0.08, width: 0.38, height: 0.30, confidence: 0.88)
+        ]
+        let processed = PanelPostProcessor.process(candidates)
+        #expect(processed.count == 2)
+        #expect(processed.contains { abs($0.confidence - 0.91) < 0.001 })
+    }
+
+    @Test func layoutQualityRejectsImplausibleResults() {
+        #expect(!PanelLayoutQuality.isUsable([]))
+        #expect(!PanelLayoutQuality.isUsable([panel(x: 0.05, y: 0.05, width: 0.9, height: 0.9)]))
+        #expect(PanelLayoutQuality.isUsable(twoByTwoPanels()))
+
+        let tooMany = (0..<13).map { index in
+            panel(
+                x: 0.02 + CGFloat(index % 4) * 0.24,
+                y: 0.02 + CGFloat(index / 4) * 0.24,
+                width: 0.20,
+                height: 0.20
+            )
+        }
+        #expect(!PanelLayoutQuality.isUsable(tooMany))
+    }
+
+    @Test func cachePathIsStableAndPageBased() {
+        let id = UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!
+        #expect(
+            PanelDetectionService.cacheRelativePathForDiagnostics(comicID: id, pageIndex: 0)
+                == "12345678-1234-1234-1234-1234567890ab/0001.json"
+        )
+        #expect(
+            PanelDetectionService.cacheRelativePathForDiagnostics(comicID: id, pageIndex: 11)
+                == "12345678-1234-1234-1234-1234567890ab/0012.json"
+        )
+    }
+
+    @Test func viewportAddsContextWithoutLeavingPageBounds() {
+        let expanded = GuidedPanelViewport.expandedAndClamped(
+            CGRect(x: 0.0, y: 0.0, width: 0.30, height: 0.25)
+        )
+        #expect(expanded.minX == 0)
+        #expect(expanded.minY == 0)
+        #expect(expanded.maxX <= 1)
+        #expect(expanded.maxY <= 1)
+
+        let transform = GuidedPanelViewport.transform(
+            normalizedPanel: CGRect(x: 0.55, y: 0.08, width: 0.36, height: 0.28),
+            imageAspectRatio: 0.70,
+            viewportSize: CGSize(width: 390, height: 844)
+        )
+        #expect(transform.scale >= 1)
+        #expect(transform.scale <= GuidedPanelViewport.defaultMaximumScale)
+        #expect(transform.focusedRect.width > 0)
+        #expect(transform.focusedRect.height > 0)
+    }
+
+    private func twoByTwoPanels() -> [DetectedPanel] {
+        [
+            panel(x: 0.06, y: 0.05, width: 0.38, height: 0.30),
+            panel(x: 0.56, y: 0.05, width: 0.38, height: 0.30),
+            panel(x: 0.06, y: 0.55, width: 0.38, height: 0.30),
+            panel(x: 0.56, y: 0.55, width: 0.38, height: 0.30)
+        ]
+    }
+
+    private func panel(
+        x: CGFloat,
+        y: CGFloat,
+        width: CGFloat,
+        height: CGFloat,
+        confidence: Float = 0.90
+    ) -> DetectedPanel {
+        DetectedPanel(
+            rect: CGRect(x: x, y: y, width: width, height: height),
+            confidence: confidence,
+            source: .visionRectangle
+        )
+    }
+}
