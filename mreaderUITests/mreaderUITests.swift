@@ -70,6 +70,8 @@ final class mreaderUITests: XCTestCase {
         let reader = element("mreader.reader.root", in: app)
         XCTAssertTrue(reader.waitForExistence(timeout: timeout))
         XCTAssertTrue(element("mreader.reader.progress", in: app).waitForExistence(timeout: timeout))
+        XCTAssertTrue(element("mreader.reader.progressOverlay", in: app).waitForExistence(timeout: timeout))
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "reader must hide the shelf tab bar")
         let settings = element("mreader.reader.settings", in: app)
         XCTAssertTrue(settings.waitForExistence(timeout: timeout))
         settings.tap()
