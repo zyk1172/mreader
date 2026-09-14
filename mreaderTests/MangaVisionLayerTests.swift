@@ -163,7 +163,7 @@ struct MangaVisionLayerTests {
         )
         #expect(filtered.accepted.map(\.id) == [readableHorizontal.id])
         #expect(filtered.rejected.map(\.id) == [tinyVertical.id])
-        #expect(filtered.rejected[0].filterReason == "字号/面积过小")
+        #expect(filtered.rejected[0].filterReason == "短文本过小")
     }
 
     @Test func scaleFitCoordinatesMapBackToOriginalPage() {
