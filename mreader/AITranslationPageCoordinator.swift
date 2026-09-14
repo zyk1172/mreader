@@ -24,10 +24,10 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
     /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核。
-    /// v23：Manga Vision balloon 成为 OCR translation-unit 边界，并恢复 ROI 后的
-    /// 页面尺度小字过滤；旧缓存缺少这些几何，必须失效。
+    /// v23：Manga Vision balloon 成为 OCR translation-unit 边界，text region
+    /// 成为 measured-text 的安全布局提示；旧缓存缺少这些几何，必须失效。
     static let translationCacheRevision = "translation-v23-manga-vision-balloon-geometry"
-    static let ocrGeometryRevision = "physical-axis-v12-manga-balloon-page-scale-filter"
+    static let ocrGeometryRevision = "physical-axis-v12-manga-balloon-layout-region"
 
     let pageURL: URL
     let image: UIImage
@@ -208,7 +208,7 @@ actor AITranslationPageCoordinator {
     init() {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("AITranslationPages", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
     func translatedBlocks(for request: AITranslationPageRequest) async throws -> [TextBlock] {
@@ -357,9 +357,9 @@ nonisolated enum AITranslationPagePipeline {
             )
         case .vision:
             // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
-            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与离线共用同一条链路。
-            // Manga Vision balloon 只 enrich 本地 OCR；Vision 模式继续保留视觉模型自己
-            // 生成的 translation unit，避免把已经翻译完的视觉 block 二次错误合并。
+            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与整本离线翻译共用同一条链路。
+            // Manga Vision geometry enriches local OCR only; Vision mode keeps the
+            // VLM's own translation units to avoid post-translation re-grouping.
             let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
@@ -456,10 +456,9 @@ nonisolated enum AITranslationPagePipeline {
             ) ?? request.image
             // Rejected candidates retain geometry/reason and must remain visible
             // to visual review; otherwise weak but real text can never re-enter the
-            // translation pipeline. Page-scale size policy is re-applied below so
-            // visual recovery cannot resurrect tiny ROI-only text.
+            // translation pipeline.
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
-            resolvedBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
+            let verified = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: reviewBlocks,
                 apiKey: request.configuration.apiKey,
@@ -473,15 +472,28 @@ nonisolated enum AITranslationPagePipeline {
                 coverageRecoveryRequested: localResult.quality?.isSuspicious == true
                     || !localResult.rejectedBlocks.isEmpty
             )
+            // Visual review may correct/recreate TextBlock values. Reattach the
+            // shared Manga Vision geometry afterwards so recovered vertical
+            // columns still join the same physical balloon. Existing VLM bubble
+            // geometry is preserved by the enrichment layer.
+            if let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: request.comicID,
+                pageIndex: request.pageIndex,
+                pageURL: request.pageURL,
+                image: ocrImage
+            ) {
+                resolvedBlocks = MangaVisionOCRGeometry.applyingDetectedGeometry(
+                    to: verified,
+                    analysis: analysis
+                )
+            } else {
+                resolvedBlocks = verified
+            }
         } else {
             resolvedBlocks = localResult.resolvedBlocks
         }
-        let pageScale = OCRPageScaleFilter.partition(
-            resolvedBlocks,
-            minimumTextHeight: request.minimumTextHeight
-        )
         let annotated = AITranslator.annotatedMangaTextBlocks(
-            pageScale.accepted,
+            resolvedBlocks,
             safeAreaInset: request.safeAreaInset,
             minimumTextHeight: request.minimumTextHeight,
             isRightToLeft: request.isRightToLeft
@@ -525,12 +537,8 @@ nonisolated enum AITranslationPagePipeline {
         minimumTextHeight: Double,
         isRightToLeft: Bool
     ) -> [TextBlock] {
-        let pageScale = OCRPageScaleFilter.partition(
-            localResult.resolvedBlocks,
-            minimumTextHeight: minimumTextHeight
-        )
         let annotated = AITranslator.annotatedMangaTextBlocks(
-            pageScale.accepted,
+            localResult.resolvedBlocks,
             safeAreaInset: 0,
             minimumTextHeight: minimumTextHeight,
             isRightToLeft: isRightToLeft
