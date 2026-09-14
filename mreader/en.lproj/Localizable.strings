@@ -74,6 +74,9 @@
 "reader.direction" = "Reading Direction";
 "reader.direction.leftToRight" = "Left to Right";
 "reader.direction.rightToLeft" = "Right to Left";
+"reader.guidedPanel.settings" = "Guided Panel";
+"reader.guidedPanel.direction" = "Guided Panel Direction";
+"reader.guidedPanel.directionFooter" = "Controls panel ordering and Guided Panel navigation only. Normal page-turn direction is unchanged.";
 "reader.animation" = "Page Turn Animation";
 "reader.animation.none" = "None";
 "reader.animation.slide" = "Slide";
