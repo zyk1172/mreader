@@ -870,6 +870,7 @@ struct ReaderView: View {
         showControls || showsControlsForTesting
     }
     @State private var translationPrefetchTask: Task<Void, Never>?
+    @State private var mangaVisionPreanalysisTask: Task<Void, Never>?
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
@@ -1246,6 +1247,8 @@ struct ReaderView: View {
             RemotePagePrefetcher.shared.cancelAll()
             translationPrefetchTask?.cancel()
             translationPrefetchTask = nil
+            mangaVisionPreanalysisTask?.cancel()
+            mangaVisionPreanalysisTask = nil
             recordReadingActivity()
             persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
         }
@@ -2245,6 +2248,26 @@ struct ReaderView: View {
             maximumConcurrent: isContinuous ? 2 : 3,
             delay: isContinuous ? 0.05 : 0.1
         )
+
+        mangaVisionPreanalysisTask?.cancel()
+        mangaVisionPreanalysisTask = nil
+        let shouldPreanalyze = readingMode == .guidedPanel
+            || comic.isOCREnabled
+            || comic.isAITranslationEnabled
+        if shouldPreanalyze {
+            let comicID = comic.id
+            let pages = manager.pages
+            // Feed the same already-computed Reader prefetch ordering into Manga Vision.
+            // The service itself caps work at three pages, so this can never expand to a book scan.
+            let visionIndices = [index] + preferredIndices
+            mangaVisionPreanalysisTask = Task(priority: .utility) {
+                await MangaVisionService.shared.preanalyze(
+                    comicID: comicID,
+                    pages: pages,
+                    indices: visionIndices
+                )
+            }
+        }
     }
 
     private func scheduleTranslationPrefetch(around index: Int) {
@@ -5853,7 +5876,9 @@ struct LocalImageView: View {
         let cacheRequest = OCRRecognitionCacheRequest(
             pageURL: url,
             fallbackImage: image,
-            options: options
+            options: options,
+            comicID: comicID,
+            pageIndex: pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
         if let comicID, let pageIndex {

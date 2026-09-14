@@ -393,10 +393,15 @@ nonisolated enum AITranslationPagePipeline {
             return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
         }
 
+        var contextualRequest = request
+        contextualRequest.previousContext = await MangaVisionTranslationContext.context(
+            for: request,
+            blocks: translated
+        )
         try await applyBatchTranslationSafely(
             to: &translated,
             indexes: Array(translated.indices),
-            request: request
+            request: contextualRequest
         )
         let missing = translated.indices.filter {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
