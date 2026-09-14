@@ -1,0 +1,71 @@
+name: Guided Panel Follow-up Patch
+
+on:
+  push:
+    branches:
+      - feature/guided-panel-v1
+
+permissions:
+  contents: write
+
+jobs:
+  patch-guided-panel:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/guided-panel-v1
+          fetch-depth: 0
+
+      - name: Apply Guided Panel follow-up
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('mreader/ReaderView.swift')
+          text = path.read_text()
+
+          action_start = text.index('''            HStack(spacing: 10) {\n                Spacer()\n\n                Button {\n                    guard readingMode != .guidedPanel else { return }\n''')
+          action_end_marker = '''                .accessibilityIdentifier("mreader.reader.progressActions")\n            }\n'''
+          action_end = text.index(action_end_marker, action_start) + len(action_end_marker)
+          action_block = '''            HStack(spacing: 10) {\n                Spacer()\n\n                Button {\n                    guard readingMode != .guidedPanel else { return }\n                    HapticManager.shared.play(.light)\n                    readingModeRaw.wrappedValue = ReadingMode.guidedPanel.rawValue\n                } label: {\n                    Image(systemName: "rectangle.split.2x2")\n                        .font(.system(size: 17, weight: .semibold))\n                        .foregroundStyle(.white)\n                        .frame(width: 44, height: 44)\n                        .background(.thinMaterial, in: Circle())\n                        .overlay {\n                            Circle()\n                                .fill(readingMode == .guidedPanel ? Color.accentColor.opacity(0.55) : Color.clear)\n                        }\n                        .overlay {\n                            Circle()\n                                .strokeBorder(\n                                    .white.opacity(readingMode == .guidedPanel ? 0.30 : 0.16),\n                                    lineWidth: 0.5\n                                )\n                        }\n                }\n                .buttonStyle(.plain)\n                .accessibilityLabel("reader.mode.guidedPanel".localized)\n                .accessibilityIdentifier("mreader.reader.guidedPanelAction")\n\n                if comic.isOCREnabled {\n                    Button {\n                        HapticManager.shared.play(.light)\n                        isOCRMagnificationVisible.toggle()\n                        if isOCRMagnificationVisible {\n                            ocrMagnifyRequestID = UUID()\n                        }\n                    } label: {\n                        Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")\n                            .font(.system(size: 17, weight: .semibold))\n                            .foregroundStyle(.white)\n                            .frame(width: 44, height: 44)\n                            .background(.thinMaterial, in: Circle())\n                            .overlay {\n                                Circle()\n                                    .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)\n                            }\n                    }\n                    .buttonStyle(.plain)\n                    .accessibilityLabel("reader.ocrMagnify".localized)\n                    .accessibilityIdentifier("mreader.reader.ocrAction")\n                }\n\n                if comic.isAITranslationEnabled {\n                    Button {\n                        HapticManager.shared.play(.light)\n                        translateRequestID = UUID()\n                    } label: {\n                        Text("AI")\n                            .font(.system(size: 15, weight: .bold, design: .rounded))\n                            .foregroundStyle(.white)\n                            .frame(width: 44, height: 44)\n                            .background(.thinMaterial, in: Circle())\n                            .overlay {\n                                Circle()\n                                    .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)\n                            }\n                    }\n                    .buttonStyle(.plain)\n                    .accessibilityLabel("reader.aiTranslationLabel".localized)\n                    .accessibilityIdentifier("mreader.reader.aiAction")\n                }\n            }\n            .frame(minHeight: 44)\n            .accessibilityIdentifier("mreader.reader.progressActions")\n'''
+          text = text[:action_start] + action_block + text[action_end:]
+
+          state_anchor = '''    @State private var panelIndex = 0\n    @State private var isDetecting = false\n'''
+          state_replacement = '''    @State private var panelIndex = 0\n    @State private var isDetecting = false\n    @State private var enterCurrentPageAtLastPanel = false\n'''
+          if state_anchor not in text:
+              raise SystemExit('Guided Panel state anchor not found')
+          text = text.replace(state_anchor, state_replacement, 1)
+
+          local_image_close = '''                        onHideControls: onHideControls\n                    )\n                    .scaleEffect(panelTransform(in: proxy.size).scale)\n'''
+          local_image_replacement = '''                        onHideControls: onHideControls\n                    )\n                    .id(page.url)\n                    .scaleEffect(panelTransform(in: proxy.size).scale)\n'''
+          guided_start = text.index('struct GuidedPanelReader: View {')
+          guided_tail = text[guided_start:]
+          if local_image_close not in guided_tail:
+              raise SystemExit('Guided Panel LocalImageView anchor not found')
+          guided_tail = guided_tail.replace(local_image_close, local_image_replacement, 1)
+          text = text[:guided_start] + guided_tail
+
+          detect_start = text.index('    private func detectPanels(for page: ComicPage) async {', guided_start)
+          transform_start = text.index('    private func panelTransform(in viewport: CGSize)', detect_start)
+          detect_block = '''    private func detectPanels(for page: ComicPage) async {\n        let pageURL = page.url\n        isDetecting = true\n\n        guard let image = await ReaderImageCache.shared.loadImage(for: pageURL, maxPixelSize: 6144) else {\n            guard currentPage?.url == pageURL else { return }\n            layout = nil\n            sourceSize = .zero\n            isDetecting = false\n            return\n        }\n\n        let detectedSourceSize = CGSize(\n            width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,\n            height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height\n        )\n        let detectedLayout = await PanelDetectionService.shared.layout(\n            for: pageURL,\n            image: image,\n            isRightToLeft: readingDirection == .rightToLeft\n        )\n\n        guard !Task.isCancelled, currentPage?.url == pageURL else { return }\n        sourceSize = detectedSourceSize\n        layout = detectedLayout\n        let lastPanelIndex = max(detectedLayout.panels.count - 1, 0)\n        if enterCurrentPageAtLastPanel {\n            panelIndex = lastPanelIndex\n            enterCurrentPageAtLastPanel = false\n        } else {\n            panelIndex = min(max(panelIndex, 0), lastPanelIndex)\n        }\n        isDetecting = false\n    }\n\n'''
+          text = text[:detect_start] + detect_block + text[transform_start:]
+
+          nav_start = text.index('    private func previousPanel() {', guided_start)
+          guided_end = text.index('\n}\n\nstruct AnimatedPageReader: View {', nav_start)
+          nav_block = '''    private func previousPanel() {\n        guard !isDetecting else { return }\n        if panelIndex > 0 {\n            panelIndex -= 1\n            HapticManager.shared.play(.light)\n        } else if currentPageIndex > 0 {\n            moveToPage(currentPageIndex - 1, enterAtLastPanel: true)\n        } else {\n            HapticManager.shared.play(.warning)\n        }\n    }\n\n    private func nextPanel() {\n        guard !isDetecting else { return }\n        let count = max(layout?.panels.count ?? 1, 1)\n        if panelIndex + 1 < count {\n            panelIndex += 1\n            HapticManager.shared.play(.light)\n        } else if currentPageIndex + 1 < pages.count {\n            moveToPage(currentPageIndex + 1, enterAtLastPanel: false)\n        } else {\n            HapticManager.shared.play(.warning)\n        }\n    }\n\n    private func moveToPage(_ pageIndex: Int, enterAtLastPanel: Bool) {\n        guard pages.indices.contains(pageIndex) else {\n            HapticManager.shared.play(.warning)\n            return\n        }\n\n        // Clear the previous page layout before changing the bound page index.\n        // Otherwise the old panel count/transform can survive long enough to keep\n        // the reader visually pinned to the completed page while the next page loads.\n        layout = nil\n        sourceSize = .zero\n        panelIndex = 0\n        enterCurrentPageAtLastPanel = enterAtLastPanel\n        isDetecting = true\n        currentPageIndex = pageIndex\n        HapticManager.shared.play(.light)\n    }\n'''
+          text = text[:nav_start] + nav_block + text[guided_end:]
+
+          path.write_text(text)
+          PY
+
+      - name: Commit follow-up and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/guided-panel-followup-patch.yml
+          git add mreader/ReaderView.swift
+          git commit -m "fix: polish Guided Panel controls and page advance"
+          git push origin HEAD:feature/guided-panel-v1
