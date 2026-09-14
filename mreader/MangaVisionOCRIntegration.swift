@@ -15,8 +15,8 @@ nonisolated enum MangaVisionOCRGeometry {
     /// - a model `text` region may become `layoutSafeRegion`, giving measured
     ///   text more room without pretending a physical speech bubble exists.
     ///
-    /// Existing visual/VLM geometry always wins. This keeps the vision-translation
-    /// path independent and makes this layer a non-destructive OCR enrichment.
+    /// Existing visual/VLM bubble geometry always wins. This keeps the vision-
+    /// translation path independent and makes this layer a non-destructive OCR enrichment.
     static func applyingDetectedGeometry(
         to blocks: [TextBlock],
         analysis: MangaPageAnalysis
@@ -37,8 +37,14 @@ nonisolated enum MangaVisionOCRGeometry {
         return blocks.map { block in
             var enriched = block
 
-            if enriched.bubbleBox == nil,
-               enriched.layoutRole == .dialogue,
+            // A real bubble supplied by another OCR/VLM path is authoritative.
+            // Do not attach a tighter model text safe-region that could silently
+            // override that bubble during Reader layout resolution.
+            if enriched.bubbleBox != nil {
+                return enriched
+            }
+
+            if enriched.layoutRole == .dialogue,
                let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
                 enriched.bubbleBox = balloon
                 if enriched.layoutSafeRegion == nil {
