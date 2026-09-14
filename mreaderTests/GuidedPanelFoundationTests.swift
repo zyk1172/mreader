@@ -194,6 +194,26 @@ struct GuidedPanelFoundationTests {
         )
     }
 
+    @Test func guidedPanelDirectionDefaultsToNormalDirectionButCanBeIndependent() {
+        let inherited = ComicBook(
+            title: "Direction Test",
+            bookmarkData: Data(),
+            totalPages: 1,
+            readingDirectionRaw: ReadingDirection.rightToLeft.rawValue
+        )
+        #expect(inherited.guidedPanelReadingDirectionRaw == ReadingDirection.rightToLeft.rawValue)
+
+        let independent = ComicBook(
+            title: "Direction Test",
+            bookmarkData: Data(),
+            totalPages: 1,
+            readingDirectionRaw: ReadingDirection.leftToRight.rawValue,
+            guidedPanelReadingDirectionRaw: ReadingDirection.rightToLeft.rawValue
+        )
+        #expect(independent.readingDirectionRaw == ReadingDirection.leftToRight.rawValue)
+        #expect(independent.guidedPanelReadingDirectionRaw == ReadingDirection.rightToLeft.rawValue)
+    }
+
     @Test func viewportAddsContextWithoutLeavingPageBounds() {
         let expanded = GuidedPanelViewport.expandedAndClamped(
             CGRect(x: 0.0, y: 0.0, width: 0.30, height: 0.25)

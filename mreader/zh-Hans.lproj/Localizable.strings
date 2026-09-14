@@ -74,6 +74,9 @@
 "reader.direction" = "阅读方向";
 "reader.direction.leftToRight" = "从左到右";
 "reader.direction.rightToLeft" = "从右到左";
+"reader.guidedPanel.settings" = "分镜阅读";
+"reader.guidedPanel.direction" = "分镜阅读方向";
+"reader.guidedPanel.directionFooter" = "仅影响分镜的识别排序和切换方向，不改变普通翻页的阅读方向。";
 "reader.animation" = "翻页动画";
 "reader.animation.none" = "无动画";
 "reader.animation.slide" = "滑动";

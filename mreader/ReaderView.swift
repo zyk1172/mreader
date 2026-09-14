@@ -890,6 +890,10 @@ struct ReaderView: View {
         ReadingDirection(rawValue: comic.readingDirectionRaw) ?? .leftToRight
     }
 
+    private var guidedPanelReadingDirection: ReadingDirection {
+        ReadingDirection(rawValue: comic.guidedPanelReadingDirectionRaw) ?? readingDirection
+    }
+
     private var pageTurnAnimation: PageTurnAnimation {
         PageTurnAnimation(rawValue: comic.pageTurnAnimationRaw) ?? .slide
     }
@@ -925,6 +929,13 @@ struct ReaderView: View {
         Binding(
             get: { comic.readingDirectionRaw },
             set: { newValue in updateComic { $0.readingDirectionRaw = newValue; $0.hasInitializedReadingPreset = true } }
+        )
+    }
+
+    private var guidedPanelReadingDirectionRaw: Binding<String> {
+        Binding(
+            get: { comic.guidedPanelReadingDirectionRaw },
+            set: { newValue in updateComic { $0.guidedPanelReadingDirectionRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
@@ -985,7 +996,7 @@ struct ReaderView: View {
                 GuidedPanelReader(
                     pages: manager.pages,
                     currentPageIndex: $currentPageIndex,
-                    readingDirection: readingDirection,
+                    readingDirection: guidedPanelReadingDirection,
                     comic: comic,
                     translateRequestID: translateRequestID,
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
@@ -1860,6 +1871,19 @@ struct ReaderView: View {
                         Label("reader.scrollSpeed.standard".localized, systemImage: "circle").tag(ScrollSpeed.standard.rawValue)
                         Label("reader.scrollSpeed.fast".localized, systemImage: "hare").tag(ScrollSpeed.fast.rawValue)
                     }
+                }
+
+                Section(
+                    header: Text("reader.guidedPanel.settings".localized),
+                    footer: Text("reader.guidedPanel.directionFooter".localized)
+                ) {
+                    Picker("reader.guidedPanel.direction".localized, selection: guidedPanelReadingDirectionRaw) {
+                        Label("reader.direction.leftToRight".localized, systemImage: "arrow.right")
+                            .tag(ReadingDirection.leftToRight.rawValue)
+                        Label("reader.direction.rightToLeft".localized, systemImage: "arrow.left")
+                            .tag(ReadingDirection.rightToLeft.rawValue)
+                    }
+                    .accessibilityIdentifier("mreader.reader.guidedPanelDirectionPicker")
                 }
             }
             .navigationTitle(comic.title)
@@ -3211,6 +3235,8 @@ struct ContinuousScrollReader: View {
 }
 
 struct GuidedPanelReader: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     let pages: [ComicPage]
     @Binding var currentPageIndex: Int
     let readingDirection: ReadingDirection
@@ -3229,6 +3255,22 @@ struct GuidedPanelReader: View {
     @State private var panelIndex = 0
     @State private var isDetecting = false
     @State private var enterCurrentPageAtLastPanel = false
+    @State private var panelNavigationDirection = 1
+
+    private var panelCameraAnimation: Animation? {
+        reduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.88)
+    }
+
+    private var pageTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let forward = panelNavigationDirection >= 0
+        let forwardInsertion: Edge = readingDirection == .rightToLeft ? .leading : .trailing
+        let forwardRemoval: Edge = readingDirection == .rightToLeft ? .trailing : .leading
+        return .asymmetric(
+            insertion: .move(edge: forward ? forwardInsertion : forwardRemoval).combined(with: .opacity),
+            removal: .move(edge: forward ? forwardRemoval : forwardInsertion).combined(with: .opacity)
+        )
+    }
 
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
@@ -3237,6 +3279,7 @@ struct GuidedPanelReader: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let camera = panelTransform(in: proxy.size)
             ZStack {
                 if let page = currentPage {
                     LocalImageView(
@@ -3268,11 +3311,14 @@ struct GuidedPanelReader: View {
                         onHideControls: onHideControls
                     )
                     .id(page.url)
-                    .scaleEffect(panelTransform(in: proxy.size).scale)
-                    .offset(panelTransform(in: proxy.size).offset)
-                    .animation(.easeInOut(duration: 0.34), value: panelIndex)
-                    .animation(.easeInOut(duration: 0.28), value: currentPageIndex)
-                    .task(id: page.url) { await detectPanels(for: page) }
+                    .scaleEffect(camera.scale)
+                    .offset(camera.offset)
+                    .transition(pageTransition)
+                    .animation(panelCameraAnimation, value: panelIndex)
+                    .animation(panelCameraAnimation, value: currentPageIndex)
+                    .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
+                        await detectPanels(for: page)
+                    }
                 }
 
                 if isDetecting {
@@ -3367,8 +3413,11 @@ struct GuidedPanelReader: View {
 
     private func previousPanel() {
         guard !isDetecting else { return }
+        panelNavigationDirection = -1
         if panelIndex > 0 {
-            panelIndex -= 1
+            withAnimation(panelCameraAnimation) {
+                panelIndex -= 1
+            }
             HapticManager.shared.play(.light)
         } else if currentPageIndex > 0 {
             moveToPage(currentPageIndex - 1, enterAtLastPanel: true)
@@ -3379,9 +3428,12 @@ struct GuidedPanelReader: View {
 
     private func nextPanel() {
         guard !isDetecting else { return }
+        panelNavigationDirection = 1
         let count = max(layout?.panels.count ?? 1, 1)
         if panelIndex + 1 < count {
-            panelIndex += 1
+            withAnimation(panelCameraAnimation) {
+                panelIndex += 1
+            }
             HapticManager.shared.play(.light)
         } else if currentPageIndex + 1 < pages.count {
             moveToPage(currentPageIndex + 1, enterAtLastPanel: false)
@@ -3399,12 +3451,15 @@ struct GuidedPanelReader: View {
         // Clear the previous page layout before changing the bound page index.
         // Otherwise the old panel count/transform can survive long enough to keep
         // the reader visually pinned to the completed page while the next page loads.
+        panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
         layout = nil
         sourceSize = .zero
         panelIndex = 0
         enterCurrentPageAtLastPanel = enterAtLastPanel
         isDetecting = true
-        currentPageIndex = pageIndex
+        withAnimation(panelCameraAnimation) {
+            currentPageIndex = pageIndex
+        }
         HapticManager.shared.play(.light)
     }
 
