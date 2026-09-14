@@ -83,7 +83,7 @@ struct ReaderContainerView: View {
                         comic.metadataUpdatedAt = Date()
                         onComicUpdate(comic)
                     }
-                    await prewarmInitialScrollingPage(in: result)
+                    // Present the reader before any 8192px warm-up.
                     manager.applyLoadedPages(result)
                     isLoaded = true
                 } else {
@@ -99,22 +99,6 @@ struct ReaderContainerView: View {
         }
     }
 
-    private func prewarmInitialScrollingPage(in result: ComicManager.LoadResult) async {
-        let mode = ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
-        guard mode == .continuousScroll || mode == .infiniteScroll,
-              !result.pages.isEmpty else {
-            return
-        }
-        let index = min(max(comic.currentPageIndex, 0), result.pages.count - 1)
-        let start = ContinuousClock.now
-        _ = await ReaderImageCache.shared.loadImage(
-            for: result.pages[index].url,
-            maxPixelSize: 8192
-        )
-        MReaderLog.reader.debug(
-            "initial scrolling page prewarmed page=\(index, privacy: .public) elapsed=\(String(describing: start.duration(to: .now)), privacy: .public)"
-        )
-    }
 }
 
 nonisolated enum ReadingMode: String, CaseIterable {
@@ -293,12 +277,10 @@ nonisolated private struct InitialReadingPreset {
 nonisolated enum ReadingPresetSamplePagePolicy {
     static func pageIndices(totalPages: Int) -> [Int] {
         guard totalPages > 0 else { return [] }
+        guard totalPages > 2 else { return Array(0..<totalPages) }
 
-        let preferredEnd = min(totalPages, 5)
-        guard 2 < preferredEnd else {
-            return Array(0..<totalPages)
-        }
-        return Array(2..<preferredEnd)
+        // A single interior sample avoids inflating three archive entries before first presentation.
+        return [2]
     }
 }
 
@@ -2236,8 +2218,8 @@ struct ReaderView: View {
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 6 : 4,
-            backwardCount: 2,
+            forwardCount: isContinuous ? 2 : 4,
+            backwardCount: isContinuous ? 1 : 2,
             includesCurrentPage: false
         )
         let urls = preferredIndices.compactMap { pageIndex -> URL? in
@@ -2246,16 +2228,17 @@ struct ReaderView: View {
         }
         ReaderImageCache.shared.preload(
             urls,
+            // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
             maxPixelSize: isContinuous ? 8192 : 4096,
-            maximumConcurrent: isContinuous ? 2 : 3,
-            delay: isContinuous ? 0.05 : 0.1
+            maximumConcurrent: isContinuous ? 1 : 2,
+            delay: isContinuous ? 0.45 : 0.15
         )
 
         mangaVisionPreanalysisTask?.cancel()
         mangaVisionPreanalysisTask = nil
         let shouldPreanalyze = readingMode == .guidedPanel
-            || comic.isOCREnabled
-            || comic.isAITranslationEnabled
+            || comic.isAutoOCRMagnificationEnabled
+            || comic.isAutoTranslationEnabled
         if shouldPreanalyze {
             let comicID = comic.id
             let pages = manager.pages
@@ -3392,15 +3375,18 @@ struct GuidedPanelReader: View {
         )
 
         guard !Task.isCancelled, currentPage?.url == pageURL else { return }
-        sourceSize = detectedSourceSize
-        layout = detectedLayout
         let lastPanelIndex = max(detectedLayout.panels.count - 1, 0)
-        if enterCurrentPageAtLastPanel {
-            panelIndex = lastPanelIndex
-            enterCurrentPageAtLastPanel = false
-        } else {
-            panelIndex = min(max(panelIndex, 0), lastPanelIndex)
+        let targetPanelIndex = enterCurrentPageAtLastPanel
+            ? lastPanelIndex
+            : min(max(panelIndex, 0), lastPanelIndex)
+
+        // Layout arrives asynchronously; animate camera-bearing state together so focus does not snap.
+        withAnimation(panelCameraAnimation) {
+            sourceSize = detectedSourceSize
+            layout = detectedLayout
+            panelIndex = targetPanelIndex
         }
+        enterCurrentPageAtLastPanel = false
         isDetecting = false
     }
 
@@ -3411,32 +3397,12 @@ struct GuidedPanelReader: View {
         let normalized = layout.panelRects.indices.contains(panelIndex)
             ? layout.panelRects[panelIndex]
             : layout.contentBounds.cgRect
-        let imageAspect = sourceSize.width / sourceSize.height
-        let viewportAspect = viewport.width / viewport.height
-        let displaySize: CGSize
-        if imageAspect > viewportAspect {
-            displaySize = CGSize(width: viewport.width, height: viewport.width / imageAspect)
-        } else {
-            displaySize = CGSize(width: viewport.height * imageAspect, height: viewport.height)
-        }
-        let imageOrigin = CGPoint(
-            x: (viewport.width - displaySize.width) / 2,
-            y: (viewport.height - displaySize.height) / 2
+        let transform = GuidedPanelViewport.transform(
+            normalizedPanel: normalized,
+            imageAspectRatio: sourceSize.width / sourceSize.height,
+            viewportSize: viewport
         )
-        let panel = CGRect(
-            x: imageOrigin.x + normalized.minX * displaySize.width,
-            y: imageOrigin.y + normalized.minY * displaySize.height,
-            width: max(normalized.width * displaySize.width, 1),
-            height: max(normalized.height * displaySize.height, 1)
-        )
-        let scale = min(max(min(viewport.width * 0.92 / panel.width, viewport.height * 0.92 / panel.height), 1), 4.8)
-        return (
-            scale,
-            CGSize(
-                width: (viewport.width / 2 - panel.midX) * scale,
-                height: (viewport.height / 2 - panel.midY) * scale
-            )
-        )
+        return (transform.scale, transform.offset)
     }
 
     private func previousPanel() {
@@ -3476,16 +3442,15 @@ struct GuidedPanelReader: View {
             return
         }
 
-        // Clear the previous page layout before changing the bound page index.
-        // Otherwise the old panel count/transform can survive long enough to keep
-        // the reader visually pinned to the completed page while the next page loads.
         panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
-        layout = nil
-        sourceSize = .zero
-        panelIndex = 0
         enterCurrentPageAtLastPanel = enterAtLastPanel
         isDetecting = true
+        // Camera reset and page identity change share one transaction. The incoming page
+        // then animates from identity into its detected first/last panel.
         withAnimation(panelCameraAnimation) {
+            layout = nil
+            sourceSize = .zero
+            panelIndex = 0
             currentPageIndex = pageIndex
         }
         HapticManager.shared.play(.light)
