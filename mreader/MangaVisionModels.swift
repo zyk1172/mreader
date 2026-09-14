@@ -4,6 +4,7 @@ import Foundation
 nonisolated enum MangaRegionType: String, Codable, CaseIterable, Sendable, Hashable {
     case panel
     case text
+    case balloon
     case face
     case body
 }
@@ -85,13 +86,16 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
 
 /// The single page-vision contract consumed by reader/OCR/translation business code.
 nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
-    static let schemaVersion = 1
+    /// v2 adds first-class balloon regions. Old cache entries deliberately fail the
+    /// service's schema-version check so pages are re-analysed with balloon geometry.
+    static let schemaVersion = 2
 
     let schemaVersion: Int
     let pageIdentifier: MangaPageIdentifier
     let imageSize: CGSize
     let panels: [MangaVisionRegion]
     let texts: [MangaVisionRegion]
+    let balloons: [MangaVisionRegion]
     let faces: [MangaVisionRegion]
     let bodies: [MangaVisionRegion]
     let modelIdentifier: String?
@@ -102,6 +106,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         imageSize: CGSize,
         panels: [MangaVisionRegion],
         texts: [MangaVisionRegion],
+        balloons: [MangaVisionRegion] = [],
         faces: [MangaVisionRegion],
         bodies: [MangaVisionRegion],
         modelIdentifier: String?,
@@ -113,6 +118,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         self.imageSize = imageSize
         self.panels = panels
         self.texts = texts
+        self.balloons = balloons
         self.faces = faces
         self.bodies = bodies
         self.modelIdentifier = modelIdentifier
@@ -120,13 +126,14 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     }
 
     var allRegions: [MangaVisionRegion] {
-        panels + texts + faces + bodies
+        panels + texts + balloons + faces + bodies
     }
 
     func regions(of type: MangaRegionType) -> [MangaVisionRegion] {
         switch type {
         case .panel: panels
         case .text: texts
+        case .balloon: balloons
         case .face: faces
         case .body: bodies
         }
@@ -134,7 +141,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, pageIdentifier, imageWidth, imageHeight
-        case panels, texts, faces, bodies, modelIdentifier, modelVersion
+        case panels, texts, balloons, faces, bodies, modelIdentifier, modelVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -147,6 +154,9 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         )
         panels = try container.decode([MangaVisionRegion].self, forKey: .panels)
         texts = try container.decode([MangaVisionRegion].self, forKey: .texts)
+        // decodeIfPresent keeps hand-authored fixtures/source compatibility, while
+        // MangaVisionService still rejects persisted v1 cache entries by schemaVersion.
+        balloons = try container.decodeIfPresent([MangaVisionRegion].self, forKey: .balloons) ?? []
         faces = try container.decode([MangaVisionRegion].self, forKey: .faces)
         bodies = try container.decode([MangaVisionRegion].self, forKey: .bodies)
         modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)
@@ -161,6 +171,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         try container.encode(Double(imageSize.height), forKey: .imageHeight)
         try container.encode(panels, forKey: .panels)
         try container.encode(texts, forKey: .texts)
+        try container.encode(balloons, forKey: .balloons)
         try container.encode(faces, forKey: .faces)
         try container.encode(bodies, forKey: .bodies)
         try container.encodeIfPresent(modelIdentifier, forKey: .modelIdentifier)
