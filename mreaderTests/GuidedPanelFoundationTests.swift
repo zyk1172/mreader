@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreML
 import Foundation
 import Testing
 @testable import mreader
@@ -97,6 +98,72 @@ struct GuidedPanelFoundationTests {
 
         #expect(processed.count == 4)
         #expect(PanelLayoutQuality.isUsable(processed))
+    }
+
+    @Test func coreMLDecoderKeepsFramesAndRejectsTextAndBalloons() throws {
+        let output = try MLMultiArray(shape: [1, 3, 38], dataType: .float32)
+
+        func set(_ instance: Int, _ feature: Int, _ value: Double) {
+            let flatIndex = instance * 38 + feature
+            output[flatIndex] = NSNumber(value: value)
+        }
+
+        set(0, 0, 176)
+        set(0, 1, 64)
+        set(0, 2, 464)
+        set(0, 3, 320)
+        set(0, 4, 0.93)
+        set(0, 5, 0)
+
+        set(1, 0, 220)
+        set(1, 1, 120)
+        set(1, 2, 340)
+        set(1, 3, 190)
+        set(1, 4, 0.99)
+        set(1, 5, 1)
+
+        set(2, 0, 210)
+        set(2, 1, 200)
+        set(2, 2, 360)
+        set(2, 3, 300)
+        set(2, 4, 0.98)
+        set(2, 5, 2)
+
+        let panels = CoreMLPanelDetector.decodedPanelsForDiagnostics(
+            output,
+            imageSize: CGSize(width: 400, height: 800)
+        )
+
+        #expect(panels.count == 1)
+        #expect(panels[0].source == .coreML)
+        #expect(abs(panels[0].confidence - 0.93) < 0.001)
+        #expect(panels[0].rect.minX >= 0)
+        #expect(panels[0].rect.maxX <= 1)
+        #expect(panels[0].rect.minY >= 0)
+        #expect(panels[0].rect.maxY <= 1)
+    }
+
+    @Test func coreMLDecoderAcceptsTransposedDetectionTensor() throws {
+        let output = try MLMultiArray(shape: [1, 38, 1], dataType: .float32)
+
+        func set(_ feature: Int, _ value: Double) {
+            output[feature] = NSNumber(value: value)
+        }
+
+        set(0, 160)
+        set(1, 80)
+        set(2, 480)
+        set(3, 400)
+        set(4, 0.88)
+        set(5, 0)
+
+        let panels = CoreMLPanelDetector.decodedPanelsForDiagnostics(
+            output,
+            imageSize: CGSize(width: 640, height: 640)
+        )
+
+        #expect(panels.count == 1)
+        #expect(abs(panels[0].rect.width - 0.5) < 0.001)
     }
 
     @Test func layoutQualityRejectsImplausibleResults() {
