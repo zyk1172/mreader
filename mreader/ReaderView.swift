@@ -880,6 +880,7 @@ struct ReaderView: View {
     @State private var editingBookmark: ComicBookmark?
     @State private var bookmarkNoteText = ""
     @State private var showBookmarkNoteAlert = false
+    @State private var readingModeBeforeGuidedPanelRaw: String
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -966,6 +967,11 @@ struct ReaderView: View {
         _lastSavedScrollPageProgress = State(initialValue: initialComic.scrollPageProgress)
         _lastPrefetchPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
         _activityLastPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
+        _readingModeBeforeGuidedPanelRaw = State(
+            initialValue: initialComic.readingModeRaw == ReadingMode.guidedPanel.rawValue
+                ? ReadingMode.horizontalPage.rawValue
+                : initialComic.readingModeRaw
+        )
     }
 
     var body: some View {
@@ -1411,9 +1417,16 @@ struct ReaderView: View {
                 Spacer()
 
                 Button {
-                    guard readingMode != .guidedPanel else { return }
                     HapticManager.shared.play(.light)
-                    readingModeRaw.wrappedValue = ReadingMode.guidedPanel.rawValue
+                    if readingMode == .guidedPanel {
+                        let restoreMode = ReadingMode(rawValue: readingModeBeforeGuidedPanelRaw)
+                            .flatMap { $0 == .guidedPanel ? nil : $0 }
+                            ?? .horizontalPage
+                        readingModeRaw.wrappedValue = restoreMode.rawValue
+                    } else {
+                        readingModeBeforeGuidedPanelRaw = comic.readingModeRaw
+                        readingModeRaw.wrappedValue = ReadingMode.guidedPanel.rawValue
+                    }
                 } label: {
                     Image(systemName: "rectangle.split.2x2")
                         .font(.system(size: 17, weight: .semibold))
