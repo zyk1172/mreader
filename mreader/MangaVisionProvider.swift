@@ -9,7 +9,7 @@ nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     let supportedRegionTypes: Set<MangaRegionType>
 }
 
-protocol MangaVisionProvider: Sendable {
+nonisolated protocol MangaVisionProvider: Sendable {
     var descriptor: MangaVisionProviderDescriptor { get async }
     func analyzePage(
         image: CGImage,
