@@ -39,12 +39,10 @@ jobs:
         run: |
           rm -rf /tmp/panel-export
           mkdir -p /tmp/panel-export
-          cd /tmp/panel-export
           python "$GITHUB_WORKSPACE/.github/scripts/export_guided_panel_model.py"
-          PACKAGE="$(find /tmp/panel-export -maxdepth 2 -type d -name '*.mlpackage' | head -n 1)"
-          test -n "$PACKAGE"
+          test -d /tmp/panel-export/PanelDetector.mlpackage
           rm -rf "$GITHUB_WORKSPACE/mreader/PanelDetector.mlpackage"
-          cp -R "$PACKAGE" "$GITHUB_WORKSPACE/mreader/PanelDetector.mlpackage"
+          cp -R /tmp/panel-export/PanelDetector.mlpackage "$GITHUB_WORKSPACE/mreader/PanelDetector.mlpackage"
           du -sh "$GITHUB_WORKSPACE/mreader/PanelDetector.mlpackage"
 
       - name: Patch detector and tests
