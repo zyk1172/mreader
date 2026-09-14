@@ -135,12 +135,14 @@ struct GuidedPanelFoundationTests {
         )
         let panels = regions.filter { $0.type == .panel }
         let texts = regions.filter { $0.type == .text }
+        let balloons = regions.filter { $0.type == .balloon }
 
+        #expect(regions.count == 3)
         #expect(panels.count == 1)
         #expect(texts.count == 1)
+        #expect(balloons.count == 1)
         #expect(abs(panels[0].confidence - 0.93) < 0.001)
         #expect(abs(panels[0].normalizedRect.width - 0.5) < 0.001)
-        #expect(regions.count == 2)
     }
 
     @Test func mangaVisionDecoderAcceptsTransposedDetectionTensor() throws {
