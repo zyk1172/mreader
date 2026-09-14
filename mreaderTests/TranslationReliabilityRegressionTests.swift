@@ -63,6 +63,7 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
         XCTAssertFalse(result.isComplete)
     }
 
+    @MainActor
     func testReadingOrderIsStableAcrossPermutationCounterexample() {
         let a = TextBlock(
             id: UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!,
@@ -84,7 +85,7 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
             [b, c, a], [c, a, b], [c, b, a]
         ]
         let outputs = permutations.map {
-            AITranslator.sortedTextBlocks($0, isRightToLeft: false).map(\.id)
+            AITranslator.sortedTextBlocks($0, isRightToLeft: false).map { $0.id }
         }
         XCTAssertEqual(Set(outputs.map { $0.map(\.uuidString).joined(separator: ",") }).count, 1)
         XCTAssertEqual(outputs.first?.count, 3)
