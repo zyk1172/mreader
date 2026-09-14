@@ -62,12 +62,12 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
     }
 }
 
-nonisolated protocol PanelDetector: Sendable {
+nonisolated protocol PanelDetecting: Sendable {
     var identifier: String { get }
     func detectPanels(in image: CGImage) throws -> [DetectedPanel]
 }
 
-nonisolated struct VisionRectanglePanelDetector: PanelDetector {
+nonisolated struct VisionRectanglePanelDetector: PanelDetecting {
     let identifier = "vision-rectangle-v3-bubble-filter"
 
     func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
@@ -98,7 +98,7 @@ nonisolated struct VisionRectanglePanelDetector: PanelDetector {
     }
 }
 
-nonisolated struct CoreMLPanelDetector: PanelDetector, @unchecked Sendable {
+nonisolated struct CoreMLPanelDetector: PanelDetecting, @unchecked Sendable {
     let identifier: String
     private let model: VNCoreMLModel
 
@@ -471,15 +471,21 @@ actor PanelDetectionService {
 
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
-    private let primaryDetector: any PanelDetector
-    private let fallbackDetector: any PanelDetector
+    private let primaryDetector: any PanelDetecting
+    private let fallbackDetector: any PanelDetecting
     private var memoryCache: [String: PanelPageLayout] = [:]
 
-    init(detector: (any PanelDetector)? = nil) {
+    init(detector: (any PanelDetecting)? = nil) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
         fallbackDetector = VisionRectanglePanelDetector()
-        primaryDetector = detector ?? CoreMLPanelDetector.bundled() ?? VisionRectanglePanelDetector()
+        if let detector {
+            primaryDetector = detector
+        } else if let coreMLDetector = CoreMLPanelDetector.bundled() {
+            primaryDetector = coreMLDetector
+        } else {
+            primaryDetector = VisionRectanglePanelDetector()
+        }
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
