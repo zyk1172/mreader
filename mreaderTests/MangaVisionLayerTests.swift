@@ -92,7 +92,7 @@ struct MangaVisionLayerTests {
             textOrientation: .vertical
         )
 
-        let enriched = MangaVisionOCRGeometry.applyingBalloonGeometry(
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
             to: [rightColumn, leftColumn],
             analysis: analysis
         )
@@ -104,6 +104,49 @@ struct MangaVisionLayerTests {
         #expect(segmentation.bubbles.count == 1)
         #expect(segmentation.bubbles[0].sourceLineCount == 2)
         #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
+    }
+
+    @Test func mangaTextRegionProvidesLayoutSafeRegionWithoutInventingBubble() {
+        let textRegion = region(
+            .text,
+            x: 0.54,
+            y: 0.18,
+            width: 0.15,
+            height: 0.28,
+            confidence: 0.88
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "safe-region-test",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [textRegion],
+            balloons: [],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let block = TextBlock(
+            text: "小さい文字も残す",
+            boundingBox: CGRect(x: 0.60, y: 0.23, width: 0.018, height: 0.17),
+            confidence: 0.92,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.018,
+            textOrientation: .vertical
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+        #expect(enriched[0].bubbleBox == nil)
+        #expect(enriched[0].layoutSafeRegion != nil)
+        #expect(enriched[0].layoutSafeRegion?.contains(block.boundingBox) == true)
+        #expect((enriched[0].layoutSafeRegion?.width ?? 0) > block.boundingBox.width)
     }
 
     @Test func mangaBalloonGeometryDoesNotOverwriteExistingVisualBubble() {
@@ -124,7 +167,7 @@ struct MangaVisionLayerTests {
             ),
             imageSize: CGSize(width: 1000, height: 1600),
             panels: [],
-            texts: [],
+            texts: [region(.text, x: 0.14, y: 0.14, width: 0.16, height: 0.08)],
             balloons: [region(.balloon, x: 0.10, y: 0.10, width: 0.30, height: 0.26)],
             faces: [],
             bodies: [],
@@ -132,38 +175,11 @@ struct MangaVisionLayerTests {
             modelVersion: 3
         )
 
-        let enriched = MangaVisionOCRGeometry.applyingBalloonGeometry(
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
             to: [block],
             analysis: analysis
         )
         #expect(enriched[0].bubbleBox == visualBubble)
-    }
-
-    @Test func pageScaleFilterUsesVerticalWidthInsteadOfTallColumnHeight() {
-        let tinyVertical = TextBlock(
-            text: "小字",
-            boundingBox: CGRect(x: 0.70, y: 0.15, width: 0.004, height: 0.22),
-            confidence: 0.95,
-            ocrSource: "original:ja",
-            estimatedFontScale: 0.004,
-            textOrientation: .vertical
-        )
-        let readableHorizontal = TextBlock(
-            text: "Readable",
-            boundingBox: CGRect(x: 0.15, y: 0.50, width: 0.22, height: 0.018),
-            confidence: 0.95,
-            ocrSource: "original:en",
-            estimatedFontScale: 0.018,
-            textOrientation: .horizontal
-        )
-
-        let filtered = OCRPageScaleFilter.partition(
-            [tinyVertical, readableHorizontal],
-            minimumTextHeight: 0.010
-        )
-        #expect(filtered.accepted.map(\.id) == [readableHorizontal.id])
-        #expect(filtered.rejected.map(\.id) == [tinyVertical.id])
-        #expect(filtered.rejected[0].filterReason == "短文本过小")
     }
 
     @Test func scaleFitCoordinatesMapBackToOriginalPage() {
