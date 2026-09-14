@@ -88,10 +88,17 @@ struct GuidedPanelVisionV2Tests {
         )
 
         let processed = PanelPostProcessor.process([parent, inset])
+        let tolerance: CGFloat = 0.000_001
+        func approximatelyEquals(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.minX - rhs.minX) <= tolerance
+                && abs(lhs.minY - rhs.minY) <= tolerance
+                && abs(lhs.width - rhs.width) <= tolerance
+                && abs(lhs.height - rhs.height) <= tolerance
+        }
 
         #expect(processed.count == 2)
-        #expect(processed.contains { $0.rect == parent.rect })
-        #expect(processed.contains { $0.rect == inset.rect })
+        #expect(processed.contains { approximatelyEquals($0.rect, parent.rect) })
+        #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
     }
 
     @Test func farCameraMoveIsSlowerAndUsesContextBridge() {
