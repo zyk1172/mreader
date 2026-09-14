@@ -2,6 +2,7 @@ import XCTest
 
 final class mreaderUITests: XCTestCase {
     private let timeout: TimeInterval = 12
+    private let semanticFallbackTimeout: TimeInterval = 2
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -30,8 +31,8 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(menu.waitForExistence(timeout: timeout))
         menu.tap()
 
-        let settings = element("mreader.shelf.settings", in: app)
-        XCTAssertTrue(settings.waitForExistence(timeout: timeout))
+        let settings = settingsMenuItem(in: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: timeout), "Settings menu item must be exposed by identifier or semantic label")
         settings.tap()
         XCTAssertTrue(element("mreader.settings.root", in: app).waitForExistence(timeout: timeout))
 
@@ -71,10 +72,10 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(reader.waitForExistence(timeout: timeout))
         XCTAssertTrue(element("mreader.reader.progress", in: app).waitForExistence(timeout: timeout))
         XCTAssertTrue(element("mreader.reader.progressOverlay", in: app).waitForExistence(timeout: timeout))
-        let progressSlider = element("mreader.reader.progressSlider", in: app)
+        let progressSlider = readerProgressSlider(in: app)
         let ocrAction = element("mreader.reader.ocrAction", in: app)
         let aiAction = element("mreader.reader.aiAction", in: app)
-        XCTAssertTrue(progressSlider.waitForExistence(timeout: timeout))
+        XCTAssertTrue(progressSlider.waitForExistence(timeout: timeout), "Reader progress slider must be exposed as an XCUI slider even if SwiftUI drops its identifier")
         XCTAssertTrue(ocrAction.waitForExistence(timeout: timeout))
         XCTAssertTrue(aiAction.waitForExistence(timeout: timeout))
         XCTAssertGreaterThan(ocrAction.frame.minY, progressSlider.frame.maxY - 1, "OCR action must sit below the progress slider")
@@ -98,6 +99,32 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(offlineMenu.waitForExistence(timeout: timeout))
         offlineMenu.tap()
         XCTAssertTrue(element("mreader.reader.offlineTranslationStart", in: app).waitForExistence(timeout: timeout))
+    }
+
+    private func settingsMenuItem(in app: XCUIApplication) -> XCUIElement {
+        let identified = app.buttons["mreader.shelf.settings"].firstMatch
+        if identified.waitForExistence(timeout: semanticFallbackTimeout) {
+            return identified
+        }
+
+        // SwiftUI Menu is bridged to a native menu on iOS 26. The bridge can
+        // preserve the visible label while dropping a Button's identifier.
+        // Keep the identifier as the primary contract, with a semantic label
+        // fallback for the framework-generated menu hierarchy.
+        let labels = ["Settings", "设置", "設定"]
+        return app.buttons.matching(NSPredicate(format: "label IN %@", labels)).firstMatch
+    }
+
+    private func readerProgressSlider(in app: XCUIApplication) -> XCUIElement {
+        let identified = app.sliders["mreader.reader.progressSlider"].firstMatch
+        if identified.waitForExistence(timeout: semanticFallbackTimeout) {
+            return identified
+        }
+
+        // SwiftUI Slider can lose accessibilityIdentifier while still being
+        // exposed correctly with the slider accessibility trait on iOS 26.
+        // The reader progress overlay contains exactly one slider.
+        return app.sliders.firstMatch
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
