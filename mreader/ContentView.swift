@@ -323,16 +323,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            shelfRootContent
-            .navigationDestination(item: $selectedReaderComic) { comic in
-                readerDestination(for: comic)
-                    .transaction { transaction in
-                        transaction.animation = nil
-                        transaction.disablesAnimations = true
-                    }
-            }
-            .modifier(shelfToolbarModifiers)
+        shelfRootContent
             .onChange(of: selectedPage) { _, _ in
                 HapticManager.shared.play(.light)
             }
@@ -474,8 +465,7 @@ struct ContentView: View {
             .onReceive(readingActivity.$days.debounce(for: .seconds(2), scheduler: RunLoop.main)) { days in
                 iCloudSync.push(comics: library.comics, activityDays: days)
             }
-        }
-        .accessibilityIdentifier("mreader.shelf.root")
+            .accessibilityIdentifier("mreader.shelf.root")
     }
 
     private func reloadMediaSourceState() async {
@@ -1081,27 +1071,21 @@ struct ContentView: View {
     @ViewBuilder
     private var shelfRootContent: some View {
         TabView(selection: $selectedPage) {
-            shelfPageContent(for: .continueReading)
-                .navigationTitle("tab.continueReading".localized)
-                .navigationBarTitleDisplayMode(.large)
+            shelfNavigationPage(for: .continueReading)
                 .tabItem {
                     Label("tab.continueReading".localized, systemImage: "book")
                         .accessibilityIdentifier("mreader.tab.continueReading")
                 }
                 .tag(MainShelfPage.continueReading)
 
-            shelfPageContent(for: .library)
-                .navigationTitle("shelf.title".localized)
-                .navigationBarTitleDisplayMode(.large)
+            shelfNavigationPage(for: .library)
                 .tabItem {
                     Label("tab.library".localized, systemImage: "books.vertical")
                         .accessibilityIdentifier("mreader.tab.library")
                 }
                 .tag(MainShelfPage.library)
 
-            shelfPageContent(for: .statistics)
-                .navigationTitle("tab.statistics".localized)
-                .navigationBarTitleDisplayMode(.large)
+            shelfNavigationPage(for: .statistics)
                 .tabItem {
                     Label("tab.statistics".localized, systemImage: "chart.bar.doc.horizontal")
                         .accessibilityIdentifier("mreader.tab.statistics")
@@ -1112,6 +1096,45 @@ struct ContentView: View {
             let topComics = Array(continueReadingComics.prefix(3))
             RemotePagePrefetcher.shared.previewPrefetch(comics: topComics)
         }
+    }
+
+    @ViewBuilder
+    private func shelfNavigationPage(for page: MainShelfPage) -> some View {
+        NavigationStack {
+            shelfPageContent(for: page)
+                .navigationTitle(shelfNavigationTitle(for: page))
+                .navigationBarTitleDisplayMode(.large)
+                .navigationDestination(item: readerSelectionBinding(for: page)) { comic in
+                    readerDestination(for: comic)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                            transaction.disablesAnimations = true
+                        }
+                }
+                .modifier(shelfToolbarModifiers)
+        }
+    }
+
+    private func shelfNavigationTitle(for page: MainShelfPage) -> String {
+        switch page {
+        case .continueReading:
+            return "tab.continueReading".localized
+        case .library:
+            return "shelf.title".localized
+        case .statistics:
+            return "tab.statistics".localized
+        }
+    }
+
+    private func readerSelectionBinding(for page: MainShelfPage) -> Binding<ComicBook?> {
+        Binding(
+            get: { selectedPage == page ? selectedReaderComic : nil },
+            set: { newValue in
+                if newValue != nil || selectedPage == page {
+                    selectedReaderComic = newValue
+                }
+            }
+        )
     }
 
     @ViewBuilder
