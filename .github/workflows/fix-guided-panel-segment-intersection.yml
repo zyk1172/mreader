@@ -24,23 +24,8 @@ jobs:
           from pathlib import Path
           p = Path('mreader/PanelReadingOrder.swift')
           text = p.read_text()
-          old = '''    private static func segmentsIntersect(
-              _ a: CGPoint,
-              _ b: CGPoint,
-              _ c: CGPoint,
-              _ d: CGPoint
-          ) -> Bool {
-              func orientation(_ p: CGPoint, _ q: CGPoint, _ r: CGPoint) -> CGFloat {
-                  (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-              }
-              let o1 = orientation(a, b, c)
-              let o2 = orientation(a, b, d)
-              let o3 = orientation(c, d, a)
-              let o4 = orientation(c, d, b)
-              return (o1 == 0 || o2 == 0 || (o1 > 0) != (o2 > 0))
-                  && (o3 == 0 || o4 == 0 || (o3 > 0) != (o4 > 0))
-          }
-          '''
+          start = text.index('    private static func segmentsIntersect(')
+          end = text.index('\n    private static func pointInPolygon', start)
           new = '''    private static func segmentsIntersect(
               _ a: CGPoint,
               _ b: CGPoint,
@@ -77,9 +62,7 @@ jobs:
               return false
           }
           '''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one segment predicate, found {text.count(old)}')
-          p.write_text(text.replace(old, new, 1))
+          p.write_text(text[:start] + new + text[end:])
           PY
           git diff --check
           git config user.name "github-actions[bot]"
