@@ -1,0 +1,34 @@
+name: Manga Vision Integration Patch
+
+on:
+  push:
+    branches:
+      - feature/manga-vision-layer
+    paths:
+      - scripts/apply_manga_vision_integration.py
+      - .github/workflows/manga-vision-integration-patch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/manga-vision-layer
+          fetch-depth: 0
+      - name: Apply integration patch
+        run: python3 scripts/apply_manga_vision_integration.py
+      - name: Commit integrated sources
+        run: |
+          rm scripts/apply_manga_vision_integration.py
+          rm .github/workflows/manga-vision-integration-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "feat: integrate Manga Vision with Guided Panel OCR and translation"
+          git push origin feature/manga-vision-layer
