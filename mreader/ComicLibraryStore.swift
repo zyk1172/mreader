@@ -261,6 +261,7 @@ final class ComicLibraryStore: ObservableObject {
 
     private static func syncMetadataChanged(existing: ComicBook, incoming: ComicBook) -> Bool {
         existing.readingDirectionRaw != incoming.readingDirectionRaw
+            || existing.guidedPanelReadingDirectionRaw != incoming.guidedPanelReadingDirectionRaw
             || existing.readingModeRaw != incoming.readingModeRaw
             || existing.pageTurnAnimationRaw != incoming.pageTurnAnimationRaw
             || existing.imageFitModeRaw != incoming.imageFitModeRaw
@@ -336,6 +337,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
             merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw
+            merged.guidedPanelReadingDirectionRaw = existing.guidedPanelReadingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
             merged.imageFitModeRaw = existing.imageFitModeRaw
@@ -463,6 +465,7 @@ final class ComicLibraryStore: ObservableObject {
             if remote.metadataUpdatedAt > comics[index].metadataUpdatedAt {
                 comics[index].metadataUpdatedAt = remote.metadataUpdatedAt
                 comics[index].readingDirectionRaw = remote.readingDirectionRaw
+                comics[index].guidedPanelReadingDirectionRaw = remote.guidedPanelReadingDirectionRaw
                 comics[index].readingModeRaw = remote.readingModeRaw
                 comics[index].pageTurnAnimationRaw = remote.pageTurnAnimationRaw
                 comics[index].imageFitModeRaw = remote.imageFitModeRaw
@@ -1250,6 +1253,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.aiTranslationModeRaw = existing.aiTranslationModeRaw
             merged.hasInitializedReadingPreset = existing.hasInitializedReadingPreset
             merged.readingDirectionRaw = existing.readingDirectionRaw
+            merged.guidedPanelReadingDirectionRaw = existing.guidedPanelReadingDirectionRaw
             merged.readingModeRaw = existing.readingModeRaw
             merged.pageTurnAnimationRaw = existing.pageTurnAnimationRaw
             merged.imageFitModeRaw = existing.imageFitModeRaw

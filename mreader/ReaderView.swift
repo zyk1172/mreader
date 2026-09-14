@@ -3265,10 +3265,9 @@ struct GuidedPanelReader: View {
     @State private var isDetecting = false
     @State private var enterCurrentPageAtLastPanel = false
     @State private var panelNavigationDirection = 1
-
-    private var panelCameraAnimation: Animation? {
-        reduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.88)
-    }
+    @State private var cameraFocusOverride: CGRect?
+    @State private var isPanelTransitioning = false
+    @State private var panelMotionTask: Task<Void, Never>?
 
     private var pageTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
@@ -3323,8 +3322,6 @@ struct GuidedPanelReader: View {
                     .scaleEffect(camera.scale)
                     .offset(camera.offset)
                     .transition(pageTransition)
-                    .animation(panelCameraAnimation, value: panelIndex)
-                    .animation(panelCameraAnimation, value: currentPageIndex)
                     .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
                         await detectPanels(for: page)
                     }
@@ -3348,6 +3345,11 @@ struct GuidedPanelReader: View {
             }
             .clipped()
         }
+        .onDisappear {
+            panelMotionTask?.cancel()
+            panelMotionTask = nil
+            isPanelTransitioning = false
+        }
     }
 
     private func detectPanels(for page: ComicPage) async {
@@ -3358,7 +3360,9 @@ struct GuidedPanelReader: View {
             guard currentPage?.url == pageURL else { return }
             layout = nil
             sourceSize = .zero
+            cameraFocusOverride = nil
             isDetecting = false
+            isPanelTransitioning = false
             return
         }
 
@@ -3374,17 +3378,26 @@ struct GuidedPanelReader: View {
             isRightToLeft: readingDirection == .rightToLeft
         )
 
+        // A cached layout can arrive while the previous page is still completing
+        // its short context/slide stage. Do not collapse both motions into one snap.
+        while isPanelTransitioning, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(40))
+        }
         guard !Task.isCancelled, currentPage?.url == pageURL else { return }
         let lastPanelIndex = max(detectedLayout.panels.count - 1, 0)
         let targetPanelIndex = enterCurrentPageAtLastPanel
             ? lastPanelIndex
             : min(max(panelIndex, 0), lastPanelIndex)
+        let targetRect = detectedLayout.panelRects.indices.contains(targetPanelIndex)
+            ? detectedLayout.panelRects[targetPanelIndex]
+            : detectedLayout.contentBounds.cgRect
+        let profile = GuidedPanelMotionPlanner.profile(from: nil, to: targetRect)
 
-        // Layout arrives asynchronously; animate camera-bearing state together so focus does not snap.
-        withAnimation(panelCameraAnimation) {
+        withAnimation(cameraAnimation(for: profile)) {
             sourceSize = detectedSourceSize
             layout = detectedLayout
             panelIndex = targetPanelIndex
+            cameraFocusOverride = nil
         }
         enterCurrentPageAtLastPanel = false
         isDetecting = false
@@ -3392,27 +3405,35 @@ struct GuidedPanelReader: View {
 
     private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
         guard viewport.width > 0, viewport.height > 0,
-              sourceSize.width > 0, sourceSize.height > 0,
-              let layout else { return (1, .zero) }
-        let normalized = layout.panelRects.indices.contains(panelIndex)
-            ? layout.panelRects[panelIndex]
-            : layout.contentBounds.cgRect
+              sourceSize.width > 0, sourceSize.height > 0 else {
+            return (1, .zero)
+        }
+        let normalized: CGRect
+        if let cameraFocusOverride {
+            normalized = cameraFocusOverride
+        } else if let layout {
+            normalized = layout.panelRects.indices.contains(panelIndex)
+                ? layout.panelRects[panelIndex]
+                : layout.contentBounds.cgRect
+        } else {
+            return (1, .zero)
+        }
+        let tuning = GuidedPanelMotionPlanner.viewportTuning(for: normalized)
         let transform = GuidedPanelViewport.transform(
             normalizedPanel: normalized,
             imageAspectRatio: sourceSize.width / sourceSize.height,
-            viewportSize: viewport
+            viewportSize: viewport,
+            contextPadding: tuning.contextPadding,
+            maximumScale: tuning.maximumScale
         )
         return (transform.scale, transform.offset)
     }
 
     private func previousPanel() {
-        guard !isDetecting else { return }
+        guard !isDetecting, !isPanelTransitioning else { return }
         panelNavigationDirection = -1
         if panelIndex > 0 {
-            withAnimation(panelCameraAnimation) {
-                panelIndex -= 1
-            }
-            HapticManager.shared.play(.light)
+            moveWithinPage(to: panelIndex - 1)
         } else if currentPageIndex > 0 {
             moveToPage(currentPageIndex - 1, enterAtLastPanel: true)
         } else {
@@ -3421,18 +3442,61 @@ struct GuidedPanelReader: View {
     }
 
     private func nextPanel() {
-        guard !isDetecting else { return }
+        guard !isDetecting, !isPanelTransitioning else { return }
         panelNavigationDirection = 1
         let count = max(layout?.panels.count ?? 1, 1)
         if panelIndex + 1 < count {
-            withAnimation(panelCameraAnimation) {
-                panelIndex += 1
-            }
-            HapticManager.shared.play(.light)
+            moveWithinPage(to: panelIndex + 1)
         } else if currentPageIndex + 1 < pages.count {
             moveToPage(currentPageIndex + 1, enterAtLastPanel: false)
         } else {
             HapticManager.shared.play(.warning)
+        }
+    }
+
+    private func moveWithinPage(to targetIndex: Int) {
+        guard let layout,
+              layout.panelRects.indices.contains(panelIndex),
+              layout.panelRects.indices.contains(targetIndex) else { return }
+        let sourceRect = layout.panelRects[panelIndex]
+        let destinationRect = layout.panelRects[targetIndex]
+        let profile = GuidedPanelMotionPlanner.profile(
+            from: sourceRect,
+            to: destinationRect
+        )
+        HapticManager.shared.play(.light)
+        panelMotionTask?.cancel()
+
+        guard !reduceMotion, profile.usesContextBridge else {
+            withAnimation(cameraAnimation(for: profile)) {
+                panelIndex = targetIndex
+                cameraFocusOverride = nil
+            }
+            return
+        }
+
+        isPanelTransitioning = true
+        let bridgeRect = GuidedPanelMotionPlanner.bridgeRect(
+            from: sourceRect,
+            to: destinationRect
+        )
+        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
+            cameraFocusOverride = bridgeRect
+        }
+        panelMotionTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(profile.bridgeDuration))
+            guard !Task.isCancelled else {
+                cameraFocusOverride = nil
+                isPanelTransitioning = false
+                return
+            }
+            withAnimation(cameraAnimation(for: profile, duration: profile.settleDuration)) {
+                panelIndex = targetIndex
+                cameraFocusOverride = nil
+            }
+            try? await Task.sleep(for: .seconds(profile.settleDuration))
+            guard !Task.isCancelled else { return }
+            isPanelTransitioning = false
         }
     }
 
@@ -3442,20 +3506,78 @@ struct GuidedPanelReader: View {
             return
         }
 
+        panelMotionTask?.cancel()
         panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
         enterCurrentPageAtLastPanel = enterAtLastPanel
         isDetecting = true
-        // Camera reset and page identity change share one transaction. The incoming page
-        // then animates from identity into its detected first/last panel.
-        withAnimation(panelCameraAnimation) {
+        HapticManager.shared.play(.light)
+
+        guard !reduceMotion else {
             layout = nil
             sourceSize = .zero
+            cameraFocusOverride = nil
             panelIndex = 0
             currentPageIndex = pageIndex
+            return
         }
-        HapticManager.shared.play(.light)
+
+        let profile = GuidedPanelMotionPlanner.profile(
+            from: layout?.panelRects[safe: panelIndex],
+            to: nil,
+            crossesPageBoundary: true
+        )
+        isPanelTransitioning = true
+        let pageContext = layout?.contentBounds.cgRect
+            ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
+            cameraFocusOverride = pageContext
+        }
+
+        panelMotionTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(profile.bridgeDuration))
+            guard !Task.isCancelled else {
+                cameraFocusOverride = nil
+                isPanelTransitioning = false
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.30)) {
+                layout = nil
+                sourceSize = .zero
+                cameraFocusOverride = nil
+                panelIndex = 0
+                currentPageIndex = pageIndex
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            isPanelTransitioning = false
+        }
     }
 
+    private func cameraAnimation(
+        for profile: GuidedPanelMotionProfile,
+        duration overrideDuration: TimeInterval? = nil
+    ) -> Animation? {
+        guard !reduceMotion else { return nil }
+        let duration = overrideDuration ?? profile.duration
+        switch profile.kind {
+        case .sameRow:
+            return .timingCurve(0.20, 0.62, 0.34, 1.0, duration: duration)
+        case .nearby:
+            return .timingCurve(0.22, 0.58, 0.32, 1.0, duration: duration)
+        case .nextRow, .farJump:
+            return .timingCurve(0.22, 0.56, 0.30, 1.0, duration: duration)
+        case .pageBoundary:
+            return .easeInOut(duration: duration)
+        case .focusEntry:
+            return .timingCurve(0.20, 0.64, 0.32, 1.0, duration: duration)
+        }
+    }
+}
+
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }
 
 struct AnimatedPageReader: View {

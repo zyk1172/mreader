@@ -12,6 +12,7 @@ nonisolated struct SyncedComicMetadata: Codable, Sendable {
     let scrollPageProgress: Double
     let metadataUpdatedAt: Date
     let readingDirectionRaw: String
+    let guidedPanelReadingDirectionRaw: String
     let readingModeRaw: String
     let pageTurnAnimationRaw: String
     let imageFitModeRaw: String
@@ -29,6 +30,7 @@ nonisolated struct SyncedComicMetadata: Codable, Sendable {
         scrollPageProgress: Double = 0,
         metadataUpdatedAt: Date = .distantPast,
         readingDirectionRaw: String = "leftToRight",
+        guidedPanelReadingDirectionRaw: String? = nil,
         readingModeRaw: String = "horizontalPage",
         pageTurnAnimationRaw: String = "slide",
         imageFitModeRaw: String = "fitScreen",
@@ -45,6 +47,7 @@ nonisolated struct SyncedComicMetadata: Codable, Sendable {
         self.scrollPageProgress = scrollPageProgress
         self.metadataUpdatedAt = metadataUpdatedAt
         self.readingDirectionRaw = readingDirectionRaw
+        self.guidedPanelReadingDirectionRaw = guidedPanelReadingDirectionRaw ?? readingDirectionRaw
         self.readingModeRaw = readingModeRaw
         self.pageTurnAnimationRaw = pageTurnAnimationRaw
         self.imageFitModeRaw = imageFitModeRaw
@@ -65,6 +68,8 @@ nonisolated struct SyncedComicMetadata: Codable, Sendable {
         scrollPageProgress = try container.decodeIfPresent(Double.self, forKey: .scrollPageProgress) ?? 0
         metadataUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .metadataUpdatedAt) ?? progressDate
         readingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .readingDirectionRaw) ?? "leftToRight"
+        guidedPanelReadingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .guidedPanelReadingDirectionRaw)
+            ?? readingDirectionRaw
         readingModeRaw = try container.decodeIfPresent(String.self, forKey: .readingModeRaw) ?? "horizontalPage"
         pageTurnAnimationRaw = try container.decodeIfPresent(String.self, forKey: .pageTurnAnimationRaw) ?? "slide"
         imageFitModeRaw = try container.decodeIfPresent(String.self, forKey: .imageFitModeRaw) ?? "fitScreen"
@@ -84,6 +89,7 @@ nonisolated struct SyncedComicMetadata: Codable, Sendable {
             scrollPageProgress: scrollPageProgress,
             metadataUpdatedAt: metadataUpdatedAt ?? self.metadataUpdatedAt,
             readingDirectionRaw: readingDirectionRaw,
+            guidedPanelReadingDirectionRaw: guidedPanelReadingDirectionRaw,
             readingModeRaw: readingModeRaw,
             pageTurnAnimationRaw: pageTurnAnimationRaw,
             imageFitModeRaw: imageFitModeRaw,
@@ -438,6 +444,9 @@ nonisolated enum ICloudMetadataMergePolicy {
             scrollPageProgress: usesLocalProgress ? local.scrollPageProgress : remote.scrollPageProgress,
             metadataUpdatedAt: max(local.metadataUpdatedAt, remote.metadataUpdatedAt),
             readingDirectionRaw: usesLocalMetadata ? local.readingDirectionRaw : remote.readingDirectionRaw,
+            guidedPanelReadingDirectionRaw: usesLocalMetadata
+                ? local.guidedPanelReadingDirectionRaw
+                : remote.guidedPanelReadingDirectionRaw,
             readingModeRaw: usesLocalMetadata ? local.readingModeRaw : remote.readingModeRaw,
             pageTurnAnimationRaw: usesLocalMetadata ? local.pageTurnAnimationRaw : remote.pageTurnAnimationRaw,
             imageFitModeRaw: usesLocalMetadata ? local.imageFitModeRaw : remote.imageFitModeRaw,
@@ -610,6 +619,7 @@ final class ICloudMetadataSyncService: ObservableObject {
                 scrollPageProgress: comic.scrollPageProgress,
                 metadataUpdatedAt: comic.metadataUpdatedAt,
                 readingDirectionRaw: comic.readingDirectionRaw,
+                guidedPanelReadingDirectionRaw: comic.guidedPanelReadingDirectionRaw,
                 readingModeRaw: comic.readingModeRaw,
                 pageTurnAnimationRaw: comic.pageTurnAnimationRaw,
                 imageFitModeRaw: comic.imageFitModeRaw,

@@ -120,7 +120,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         return MangaPageAnalysis(
             pageIdentifier: pageIdentifier,
             imageSize: sourceImageSize,
-            panels: MangaVisionRegionPostProcessor.deduplicated(grouped[.panel] ?? []),
+            panels: grouped[.panel] ?? [],
             texts: MangaVisionRegionPostProcessor.deduplicated(grouped[.text] ?? []),
             balloons: MangaVisionRegionPostProcessor.deduplicated(
                 grouped[.balloon] ?? [],
