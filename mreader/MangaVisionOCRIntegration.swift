@@ -4,40 +4,70 @@ import Foundation
 /// Bridges page-level Manga Vision regions into the existing TextBlock contract.
 /// The Core ML model owns only geometry; OCR remains the source of text/confidence.
 nonisolated enum MangaVisionOCRGeometry {
-    private struct BalloonCandidate {
-        let region: MangaVisionRegion
-        let fittedRect: CGRect
+    private struct RegionCandidate {
+        let rect: CGRect
         let score: CGFloat
     }
 
-    static func applyingBalloonGeometry(
+    /// Enrich local OCR with two different kinds of model geometry:
+    /// - a physical `balloon` may become `bubbleBox` and therefore a canonical
+    ///   translation-unit boundary;
+    /// - a model `text` region may become `layoutSafeRegion`, giving measured
+    ///   text more room without pretending a physical speech bubble exists.
+    ///
+    /// Existing visual/VLM geometry always wins. This keeps the vision-translation
+    /// path independent and makes this layer a non-destructive OCR enrichment.
+    static func applyingDetectedGeometry(
         to blocks: [TextBlock],
         analysis: MangaPageAnalysis
     ) -> [TextBlock] {
-        guard !blocks.isEmpty, !analysis.balloons.isEmpty else { return blocks }
+        guard !blocks.isEmpty else { return blocks }
         let balloons = MangaVisionRegionPostProcessor.deduplicated(
             analysis.balloons.filter(isUsableBalloon),
             iouThreshold: 0.58,
             containmentThreshold: 0.90
         )
-        guard !balloons.isEmpty else { return blocks }
+        let textRegions = MangaVisionRegionPostProcessor.deduplicated(
+            analysis.texts.filter(isUsableTextRegion),
+            iouThreshold: 0.58,
+            containmentThreshold: 0.88
+        )
+        guard !balloons.isEmpty || !textRegions.isEmpty else { return blocks }
 
         return blocks.map { block in
-            // Preserve geometry explicitly supplied by Vision translation or another
-            // trusted source. Manga Vision is a recovery/enrichment layer, not an
-            // authority that overwrites a known bubble.
-            guard block.bubbleBox == nil,
-                  block.layoutRole == .dialogue,
-                  let match = bestBalloon(for: block.boundingBox, balloons: balloons) else {
-                return block
-            }
             var enriched = block
-            enriched.bubbleBox = match
-            if enriched.layoutSafeRegion == nil {
-                enriched.layoutSafeRegion = match
+
+            if enriched.bubbleBox == nil,
+               enriched.layoutRole == .dialogue,
+               let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
+                enriched.bubbleBox = balloon
+                if enriched.layoutSafeRegion == nil {
+                    enriched.layoutSafeRegion = balloon
+                }
+                return enriched
+            }
+
+            // Do not manufacture a bubble from a text detector. A padded text
+            // region is only a layout hint, useful for narration/labels and for
+            // dialogue where the balloon detector genuinely found nothing.
+            if enriched.layoutSafeRegion == nil,
+               let safeRegion = bestTextSafeRegion(
+                    for: enriched.boundingBox,
+                    textRegions: textRegions
+               ) {
+                enriched.layoutSafeRegion = safeRegion
             }
             return enriched
         }
+    }
+
+    // Kept as a narrow compatibility name for tests/callers written during the
+    // first balloon integration; it now also attaches model text safe regions.
+    static func applyingBalloonGeometry(
+        to blocks: [TextBlock],
+        analysis: MangaPageAnalysis
+    ) -> [TextBlock] {
+        applyingDetectedGeometry(to: blocks, analysis: analysis)
     }
 
     static func bestBalloonForDiagnostics(
@@ -58,7 +88,7 @@ nonisolated enum MangaVisionOCRGeometry {
         let toleranceY = max(0.004, textRect.height * 0.10)
         let center = CGPoint(x: textRect.midX, y: textRect.midY)
 
-        let candidates = balloons.compactMap { balloon -> BalloonCandidate? in
+        let candidates = balloons.compactMap { balloon -> RegionCandidate? in
             let rect = balloon.normalizedRect.standardized
             guard rect.width > 0, rect.height > 0 else { return nil }
             let containment = MangaPageCoordinateSpace.containment(of: textRect, in: rect)
@@ -84,28 +114,54 @@ nonisolated enum MangaVisionOCRGeometry {
                 - normalizedDistance * 0.9
                 - fittedArea * 0.8
                 + CGFloat(balloon.confidence) * 0.35
-            return BalloonCandidate(region: balloon, fittedRect: fitted, score: score)
+            return RegionCandidate(rect: fitted, score: score)
         }.sorted { lhs, rhs in
             if abs(lhs.score - rhs.score) > 0.000_1 { return lhs.score > rhs.score }
-            let lhsArea = MangaPageCoordinateSpace.area(lhs.fittedRect)
-            let rhsArea = MangaPageCoordinateSpace.area(rhs.fittedRect)
-            return lhsArea < rhsArea
+            return MangaPageCoordinateSpace.area(lhs.rect)
+                < MangaPageCoordinateSpace.area(rhs.rect)
         }
 
         guard let best = candidates.first else { return nil }
         if candidates.count > 1 {
             let second = candidates[1]
-            let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
-                best.fittedRect,
-                second.fittedRect
-            )
+            let overlap = MangaPageCoordinateSpace.intersectionOverUnion(best.rect, second.rect)
             // Two unrelated balloons with almost identical assignment scores are
             // ambiguous. Refuse to invent grouping instead of joining dialogues.
             if best.score - second.score < 0.08, overlap < 0.25 {
                 return nil
             }
         }
-        return best.fittedRect
+        return best.rect
+    }
+
+    private static func bestTextSafeRegion(
+        for rawTextRect: CGRect,
+        textRegions: [MangaVisionRegion]
+    ) -> CGRect? {
+        let textRect = MangaPageCoordinateSpace.clampedNormalizedRect(rawTextRect.standardized)
+        guard textRect.width > 0, textRect.height > 0 else { return nil }
+        let center = CGPoint(x: textRect.midX, y: textRect.midY)
+        let candidates = textRegions.compactMap { region -> RegionCandidate? in
+            let rect = region.normalizedRect.standardized
+            let containment = MangaPageCoordinateSpace.containment(of: textRect, in: rect)
+            let centerInside = rect.insetBy(dx: -0.004, dy: -0.004).contains(center)
+            guard containment >= 0.45 || (centerInside && containment >= 0.25) else { return nil }
+
+            // Text detections are normally tight. Give measured translation a
+            // modest local expansion, still far smaller than a page-level card.
+            let padded = MangaPageCoordinateSpace.paddedNormalizedRect(rect, fraction: 0.28)
+            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(padded.union(textRect))
+            let area = MangaPageCoordinateSpace.area(fitted)
+            guard area > 0, area <= 0.30 else { return nil }
+            let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
+            let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
+            let score = containment * 3.0
+                - distance / diagonal * 0.7
+                - area * 0.45
+                + CGFloat(region.confidence) * 0.25
+            return RegionCandidate(rect: fitted, score: score)
+        }
+        return candidates.max(by: { $0.score < $1.score })?.rect
     }
 
     private static func isUsableBalloon(_ region: MangaVisionRegion) -> Bool {
@@ -117,81 +173,15 @@ nonisolated enum MangaVisionOCRGeometry {
             && area >= 0.000_04
             && area <= 0.55
     }
-}
 
-/// A page-space filter applied after ROI OCR. VNRecognizeTextRequest.minimumTextHeight
-/// is relative to the cropped ROI, so it cannot be the final policy once Manga Vision
-/// starts feeding small text crops. This restores the user's page-level threshold and
-/// uses the physical font axis: horizontal -> height, vertical -> width.
-nonisolated enum OCRPageScaleFilter {
-    struct Result: Sendable {
-        let accepted: [TextBlock]
-        let rejected: [TextBlock]
-    }
-
-    static func partition(
-        _ blocks: [TextBlock],
-        minimumTextHeight: Double
-    ) -> Result {
-        let minimumAxis = min(max(CGFloat(minimumTextHeight), 0.002), 0.05)
-        let minimumArea = minimumAxis * 0.0048
-        var accepted: [TextBlock] = []
-        var rejected: [TextBlock] = []
-        accepted.reserveCapacity(blocks.count)
-
-        for block in blocks {
-            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let rect = block.boundingBox
-            let geometryAxis = block.textOrientation == .vertical ? rect.width : rect.height
-            let estimatedAxis = block.estimatedFontScale.isFinite && block.estimatedFontScale > 0
-                ? CGFloat(block.estimatedFontScale)
-                : geometryAxis
-            let fontAxis = max(min(estimatedAxis, max(geometryAxis * 3, geometryAxis)), 0)
-            let area = max(rect.width, 0) * max(rect.height, 0)
-
-            let reason: String?
-            if text.count <= 2, fontAxis < minimumAxis * 1.55 {
-                reason = "短文本过小"
-            } else if fontAxis < minimumAxis || area < minimumArea {
-                reason = "字号/面积过小"
-            } else {
-                reason = nil
-            }
-
-            guard let reason else {
-                accepted.append(block)
-                continue
-            }
-            var filtered = block
-            filtered.isFiltered = true
-            filtered.filterReason = reason
-            rejected.append(filtered)
-        }
-        return Result(accepted: accepted, rejected: rejected)
-    }
-
-    static func applying(
-        to result: OCRPipelineResult,
-        minimumTextHeight: Double,
-        isRightToLeft: Bool
-    ) -> OCRPipelineResult {
-        let filtered = partition(
-            result.resolvedBlocks,
-            minimumTextHeight: minimumTextHeight
-        )
-        let segmentation = MangaTextSegmenter.segment(
-            filtered.accepted,
-            isRightToLeft: isRightToLeft
-        )
-        return OCRPipelineResult(
-            rawBlocks: result.rawBlocks,
-            resolvedBlocks: filtered.accepted,
-            lineBlocks: segmentation.lines,
-            bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: result.rejectedBlocks + filtered.rejected,
-            detectedLanguage: result.detectedLanguage,
-            quality: result.quality
-        )
+    private static func isUsableTextRegion(_ region: MangaVisionRegion) -> Bool {
+        guard region.type == .text, region.confidence >= 0.18 else { return false }
+        let rect = region.normalizedRect
+        let area = MangaPageCoordinateSpace.area(rect)
+        return rect.width >= 0.002
+            && rect.height >= 0.002
+            && area >= 0.000_02
+            && area <= 0.30
     }
 }
 
@@ -251,7 +241,7 @@ nonisolated enum MangaVisionOCROrdering {
         // Attach detected physical balloons before segmentation. This is the key
         // boundary that turns several Japanese vertical OCR columns inside one
         // speech balloon into one translation unit instead of several grey cards.
-        let enrichedResolved = MangaVisionOCRGeometry.applyingBalloonGeometry(
+        let enrichedResolved = MangaVisionOCRGeometry.applyingDetectedGeometry(
             to: result.resolvedBlocks,
             analysis: analysis
         )
@@ -260,7 +250,7 @@ nonisolated enum MangaVisionOCROrdering {
             isRightToLeft: isRightToLeft
         )
         return OCRPipelineResult(
-            rawBlocks: MangaVisionOCRGeometry.applyingBalloonGeometry(
+            rawBlocks: MangaVisionOCRGeometry.applyingDetectedGeometry(
                 to: result.rawBlocks,
                 analysis: analysis
             ),
