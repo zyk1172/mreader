@@ -19,10 +19,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            // OCR geometry, the Japanese vertical fallback and the bubble
-            // grouping (visual bubble identity) changed; do not reuse pages
-            // written before this pipeline revision.
-            "local-ocr-v10-manga-vision-roi-panel-order",
+            // v11 keeps Manga Vision text ROI discovery and adds first-class
+            // balloon/layout geometry. Do not reuse pages written before that
+            // translation-unit contract existed.
+            "local-ocr-v11-manga-vision-balloon-layout-geometry",
             MangaVisionService.analysisRevision,
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
@@ -188,6 +188,8 @@ actor OCRRecognitionCache {
     private func store(_ result: OCRPipelineResult, forKey key: String) {
         guard !result.rawBlocks.isEmpty else { return }
         insertIntoMemory(result, forKey: key)
+        // Persist raw OCR observations only. Manga Vision balloon/text geometry
+        // is intentionally reattached from the versioned page analysis on cache hit.
         let page = CachedOCRPage(
             createdAt: Date(),
             rawBlocks: result.rawBlocks.map(CachedOCRBlock.init)

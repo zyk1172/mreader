@@ -8,17 +8,18 @@ import UIKit
 @Suite(.serialized)
 @MainActor
 struct MangaVisionLayerTests {
-    @Test func adapterMapsFourSemanticClassesWithoutExposingIDsUpstream() throws {
+    @Test func adapterMapsFiveSemanticClassesWithoutExposingIDsUpstream() throws {
         let output = try detectionTensor(rows: [
             [64, 64, 256, 256, 0.91, 0],
             [300, 80, 420, 180, 0.82, 1],
-            [100, 300, 180, 380, 0.77, 2],
-            [80, 280, 230, 560, 0.74, 3]
+            [280, 60, 450, 210, 0.79, 2],
+            [100, 300, 180, 380, 0.77, 3],
+            [80, 280, 230, 560, 0.74, 4]
         ])
         let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
             output,
             analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame", 1: "text", 2: "face", 3: "body"]
+            labelsByClassID: [0: "frame", 1: "text", 2: "balloon", 3: "face", 4: "body"]
         )
         #expect(Set(regions.map(\.type)) == Set(MangaRegionType.allCases))
     }
@@ -38,15 +39,147 @@ struct MangaVisionLayerTests {
         let output = try detectionTensor(rows: [
             [40, 40, 180, 180, 0.23, 0],
             [200, 40, 300, 140, 0.17, 1],
-            [40, 220, 120, 300, 0.20, 2],
-            [200, 220, 340, 500, 0.19, 3]
+            [200, 160, 340, 300, 0.19, 2],
+            [40, 220, 120, 300, 0.20, 3],
+            [200, 220, 340, 500, 0.19, 4]
         ])
         let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
             output,
             analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame", 1: "text", 2: "face", 3: "body"]
+            labelsByClassID: [0: "frame", 1: "text", 2: "balloon", 3: "face", 4: "body"]
         )
         #expect(regions.map(\.type) == [.face])
+    }
+
+    @Test func mangaBalloonGeometryCombinesVerticalColumnsIntoOneTranslationUnit() {
+        let balloon = region(
+            .balloon,
+            x: 0.48,
+            y: 0.16,
+            width: 0.28,
+            height: 0.42,
+            confidence: 0.92
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "balloon-test",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let rightColumn = TextBlock(
+            text: "これは",
+            boundingBox: CGRect(x: 0.66, y: 0.22, width: 0.035, height: 0.22),
+            confidence: 0.95,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.035,
+            textOrientation: .vertical
+        )
+        let leftColumn = TextBlock(
+            text: "テストです",
+            boundingBox: CGRect(x: 0.57, y: 0.20, width: 0.035, height: 0.26),
+            confidence: 0.94,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.035,
+            textOrientation: .vertical
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [rightColumn, leftColumn],
+            analysis: analysis
+        )
+        #expect(enriched.allSatisfy { $0.bubbleBox != nil })
+        #expect(enriched.allSatisfy { $0.bubbleBox == balloon.normalizedRect })
+
+        let segmentation = MangaTextSegmenter.segment(enriched, isRightToLeft: true)
+        #expect(segmentation.lines.count == 2)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
+        #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
+    }
+
+    @Test func mangaTextRegionProvidesLayoutSafeRegionWithoutInventingBubble() {
+        let textRegion = region(
+            .text,
+            x: 0.54,
+            y: 0.18,
+            width: 0.15,
+            height: 0.28,
+            confidence: 0.88
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "safe-region-test",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [textRegion],
+            balloons: [],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let block = TextBlock(
+            text: "小さい文字も残す",
+            boundingBox: CGRect(x: 0.60, y: 0.23, width: 0.018, height: 0.17),
+            confidence: 0.92,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.018,
+            textOrientation: .vertical
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+        #expect(enriched[0].bubbleBox == nil)
+        #expect(enriched[0].layoutSafeRegion != nil)
+        #expect(enriched[0].layoutSafeRegion?.contains(block.boundingBox) == true)
+        #expect((enriched[0].layoutSafeRegion?.width ?? 0) > block.boundingBox.width)
+    }
+
+    @Test func mangaBalloonGeometryDoesNotOverwriteExistingVisualBubble() {
+        let visualBubble = CGRect(x: 0.12, y: 0.12, width: 0.24, height: 0.20)
+        let block = TextBlock(
+            text: "already grouped",
+            boundingBox: CGRect(x: 0.16, y: 0.16, width: 0.12, height: 0.05),
+            confidence: 0.95,
+            ocrSource: "visual-dialogue",
+            bubbleBox: visualBubble,
+            textOrientation: .horizontal
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "visual-preserve",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1000, height: 1600),
+            panels: [],
+            texts: [region(.text, x: 0.14, y: 0.14, width: 0.16, height: 0.08)],
+            balloons: [region(.balloon, x: 0.10, y: 0.10, width: 0.30, height: 0.26)],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+        #expect(enriched[0].bubbleBox == visualBubble)
     }
 
     @Test func scaleFitCoordinatesMapBackToOriginalPage() {
@@ -320,6 +453,7 @@ private actor FakeMangaVisionProvider: MangaVisionProvider {
                 )
             ],
             texts: [],
+            balloons: [],
             faces: [],
             bodies: [],
             modelIdentifier: "fake-manga-vision",

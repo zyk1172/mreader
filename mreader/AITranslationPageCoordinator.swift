@@ -23,10 +23,11 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 所依赖的 translation-unit 契约；几何或分组契约升级时必须失效，不能复用旧结果。
     /// v19：没有可靠 bubbleBox 的连续 OCR line 形成 measured paragraph；它仍不
     /// 创建 bubbleBox，但会改变 translation unit 数量，必须隔离旧的逐行结果。
-    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核，
-    /// 会改写 sourceText 与 translation unit 数量，旧缓存必须失效。
-    static let translationCacheRevision = "translation-v22-vision-slice-merge-and-source-review"
-    static let ocrGeometryRevision = "physical-axis-v11-canonical-bubble-region-measured-paragraph"
+    /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核。
+    /// v23：Manga Vision balloon 成为 OCR translation-unit 边界，text region
+    /// 成为 measured-text 的安全布局提示；旧缓存缺少这些几何，必须失效。
+    static let translationCacheRevision = "translation-v23-manga-vision-balloon-geometry"
+    static let ocrGeometryRevision = "physical-axis-v12-manga-balloon-layout-region"
 
     let pageURL: URL
     let image: UIImage
@@ -207,7 +208,7 @@ actor AITranslationPageCoordinator {
     init() {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("AITranslationPages", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
     func translatedBlocks(for request: AITranslationPageRequest) async throws -> [TextBlock] {
@@ -356,7 +357,9 @@ nonisolated enum AITranslationPagePipeline {
             )
         case .vision:
             // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
-            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与离线共用同一条链路。
+            // 都在 AITranslator.finalizeVisionRecognition 里完成，实时与整本离线翻译共用同一条链路。
+            // Manga Vision geometry enriches local OCR only; Vision mode keeps the
+            // VLM's own translation units to avoid post-translation re-grouping.
             let result = try await TranslationRuntimeService.translateVisionPageWithStatus(
                 image: request.image,
                 apiKey: request.configuration.apiKey,
@@ -455,7 +458,7 @@ nonisolated enum AITranslationPagePipeline {
             // to visual review; otherwise weak but real text can never re-enter the
             // translation pipeline.
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
-            resolvedBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
+            let verified = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: reviewBlocks,
                 apiKey: request.configuration.apiKey,
@@ -469,6 +472,23 @@ nonisolated enum AITranslationPagePipeline {
                 coverageRecoveryRequested: localResult.quality?.isSuspicious == true
                     || !localResult.rejectedBlocks.isEmpty
             )
+            // Visual review may correct/recreate TextBlock values. Reattach the
+            // shared Manga Vision geometry afterwards so recovered vertical
+            // columns still join the same physical balloon. Existing VLM bubble
+            // geometry is preserved by the enrichment layer.
+            if let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: request.comicID,
+                pageIndex: request.pageIndex,
+                pageURL: request.pageURL,
+                image: ocrImage
+            ) {
+                resolvedBlocks = MangaVisionOCRGeometry.applyingDetectedGeometry(
+                    to: verified,
+                    analysis: analysis
+                )
+            } else {
+                resolvedBlocks = verified
+            }
         } else {
             resolvedBlocks = localResult.resolvedBlocks
         }
@@ -572,7 +592,7 @@ nonisolated enum AITranslationPagePipeline {
                 )
                 group.addTask {
                     do {
-                let text = try await TranslationRuntimeService.translate(
+                        let text = try await TranslationRuntimeService.translate(
                             text: block.text,
                             ocrMetadata: AITranslator.ocrMetadata(for: block),
                             pageContext: pageContext,
