@@ -120,6 +120,8 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var translationSourceLanguageRaw: String
     var hasInitializedReadingPreset: Bool
     var readingDirectionRaw: String
+    /// Guided Panel keeps its own ordering direction so changing panel flow does not alter normal page turns.
+    var guidedPanelReadingDirectionRaw: String
     var readingModeRaw: String
     var pageTurnAnimationRaw: String
     var imageFitModeRaw: String
@@ -138,7 +140,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         TranslationSourceLanguage(rawValue: translationSourceLanguageRaw) ?? .automatic
     }
 
-    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, borderlessTranslationFontSize: Double = ComicBook.defaultBorderlessTranslationFontSize, minimumReadableTranslationFontSize: Double = ComicBook.defaultMinimumReadableTranslationFontSize, prefersInPlaceTranslation: Bool = false, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
+    nonisolated init(id: UUID = UUID(), title: String, bookmarkData: Data, totalPages: Int, coverImagePath: String? = nil, fileSize: Int64 = 0, libraryPath: String? = nil, libraryRelativePath: String? = nil, sourceTypeRaw: String = ComicSourceType.local.rawValue, sourceURL: String? = nil, mediaSourceID: UUID? = nil, komgaLibraryID: String? = nil, komgaSeriesID: String? = nil, komgaBookID: String? = nil, remoteCoverID: String? = nil, remoteCoverURL: String? = nil, remotePageCount: Int? = nil, chapterTypeRaw: String? = nil, chapterPath: String? = nil, seriesID: UUID? = nil, currentPageIndex: Int = 0, furthestPageIndex: Int? = nil, progressUpdatedAt: Date = .distantPast, metadataUpdatedAt: Date = .distantPast, hasBeenOpened: Bool = false, scrollProgress: Double = 0, scrollPageProgress: Double = 0, lastReadAt: Date = .distantPast, isLocked: Bool = false, isOCREnabled: Bool = true, isAITranslationEnabled: Bool = true, isAutoTranslationEnabled: Bool = false, isOfflineTranslationOverlayEnabled: Bool = true, isAutoOCRMagnificationEnabled: Bool = false, ocrTextScale: Double = 0.55, ocrSafeAreaInset: Double = 0, ocrMinimumTextHeight: Double = 0.002, borderlessTranslationFontSize: Double = ComicBook.defaultBorderlessTranslationFontSize, minimumReadableTranslationFontSize: Double = ComicBook.defaultMinimumReadableTranslationFontSize, prefersInPlaceTranslation: Bool = false, aiTranslationModeRaw: String = AITranslationMode.ocr.rawValue, translationSourceLanguageRaw: String = TranslationSourceLanguage.automatic.rawValue, hasInitializedReadingPreset: Bool = false, readingDirectionRaw: String = "leftToRight", guidedPanelReadingDirectionRaw: String? = nil, readingModeRaw: String = "horizontalPage", pageTurnAnimationRaw: String = "slide", imageFitModeRaw: String = "fitScreen", scrollSpeedRaw: String = "standard", bookmarks: [ComicBookmark] = []) {
         self.id = id
         self.title = title
         self.bookmarkData = bookmarkData
@@ -183,6 +185,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         self.translationSourceLanguageRaw = translationSourceLanguageRaw
         self.hasInitializedReadingPreset = hasInitializedReadingPreset
         self.readingDirectionRaw = readingDirectionRaw
+        self.guidedPanelReadingDirectionRaw = guidedPanelReadingDirectionRaw ?? readingDirectionRaw
         self.readingModeRaw = readingModeRaw
         self.pageTurnAnimationRaw = pageTurnAnimationRaw
         self.imageFitModeRaw = imageFitModeRaw
@@ -242,6 +245,7 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
         translationSourceLanguageRaw = try container.decodeIfPresent(String.self, forKey: .translationSourceLanguageRaw) ?? TranslationSourceLanguage.automatic.rawValue
         hasInitializedReadingPreset = try container.decodeIfPresent(Bool.self, forKey: .hasInitializedReadingPreset) ?? true
         readingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .readingDirectionRaw) ?? "leftToRight"
+        guidedPanelReadingDirectionRaw = try container.decodeIfPresent(String.self, forKey: .guidedPanelReadingDirectionRaw) ?? readingDirectionRaw
         readingModeRaw = try container.decodeIfPresent(String.self, forKey: .readingModeRaw) ?? "horizontalPage"
         pageTurnAnimationRaw = try container.decodeIfPresent(String.self, forKey: .pageTurnAnimationRaw) ?? "slide"
         imageFitModeRaw = try container.decodeIfPresent(String.self, forKey: .imageFitModeRaw) ?? "fitScreen"

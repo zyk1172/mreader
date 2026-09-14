@@ -880,6 +880,7 @@ struct ReaderView: View {
     @State private var editingBookmark: ComicBookmark?
     @State private var bookmarkNoteText = ""
     @State private var showBookmarkNoteAlert = false
+    @State private var readingModeBeforeGuidedPanelRaw: String
 
     private var readingMode: ReadingMode {
         ReadingMode(rawValue: comic.readingModeRaw) ?? .horizontalPage
@@ -887,6 +888,10 @@ struct ReaderView: View {
 
     private var readingDirection: ReadingDirection {
         ReadingDirection(rawValue: comic.readingDirectionRaw) ?? .leftToRight
+    }
+
+    private var guidedPanelReadingDirection: ReadingDirection {
+        ReadingDirection(rawValue: comic.guidedPanelReadingDirectionRaw) ?? readingDirection
     }
 
     private var pageTurnAnimation: PageTurnAnimation {
@@ -924,6 +929,13 @@ struct ReaderView: View {
         Binding(
             get: { comic.readingDirectionRaw },
             set: { newValue in updateComic { $0.readingDirectionRaw = newValue; $0.hasInitializedReadingPreset = true } }
+        )
+    }
+
+    private var guidedPanelReadingDirectionRaw: Binding<String> {
+        Binding(
+            get: { comic.guidedPanelReadingDirectionRaw },
+            set: { newValue in updateComic { $0.guidedPanelReadingDirectionRaw = newValue; $0.hasInitializedReadingPreset = true } }
         )
     }
 
@@ -966,6 +978,11 @@ struct ReaderView: View {
         _lastSavedScrollPageProgress = State(initialValue: initialComic.scrollPageProgress)
         _lastPrefetchPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
         _activityLastPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
+        _readingModeBeforeGuidedPanelRaw = State(
+            initialValue: initialComic.readingModeRaw == ReadingMode.guidedPanel.rawValue
+                ? ReadingMode.horizontalPage.rawValue
+                : initialComic.readingModeRaw
+        )
     }
 
     var body: some View {
@@ -979,7 +996,7 @@ struct ReaderView: View {
                 GuidedPanelReader(
                     pages: manager.pages,
                     currentPageIndex: $currentPageIndex,
-                    readingDirection: readingDirection,
+                    readingDirection: guidedPanelReadingDirection,
                     comic: comic,
                     translateRequestID: translateRequestID,
                     ocrMagnifyRequestID: ocrMagnifyRequestID,
@@ -1407,56 +1424,88 @@ struct ReaderView: View {
                     .padding(.bottom, 9)
             }
 
-            if comic.isOCREnabled || comic.isAITranslationEnabled {
-                HStack(spacing: 10) {
-                    Spacer()
+            HStack(spacing: 10) {
+                Spacer()
 
-                    if comic.isOCREnabled {
-                        Button {
-                            HapticManager.shared.play(.light)
-                            isOCRMagnificationVisible.toggle()
-                            if isOCRMagnificationVisible {
-                                ocrMagnifyRequestID = UUID()
-                            }
-                        } label: {
-                            Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.thinMaterial, in: Circle())
-                                .overlay {
-                                    Circle()
-                                        .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("reader.ocrMagnify".localized)
-                        .accessibilityIdentifier("mreader.reader.ocrAction")
+                Button {
+                    HapticManager.shared.play(.light)
+                    if readingMode == .guidedPanel {
+                        let restoreMode = ReadingMode(rawValue: readingModeBeforeGuidedPanelRaw)
+                            .flatMap { $0 == .guidedPanel ? nil : $0 }
+                            ?? .horizontalPage
+                        readingModeRaw.wrappedValue = restoreMode.rawValue
+                    } else {
+                        readingModeBeforeGuidedPanelRaw = comic.readingModeRaw
+                        readingModeRaw.wrappedValue = ReadingMode.guidedPanel.rawValue
                     }
-
-                    if comic.isAITranslationEnabled {
-                        Button {
-                            HapticManager.shared.play(.light)
-                            translateRequestID = UUID()
-                        } label: {
-                            Text("AI")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.thinMaterial, in: Circle())
-                                .overlay {
-                                    Circle()
-                                        .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
-                                }
+                } label: {
+                    Image(systemName: "rectangle.split.2x2")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.thinMaterial, in: Circle())
+                        .overlay {
+                            Circle()
+                                .fill(readingMode == .guidedPanel ? Color.accentColor.opacity(0.55) : Color.clear)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("reader.aiTranslationLabel".localized)
-                        .accessibilityIdentifier("mreader.reader.aiAction")
-                    }
+                        .overlay {
+                            Circle()
+                                .strokeBorder(
+                                    .white.opacity(readingMode == .guidedPanel ? 0.30 : 0.16),
+                                    lineWidth: 0.5
+                                )
+                        }
                 }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("mreader.reader.progressActions")
+                .buttonStyle(.plain)
+                .accessibilityLabel("reader.mode.guidedPanel".localized)
+                .accessibilityIdentifier("mreader.reader.guidedPanelAction")
+
+                if comic.isOCREnabled {
+                    Button {
+                        HapticManager.shared.play(.light)
+                        isOCRMagnificationVisible.toggle()
+                        if isOCRMagnificationVisible {
+                            ocrMagnifyRequestID = UUID()
+                        }
+                    } label: {
+                        Image(systemName: isOCRMagnificationActive ? "text.magnifyingglass" : "text.viewfinder")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.thinMaterial, in: Circle())
+                            .overlay {
+                                Circle()
+                                    .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("reader.ocrMagnify".localized)
+                    .accessibilityIdentifier("mreader.reader.ocrAction")
+                }
+
+                if comic.isAITranslationEnabled {
+                    Button {
+                        HapticManager.shared.play(.light)
+                        translateRequestID = UUID()
+                    } label: {
+                        Text("AI")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.thinMaterial, in: Circle())
+                            .overlay {
+                                Circle()
+                                    .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("reader.aiTranslationLabel".localized)
+                    .accessibilityIdentifier("mreader.reader.aiAction")
+                }
             }
+            .frame(minHeight: 44)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("mreader.reader.progressActions")
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
@@ -1469,6 +1518,7 @@ struct ReaderView: View {
         .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
         .padding(.horizontal, 10)
         .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mreader.reader.progressOverlay")
     }
 
@@ -1823,6 +1873,19 @@ struct ReaderView: View {
                         Label("reader.scrollSpeed.standard".localized, systemImage: "circle").tag(ScrollSpeed.standard.rawValue)
                         Label("reader.scrollSpeed.fast".localized, systemImage: "hare").tag(ScrollSpeed.fast.rawValue)
                     }
+                }
+
+                Section(
+                    header: Text("reader.guidedPanel.settings".localized),
+                    footer: Text("reader.guidedPanel.directionFooter".localized)
+                ) {
+                    Picker("reader.guidedPanel.direction".localized, selection: guidedPanelReadingDirectionRaw) {
+                        Label("reader.direction.leftToRight".localized, systemImage: "arrow.right")
+                            .tag(ReadingDirection.leftToRight.rawValue)
+                        Label("reader.direction.rightToLeft".localized, systemImage: "arrow.left")
+                            .tag(ReadingDirection.rightToLeft.rawValue)
+                    }
+                    .accessibilityIdentifier("mreader.reader.guidedPanelDirectionPicker")
                 }
             }
             .navigationTitle(comic.title)
@@ -3174,6 +3237,8 @@ struct ContinuousScrollReader: View {
 }
 
 struct GuidedPanelReader: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     let pages: [ComicPage]
     @Binding var currentPageIndex: Int
     let readingDirection: ReadingDirection
@@ -3191,6 +3256,23 @@ struct GuidedPanelReader: View {
     @State private var sourceSize: CGSize = .zero
     @State private var panelIndex = 0
     @State private var isDetecting = false
+    @State private var enterCurrentPageAtLastPanel = false
+    @State private var panelNavigationDirection = 1
+
+    private var panelCameraAnimation: Animation? {
+        reduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.88)
+    }
+
+    private var pageTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let forward = panelNavigationDirection >= 0
+        let forwardInsertion: Edge = readingDirection == .rightToLeft ? .leading : .trailing
+        let forwardRemoval: Edge = readingDirection == .rightToLeft ? .trailing : .leading
+        return .asymmetric(
+            insertion: .move(edge: forward ? forwardInsertion : forwardRemoval).combined(with: .opacity),
+            removal: .move(edge: forward ? forwardRemoval : forwardInsertion).combined(with: .opacity)
+        )
+    }
 
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
@@ -3199,6 +3281,7 @@ struct GuidedPanelReader: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let camera = panelTransform(in: proxy.size)
             ZStack {
                 if let page = currentPage {
                     LocalImageView(
@@ -3229,11 +3312,15 @@ struct GuidedPanelReader: View {
                         onShowControls: onShowControls,
                         onHideControls: onHideControls
                     )
-                    .scaleEffect(panelTransform(in: proxy.size).scale)
-                    .offset(panelTransform(in: proxy.size).offset)
-                    .animation(.easeInOut(duration: 0.34), value: panelIndex)
-                    .animation(.easeInOut(duration: 0.28), value: currentPageIndex)
-                    .task(id: page.url) { await detectPanels(for: page) }
+                    .id(page.url)
+                    .scaleEffect(camera.scale)
+                    .offset(camera.offset)
+                    .transition(pageTransition)
+                    .animation(panelCameraAnimation, value: panelIndex)
+                    .animation(panelCameraAnimation, value: currentPageIndex)
+                    .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
+                        await detectPanels(for: page)
+                    }
                 }
 
                 if isDetecting {
@@ -3257,23 +3344,38 @@ struct GuidedPanelReader: View {
     }
 
     private func detectPanels(for page: ComicPage) async {
+        let pageURL = page.url
         isDetecting = true
-        defer { isDetecting = false }
-        guard let image = await ReaderImageCache.shared.loadImage(for: page.url, maxPixelSize: 6144) else {
+
+        guard let image = await ReaderImageCache.shared.loadImage(for: pageURL, maxPixelSize: 6144) else {
+            guard currentPage?.url == pageURL else { return }
             layout = nil
             sourceSize = .zero
+            isDetecting = false
             return
         }
-        sourceSize = CGSize(
+
+        let detectedSourceSize = CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
         )
-        layout = await PanelDetectionService.shared.layout(
-            for: page.url,
+        let detectedLayout = await PanelDetectionService.shared.layout(
+            for: pageURL,
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
         )
-        panelIndex = min(panelIndex, max((layout?.panels.count ?? 1) - 1, 0))
+
+        guard !Task.isCancelled, currentPage?.url == pageURL else { return }
+        sourceSize = detectedSourceSize
+        layout = detectedLayout
+        let lastPanelIndex = max(detectedLayout.panels.count - 1, 0)
+        if enterCurrentPageAtLastPanel {
+            panelIndex = lastPanelIndex
+            enterCurrentPageAtLastPanel = false
+        } else {
+            panelIndex = min(max(panelIndex, 0), lastPanelIndex)
+        }
+        isDetecting = false
     }
 
     private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
@@ -3312,31 +3414,57 @@ struct GuidedPanelReader: View {
     }
 
     private func previousPanel() {
+        guard !isDetecting else { return }
+        panelNavigationDirection = -1
         if panelIndex > 0 {
-            panelIndex -= 1
+            withAnimation(panelCameraAnimation) {
+                panelIndex -= 1
+            }
             HapticManager.shared.play(.light)
         } else if currentPageIndex > 0 {
-            currentPageIndex -= 1
-            panelIndex = Int.max
-            HapticManager.shared.play(.light)
+            moveToPage(currentPageIndex - 1, enterAtLastPanel: true)
         } else {
             HapticManager.shared.play(.warning)
         }
     }
 
     private func nextPanel() {
+        guard !isDetecting else { return }
+        panelNavigationDirection = 1
         let count = max(layout?.panels.count ?? 1, 1)
         if panelIndex + 1 < count {
-            panelIndex += 1
+            withAnimation(panelCameraAnimation) {
+                panelIndex += 1
+            }
             HapticManager.shared.play(.light)
         } else if currentPageIndex + 1 < pages.count {
-            currentPageIndex += 1
-            panelIndex = 0
-            HapticManager.shared.play(.light)
+            moveToPage(currentPageIndex + 1, enterAtLastPanel: false)
         } else {
             HapticManager.shared.play(.warning)
         }
     }
+
+    private func moveToPage(_ pageIndex: Int, enterAtLastPanel: Bool) {
+        guard pages.indices.contains(pageIndex) else {
+            HapticManager.shared.play(.warning)
+            return
+        }
+
+        // Clear the previous page layout before changing the bound page index.
+        // Otherwise the old panel count/transform can survive long enough to keep
+        // the reader visually pinned to the completed page while the next page loads.
+        panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
+        layout = nil
+        sourceSize = .zero
+        panelIndex = 0
+        enterCurrentPageAtLastPanel = enterAtLastPanel
+        isDetecting = true
+        withAnimation(panelCameraAnimation) {
+            currentPageIndex = pageIndex
+        }
+        HapticManager.shared.play(.light)
+    }
+
 }
 
 struct AnimatedPageReader: View {
