@@ -15,7 +15,7 @@ nonisolated struct CacheStorageSnapshot: Sendable {
 }
 
 nonisolated enum CacheStorageManager {
-    private static let fileManager = FileManager.default
+    private static var fileManager: FileManager { FileManager() }
 
     static func snapshot() -> CacheStorageSnapshot {
         CacheStorageSnapshot(
