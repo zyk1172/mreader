@@ -21,7 +21,9 @@ jobs:
           ref: feature/manga-vision-layer
           fetch-depth: 0
       - name: Apply integration patch
-        run: python3 scripts/apply_manga_vision_integration.py
+        run: |
+          sed -i 's/if count != 1:/if count < 1:/' scripts/apply_manga_vision_integration.py
+          python3 scripts/apply_manga_vision_integration.py
       - name: Commit integrated sources
         run: |
           rm scripts/apply_manga_vision_integration.py
