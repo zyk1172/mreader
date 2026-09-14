@@ -24,7 +24,8 @@ struct PanelDebugOverlay: View {
                 in: CGRect(origin: .zero, size: proxy.size)
             )
             ZStack(alignment: .topLeading) {
-                ForEach(Array(layout.panels.enumerated()), id: \.offset) { index, panel in
+                ForEach(layout.panels.indices, id: \.self) { index in
+                    let panel = layout.panels[index]
                     let rect = displayRect(panel.rect.cgRect, in: imageRect)
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .stroke(
