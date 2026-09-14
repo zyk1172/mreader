@@ -19,10 +19,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
             sourceIdentity = pageURL.absoluteString
         }
         let rawValue = [
-            // OCR geometry, the Japanese vertical fallback and the bubble
-            // grouping (visual bubble identity) changed; do not reuse pages
-            // written before this pipeline revision.
-            "local-ocr-v10-manga-vision-roi-panel-order",
+            // v11 keeps Manga Vision text ROI discovery, but restores the final
+            // minimum-text policy in normalized page space and enriches OCR
+            // blocks with physical balloon geometry after analysis.
+            "local-ocr-v11-manga-vision-balloon-page-axis-filter",
             MangaVisionService.analysisRevision,
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
@@ -110,19 +110,26 @@ actor OCRRecognitionCache {
             MReaderLog.aiVision.debug(
                 "local OCR cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.resolvedBlocks.count, privacy: .public)"
             )
+            let geometryResolved: OCRPipelineResult
             if let analysis = try? await MangaVisionService.shared.analysis(
                 comicID: request.comicID,
                 pageIndex: request.pageIndex,
                 pageURL: request.pageURL,
                 image: request.fallbackImage
             ) {
-                return MangaVisionOCROrdering.applyingReadingOrder(
+                geometryResolved = MangaVisionOCROrdering.applyingReadingOrder(
                     to: cached,
                     analysis: analysis,
                     isRightToLeft: request.options.isRightToLeft
                 )
+            } else {
+                geometryResolved = cached
             }
-            return cached
+            return OCRPageScaleFilter.applying(
+                to: geometryResolved,
+                minimumTextHeight: request.options.minimumTextHeight,
+                isRightToLeft: request.options.isRightToLeft
+            )
         }
         if let existing = inFlight[key] {
             MReaderLog.aiVision.debug("local OCR joined in-flight key=\(key.prefix(10), privacy: .public)")
@@ -140,10 +147,15 @@ actor OCRRecognitionCache {
                 pageURL: request.pageURL,
                 image: image
             )
-            return try await MangaOCRPipeline.recognize(
+            let result = try await MangaOCRPipeline.recognize(
                 in: image,
                 options: request.options,
                 mangaAnalysis: analysis
+            )
+            return OCRPageScaleFilter.applying(
+                to: result,
+                minimumTextHeight: request.options.minimumTextHeight,
+                isRightToLeft: request.options.isRightToLeft
             )
         }
         inFlight[key] = task
@@ -188,6 +200,8 @@ actor OCRRecognitionCache {
     private func store(_ result: OCRPipelineResult, forKey key: String) {
         guard !result.rawBlocks.isEmpty else { return }
         insertIntoMemory(result, forKey: key)
+        // Persist raw OCR observations only. Manga Vision balloon geometry is
+        // intentionally reattached from the versioned page analysis on cache hit.
         let page = CachedOCRPage(
             createdAt: Date(),
             rawBlocks: result.rawBlocks.map(CachedOCRBlock.init)
