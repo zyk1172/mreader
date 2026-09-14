@@ -19,7 +19,7 @@ nonisolated enum LocalResourceAccessPolicy {
     }
 
     private static let logLock = NSLock()
-    private static var loggedDecisions: Set<String> = []
+    nonisolated(unsafe) private static var loggedDecisions: Set<String> = []
 
     static func location(for url: URL) -> Location {
         let standardized = url.standardizedFileURL.resolvingSymlinksInPath()

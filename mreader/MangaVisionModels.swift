@@ -9,6 +9,65 @@ nonisolated enum MangaRegionType: String, Codable, CaseIterable, Sendable, Hasha
     case body
 }
 
+nonisolated struct MangaVisionPoint: Codable, Sendable, Hashable {
+    let x: Double
+    let y: Double
+
+    init(_ point: CGPoint) {
+        x = min(max(Double(point.x), 0), 1)
+        y = min(max(Double(point.y), 0), 1)
+    }
+
+    var cgPoint: CGPoint {
+        CGPoint(x: x, y: y)
+    }
+}
+
+/// Compact normalized contour distilled from an instance-segmentation mask.
+/// The provider caps the point count so persisted Manga Vision cache entries stay small.
+nonisolated struct MangaVisionContour: Codable, Sendable, Hashable {
+    static let maximumPointCount = 32
+
+    let points: [MangaVisionPoint]
+
+    init(points: [CGPoint]) {
+        guard !points.isEmpty else {
+            self.points = []
+            return
+        }
+        let normalized = points.map(MangaVisionPoint.init)
+        if normalized.count <= Self.maximumPointCount {
+            self.points = normalized
+            return
+        }
+        let stride = Double(normalized.count) / Double(Self.maximumPointCount)
+        self.points = (0..<Self.maximumPointCount).map { index in
+            normalized[min(Int((Double(index) * stride).rounded(.down)), normalized.count - 1)]
+        }
+    }
+
+    var cgPoints: [CGPoint] {
+        points.map(\.cgPoint)
+    }
+
+    var bounds: CGRect {
+        guard let first = cgPoints.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in cgPoints.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return MangaPageCoordinateSpace.clampedNormalizedRect(
+            CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        )
+    }
+}
+
 /// Stable identity for a page analysis. `scope` is normally the comic UUID;
 /// URL-derived scopes are used only by legacy callers that do not have book identity.
 nonisolated struct MangaPageIdentifier: Codable, Sendable, Hashable {
@@ -25,17 +84,21 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
     let type: MangaRegionType
     let normalizedRect: CGRect
     let confidence: Float
+    /// Optional mask-derived contour. Bounding-box-only providers leave this nil.
+    let contour: MangaVisionContour?
 
     init(
         id: UUID = UUID(),
         type: MangaRegionType,
         normalizedRect: CGRect,
-        confidence: Float
+        confidence: Float,
+        contour: MangaVisionContour? = nil
     ) {
         self.id = id
         self.type = type
         self.normalizedRect = MangaPageCoordinateSpace.clampedNormalizedRect(normalizedRect)
         self.confidence = confidence
+        self.contour = contour
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -43,6 +106,7 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
             && lhs.type == rhs.type
             && lhs.normalizedRect == rhs.normalizedRect
             && lhs.confidence == rhs.confidence
+            && lhs.contour == rhs.contour
     }
 
     func hash(into hasher: inout Hasher) {
@@ -53,10 +117,11 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
         hasher.combine(Double(normalizedRect.width))
         hasher.combine(Double(normalizedRect.height))
         hasher.combine(confidence)
+        hasher.combine(contour)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, type, x, y, width, height, confidence
+        case id, type, x, y, width, height, confidence, contour
     }
 
     init(from decoder: Decoder) throws {
@@ -70,6 +135,7 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
             width: try container.decode(Double.self, forKey: .width),
             height: try container.decode(Double.self, forKey: .height)
         ))
+        contour = try container.decodeIfPresent(MangaVisionContour.self, forKey: .contour)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -81,14 +147,15 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
         try container.encode(Double(normalizedRect.width), forKey: .width)
         try container.encode(Double(normalizedRect.height), forKey: .height)
         try container.encode(confidence, forKey: .confidence)
+        try container.encodeIfPresent(contour, forKey: .contour)
     }
 }
 
 /// The single page-vision contract consumed by reader/OCR/translation business code.
 nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
-    /// v2 adds first-class balloon regions. Old cache entries deliberately fail the
-    /// service's schema-version check so pages are re-analysed with balloon geometry.
-    static let schemaVersion = 2
+    /// v3 adds optional mask-derived region contours. Old v2 entries are invalidated
+    /// so Guided Panel does not keep stale box-only structure when masks are available.
+    static let schemaVersion = 3
 
     let schemaVersion: Int
     let pageIdentifier: MangaPageIdentifier
@@ -154,8 +221,6 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         )
         panels = try container.decode([MangaVisionRegion].self, forKey: .panels)
         texts = try container.decode([MangaVisionRegion].self, forKey: .texts)
-        // decodeIfPresent keeps hand-authored fixtures/source compatibility, while
-        // MangaVisionService still rejects persisted v1 cache entries by schemaVersion.
         balloons = try container.decodeIfPresent([MangaVisionRegion].self, forKey: .balloons) ?? []
         faces = try container.decode([MangaVisionRegion].self, forKey: .faces)
         bodies = try container.decode([MangaVisionRegion].self, forKey: .bodies)

@@ -3,7 +3,8 @@ import Testing
 @testable import mreader
 
 struct ShelfComicIndexTests {
-    @Test func partitionsVisibleComicsInOnePassAndPreservesBucketOrder() {
+    @Test @MainActor
+    func partitionsVisibleComicsInOnePassAndPreservesBucketOrder() {
         let seriesA = UUID()
         let seriesB = UUID()
 
@@ -14,9 +15,9 @@ struct ShelfComicIndexTests {
 
         let index = ShelfComicIndex(comics: [root, a1, b1, a2])
 
-        #expect(index.rootComics.map(\.id) == [root.id])
-        #expect(index.comicsBySeriesID[seriesA]?.map(\.id) == [a1.id, a2.id])
-        #expect(index.comicsBySeriesID[seriesB]?.map(\.id) == [b1.id])
+        #expect(index.rootComics.map { $0.id } == [root.id])
+        #expect(index.comicsBySeriesID[seriesA]?.map { $0.id } == [a1.id, a2.id])
+        #expect(index.comicsBySeriesID[seriesB]?.map { $0.id } == [b1.id])
         #expect(index.visibleSeriesIDs == Set([seriesA, seriesB]))
     }
 

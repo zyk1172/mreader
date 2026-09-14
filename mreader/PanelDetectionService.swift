@@ -13,11 +13,18 @@ nonisolated struct DetectedPanel: Sendable, Equatable {
     let rect: CGRect
     let confidence: Float
     let source: PanelDetectionSource
+    let contour: [CGPoint]?
 
-    init(rect: CGRect, confidence: Float, source: PanelDetectionSource) {
+    init(
+        rect: CGRect,
+        confidence: Float,
+        source: PanelDetectionSource,
+        contour: [CGPoint]? = nil
+    ) {
         self.rect = rect
         self.confidence = confidence
         self.source = source
+        self.contour = contour
     }
 }
 
@@ -25,11 +32,24 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
     let rect: NormalizedRect
     let confidence: Float
     let source: PanelDetectionSource
+    let contour: MangaVisionContour?
+
+    init(
+        rect: NormalizedRect,
+        confidence: Float,
+        source: PanelDetectionSource,
+        contour: MangaVisionContour? = nil
+    ) {
+        self.rect = rect
+        self.confidence = confidence
+        self.source = source
+        self.contour = contour
+    }
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 2
-    static let modelVersion = 3
+    static let schemaVersion = 3
+    static let modelVersion = 4
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -39,8 +59,34 @@ nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     let panels: [PanelLayoutPanel]
     let contentBounds: NormalizedRect
     let usedFallback: Bool
+    let orderingStrategyRaw: String
+
+    init(
+        schemaVersion: Int,
+        modelVersion: Int,
+        detectorIdentifier: String,
+        direction: String,
+        sourceFingerprint: String,
+        panels: [PanelLayoutPanel],
+        contentBounds: NormalizedRect,
+        usedFallback: Bool,
+        orderingStrategy: PanelReadingOrderStrategy = .strictXYCut
+    ) {
+        self.schemaVersion = schemaVersion
+        self.modelVersion = modelVersion
+        self.detectorIdentifier = detectorIdentifier
+        self.direction = direction
+        self.sourceFingerprint = sourceFingerprint
+        self.panels = panels
+        self.contentBounds = contentBounds
+        self.usedFallback = usedFallback
+        self.orderingStrategyRaw = orderingStrategy.rawValue
+    }
 
     var panelRects: [CGRect] { panels.map(\.rect.cgRect) }
+    var orderingStrategy: PanelReadingOrderStrategy {
+        PanelReadingOrderStrategy(rawValue: orderingStrategyRaw) ?? .strictXYCut
+    }
 }
 
 nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
@@ -121,7 +167,8 @@ nonisolated enum PanelPostProcessor {
             return DetectedPanel(
                 rect: rect,
                 confidence: panel.confidence,
-                source: panel.source
+                source: panel.source,
+                contour: panel.contour
             )
         }
 
@@ -156,7 +203,9 @@ nonisolated enum PanelPostProcessor {
             let containment = intersectionArea / max(smallerArea, 0.0001)
             let sizeRatio = smallerArea / max(largerArea, 0.0001)
 
-            if containment >= 0.90, sizeRatio <= 0.58 {
+            if (candidate.source == .visionRectangle || existing.source == .visionRectangle),
+               containment >= 0.90,
+               sizeRatio <= 0.58 {
                 return candidateArea > existingArea
             }
         }
@@ -175,7 +224,15 @@ nonisolated enum PanelPostProcessor {
         let rhsArea = area(rhs.rect)
         let unionArea = max(lhsArea + rhsArea - intersectionArea, 0.0001)
         let iou = intersectionArea / unionArea
-        let containment = intersectionArea / max(min(lhsArea, rhsArea), 0.0001)
+        let smallerArea = min(lhsArea, rhsArea)
+        let largerArea = max(lhsArea, rhsArea)
+        let containment = intersectionArea / max(smallerArea, 0.0001)
+        let sizeRatio = smallerArea / max(largerArea, 0.0001)
+        if lhs.source == .coreML, rhs.source == .coreML {
+            // The segmentation model already separates frame from balloon. Preserve
+            // real inset panels instead of treating containment alone as duplication.
+            return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
+        }
         return iou >= 0.58 || containment >= 0.82
     }
 
@@ -268,7 +325,8 @@ nonisolated enum PanelPostProcessor {
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        guard (2...12).contains(panels.count) else { return false }
+        let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
+        guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= 0.34 else { return false }
         guard PanelPostProcessor.hasVisionPanelStructure(panels) else { return false }
@@ -437,7 +495,8 @@ actor PanelDetectionService {
             DetectedPanel(
                 rect: $0.normalizedRect,
                 confidence: $0.confidence,
-                source: .coreML
+                source: .coreML,
+                contour: $0.contour?.cgPoints
             )
         }
         var processed = PanelPostProcessor.process(primaryPanels)
@@ -454,22 +513,33 @@ actor PanelDetectionService {
 
         let result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
-            let ordered = PanelReadingOrder.ordered(processed, isRightToLeft: isRightToLeft)
+            let structure = MangaPageStructureGraph(
+                panels: processed,
+                analysis: mangaAnalysis,
+                isRightToLeft: isRightToLeft
+            )
+            let readingPlan = PanelReadingOrder.plan(
+                processed,
+                isRightToLeft: isRightToLeft,
+                structure: structure
+            )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
                 detectorIdentifier: detectorIdentifier,
                 direction: direction,
                 sourceFingerprint: sourceFingerprint,
-                panels: ordered.map {
+                panels: readingPlan.panels.map {
                     PanelLayoutPanel(
                         rect: NormalizedRect($0.rect),
                         confidence: $0.confidence,
-                        source: $0.source
+                        source: $0.source,
+                        contour: $0.contour.map { MangaVisionContour(points: $0) }
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
-                usedFallback: false
+                usedFallback: false,
+                orderingStrategy: readingPlan.strategy
             )
         } else {
             result = Self.fullPageLayout(
@@ -534,7 +604,8 @@ actor PanelDetectionService {
                 )
             ],
             contentBounds: NormalizedRect(fallback),
-            usedFallback: true
+            usedFallback: true,
+            orderingStrategy: .fullPageFallback
         )
     }
 

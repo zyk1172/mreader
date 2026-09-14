@@ -16,6 +16,14 @@ nonisolated enum MangaPageCoordinateSpace {
         return result.isNull ? .zero : result
     }
 
+    static func clampedNormalizedPoint(_ point: CGPoint) -> CGPoint {
+        guard point.x.isFinite, point.y.isFinite else { return .zero }
+        return CGPoint(
+            x: min(max(point.x, 0), 1),
+            y: min(max(point.y, 0), 1)
+        )
+    }
+
     /// Vision observations use a bottom-left origin. All Manga Vision business
     /// coordinates use a top-left origin.
     static func topLeftNormalizedRect(fromVisionRect rect: CGRect) -> CGRect {
@@ -76,6 +84,38 @@ nonisolated enum MangaPageCoordinateSpace {
             width: (x2 - x1) / scaledWidth,
             height: (y2 - y1) / scaledHeight
         ))
+    }
+
+    /// Maps one model-input point through the same `.scaleFit` letterbox used by
+    /// the detection boxes. Points that fall in padding are rejected rather than
+    /// clamped onto a page edge, which keeps mask contours from inventing geometry.
+    static func sourceNormalizedPointFromScaleFitModelPoint(
+        _ point: CGPoint,
+        inputSize: CGSize,
+        sourceSize: CGSize
+    ) -> CGPoint? {
+        guard inputSize.width > 0,
+              inputSize.height > 0,
+              sourceSize.width > 0,
+              sourceSize.height > 0,
+              point.x.isFinite,
+              point.y.isFinite else {
+            return nil
+        }
+        let scale = min(inputSize.width / sourceSize.width, inputSize.height / sourceSize.height)
+        let scaledWidth = sourceSize.width * scale
+        let scaledHeight = sourceSize.height * scale
+        let padX = (inputSize.width - scaledWidth) / 2
+        let padY = (inputSize.height - scaledHeight) / 2
+        let normalized = CGPoint(
+            x: (point.x - padX) / scaledWidth,
+            y: (point.y - padY) / scaledHeight
+        )
+        guard normalized.x >= 0, normalized.x <= 1,
+              normalized.y >= 0, normalized.y <= 1 else {
+            return nil
+        }
+        return normalized
     }
 
     static func paddedNormalizedRect(_ rect: CGRect, fraction: CGFloat) -> CGRect {

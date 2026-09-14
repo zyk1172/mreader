@@ -71,6 +71,7 @@ struct RemoteInputHardeningTests {
     }
 
     @Test
+    @MainActor
     func postWithoutContentLengthCompletesForImmediateRejection() throws {
         let state = HTTPRequestReceiveState()
         defer { state.cleanup() }

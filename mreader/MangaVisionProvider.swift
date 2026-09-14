@@ -23,9 +23,8 @@ nonisolated enum MangaVisionProviderError: Error, Sendable {
     case unsupportedOutput
 }
 
-/// Adapter for the currently bundled Ultralytics export. All class IDs, tensor
-/// shape handling, input-size knowledge and Core ML/Vision details stop here.
-/// A future self-trained provider only needs to satisfy `MangaVisionProvider`.
+/// Adapter for the bundled Ultralytics segmentation export. Class IDs, tensor
+/// layouts, model-input coordinates and mask decoding all stop at this boundary.
 actor YOLOMangaVisionProvider: MangaVisionProvider {
     static let shared = YOLOMangaVisionProvider()
 
@@ -34,6 +33,41 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let visionModel: VNCoreMLModel
         let labelsByClassID: [Int: String]
         let descriptor: MangaVisionProviderDescriptor
+    }
+
+    private struct DetectionTensorLayout {
+        let rowMajor: Bool
+        let instanceCount: Int
+        let featureCount: Int
+    }
+
+    private struct DecodedCandidate {
+        let region: MangaVisionRegion
+        let instanceIndex: Int
+        let modelRect: CGRect
+        let maskCoefficients: [Double]
+    }
+
+    private enum SegmentationTensorLayout {
+        case direct(
+            array: MLMultiArray,
+            instanceAxis: Int,
+            yAxis: Int,
+            xAxis: Int,
+            instanceCount: Int,
+            height: Int,
+            width: Int,
+            usesLogits: Bool
+        )
+        case prototypes(
+            array: MLMultiArray,
+            channelAxis: Int,
+            yAxis: Int,
+            xAxis: Int,
+            channelCount: Int,
+            height: Int,
+            width: Int
+        )
     }
 
     private let modelResourceName: String
@@ -63,17 +97,20 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
         try handler.perform([request])
 
-        let featureObservations = (request.results ?? []).compactMap {
-            $0 as? VNCoreMLFeatureValueObservation
-        }
-        guard let output = featureObservations
-            .compactMap({ $0.featureValue.multiArrayValue })
-            .first(where: Self.looksLikeDetectionTensor) else {
+        let featureArrays = (request.results ?? [])
+            .compactMap { $0 as? VNCoreMLFeatureValueObservation }
+            .compactMap { $0.featureValue.multiArrayValue }
+        guard let detectionIndex = featureArrays.firstIndex(where: Self.looksLikeDetectionTensor) else {
             throw MangaVisionProviderError.unsupportedOutput
+        }
+        let detectionOutput = featureArrays[detectionIndex]
+        let segmentationOutputs = featureArrays.enumerated().compactMap { index, array in
+            index == detectionIndex ? nil : array
         }
 
         let decoded = Self.decodeRegions(
-            output,
+            detectionOutput,
+            segmentationOutputs: segmentationOutputs,
             analysisImageSize: CGSize(width: image.width, height: image.height),
             labelsByClassID: runtime.labelsByClassID,
             inputSize: runtime.descriptor.inputSize,
@@ -118,9 +155,9 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let supported = Set(labels.values.compactMap(Self.semanticRegionType(forLabel:)))
         let descriptor = MangaVisionProviderDescriptor(
             modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
-            // v3 is the adapter/business contract: the bundled model is unchanged,
-            // but class 2 `balloon` is now preserved instead of discarded.
-            modelVersion: 3,
+            // v4 consumes frame/text/balloon together and decodes instance-mask
+            // outputs when the bundled Core ML export exposes them.
+            modelVersion: 4,
             inputSize: CGSize(width: 640, height: 640),
             supportedRegionTypes: supported
         )
@@ -145,7 +182,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
 
     private static let fallbackDescriptor = MangaVisionProviderDescriptor(
         modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
-        modelVersion: 3,
+        modelVersion: 4,
         inputSize: CGSize(width: 640, height: 640),
         supportedRegionTypes: [.panel, .text, .balloon]
     )
@@ -153,9 +190,6 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
     private static let defaultConfidenceThresholds: [MangaRegionType: Float] = [
         .panel: 0.24,
         .text: 0.18,
-        // Balloon geometry changes grouping and layout, so keep a slightly
-        // stricter floor than text ROI discovery while still accepting normal
-        // Manga109 detections.
         .balloon: 0.20,
         .face: 0.20,
         .body: 0.20
@@ -225,15 +259,24 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
     }
 
     private static func looksLikeDetectionTensor(_ output: MLMultiArray) -> Bool {
+        detectionTensorLayout(output) != nil
+    }
+
+    private static func detectionTensorLayout(_ output: MLMultiArray) -> DetectionTensorLayout? {
         let shape = output.shape.map(\.intValue)
-        guard shape.count == 3, shape.first == 1 else { return false }
-        let dimensions = Array(shape.dropFirst())
-        return dimensions.contains(where: { $0 >= 6 && $0 <= 256 })
-            && dimensions.contains(where: { $0 >= 1 && $0 <= 2_000 })
+        guard shape.count == 3, shape.first == 1 else { return nil }
+        if shape[2] >= 6, shape[2] <= 256, shape[1] >= 1, shape[1] <= 2_000 {
+            return DetectionTensorLayout(rowMajor: true, instanceCount: shape[1], featureCount: shape[2])
+        }
+        if shape[1] >= 6, shape[1] <= 256, shape[2] >= 1, shape[2] <= 2_000 {
+            return DetectionTensorLayout(rowMajor: false, instanceCount: shape[2], featureCount: shape[1])
+        }
+        return nil
     }
 
     static func decodeForDiagnostics(
         _ output: MLMultiArray,
+        segmentationOutput: MLMultiArray? = nil,
         analysisImageSize: CGSize,
         labelsByClassID: [Int: String],
         inputSize: CGSize = CGSize(width: 640, height: 640),
@@ -241,6 +284,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
     ) -> [MangaVisionRegion] {
         decodeRegions(
             output,
+            segmentationOutputs: segmentationOutput.map { [$0] } ?? [],
             analysisImageSize: analysisImageSize,
             labelsByClassID: labelsByClassID,
             inputSize: inputSize,
@@ -250,43 +294,26 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
 
     private static func decodeRegions(
         _ output: MLMultiArray,
+        segmentationOutputs: [MLMultiArray],
         analysisImageSize: CGSize,
         labelsByClassID: [Int: String],
         inputSize: CGSize,
         thresholds: [MangaRegionType: Float]
     ) -> [MangaVisionRegion] {
-        let shape = output.shape.map(\.intValue)
-        guard shape.count == 3,
-              shape[0] == 1,
+        guard let tensorLayout = detectionTensorLayout(output),
               analysisImageSize.width > 0,
               analysisImageSize.height > 0 else { return [] }
 
-        let rowMajor: Bool
-        let instanceCount: Int
-        let featureCount: Int
-        if shape[2] >= 6, shape[2] <= 256 {
-            rowMajor = true
-            instanceCount = shape[1]
-            featureCount = shape[2]
-        } else if shape[1] >= 6, shape[1] <= 256 {
-            rowMajor = false
-            instanceCount = shape[2]
-            featureCount = shape[1]
-        } else {
-            return []
-        }
-        guard featureCount >= 6 else { return [] }
-
         func value(instance: Int, feature: Int) -> Double {
-            let indices: [NSNumber] = rowMajor
+            let indices: [NSNumber] = tensorLayout.rowMajor
                 ? [0, NSNumber(value: instance), NSNumber(value: feature)]
                 : [0, NSNumber(value: feature), NSNumber(value: instance)]
             return output[indices].doubleValue
         }
 
-        var regions: [MangaVisionRegion] = []
-        regions.reserveCapacity(min(instanceCount, 96))
-        for index in 0..<instanceCount {
+        var candidates: [DecodedCandidate] = []
+        candidates.reserveCapacity(min(tensorLayout.instanceCount, 96))
+        for index in 0..<tensorLayout.instanceCount {
             let confidence = Float(value(instance: index, feature: 4))
             guard confidence.isFinite else { continue }
             let classID = Int(value(instance: index, feature: 5).rounded())
@@ -306,22 +333,278 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
                 y1 *= inputSize.height
                 y2 *= inputSize.height
             }
+            let modelRect = CGRect(
+                x: min(x1, x2),
+                y: min(y1, y2),
+                width: abs(x2 - x1),
+                height: abs(y2 - y1)
+            )
             let rect = MangaPageCoordinateSpace.sourceNormalizedRectFromScaleFitXYXY(
-                x1: x1,
-                y1: y1,
-                x2: x2,
-                y2: y2,
+                x1: modelRect.minX,
+                y1: modelRect.minY,
+                x2: modelRect.maxX,
+                y2: modelRect.maxY,
                 inputSize: inputSize,
                 sourceSize: analysisImageSize
             )
             guard rect.width > 0.002, rect.height > 0.002 else { continue }
-            regions.append(MangaVisionRegion(
-                type: type,
-                normalizedRect: rect,
-                confidence: confidence
+            let coefficients: [Double]
+            if tensorLayout.featureCount > 6 {
+                coefficients = (6..<tensorLayout.featureCount).map {
+                    value(instance: index, feature: $0)
+                }
+            } else {
+                coefficients = []
+            }
+            candidates.append(DecodedCandidate(
+                region: MangaVisionRegion(
+                    type: type,
+                    normalizedRect: rect,
+                    confidence: confidence
+                ),
+                instanceIndex: index,
+                modelRect: modelRect,
+                maskCoefficients: coefficients
             ))
         }
-        return regions
+
+        guard !segmentationOutputs.isEmpty else {
+            return candidates.map(\.region)
+        }
+        let segmentationLayouts = segmentationOutputs.compactMap {
+            segmentationTensorLayout(
+                $0,
+                instanceCount: tensorLayout.instanceCount,
+                coefficientCount: max(tensorLayout.featureCount - 6, 0)
+            )
+        }
+        guard !segmentationLayouts.isEmpty else {
+            return candidates.map(\.region)
+        }
+
+        return candidates.map { candidate in
+            // Exact contours materially help panel gutters and balloon geometry.
+            // Text masks are intentionally left box-only: decoding dozens of glyph
+            // regions would add CPU work without improving the OCR ROI contract.
+            guard candidate.region.type == .panel || candidate.region.type == .balloon,
+                  let contour = segmentationLayouts.lazy.compactMap({ layout in
+                      maskContour(
+                          for: candidate,
+                          layout: layout,
+                          inputSize: inputSize,
+                          sourceSize: analysisImageSize
+                      )
+                  }).first else {
+                return candidate.region
+            }
+            return MangaVisionRegion(
+                id: candidate.region.id,
+                type: candidate.region.type,
+                normalizedRect: candidate.region.normalizedRect,
+                confidence: candidate.region.confidence,
+                contour: contour
+            )
+        }
+    }
+
+    private static func segmentationTensorLayout(
+        _ array: MLMultiArray,
+        instanceCount: Int,
+        coefficientCount: Int
+    ) -> SegmentationTensorLayout? {
+        let shape = array.shape.map(\.intValue)
+        guard shape.count == 4, shape[0] == 1 else { return nil }
+
+        let candidateAxes = [1, 2, 3]
+        if let instanceAxis = candidateAxes.first(where: { axis in
+            shape[axis] == instanceCount
+                && candidateAxes.filter { $0 != axis }.allSatisfy { shape[$0] >= 4 }
+        }) {
+            let spatial = candidateAxes.filter { $0 != instanceAxis }
+            let yAxis = spatial[0]
+            let xAxis = spatial[1]
+            let usesLogits = directMaskUsesLogits(
+                array,
+                instanceAxis: instanceAxis,
+                yAxis: yAxis,
+                xAxis: xAxis,
+                height: shape[yAxis],
+                width: shape[xAxis]
+            )
+            return .direct(
+                array: array,
+                instanceAxis: instanceAxis,
+                yAxis: yAxis,
+                xAxis: xAxis,
+                instanceCount: instanceCount,
+                height: shape[yAxis],
+                width: shape[xAxis],
+                usesLogits: usesLogits
+            )
+        }
+
+        guard coefficientCount > 0,
+              let channelAxis = candidateAxes.first(where: { shape[$0] == coefficientCount }) else {
+            return nil
+        }
+        let spatial = candidateAxes.filter { $0 != channelAxis }
+        guard spatial.count == 2,
+              shape[spatial[0]] >= 4,
+              shape[spatial[1]] >= 4 else { return nil }
+        return .prototypes(
+            array: array,
+            channelAxis: channelAxis,
+            yAxis: spatial[0],
+            xAxis: spatial[1],
+            channelCount: coefficientCount,
+            height: shape[spatial[0]],
+            width: shape[spatial[1]]
+        )
+    }
+
+    private static func directMaskUsesLogits(
+        _ array: MLMultiArray,
+        instanceAxis: Int,
+        yAxis: Int,
+        xAxis: Int,
+        height: Int,
+        width: Int
+    ) -> Bool {
+        let sampleRows = [0, height / 4, height / 2, max(height - 1, 0)]
+        let sampleColumns = [0, width / 4, width / 2, max(width - 1, 0)]
+        for y in sampleRows where y < height {
+            for x in sampleColumns where x < width {
+                let value = arrayValue4D(
+                    array,
+                    axisValues: [instanceAxis: 0, yAxis: y, xAxis: x]
+                )
+                if value < -0.001 || value > 1.001 { return true }
+            }
+        }
+        return false
+    }
+
+    private static func maskContour(
+        for candidate: DecodedCandidate,
+        layout: SegmentationTensorLayout,
+        inputSize: CGSize,
+        sourceSize: CGSize
+    ) -> MangaVisionContour? {
+        let width: Int
+        let height: Int
+        let isActive: (Int, Int) -> Bool
+
+        switch layout {
+        case let .direct(array, instanceAxis, yAxis, xAxis, instanceCount, h, w, usesLogits):
+            guard candidate.instanceIndex < instanceCount else { return nil }
+            width = w
+            height = h
+            isActive = { x, y in
+                let value = arrayValue4D(
+                    array,
+                    axisValues: [
+                        instanceAxis: candidate.instanceIndex,
+                        yAxis: y,
+                        xAxis: x
+                    ]
+                )
+                return usesLogits ? value > 0 : value >= 0.5
+            }
+
+        case let .prototypes(array, channelAxis, yAxis, xAxis, channelCount, h, w):
+            guard candidate.maskCoefficients.count >= channelCount else { return nil }
+            width = w
+            height = h
+            isActive = { x, y in
+                var score = 0.0
+                for channel in 0..<channelCount {
+                    score += candidate.maskCoefficients[channel] * arrayValue4D(
+                        array,
+                        axisValues: [channelAxis: channel, yAxis: y, xAxis: x]
+                    )
+                }
+                // sigmoid(score) > 0.5 iff score > 0.
+                return score > 0
+            }
+        }
+
+        guard width >= 4, height >= 4 else { return nil }
+        let stepX = max(1, width / 80)
+        let stepY = max(1, height / 80)
+        let cellWidth = inputSize.width / CGFloat(width)
+        let cellHeight = inputSize.height / CGFloat(height)
+        let cropRect = candidate.modelRect.insetBy(
+            dx: -cellWidth * 1.5,
+            dy: -cellHeight * 1.5
+        )
+        var pagePoints: [CGPoint] = []
+        pagePoints.reserveCapacity(320)
+
+        for y in Swift.stride(from: 0, to: height, by: stepY) {
+            for x in Swift.stride(from: 0, to: width, by: stepX) {
+                guard isActive(x, y) else { continue }
+                let modelPoint = CGPoint(
+                    x: (CGFloat(x) + 0.5) * cellWidth,
+                    y: (CGFloat(y) + 0.5) * cellHeight
+                )
+                guard cropRect.contains(modelPoint),
+                      let pagePoint = MangaPageCoordinateSpace.sourceNormalizedPointFromScaleFitModelPoint(
+                          modelPoint,
+                          inputSize: inputSize,
+                          sourceSize: sourceSize
+                      ) else { continue }
+                pagePoints.append(pagePoint)
+            }
+        }
+
+        guard pagePoints.count >= 3 else { return nil }
+        let hull = convexHull(pagePoints)
+        guard hull.count >= 3 else { return nil }
+        return MangaVisionContour(points: hull)
+    }
+
+    private static func arrayValue4D(
+        _ array: MLMultiArray,
+        axisValues: [Int: Int]
+    ) -> Double {
+        var indices = [0, 0, 0, 0]
+        for (axis, value) in axisValues where indices.indices.contains(axis) {
+            indices[axis] = value
+        }
+        return array[indices.map { NSNumber(value: $0) }].doubleValue
+    }
+
+    private static func convexHull(_ points: [CGPoint]) -> [CGPoint] {
+        let sorted = points.sorted {
+            if abs($0.x - $1.x) > 0.000_001 { return $0.x < $1.x }
+            return $0.y < $1.y
+        }
+        guard sorted.count > 2 else { return sorted }
+
+        func cross(_ origin: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            (a.x - origin.x) * (b.y - origin.y)
+                - (a.y - origin.y) * (b.x - origin.x)
+        }
+
+        var lower: [CGPoint] = []
+        for point in sorted {
+            while lower.count >= 2,
+                  cross(lower[lower.count - 2], lower[lower.count - 1], point) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(point)
+        }
+        var upper: [CGPoint] = []
+        for point in sorted.reversed() {
+            while upper.count >= 2,
+                  cross(upper[upper.count - 2], upper[upper.count - 1], point) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(point)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        return lower + upper
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {
