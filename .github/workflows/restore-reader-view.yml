@@ -24,8 +24,7 @@ jobs:
           git checkout 67f5168758d29dc294e69235a6cabba8d93fad77 -- mreader/ReaderView.swift
           rm .github/workflows/restore-reader-view.yml
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+zyk1172@users.noreply.github.com"
           git add -A
-          git diff --cached --check
           git commit -m "fix: restore ReaderView after metadata update conflict"
           git push origin feature/guided-panel-v1
