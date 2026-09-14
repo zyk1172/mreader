@@ -45,6 +45,60 @@ struct GuidedPanelFoundationTests {
         #expect(processed.contains { abs($0.confidence - 0.91) < 0.001 })
     }
 
+    @Test func postProcessorPrefersContainingPanelOverHighConfidenceDialogueBox() {
+        let realPanel = panel(
+            x: 0.08,
+            y: 0.08,
+            width: 0.44,
+            height: 0.36,
+            confidence: 0.55
+        )
+        let dialogueBox = panel(
+            x: 0.19,
+            y: 0.16,
+            width: 0.17,
+            height: 0.11,
+            confidence: 0.99
+        )
+        let neighborPanel = panel(
+            x: 0.56,
+            y: 0.08,
+            width: 0.36,
+            height: 0.36,
+            confidence: 0.80
+        )
+
+        let processed = PanelPostProcessor.process([dialogueBox, realPanel, neighborPanel])
+
+        #expect(processed.contains { abs($0.rect.width - realPanel.rect.width) < 0.0001 })
+        #expect(!processed.contains { abs($0.rect.width - dialogueBox.rect.width) < 0.0001 })
+    }
+
+    @Test func visionLayoutRejectsFloatingDialogueBoxPattern() {
+        let dialogueBoxes = [
+            panel(x: 0.13, y: 0.12, width: 0.24, height: 0.23),
+            panel(x: 0.55, y: 0.27, width: 0.25, height: 0.22),
+            panel(x: 0.22, y: 0.53, width: 0.23, height: 0.24),
+            panel(x: 0.61, y: 0.69, width: 0.24, height: 0.23)
+        ]
+        let processed = PanelPostProcessor.process(dialogueBoxes)
+
+        #expect(!PanelLayoutQuality.isUsable(processed))
+    }
+
+    @Test func visionLayoutKeepsStructurallyAlignedSmallPanels() {
+        let smallPanels = [
+            panel(x: 0.06, y: 0.06, width: 0.26, height: 0.22),
+            panel(x: 0.36, y: 0.06, width: 0.26, height: 0.22),
+            panel(x: 0.66, y: 0.06, width: 0.26, height: 0.22),
+            panel(x: 0.06, y: 0.34, width: 0.26, height: 0.22)
+        ]
+        let processed = PanelPostProcessor.process(smallPanels)
+
+        #expect(processed.count == 4)
+        #expect(PanelLayoutQuality.isUsable(processed))
+    }
+
     @Test func layoutQualityRejectsImplausibleResults() {
         #expect(!PanelLayoutQuality.isUsable([]))
         #expect(!PanelLayoutQuality.isUsable([panel(x: 0.05, y: 0.05, width: 0.9, height: 0.9)]))
