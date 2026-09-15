@@ -2337,8 +2337,10 @@ struct ReaderView: View {
 
         mangaVisionPreanalysisTask?.cancel()
         mangaVisionPreanalysisTask = nil
-        let shouldPreanalyze = readingMode == .guidedPanel
-            || comic.isAutoOCRMagnificationEnabled
+        // Guided Panel 不再走这条预分析：它由 GuidedPanelReader 自己的邻页预取接管
+        // （那边会连着布局与推理一起预热，而且不会在翻页时被取消）。这里继续提交只会
+        // 产生一份每次翻页都被取消、几乎跑不完的任务。
+        let shouldPreanalyze = comic.isAutoOCRMagnificationEnabled
             || comic.isAutoTranslationEnabled
         if shouldPreanalyze {
             let comicID = comic.id
@@ -3358,6 +3360,22 @@ struct ContinuousScrollReader: View {
     }
 }
 
+/// 分镜模式的邻页布局缓存与预取队列。
+///
+/// 翻页时要用到下一页的布局才能“直接落到第一个分镜”，而 `PanelDetectionService`
+/// 的缓存是 actor 隔离的（同步读不到），所以这里在 MainActor 上留一份同步可读的副本。
+/// 用普通引用类型而非 `@State` 字典：预取落地不应该让分镜视图的 body 失效。
+private final class GuidedPanelLayoutStore {
+    var layouts: [String: PanelPageLayout] = [:]
+    /// 正在排队或正在预取的页，避免重复提交。
+    var scheduled: Set<String> = []
+    var pending: [Int] = []
+    var prefetchTask: Task<Void, Never>?
+    /// 已经由 `moveToPage` 直接把相机落到目标分镜的页；这类页面的 `detectPanels`
+    /// 不应再补一次“整页 -> 首分镜”的入场动画。
+    var appliedPageURL: URL?
+}
+
 struct GuidedPanelReader: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3379,22 +3397,13 @@ struct GuidedPanelReader: View {
     @State private var panelIndex = 0
     @State private var isDetecting = false
     @State private var enterCurrentPageAtLastPanel = false
-    @State private var panelNavigationDirection = 1
     @State private var cameraFocusOverride: CGRect?
     @State private var isPanelTransitioning = false
     @State private var panelMotionTask: Task<Void, Never>?
+    @State private var layoutStore = GuidedPanelLayoutStore()
 
-    private var pageTransition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        let forward = panelNavigationDirection >= 0
-        let forwardInsertion: Edge = readingDirection == .rightToLeft ? .leading : .trailing
-        let forwardRemoval: Edge = readingDirection == .rightToLeft ? .trailing : .leading
-        return .asymmetric(
-            insertion: .move(edge: forward ? forwardInsertion : forwardRemoval).combined(with: .opacity),
-            removal: .move(edge: forward ? forwardRemoval : forwardInsertion).combined(with: .opacity)
-        )
-    }
-
+    /// 跨页不做整页过渡：新页直接出现在目标分镜上，由相机在同一个 transaction 里
+    /// 从上一页的取景平滑移动到目标分镜取景（见 `moveToPage`）。
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
         return pages[currentPageIndex]
@@ -3436,7 +3445,8 @@ struct GuidedPanelReader: View {
                     .id(page.url)
                     .scaleEffect(camera.scale)
                     .offset(camera.offset)
-                    .transition(pageTransition)
+                    // 没有 transition：跨页由 `moveToPage` 直接把相机送到目标分镜，
+                    // 读者看到的应该是“上一个分镜 -> 下一个分镜”，而不是整页画面。
                     .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
                         await detectPanels(for: page)
                     }
@@ -3464,11 +3474,25 @@ struct GuidedPanelReader: View {
             panelMotionTask?.cancel()
             panelMotionTask = nil
             isPanelTransitioning = false
+            layoutStore.prefetchTask?.cancel()
+            layoutStore.prefetchTask = nil
+            layoutStore.pending.removeAll()
+            layoutStore.scheduled.removeAll()
         }
     }
 
     private func detectPanels(for page: ComicPage) async {
         let pageURL = page.url
+
+        // 预取命中：布局已经在本地缓存里，直接落到目标分镜，不显示加载圈。
+        if let cached = layoutStore.layouts[pageURL.absoluteString] {
+            if layoutStore.appliedPageURL != pageURL {
+                applyCachedLayout(cached, for: page)
+            }
+            scheduleNeighbourPrefetch(around: currentPageIndex)
+            return
+        }
+
         isDetecting = true
 
         guard let image = await ReaderImageCache.shared.loadImage(
@@ -3497,6 +3521,7 @@ struct GuidedPanelReader: View {
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
         )
+        layoutStore.layouts[pageURL.absoluteString] = detectedLayout
 
         // A cached layout can arrive while the previous page is still completing
         // its short context/slide stage. Do not collapse both motions into one snap.
@@ -3521,6 +3546,76 @@ struct GuidedPanelReader: View {
         }
         enterCurrentPageAtLastPanel = false
         isDetecting = false
+
+        // 当前页就绪后立刻预热邻页：读者翻页时布局已经在本地缓存里，不再等检测。
+        scheduleNeighbourPrefetch(around: currentPageIndex)
+    }
+
+    /// 预取命中时的入场：一次把相机设到目标分镜，不做“整页 -> 首分镜”的缩放。
+    private func applyCachedLayout(_ cached: PanelPageLayout, for page: ComicPage) {
+        guard !cached.panels.isEmpty else { return }
+        let lastPanelIndex = max(cached.panels.count - 1, 0)
+        let targetPanelIndex = enterCurrentPageAtLastPanel ? lastPanelIndex : 0
+        layout = cached
+        if let size = PageGeometryStore.shared.size(for: page.url) {
+            sourceSize = size
+        }
+        panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
+        cameraFocusOverride = nil
+        enterCurrentPageAtLastPanel = false
+        isDetecting = false
+        layoutStore.appliedPageURL = page.url
+    }
+
+    /// 预热当前页前后的分镜布局。
+    ///
+    /// 这里刻意**不取消**已经在跑的预取任务：`ReaderView.preloadPages` 每次翻页都会
+    /// 取消自己的预分析任务，导致下一页的推理几乎永远跑不完，翻页时又要现场检测并
+    /// 显示加载圈。本队列串行消费，翻页只追加目标，不打断进行中的一页。
+    private func scheduleNeighbourPrefetch(around pageIndex: Int) {
+        for index in [pageIndex + 1, pageIndex + 2, pageIndex - 1] where pages.indices.contains(index) {
+            let identifier = pages[index].url.absoluteString
+            guard layoutStore.layouts[identifier] == nil,
+                  !layoutStore.scheduled.contains(identifier),
+                  !layoutStore.pending.contains(index) else { continue }
+            layoutStore.scheduled.insert(identifier)
+            layoutStore.pending.append(index)
+        }
+        drainNeighbourPrefetchQueue()
+    }
+
+    private func drainNeighbourPrefetchQueue() {
+        guard layoutStore.prefetchTask == nil, !layoutStore.pending.isEmpty else { return }
+        layoutStore.prefetchTask = Task { @MainActor in
+            while let index = layoutStore.pending.first {
+                layoutStore.pending.removeFirst()
+                guard !Task.isCancelled else { break }
+                await prefetchLayout(at: index)
+            }
+            layoutStore.prefetchTask = nil
+        }
+    }
+
+    private func prefetchLayout(at index: Int) async {
+        let page = pages[index]
+        let identifier = page.url.absoluteString
+        defer { layoutStore.scheduled.remove(identifier) }
+        guard layoutStore.layouts[identifier] == nil else { return }
+        // 图片解码与邻页图片预取共用同一条 4096 档缓存，命中时不会重复解码。
+        guard let image = await ReaderImageCache.shared.loadImage(
+            for: page.url,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else { return }
+        guard !Task.isCancelled else { return }
+        let prefetched = await PanelDetectionService.shared.layout(
+            comicID: comic.id,
+            pageIndex: page.index,
+            pageURL: page.url,
+            image: image,
+            isRightToLeft: readingDirection == .rightToLeft
+        )
+        guard !Task.isCancelled else { return }
+        layoutStore.layouts[identifier] = prefetched
     }
 
     private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
@@ -3551,7 +3646,6 @@ struct GuidedPanelReader: View {
 
     private func previousPanel() {
         guard !isDetecting, !isPanelTransitioning else { return }
-        panelNavigationDirection = -1
         if panelIndex > 0 {
             moveWithinPage(to: panelIndex - 1)
         } else if currentPageIndex > 0 {
@@ -3563,7 +3657,6 @@ struct GuidedPanelReader: View {
 
     private func nextPanel() {
         guard !isDetecting, !isPanelTransitioning else { return }
-        panelNavigationDirection = 1
         let count = max(layout?.panels.count ?? 1, 1)
         if panelIndex + 1 < count {
             moveWithinPage(to: panelIndex + 1)
@@ -3604,10 +3697,10 @@ struct GuidedPanelReader: View {
             cameraFocusOverride = bridgeRect
         }
         panelMotionTask = Task { @MainActor in
+            defer { isPanelTransitioning = false }
             try? await Task.sleep(for: .seconds(profile.bridgeDuration))
             guard !Task.isCancelled else {
                 cameraFocusOverride = nil
-                isPanelTransitioning = false
                 return
             }
             withAnimation(cameraAnimation(for: profile, duration: profile.settleDuration)) {
@@ -3615,8 +3708,6 @@ struct GuidedPanelReader: View {
                 cameraFocusOverride = nil
             }
             try? await Task.sleep(for: .seconds(profile.settleDuration))
-            guard !Task.isCancelled else { return }
-            isPanelTransitioning = false
         }
     }
 
@@ -3627,50 +3718,50 @@ struct GuidedPanelReader: View {
         }
 
         panelMotionTask?.cancel()
-        panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
-        enterCurrentPageAtLastPanel = enterAtLastPanel
-        isDetecting = true
+        panelMotionTask = nil
+        isPanelTransitioning = false
         HapticManager.shared.play(.light)
 
-        guard !reduceMotion else {
-            layout = nil
-            sourceSize = .zero
-            cameraFocusOverride = nil
-            panelIndex = 0
-            currentPageIndex = pageIndex
-            return
-        }
-
+        let targetPage = pages[pageIndex]
+        let targetURL = targetPage.url
         let profile = GuidedPanelMotionPlanner.profile(
             from: layout?.panelRects[safe: panelIndex],
             to: nil,
             crossesPageBoundary: true
         )
-        isPanelTransitioning = true
-        let pageContext = layout?.contentBounds.cgRect
-            ?? CGRect(x: 0, y: 0, width: 1, height: 1)
-        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
-            cameraFocusOverride = pageContext
-        }
 
-        panelMotionTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(profile.bridgeDuration))
-            guard !Task.isCancelled else {
+        // 预取命中：直接把相机落到目标分镜。新页在同一个 transaction 里替换旧页，
+        // 相机从上一页的取景平滑移动到目标分镜取景——读者看到的是“上一个分镜 ->
+        // 下一个分镜”，中间不出现整页画面。
+        if let cached = layoutStore.layouts[targetURL.absoluteString],
+           !cached.panels.isEmpty,
+           let targetSourceSize = PageGeometryStore.shared.size(for: targetURL) {
+            let lastPanelIndex = max(cached.panels.count - 1, 0)
+            let targetPanelIndex = enterAtLastPanel ? lastPanelIndex : 0
+            withAnimation(cameraAnimation(for: profile)) {
+                layout = cached
+                sourceSize = targetSourceSize
+                panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
                 cameraFocusOverride = nil
-                isPanelTransitioning = false
-                return
-            }
-            withAnimation(.easeInOut(duration: profile.settleDuration)) {
-                layout = nil
-                sourceSize = .zero
-                cameraFocusOverride = nil
-                panelIndex = 0
                 currentPageIndex = pageIndex
             }
-            try? await Task.sleep(for: .seconds(profile.settleDuration))
-            guard !Task.isCancelled else { return }
-            isPanelTransitioning = false
+            enterCurrentPageAtLastPanel = false
+            isDetecting = false
+            layoutStore.appliedPageURL = targetURL
+            scheduleNeighbourPrefetch(around: pageIndex)
+            return
         }
+
+        // 预取还没落地：新页先以整页进入，检测完成后由入场动画收到目标分镜。
+        layout = nil
+        sourceSize = PageGeometryStore.shared.size(for: targetURL) ?? .zero
+        cameraFocusOverride = nil
+        panelIndex = 0
+        enterCurrentPageAtLastPanel = enterAtLastPanel
+        isDetecting = true
+        layoutStore.appliedPageURL = nil
+        currentPageIndex = pageIndex
+        scheduleNeighbourPrefetch(around: pageIndex)
     }
 
     private func cameraAnimation(

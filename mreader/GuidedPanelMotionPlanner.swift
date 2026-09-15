@@ -33,15 +33,15 @@ nonisolated enum GuidedPanelMotionPlanner {
         crossesPageBoundary: Bool = false
     ) -> GuidedPanelMotionProfile {
         if crossesPageBoundary {
-            // Page changes breathe a little longer than an in-page move: the short
-            // bridge exposes page context before the directional page transition,
-            // then the new page performs its own focus entry.
+            // 跨页不做“先退到整页上下文”的桥接：读者应该从上一页的最后一个分镜直接
+            // 进入下一页的目标分镜，中间不出现整页画面。整段时长就是相机从旧取景
+            // 移动到新取景的单次 easeInOut。
             return GuidedPanelMotionProfile(
                 kind: .pageBoundary,
-                duration: 0.56,
-                bridgeDuration: 0.26,
-                settleDuration: 0.30,
-                usesContextBridge: true
+                duration: 0.42,
+                bridgeDuration: 0,
+                settleDuration: 0.42,
+                usesContextBridge: false
             )
         }
         guard let source, let destination else {

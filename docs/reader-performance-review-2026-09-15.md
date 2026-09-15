@@ -228,6 +228,9 @@ ReaderImageCache.shared.preload(urls, maxPixelSize: isContinuous ? 8192 : 4096,
 | 长条首开 | 新增 `PageGeometryStore.preloadSizes`：首屏前用 150ms 预算只读图片头部登记前 12 页真实宽高比（本地源）；占位高度增加「就近页比例」兜底，不再直接落到 1.35 | `ReaderView.swift` |
 | 主页空白 | 继续阅读页在无在读漫画时给出显式空状态（可跳转书架）；手机横屏/宽窗口按「卡高不超过容器高 78%」反推列数，避免 2 列做出比屏幕还高的卡片 | `ContentView.swift`、5 个 `Localizable.strings` |
 | 解码缓存预算 | 基线机型改为 iPad mini 5（A12 / 3GB，本工程支持的最低内存机型）。最低档 `(180, 130)` → `(512, 384)`，其余档同步上调为 `(640, 480)` / `(1024, 768)` / `(1280, 960)`；分档改为纯函数 `ReaderImageCacheBudget.limits(forPhysicalMemoryBytes:)` 并被单测锁定；启动时打日志便于在真机核对命中档位 | `ReaderView.swift` |
+| 分镜翻页等待 | 新增邻页布局预取队列（`GuidedPanelLayoutStore`，串行消费、**不随翻页取消**）：当前页布局就绪后立刻预热 `±1 / +2` 页的图片与面板布局，翻页时同步命中本地缓存，不再显示加载圈。同时把 `.guidedPanel` 从 `preanalyze` 里移除——那条任务每次翻页都会被取消，几乎跑不完 | `ReaderView.swift` |
+| 分镜整页过渡 | `pageBoundary` 不再桥接到整页上下文（`bridgeDuration: 0`，0.42s 单段 easeInOut）；删除方向性整页 `transition`。翻页时若预取命中，直接把相机设到目标分镜，读者看到的是「上一个分镜 → 下一个分镜」，中间不出现整页画面；只有预取未落地时才退回整页入场 | `ReaderView.swift`、`GuidedPanelMotionPlanner.swift` |
+| 分镜翻页被永久 gate | `moveWithinPage` 的取消分支会把 `isPanelTransitioning` 留在 `true`，一旦在收尾等待期间被取消，后续 `nextPanel`/`previousPanel` 会被永久拦截。改为 `defer` 复位；同时清理已无读取方的 `panelNavigationDirection` | `ReaderView.swift` |
 
 ### 已验证
 
@@ -235,6 +238,7 @@ ReaderImageCache.shared.preload(urls, maxPixelSize: isContinuous ? 8192 : 4096,
 - 单元测试 398 项通过（含新增的分镜时长契约、网格列数契约、缓存预算分档契约）。
 - UI 冒烟测试全部通过。
 - 缓存预算分档在模拟器上无法验证 3GB 档位（模拟器的 `physicalMemory` 返回宿主 Mac 的内存），需在 iPad mini 5 上按启动日志 `reader image cache limits physicalMemoryMB=...` 核对。
+- 分镜邻页预取实测：清空缓存后切到分镜模式并**只停留在第 1 页**，`Library/Caches/PanelLayouts/<comicID>/0002.json`（第 2 页布局）已落盘 —— 说明翻页前邻页布局已经算好。
 
 ### 未修复（建议单独排期）
 

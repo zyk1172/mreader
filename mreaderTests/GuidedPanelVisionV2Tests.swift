@@ -130,8 +130,12 @@ struct GuidedPanelVisionV2Tests {
         #expect(farProfile.duration <= 0.90)
 
         #expect(boundary.kind == .pageBoundary)
-        #expect(boundary.usesContextBridge)
-        #expect(boundary.duration <= 0.70)
+        // 跨页不做桥接：读者从上一页的最后一个分镜直接进入下一页的目标分镜，
+        // 中间不出现整页画面（整页上下文阶段曾经是 --bridgeDuration 那段）。
+        #expect(!boundary.usesContextBridge)
+        #expect(boundary.bridgeDuration == 0)
+        #expect(boundary.duration == boundary.settleDuration)
+        #expect(boundary.duration <= 0.50)
 
         // The lead-in must already move in the destination's direction, stay closer to the
         // source than to the destination, and cover enough ground to be perceptible.
