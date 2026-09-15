@@ -264,28 +264,14 @@ enum RemotePagePriority: Sendable {
 }
 
 nonisolated private func remoteCacheLimits() -> (memoryLimitMB: Int, diskLimitMB: Int) {
-    let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
-    // 这是压缩后的图片 Data 缓存。除它之外进程里还同时存在解码后的 UIImage、
-    // SwiftUI/UIKit 视图层、OCR 图像和 AI 请求图片，因此内存预算必须留足余量。
-    // 阅读器长时间连续翻页时真正要防的是 jetsam，而不是缓存未命中。
-    if ramGB >= 6 {
-        return (180, 2_048)
-    } else if ramGB >= 4 {
-        return (130, 1_024)
-    } else {
-        return (90, 512)
-    }
+    // 与解码位图缓存共用同一张分档表（`ReaderMemoryBudgetPlanner`）：两处各自维护分档
+    // 曾经让同一台机器上的两条缓存差一个数量级（≥6GB 档只有 180MB）。
+    let budget = ReaderMemoryBudgetPlanner.budget()
+    return (budget.remotePageDataCacheMB, budget.remotePageDataDiskMB)
 }
 
 nonisolated private func remotePrefetchBudgetBytes() -> Int64 {
-    let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
-    if ramGB >= 6 {
-        return 500 * 1024 * 1024
-    } else if ramGB >= 4 {
-        return 300 * 1024 * 1024
-    } else {
-        return 160 * 1024 * 1024
-    }
+    Int64(ReaderMemoryBudgetPlanner.budget().remotePrefetchMB) * 1024 * 1024
 }
 
 actor RemotePageCache {

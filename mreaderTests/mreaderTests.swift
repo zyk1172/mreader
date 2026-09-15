@@ -1465,6 +1465,61 @@ struct mreaderTests {
         #expect(result.cardWidth == 170)
     }
 
+    @Test func readerMemoryBudgetKeepsThreeGigabyteDeviceUsable() {
+        // iPad mini 5（A12 / 3GB）是本工程支持的最低内存机型，它必须拿到足够大的
+        // 解码缓存：单页 4096px 位图约 15-45MB，180MB 只放得下 4-11 页。
+        let miniFive = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+
+        #expect(miniFive.decodedImageCacheMB >= ReaderMemoryBudgetPlanner.minimumDecodedImageCacheMB)
+        #expect(miniFive.decodedImageCacheMB >= 512)
+        #expect(miniFive.decodedImagePreloadMB >= 256)
+        #expect(miniFive.decodedImagePreloadMB < miniFive.decodedImageCacheMB)
+        #expect(miniFive.remotePageDataCacheMB >= 128)
+        #expect(miniFive.remotePageDataDiskMB >= 512)
+    }
+
+    @Test func readerMemoryBudgetGrowsWithPhysicalMemory() {
+        let threeGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+        let fourGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 4 * 1_024 * 1_024 * 1_024)
+        let sixGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 6 * 1_024 * 1_024 * 1_024)
+        let eightGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+
+        #expect(threeGB.decodedImageCacheMB < fourGB.decodedImageCacheMB)
+        #expect(fourGB.decodedImageCacheMB < sixGB.decodedImageCacheMB)
+        #expect(sixGB.decodedImageCacheMB < eightGB.decodedImageCacheMB)
+        #expect(threeGB.remotePageDataCacheMB < fourGB.remotePageDataCacheMB)
+        #expect(fourGB.remotePageDataCacheMB < sixGB.remotePageDataCacheMB)
+        #expect(sixGB.remotePageDataCacheMB < eightGB.remotePageDataCacheMB)
+        // 预取预算始终小于常驻上限，避免预取把缓存挤满。
+        for budget in [threeGB, fourGB, sixGB, eightGB] {
+            #expect(budget.decodedImagePreloadMB < budget.decodedImageCacheMB)
+        }
+    }
+
+    @Test func readerMemoryBudgetDoesNotLeaveRemoteCacheAtLegacyFloor() {
+        // 16 Pro 是 8GB：远程页压缩数据缓存曾经只有 180MB，与解码位图缓存差了一个数量级。
+        let sixteenPro = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+
+        #expect(sixteenPro.remotePageDataCacheMB >= 512)
+        #expect(sixteenPro.decodedImageCacheMB >= 1_024)
+    }
+
+    @Test func phoneShelfWidensColumnsInShortWideWindows() {
+        // 横屏/宽窗口里两列会做出比屏幕还高的卡片，一行占满整屏，其余区域就是空白。
+        let landscape = ShelfCardMetrics.gridLayout(for: 714, containerHeight: 390, idiom: .phone)
+
+        #expect(landscape.columns.count >= 3)
+        #expect(landscape.columns.count <= ShelfCardMetrics.maximumPhoneColumns)
+        #expect(ShelfCardMetrics.cardHeight(for: landscape.cardWidth) <= 390 * 0.85)
+    }
+
+    @Test func phoneShelfKeepsTwoColumnsWhenWidthIsNotWiderThanHeight() {
+        let narrow = ShelfCardMetrics.gridLayout(for: 393, containerHeight: 700, idiom: .phone)
+
+        #expect(narrow.columns.count == 2)
+        #expect(narrow.cardWidth == 170)
+    }
+
     @Test func iPadShelfUsesAdditionalColumns() {
         let result = ShelfCardMetrics.gridLayout(for: 744, idiom: .pad)
 

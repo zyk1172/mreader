@@ -21,6 +21,8 @@
 "shelf.itemCount" = "%d items";
 "shelf.empty" = "No comics yet";
 "shelf.pullToRefresh" = "Pull to refresh";
+"shelf.continueReadingEmptyTitle" = "Nothing in progress";
+"shelf.continueReadingEmptyDescription" = "Open a comic from your library and it will appear here.";
 
 /* Comic Actions */
 "comic.rename" = "Rename";

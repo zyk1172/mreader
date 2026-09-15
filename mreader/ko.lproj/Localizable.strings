@@ -354,6 +354,8 @@
 "shelf.selectedCount" = "%d 개 선택됨";
 "shelf.emptyTitle" = "서재가 비어 있습니다";
 "shelf.emptyDescription" = "이미지 폴더, ZIP, CBZ 가져오기를 지원합니다";
+"shelf.continueReadingEmptyTitle" = "읽는 중인 만화가 없습니다";
+"shelf.continueReadingEmptyDescription" = "서재에서 열면 여기에 표시됩니다.";
 "shelf.importComics" = "만화 파일 가져오기";
 "shelf.importFolder" = "만화 폴더 가져오기";
 

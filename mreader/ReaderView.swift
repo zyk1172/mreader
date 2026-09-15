@@ -83,6 +83,12 @@ struct ReaderContainerView: View {
                         comic.metadataUpdatedAt = Date()
                         onComicUpdate(comic)
                     }
+                    // 连续滚动的占位高度依赖页面几何。本地源只读图片头部即可拿到真实
+                    // 宽高比，所以在首屏出现前用有限预算登记前若干页，避免长条漫画
+                    // 先按兜底比例布局、图片落地后再整体重排（审查 #17）。
+                    if comic.sourceType == .local {
+                        await PageGeometryStore.shared.preloadSizes(for: result.pages)
+                    }
                     // Present the reader before any 8192px warm-up.
                     manager.applyLoadedPages(result)
                     isLoaded = true
@@ -394,6 +400,57 @@ final class PageGeometryStore {
     func size(for url: URL) -> CGSize? {
         sizes[url.absoluteString]
     }
+
+    /// height/width。长条页比例远大于 1，是占位高度唯一的正确来源。
+    func aspectRatio(for url: URL) -> CGFloat? {
+        guard let size = size(for: url), size.width > 1, size.height > 1 else { return nil }
+        return size.height / size.width
+    }
+
+    /// 就近页比例：同一本长条漫画的相邻页几乎总是同比例，用于在自身几何尚未登记时
+    /// 避免退回 1.35 这种会把长条低估 6-11 倍的兜底值。
+    func neighbouringAspectRatio(
+        for url: URL,
+        among pages: [ComicPage],
+        maximumDistance: Int = 3
+    ) -> CGFloat? {
+        guard let index = pages.firstIndex(where: { $0.url == url }) else { return nil }
+        for distance in 1...max(1, maximumDistance) {
+            for candidate in [index - distance, index + distance] {
+                guard pages.indices.contains(candidate),
+                      let ratio = aspectRatio(for: pages[candidate].url) else { continue }
+                return ratio
+            }
+        }
+        return nil
+    }
+
+    /// 只读图片头部预登记页面几何，不做完整解码。连续滚动的占位高度依赖它：
+    /// 冷启动时若无几何，长条页会先按兜底比例布局，图片落地后再整体重排（审查 #17）。
+    /// `budgetNanoseconds` 限制总耗时，避免为了预登记而拖慢首屏。
+    func preloadSizes(
+        for pages: [ComicPage],
+        limit: Int = 12,
+        budgetNanoseconds: UInt64 = 150_000_000
+    ) async {
+        let candidates = pages.prefix(max(0, limit)).filter { size(for: $0.url) == nil }
+        guard !candidates.isEmpty else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+
+        for page in candidates {
+            if DispatchTime.now().uptimeNanoseconds &- started >= budgetNanoseconds { break }
+            if Task.isCancelled { return }
+            let url = page.url
+            let size = await Task.detached(priority: .userInitiated) { () -> CGSize? in
+                if ComicManager.isArchivePageURL(url) {
+                    return ComicManager.imagePixelSizeForArchivePageURL(url)
+                }
+                guard url.isFileURL else { return nil }
+                return imagePixelSize(from: url)
+            }.value
+            if let size { setSize(size, for: page.url) }
+        }
+    }
 }
 
 @MainActor
@@ -425,17 +482,6 @@ private final class ReaderProgressThumbnailCache {
             cache.setObject(image, forKey: key as NSString)
         }
         return image
-    }
-}
-
-nonisolated private func cacheLimits() -> (memoryLimitMB: Int, preloadMB: Int) {
-    let ramGB = Double(deviceMemoryBytes()) / (1024 * 1024 * 1024)
-    if ramGB >= 6 {
-        return (750, 600)
-    } else if ramGB >= 4 {
-        return (340, 260)
-    } else {
-        return (180, 130)
     }
 }
 
@@ -494,10 +540,14 @@ private final class ReaderImageCache {
     private let preloadBudgetBytes: Int
 
     private init() {
-        let limits = cacheLimits()
-        preloadBudgetBytes = limits.preloadMB * 1024 * 1024
+        let budget = ReaderMemoryBudgetPlanner.budget()
+        preloadBudgetBytes = budget.decodedImagePreloadMB * 1024 * 1024
         cache.countLimit = 0
-        cache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
+        cache.totalCostLimit = budget.decodedImageCacheMB * 1024 * 1024
+        // 分档结果直接落日志：换设备或换机型的现场可以直接核对是否命中了预期档位。
+        MReaderLog.reader.debug(
+            "reader memory budget physicalMemoryMB=\(Int(deviceMemoryBytes() / (1024 * 1024)), privacy: .public) decodedImageCacheMB=\(budget.decodedImageCacheMB, privacy: .public) decodedImagePreloadMB=\(budget.decodedImagePreloadMB, privacy: .public)"
+        )
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
@@ -520,6 +570,14 @@ private final class ReaderImageCache {
 
     // 升序：选择“最小但 >= 请求”的缓存（项12），避免无谓持有更大 UIImage。
     private let resolutionTiers: [CGFloat] = [4096, 6144, 8192]
+
+    /// Guided Panel renders pages with `.fitScreen`, and panel detection only needs a
+    /// 640px analysis image. Detection therefore shares this decode tier with the
+    /// on-screen page instead of requesting a larger one: a larger request misses the
+    /// 4096 cache entry and decodes the same page a second time.
+    static let fitScreenMaxPixelSize: CGFloat = 4096
+    /// fitWidth renders long strips at screen width, so it needs more headroom than fitScreen.
+    static let fitWidthMaxPixelSize: CGFloat = 8192
 
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
         for tier in resolutionTiers where tier >= maxPixelSize {
@@ -2229,15 +2287,19 @@ struct ReaderView: View {
         ReaderImageCache.shared.preload(
             urls,
             // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
-            maxPixelSize: isContinuous ? 8192 : 4096,
+            maxPixelSize: isContinuous
+                ? ReaderImageCache.fitWidthMaxPixelSize
+                : ReaderImageCache.fitScreenMaxPixelSize,
             maximumConcurrent: isContinuous ? 1 : 2,
             delay: isContinuous ? 0.45 : 0.15
         )
 
         mangaVisionPreanalysisTask?.cancel()
         mangaVisionPreanalysisTask = nil
-        let shouldPreanalyze = readingMode == .guidedPanel
-            || comic.isAutoOCRMagnificationEnabled
+        // Guided Panel 不再走这条预分析：它由 GuidedPanelReader 自己的邻页预取接管
+        // （那边会连着布局与推理一起预热，而且不会在翻页时被取消）。这里继续提交只会
+        // 产生一份每次翻页都被取消、几乎跑不完的任务。
+        let shouldPreanalyze = comic.isAutoOCRMagnificationEnabled
             || comic.isAutoTranslationEnabled
         if shouldPreanalyze {
             let comicID = comic.id
@@ -2931,6 +2993,17 @@ private extension UIView {
     }
 }
 
+/// 连续滚动的页高/页框缓存。
+///
+/// 这两个字典的值由滚动位置派生，并且每个滚动 tick 都会更新。把它们放进 `@State`
+/// 会让 `ContinuousScrollReader` 的 body 在每个滚动 tick 失效一次，从而重建所有可见
+/// 页（每页都是包含大量覆盖层与手势的 `LocalImageView`）。放进普通的引用类型容器后，
+/// 更新只影响读取它们的回调，不再触发 SwiftUI 的视图失效。
+private final class ReaderScrollPageMetricsStore {
+    var heights: [Int: CGFloat] = [:]
+    var frames: [Int: CGRect] = [:]
+}
+
 struct ContinuousScrollReader: View {
     private static let coordinateSpaceName = "mreader.readerScroll"
 
@@ -2953,8 +3026,9 @@ struct ContinuousScrollReader: View {
     let onHideControls: () -> Void
 
     @State private var scrollView: UIScrollView?
-    @State private var pageHeights: [Int: CGFloat] = [:]
-    @State private var pageFrames: [Int: CGRect] = [:]
+    /// 非观察状态容器：滚动位置派生的页高/页框不能写进 `@State`，否则每次滚动
+    /// 都会让整个 reader 的 body 失效并重建所有可见页（审查：滚动掉帧、首开重排）。
+    @State private var pageMetrics = ReaderScrollPageMetricsStore()
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
@@ -3051,17 +3125,17 @@ struct ContinuousScrollReader: View {
                     scheduleVisiblePageUpdate(delay: 0.02)
                 }
                 .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
-                    guard pageHeights != heights else { return }
-                    pageHeights = heights
+                    guard pageMetrics.heights != heights else { return }
+                    pageMetrics.heights = heights
                 }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     let now = Date()
-                    guard pageFrames != frames else { return }
+                    guard pageMetrics.frames != frames else { return }
                     guard !didRestorePosition || now.timeIntervalSince(lastPageFrameCommitDate) >= 0.08 else {
                         return
                     }
                     lastPageFrameCommitDate = now
-                    pageFrames = frames
+                    pageMetrics.frames = frames
                     scheduleVisiblePageUpdate(delay: 0.04)
                 }
                 .onDisappear {
@@ -3137,11 +3211,11 @@ struct ContinuousScrollReader: View {
     }
 
     private func updateCurrentPageFromVisibleFrames() {
-        updateCurrentPageFromViewport(frames: pageFrames, viewportSize: viewportSize)
+        updateCurrentPageFromViewport(frames: pageMetrics.frames, viewportSize: viewportSize)
     }
 
     private func estimatedPageHeight(for index: Int) -> CGFloat {
-        pageHeights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
+        pageMetrics.heights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
     }
 
     private func pageTop(for index: Int) -> CGFloat {
@@ -3217,10 +3291,12 @@ struct ContinuousScrollReader: View {
 
     /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
     private func placeholderHeight(for url: URL, viewport: CGSize) -> CGFloat {
-        if let size = PageGeometryStore.shared.size(for: url), size.width > 1 {
-            return max(viewport.height, viewport.width * size.height / size.width)
-        }
-        return max(viewport.height, viewport.width * 1.35)
+        let store = PageGeometryStore.shared
+        let fallbackRatio: CGFloat = 1.35
+        let ratio = store.aspectRatio(for: url)
+            ?? store.neighbouringAspectRatio(for: url, among: pages)
+            ?? fallbackRatio
+        return max(viewport.height, viewport.width * max(ratio, 0.2))
     }
 
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
@@ -3241,6 +3317,29 @@ struct ContinuousScrollReader: View {
         scheduleVisiblePageUpdate(delay: 0.04)
         return true
     }
+}
+
+/// 分镜模式的邻页布局缓存与预取队列。
+///
+/// 翻页时要用到下一页的布局才能“直接落到第一个分镜”，而 `PanelDetectionService`
+/// 的缓存是 actor 隔离的（同步读不到），所以这里在 MainActor 上留一份同步可读的副本。
+/// 副本里连同页面像素尺寸一起存：翻页路径不能再依赖 `PageGeometryStore` 是否已经
+/// 登记过该页，否则尺寸未知时会退回整页入场的兜底路径（读者看到的就是加载圈）。
+/// 用普通引用类型而非 `@State` 字典：预取落地不应该让分镜视图的 body 失效。
+private final class GuidedPanelLayoutStore {
+    struct Entry {
+        let layout: PanelPageLayout
+        let sourceSize: CGSize
+    }
+
+    var entries: [String: Entry] = [:]
+    /// 正在排队或正在预取的页，避免重复提交。
+    var scheduled: Set<String> = []
+    var pending: [Int] = []
+    var prefetchTask: Task<Void, Never>?
+    /// 已经由 `moveToPage` 直接把相机落到目标分镜的页；这类页面的 `detectPanels`
+    /// 不应再补一次“整页 -> 首分镜”的入场动画。
+    var appliedPageURL: URL?
 }
 
 struct GuidedPanelReader: View {
@@ -3264,22 +3363,13 @@ struct GuidedPanelReader: View {
     @State private var panelIndex = 0
     @State private var isDetecting = false
     @State private var enterCurrentPageAtLastPanel = false
-    @State private var panelNavigationDirection = 1
     @State private var cameraFocusOverride: CGRect?
     @State private var isPanelTransitioning = false
     @State private var panelMotionTask: Task<Void, Never>?
+    @State private var layoutStore = GuidedPanelLayoutStore()
 
-    private var pageTransition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        let forward = panelNavigationDirection >= 0
-        let forwardInsertion: Edge = readingDirection == .rightToLeft ? .leading : .trailing
-        let forwardRemoval: Edge = readingDirection == .rightToLeft ? .trailing : .leading
-        return .asymmetric(
-            insertion: .move(edge: forward ? forwardInsertion : forwardRemoval).combined(with: .opacity),
-            removal: .move(edge: forward ? forwardRemoval : forwardInsertion).combined(with: .opacity)
-        )
-    }
-
+    /// 跨页不做整页过渡：新页直接出现在目标分镜上，由相机在同一个 transaction 里
+    /// 从上一页的取景平滑移动到目标分镜取景（见 `moveToPage`）。
     private var currentPage: ComicPage? {
         guard pages.indices.contains(currentPageIndex) else { return nil }
         return pages[currentPageIndex]
@@ -3318,10 +3408,12 @@ struct GuidedPanelReader: View {
                         onShowControls: onShowControls,
                         onHideControls: onHideControls
                     )
-                    .id(page.url)
+                    // 不挂 .id(page.url)：跨页时保留同一个视图身份，相机才能在同一组
+                    // scaleEffect/offset 上从上一页的取景插值到目标分镜；挂上 id 会让
+                    // SwiftUI 把整棵子树当成新视图，结果是硬切、看不到移动。
+                    // 换页后的图片重载由 LocalImageView 里的 loadedPageURL 负责。
                     .scaleEffect(camera.scale)
                     .offset(camera.offset)
-                    .transition(pageTransition)
                     .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
                         await detectPanels(for: page)
                     }
@@ -3349,24 +3441,51 @@ struct GuidedPanelReader: View {
             panelMotionTask?.cancel()
             panelMotionTask = nil
             isPanelTransitioning = false
+            layoutStore.prefetchTask?.cancel()
+            layoutStore.prefetchTask = nil
+            layoutStore.pending.removeAll()
+            layoutStore.scheduled.removeAll()
         }
     }
 
     private func detectPanels(for page: ComicPage) async {
         let pageURL = page.url
+
+        // 无论从哪条路径返回，只要当前页还是这一页，就不要把加载圈留在屏幕上。
+        // 之前取消分支直接 return，会让 isDetecting 永久停在 true：加载圈一直在转，
+        // 而且 nextPanel/previousPanel 的 `guard !isDetecting` 会连带把翻页锁死。
+        defer {
+            if currentPage?.url == pageURL {
+                isDetecting = false
+            }
+        }
+
+        // 预取命中：布局已经在本地缓存里，直接落到目标分镜，不显示加载圈。
+        if let cached = layoutStore.entries[pageURL.absoluteString] {
+            if layoutStore.appliedPageURL != pageURL {
+                applyCachedLayout(cached, for: page)
+            }
+            scheduleNeighbourPrefetch(around: currentPageIndex)
+            return
+        }
+
         isDetecting = true
 
-        guard let image = await ReaderImageCache.shared.loadImage(for: pageURL, maxPixelSize: 6144) else {
+        guard let image = await ReaderImageCache.shared.loadImage(
+            for: pageURL,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else {
             guard currentPage?.url == pageURL else { return }
             layout = nil
             sourceSize = .zero
             cameraFocusOverride = nil
-            isDetecting = false
             isPanelTransitioning = false
             return
         }
 
-        let detectedSourceSize = CGSize(
+        // Prefer the registered page geometry: it is already known for archive and
+        // local pages and avoids deriving the page aspect from a decoded bitmap.
+        let detectedSourceSize = PageGeometryStore.shared.size(for: pageURL) ?? CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
         )
@@ -3376,6 +3495,10 @@ struct GuidedPanelReader: View {
             pageURL: pageURL,
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
+        )
+        layoutStore.entries[pageURL.absoluteString] = GuidedPanelLayoutStore.Entry(
+            layout: detectedLayout,
+            sourceSize: detectedSourceSize
         )
 
         // A cached layout can arrive while the previous page is still completing
@@ -3400,7 +3523,84 @@ struct GuidedPanelReader: View {
             cameraFocusOverride = nil
         }
         enterCurrentPageAtLastPanel = false
+
+        // 当前页就绪后立刻预热邻页：读者翻页时布局已经在本地缓存里，不再等检测。
+        scheduleNeighbourPrefetch(around: currentPageIndex)
+    }
+
+    /// 预取命中时的入场：一次把相机设到目标分镜，不做“整页 -> 首分镜”的缩放。
+    private func applyCachedLayout(_ cached: GuidedPanelLayoutStore.Entry, for page: ComicPage) {
+        guard !cached.layout.panels.isEmpty else { return }
+        let lastPanelIndex = max(cached.layout.panels.count - 1, 0)
+        let targetPanelIndex = enterCurrentPageAtLastPanel ? lastPanelIndex : 0
+        layout = cached.layout
+        sourceSize = cached.sourceSize
+        panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
+        cameraFocusOverride = nil
+        enterCurrentPageAtLastPanel = false
         isDetecting = false
+        layoutStore.appliedPageURL = page.url
+    }
+
+    /// 预热当前页前后的分镜布局。
+    ///
+    /// 这里刻意**不取消**已经在跑的预取任务：`ReaderView.preloadPages` 每次翻页都会
+    /// 取消自己的预分析任务，导致下一页的推理几乎永远跑不完，翻页时又要现场检测并
+    /// 显示加载圈。本队列串行消费，翻页只追加目标，不打断进行中的一页。
+    private func scheduleNeighbourPrefetch(around pageIndex: Int) {
+        // 向前两页、向后一页：读者读完一页时后面两页已经处理完，同时把每轮
+        // Core ML 推理量压到 3 页以内（再多会明显增加常驻功耗）。
+        for index in [pageIndex + 1, pageIndex + 2, pageIndex - 1]
+        where pages.indices.contains(index) {
+            let identifier = pages[index].url.absoluteString
+            guard layoutStore.entries[identifier] == nil,
+                  !layoutStore.scheduled.contains(identifier),
+                  !layoutStore.pending.contains(index) else { continue }
+            layoutStore.scheduled.insert(identifier)
+            layoutStore.pending.append(index)
+        }
+        drainNeighbourPrefetchQueue()
+    }
+
+    private func drainNeighbourPrefetchQueue() {
+        guard layoutStore.prefetchTask == nil, !layoutStore.pending.isEmpty else { return }
+        layoutStore.prefetchTask = Task { @MainActor in
+            while let index = layoutStore.pending.first {
+                layoutStore.pending.removeFirst()
+                guard !Task.isCancelled else { break }
+                await prefetchLayout(at: index)
+            }
+            layoutStore.prefetchTask = nil
+        }
+    }
+
+    private func prefetchLayout(at index: Int) async {
+        let page = pages[index]
+        let identifier = page.url.absoluteString
+        defer { layoutStore.scheduled.remove(identifier) }
+        guard layoutStore.entries[identifier] == nil else { return }
+        // 图片解码与邻页图片预取共用同一条 4096 档缓存，命中时不会重复解码。
+        guard let image = await ReaderImageCache.shared.loadImage(
+            for: page.url,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else { return }
+        guard !Task.isCancelled else { return }
+        let sourceSize = PageGeometryStore.shared.size(for: page.url) ?? CGSize(
+            width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
+            height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
+        )
+        let prefetched = await PanelDetectionService.shared.layout(
+            comicID: comic.id,
+            pageIndex: page.index,
+            pageURL: page.url,
+            image: image,
+            isRightToLeft: readingDirection == .rightToLeft
+        )
+        guard !Task.isCancelled else { return }
+        layoutStore.entries[identifier] = GuidedPanelLayoutStore.Entry(
+            layout: prefetched,
+            sourceSize: sourceSize
+        )
     }
 
     private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
@@ -3431,7 +3631,6 @@ struct GuidedPanelReader: View {
 
     private func previousPanel() {
         guard !isDetecting, !isPanelTransitioning else { return }
-        panelNavigationDirection = -1
         if panelIndex > 0 {
             moveWithinPage(to: panelIndex - 1)
         } else if currentPageIndex > 0 {
@@ -3443,7 +3642,6 @@ struct GuidedPanelReader: View {
 
     private func nextPanel() {
         guard !isDetecting, !isPanelTransitioning else { return }
-        panelNavigationDirection = 1
         let count = max(layout?.panels.count ?? 1, 1)
         if panelIndex + 1 < count {
             moveWithinPage(to: panelIndex + 1)
@@ -3484,10 +3682,10 @@ struct GuidedPanelReader: View {
             cameraFocusOverride = bridgeRect
         }
         panelMotionTask = Task { @MainActor in
+            defer { isPanelTransitioning = false }
             try? await Task.sleep(for: .seconds(profile.bridgeDuration))
             guard !Task.isCancelled else {
                 cameraFocusOverride = nil
-                isPanelTransitioning = false
                 return
             }
             withAnimation(cameraAnimation(for: profile, duration: profile.settleDuration)) {
@@ -3495,8 +3693,6 @@ struct GuidedPanelReader: View {
                 cameraFocusOverride = nil
             }
             try? await Task.sleep(for: .seconds(profile.settleDuration))
-            guard !Task.isCancelled else { return }
-            isPanelTransitioning = false
         }
     }
 
@@ -3507,50 +3703,49 @@ struct GuidedPanelReader: View {
         }
 
         panelMotionTask?.cancel()
-        panelNavigationDirection = pageIndex >= currentPageIndex ? 1 : -1
-        enterCurrentPageAtLastPanel = enterAtLastPanel
-        isDetecting = true
+        panelMotionTask = nil
+        isPanelTransitioning = false
         HapticManager.shared.play(.light)
 
-        guard !reduceMotion else {
-            layout = nil
-            sourceSize = .zero
-            cameraFocusOverride = nil
-            panelIndex = 0
-            currentPageIndex = pageIndex
-            return
-        }
-
+        let targetPage = pages[pageIndex]
+        let targetURL = targetPage.url
         let profile = GuidedPanelMotionPlanner.profile(
             from: layout?.panelRects[safe: panelIndex],
             to: nil,
             crossesPageBoundary: true
         )
-        isPanelTransitioning = true
-        let pageContext = layout?.contentBounds.cgRect
-            ?? CGRect(x: 0, y: 0, width: 1, height: 1)
-        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
-            cameraFocusOverride = pageContext
-        }
 
-        panelMotionTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(profile.bridgeDuration))
-            guard !Task.isCancelled else {
+        // 预取命中：直接把相机落到目标分镜。新页在同一个 transaction 里替换旧页，
+        // 相机从上一页的取景平滑移动到目标分镜取景——读者看到的是“上一个分镜 ->
+        // 下一个分镜”，中间不出现整页画面，也不显示加载圈。
+        if let cached = layoutStore.entries[targetURL.absoluteString],
+           !cached.layout.panels.isEmpty {
+            let lastPanelIndex = max(cached.layout.panels.count - 1, 0)
+            let targetPanelIndex = enterAtLastPanel ? lastPanelIndex : 0
+            withAnimation(cameraAnimation(for: profile)) {
+                layout = cached.layout
+                sourceSize = cached.sourceSize
+                panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
                 cameraFocusOverride = nil
-                isPanelTransitioning = false
-                return
-            }
-            withAnimation(.easeInOut(duration: 0.30)) {
-                layout = nil
-                sourceSize = .zero
-                cameraFocusOverride = nil
-                panelIndex = 0
                 currentPageIndex = pageIndex
             }
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            isPanelTransitioning = false
+            enterCurrentPageAtLastPanel = false
+            isDetecting = false
+            layoutStore.appliedPageURL = targetURL
+            scheduleNeighbourPrefetch(around: pageIndex)
+            return
         }
+
+        // 预取还没落地：新页先以整页进入，检测完成后由入场动画收到目标分镜。
+        layout = nil
+        sourceSize = PageGeometryStore.shared.size(for: targetURL) ?? .zero
+        cameraFocusOverride = nil
+        panelIndex = 0
+        enterCurrentPageAtLastPanel = enterAtLastPanel
+        isDetecting = true
+        layoutStore.appliedPageURL = nil
+        currentPageIndex = pageIndex
+        scheduleNeighbourPrefetch(around: pageIndex)
     }
 
     private func cameraAnimation(
@@ -3560,16 +3755,18 @@ struct GuidedPanelReader: View {
         guard !reduceMotion else { return nil }
         let duration = overrideDuration ?? profile.duration
         switch profile.kind {
-        case .sameRow:
-            return .timingCurve(0.20, 0.62, 0.34, 1.0, duration: duration)
-        case .nearby:
-            return .timingCurve(0.22, 0.58, 0.32, 1.0, duration: duration)
+        case .sameRow, .nearby:
+            // Standard ease-out: the eased distance is spread across the whole
+            // duration. The previous custom curve placed its second control point at
+            // x=0.34, so it covered the entire distance in the first third of the
+            // duration and then coasted — a dead tail that felt like a stall.
+            return .easeOut(duration: duration)
         case .nextRow, .farJump:
-            return .timingCurve(0.22, 0.56, 0.30, 1.0, duration: duration)
+            return .timingCurve(0.24, 0.58, 0.58, 1.0, duration: duration)
         case .pageBoundary:
             return .easeInOut(duration: duration)
         case .focusEntry:
-            return .timingCurve(0.20, 0.64, 0.32, 1.0, duration: duration)
+            return .easeOut(duration: duration)
         }
     }
 }
@@ -4311,6 +4508,8 @@ struct LocalImageView: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
     @State private var uiImage: UIImage? = nil
+    /// 已经加载进 `uiImage` 的页面。分镜跨页会复用同一个视图身份，靠它判断是否需要重新加载。
+    @State private var loadedPageURL: URL?
 #if DEBUG
     @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
     @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
@@ -4527,7 +4726,10 @@ struct LocalImageView: View {
             }
         }
         .task(id: imageLoadTaskID) {
-            guard uiImage == nil else { return }
+            // 视图身份可能被复用：分镜跨页要靠同一个视图身份才能让相机在
+            // scaleEffect/offset 上插值（否则整页就是硬切）。所以不能只看
+            // uiImage 是否为空，必须比对已经加载的是不是当前这一页。
+            guard loadedPageURL != url || uiImage == nil else { return }
             if imageLoadDelay > 0 {
                 do {
                     try await Task.sleep(for: .seconds(imageLoadDelay))
@@ -5346,6 +5548,7 @@ struct LocalImageView: View {
     }
 
     private func loadImage() async {
+        let pageURL = url
         await MainActor.run {
             translationTask?.cancel()
             translationTask = nil
@@ -5363,9 +5566,11 @@ struct LocalImageView: View {
         let maxPixelSize = preferredDecodeMaxPixelSize
         if let cachedImage = ReaderImageCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
             await MainActor.run {
+                guard self.url == pageURL else { return }
                 isLoadingImage = false
                 loadFailed = false
                 uiImage = cachedImage
+                loadedPageURL = pageURL
                 isOfflineTranslationDisplayed = false
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
@@ -5400,6 +5605,7 @@ struct LocalImageView: View {
             isLoadingImage = true
             loadFailed = false
             uiImage = nil
+            loadedPageURL = nil
             isOfflineTranslationDisplayed = false
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
@@ -5422,7 +5628,9 @@ struct LocalImageView: View {
 
         let loadedImage = await ReaderImageCache.shared.loadImage(for: url, maxPixelSize: maxPixelSize)
         await MainActor.run {
+            guard self.url == pageURL else { return }
             self.uiImage = loadedImage
+            self.loadedPageURL = loadedImage == nil ? nil : pageURL
             self.loadFailed = loadedImage == nil
             self.isLoadingImage = false
         }
@@ -5673,7 +5881,9 @@ struct LocalImageView: View {
     }
 
     private var preferredDecodeMaxPixelSize: CGFloat {
-        imageFitMode == .fitWidth ? 8192 : 4096
+        imageFitMode == .fitWidth
+            ? ReaderImageCache.fitWidthMaxPixelSize
+            : ReaderImageCache.fitScreenMaxPixelSize
     }
 
     private func startOCRMagnification() {
