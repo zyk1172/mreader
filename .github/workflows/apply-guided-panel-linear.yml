@@ -1,0 +1,211 @@
+name: Apply guided panel linear motion patch
+
+on:
+  push:
+    branches:
+      - fix/shelf-scroll-guided-panel-motion-haptics
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/shelf-scroll-guided-panel-motion-haptics
+
+      - name: Apply focused ReaderView patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('mreader/ReaderView.swift')
+          text = path.read_text()
+
+          old_move = '''    private func moveWithinPage(to targetIndex: Int) {
+              guard let layout,
+                    layout.panelRects.indices.contains(panelIndex),
+                    layout.panelRects.indices.contains(targetIndex) else { return }
+              let sourceRect = layout.panelRects[panelIndex]
+              let destinationRect = layout.panelRects[targetIndex]
+              let profile = GuidedPanelMotionPlanner.profile(
+                  from: sourceRect,
+                  to: destinationRect
+              )
+              HapticManager.shared.play(.light)
+              panelMotionTask?.cancel()
+
+              guard !reduceMotion, profile.usesContextBridge else {
+                  withAnimation(cameraAnimation(for: profile)) {
+                      panelIndex = targetIndex
+                      cameraFocusOverride = nil
+                  }
+                  return
+              }
+
+              isPanelTransitioning = true
+              let bridgeRect = GuidedPanelMotionPlanner.bridgeRect(
+                  from: sourceRect,
+                  to: destinationRect
+              )
+              withAnimation(.easeOut(duration: profile.bridgeDuration)) {
+                  cameraFocusOverride = bridgeRect
+              }
+              panelMotionTask = Task { @MainActor in
+                  try? await Task.sleep(for: .seconds(profile.bridgeDuration))
+                  guard !Task.isCancelled else {
+                      cameraFocusOverride = nil
+                      isPanelTransitioning = false
+                      return
+                  }
+                  withAnimation(cameraAnimation(for: profile, duration: profile.settleDuration)) {
+                      panelIndex = targetIndex
+                      cameraFocusOverride = nil
+                  }
+                  try? await Task.sleep(for: .seconds(profile.settleDuration))
+                  guard !Task.isCancelled else { return }
+                  isPanelTransitioning = false
+              }
+          }
+          '''
+
+          new_move = '''    private func moveWithinPage(to targetIndex: Int) {
+              guard let layout,
+                    layout.panelRects.indices.contains(panelIndex),
+                    layout.panelRects.indices.contains(targetIndex) else { return }
+              let sourceRect = layout.panelRects[panelIndex]
+              let destinationRect = layout.panelRects[targetIndex]
+              let profile = GuidedPanelMotionPlanner.profile(
+                  from: sourceRect,
+                  to: destinationRect
+              )
+              HapticManager.shared.play(.light)
+              panelMotionTask?.cancel()
+
+              guard !reduceMotion else {
+                  panelIndex = targetIndex
+                  cameraFocusOverride = nil
+                  return
+              }
+
+              // A panel change is one continuous camera travel. Splitting the move
+              // into bridge + settle stages caused a visible velocity discontinuity
+              // and made the path harder to follow. Linear interpolation keeps the
+              // viewport moving at one constant speed from the source to destination.
+              isPanelTransitioning = true
+              withAnimation(.linear(duration: profile.duration)) {
+                  panelIndex = targetIndex
+                  cameraFocusOverride = nil
+              }
+              panelMotionTask = Task { @MainActor in
+                  try? await Task.sleep(for: .seconds(profile.duration))
+                  guard !Task.isCancelled else { return }
+                  isPanelTransitioning = false
+              }
+          }
+          '''
+
+          old_page = '''        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
+              cameraFocusOverride = pageContext
+          }
+
+          panelMotionTask = Task { @MainActor in
+              try? await Task.sleep(for: .seconds(profile.bridgeDuration))
+              guard !Task.isCancelled else {
+                  cameraFocusOverride = nil
+                  isPanelTransitioning = false
+                  return
+              }
+              withAnimation(.easeInOut(duration: 0.30)) {
+                  layout = nil
+                  sourceSize = .zero
+                  cameraFocusOverride = nil
+                  panelIndex = 0
+                  currentPageIndex = pageIndex
+              }
+              try? await Task.sleep(for: .milliseconds(300))
+              guard !Task.isCancelled else { return }
+              isPanelTransitioning = false
+          }
+          '''
+
+          new_page = '''        withAnimation(.linear(duration: profile.bridgeDuration)) {
+              cameraFocusOverride = pageContext
+          }
+
+          panelMotionTask = Task { @MainActor in
+              try? await Task.sleep(for: .seconds(profile.bridgeDuration))
+              guard !Task.isCancelled else {
+                  cameraFocusOverride = nil
+                  isPanelTransitioning = false
+                  return
+              }
+              let pageSlideDuration: TimeInterval = 0.45
+              withAnimation(.linear(duration: pageSlideDuration)) {
+                  layout = nil
+                  sourceSize = .zero
+                  cameraFocusOverride = nil
+                  panelIndex = 0
+                  currentPageIndex = pageIndex
+              }
+              try? await Task.sleep(for: .seconds(pageSlideDuration))
+              guard !Task.isCancelled else { return }
+              isPanelTransitioning = false
+          }
+          '''
+
+          old_animation = '''    private func cameraAnimation(
+              for profile: GuidedPanelMotionProfile,
+              duration overrideDuration: TimeInterval? = nil
+          ) -> Animation? {
+              guard !reduceMotion else { return nil }
+              let duration = overrideDuration ?? profile.duration
+              switch profile.kind {
+              case .sameRow:
+                  return .timingCurve(0.20, 0.62, 0.34, 1.0, duration: duration)
+              case .nearby:
+                  return .timingCurve(0.22, 0.58, 0.32, 1.0, duration: duration)
+              case .nextRow, .farJump:
+                  return .timingCurve(0.22, 0.56, 0.30, 1.0, duration: duration)
+              case .pageBoundary:
+                  return .easeInOut(duration: duration)
+              case .focusEntry:
+                  return .timingCurve(0.20, 0.64, 0.32, 1.0, duration: duration)
+              }
+          }
+          '''
+
+          new_animation = '''    private func cameraAnimation(
+              for profile: GuidedPanelMotionProfile,
+              duration overrideDuration: TimeInterval? = nil
+          ) -> Animation? {
+              guard !reduceMotion else { return nil }
+              return .linear(duration: overrideDuration ?? profile.duration)
+          }
+          '''
+
+          replacements = [
+              (old_move, new_move, 'moveWithinPage'),
+              (old_page, new_page, 'moveToPage'),
+              (old_animation, new_animation, 'cameraAnimation'),
+          ]
+          for old, new, name in replacements:
+              if old not in text:
+                  raise SystemExit(f'expected ReaderView block not found: {name}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Remove temporary workflow and push patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-guided-panel-linear.yml
+          git add mreader/ReaderView.swift
+          git diff --check
+          git commit -m "Use constant-speed guided panel camera motion"
+          git push origin HEAD:fix/shelf-scroll-guided-panel-motion-haptics
