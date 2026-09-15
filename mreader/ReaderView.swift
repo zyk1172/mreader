@@ -3467,39 +3467,26 @@ struct GuidedPanelReader: View {
         HapticManager.shared.play(.light)
         panelMotionTask?.cancel()
 
-        guard !reduceMotion, profile.usesContextBridge else {
-            withAnimation(cameraAnimation(for: profile)) {
-                panelIndex = targetIndex
-                cameraFocusOverride = nil
-            }
+        guard !reduceMotion else {
+            panelIndex = targetIndex
+            cameraFocusOverride = nil
             return
         }
 
+        // One uninterrupted constant-speed camera path keeps the spatial
+        // relationship between source and destination obvious. The previous
+        // bridge + settle sequence introduced a visible velocity discontinuity.
         isPanelTransitioning = true
-        let bridgeRect = GuidedPanelMotionPlanner.bridgeRect(
-            from: sourceRect,
-            to: destinationRect
-        )
-        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
-            cameraFocusOverride = bridgeRect
+        withAnimation(.linear(duration: profile.duration)) {
+            panelIndex = targetIndex
+            cameraFocusOverride = nil
         }
         panelMotionTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(profile.bridgeDuration))
-            guard !Task.isCancelled else {
-                cameraFocusOverride = nil
-                isPanelTransitioning = false
-                return
-            }
-            withAnimation(cameraAnimation(for: profile, duration: profile.settleDuration)) {
-                panelIndex = targetIndex
-                cameraFocusOverride = nil
-            }
-            try? await Task.sleep(for: .seconds(profile.settleDuration))
+            try? await Task.sleep(for: .seconds(profile.duration))
             guard !Task.isCancelled else { return }
             isPanelTransitioning = false
         }
     }
-
     private func moveToPage(_ pageIndex: Int, enterAtLastPanel: Bool) {
         guard pages.indices.contains(pageIndex) else {
             HapticManager.shared.play(.warning)
@@ -3529,7 +3516,7 @@ struct GuidedPanelReader: View {
         isPanelTransitioning = true
         let pageContext = layout?.contentBounds.cgRect
             ?? CGRect(x: 0, y: 0, width: 1, height: 1)
-        withAnimation(.easeOut(duration: profile.bridgeDuration)) {
+        withAnimation(.linear(duration: profile.bridgeDuration)) {
             cameraFocusOverride = pageContext
         }
 
@@ -3540,14 +3527,15 @@ struct GuidedPanelReader: View {
                 isPanelTransitioning = false
                 return
             }
-            withAnimation(.easeInOut(duration: 0.30)) {
+            let pageSlideDuration: TimeInterval = 0.45
+            withAnimation(.linear(duration: pageSlideDuration)) {
                 layout = nil
                 sourceSize = .zero
                 cameraFocusOverride = nil
                 panelIndex = 0
                 currentPageIndex = pageIndex
             }
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .seconds(pageSlideDuration))
             guard !Task.isCancelled else { return }
             isPanelTransitioning = false
         }
@@ -3558,19 +3546,7 @@ struct GuidedPanelReader: View {
         duration overrideDuration: TimeInterval? = nil
     ) -> Animation? {
         guard !reduceMotion else { return nil }
-        let duration = overrideDuration ?? profile.duration
-        switch profile.kind {
-        case .sameRow:
-            return .timingCurve(0.20, 0.62, 0.34, 1.0, duration: duration)
-        case .nearby:
-            return .timingCurve(0.22, 0.58, 0.32, 1.0, duration: duration)
-        case .nextRow, .farJump:
-            return .timingCurve(0.22, 0.56, 0.30, 1.0, duration: duration)
-        case .pageBoundary:
-            return .easeInOut(duration: duration)
-        case .focusEntry:
-            return .timingCurve(0.20, 0.64, 0.32, 1.0, duration: duration)
-        }
+        return .linear(duration: overrideDuration ?? profile.duration)
     }
 }
 
