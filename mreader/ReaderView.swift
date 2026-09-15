@@ -83,6 +83,12 @@ struct ReaderContainerView: View {
                         comic.metadataUpdatedAt = Date()
                         onComicUpdate(comic)
                     }
+                    // 连续滚动的占位高度依赖页面几何。本地源只读图片头部即可拿到真实
+                    // 宽高比，所以在首屏出现前用有限预算登记前若干页，避免长条漫画
+                    // 先按兜底比例布局、图片落地后再整体重排（审查 #17）。
+                    if comic.sourceType == .local {
+                        await PageGeometryStore.shared.preloadSizes(for: result.pages)
+                    }
                     // Present the reader before any 8192px warm-up.
                     manager.applyLoadedPages(result)
                     isLoaded = true
@@ -394,6 +400,57 @@ final class PageGeometryStore {
     func size(for url: URL) -> CGSize? {
         sizes[url.absoluteString]
     }
+
+    /// height/width。长条页比例远大于 1，是占位高度唯一的正确来源。
+    func aspectRatio(for url: URL) -> CGFloat? {
+        guard let size = size(for: url), size.width > 1, size.height > 1 else { return nil }
+        return size.height / size.width
+    }
+
+    /// 就近页比例：同一本长条漫画的相邻页几乎总是同比例，用于在自身几何尚未登记时
+    /// 避免退回 1.35 这种会把长条低估 6-11 倍的兜底值。
+    func neighbouringAspectRatio(
+        for url: URL,
+        among pages: [ComicPage],
+        maximumDistance: Int = 3
+    ) -> CGFloat? {
+        guard let index = pages.firstIndex(where: { $0.url == url }) else { return nil }
+        for distance in 1...max(1, maximumDistance) {
+            for candidate in [index - distance, index + distance] {
+                guard pages.indices.contains(candidate),
+                      let ratio = aspectRatio(for: pages[candidate].url) else { continue }
+                return ratio
+            }
+        }
+        return nil
+    }
+
+    /// 只读图片头部预登记页面几何，不做完整解码。连续滚动的占位高度依赖它：
+    /// 冷启动时若无几何，长条页会先按兜底比例布局，图片落地后再整体重排（审查 #17）。
+    /// `budgetNanoseconds` 限制总耗时，避免为了预登记而拖慢首屏。
+    func preloadSizes(
+        for pages: [ComicPage],
+        limit: Int = 12,
+        budgetNanoseconds: UInt64 = 150_000_000
+    ) async {
+        let candidates = pages.prefix(max(0, limit)).filter { size(for: $0.url) == nil }
+        guard !candidates.isEmpty else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+
+        for page in candidates {
+            if DispatchTime.now().uptimeNanoseconds &- started >= budgetNanoseconds { break }
+            if Task.isCancelled { return }
+            let url = page.url
+            let size = await Task.detached(priority: .userInitiated) { () -> CGSize? in
+                if ComicManager.isArchivePageURL(url) {
+                    return ComicManager.imagePixelSizeForArchivePageURL(url)
+                }
+                guard url.isFileURL else { return nil }
+                return imagePixelSize(from: url)
+            }.value
+            if let size { setSize(size, for: page.url) }
+        }
+    }
 }
 
 @MainActor
@@ -520,6 +577,14 @@ private final class ReaderImageCache {
 
     // 升序：选择“最小但 >= 请求”的缓存（项12），避免无谓持有更大 UIImage。
     private let resolutionTiers: [CGFloat] = [4096, 6144, 8192]
+
+    /// Guided Panel renders pages with `.fitScreen`, and panel detection only needs a
+    /// 640px analysis image. Detection therefore shares this decode tier with the
+    /// on-screen page instead of requesting a larger one: a larger request misses the
+    /// 4096 cache entry and decodes the same page a second time.
+    static let fitScreenMaxPixelSize: CGFloat = 4096
+    /// fitWidth renders long strips at screen width, so it needs more headroom than fitScreen.
+    static let fitWidthMaxPixelSize: CGFloat = 8192
 
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
         for tier in resolutionTiers where tier >= maxPixelSize {
@@ -2229,7 +2294,9 @@ struct ReaderView: View {
         ReaderImageCache.shared.preload(
             urls,
             // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
-            maxPixelSize: isContinuous ? 8192 : 4096,
+            maxPixelSize: isContinuous
+                ? ReaderImageCache.fitWidthMaxPixelSize
+                : ReaderImageCache.fitScreenMaxPixelSize,
             maximumConcurrent: isContinuous ? 1 : 2,
             delay: isContinuous ? 0.45 : 0.15
         )
@@ -2931,6 +2998,17 @@ private extension UIView {
     }
 }
 
+/// 连续滚动的页高/页框缓存。
+///
+/// 这两个字典的值由滚动位置派生，并且每个滚动 tick 都会更新。把它们放进 `@State`
+/// 会让 `ContinuousScrollReader` 的 body 在每个滚动 tick 失效一次，从而重建所有可见
+/// 页（每页都是包含大量覆盖层与手势的 `LocalImageView`）。放进普通的引用类型容器后，
+/// 更新只影响读取它们的回调，不再触发 SwiftUI 的视图失效。
+private final class ReaderScrollPageMetricsStore {
+    var heights: [Int: CGFloat] = [:]
+    var frames: [Int: CGRect] = [:]
+}
+
 struct ContinuousScrollReader: View {
     private static let coordinateSpaceName = "mreader.readerScroll"
 
@@ -2953,8 +3031,9 @@ struct ContinuousScrollReader: View {
     let onHideControls: () -> Void
 
     @State private var scrollView: UIScrollView?
-    @State private var pageHeights: [Int: CGFloat] = [:]
-    @State private var pageFrames: [Int: CGRect] = [:]
+    /// 非观察状态容器：滚动位置派生的页高/页框不能写进 `@State`，否则每次滚动
+    /// 都会让整个 reader 的 body 失效并重建所有可见页（审查：滚动掉帧、首开重排）。
+    @State private var pageMetrics = ReaderScrollPageMetricsStore()
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
@@ -3051,17 +3130,17 @@ struct ContinuousScrollReader: View {
                     scheduleVisiblePageUpdate(delay: 0.02)
                 }
                 .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
-                    guard pageHeights != heights else { return }
-                    pageHeights = heights
+                    guard pageMetrics.heights != heights else { return }
+                    pageMetrics.heights = heights
                 }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     let now = Date()
-                    guard pageFrames != frames else { return }
+                    guard pageMetrics.frames != frames else { return }
                     guard !didRestorePosition || now.timeIntervalSince(lastPageFrameCommitDate) >= 0.08 else {
                         return
                     }
                     lastPageFrameCommitDate = now
-                    pageFrames = frames
+                    pageMetrics.frames = frames
                     scheduleVisiblePageUpdate(delay: 0.04)
                 }
                 .onDisappear {
@@ -3137,11 +3216,11 @@ struct ContinuousScrollReader: View {
     }
 
     private func updateCurrentPageFromVisibleFrames() {
-        updateCurrentPageFromViewport(frames: pageFrames, viewportSize: viewportSize)
+        updateCurrentPageFromViewport(frames: pageMetrics.frames, viewportSize: viewportSize)
     }
 
     private func estimatedPageHeight(for index: Int) -> CGFloat {
-        pageHeights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
+        pageMetrics.heights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
     }
 
     private func pageTop(for index: Int) -> CGFloat {
@@ -3217,10 +3296,12 @@ struct ContinuousScrollReader: View {
 
     /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
     private func placeholderHeight(for url: URL, viewport: CGSize) -> CGFloat {
-        if let size = PageGeometryStore.shared.size(for: url), size.width > 1 {
-            return max(viewport.height, viewport.width * size.height / size.width)
-        }
-        return max(viewport.height, viewport.width * 1.35)
+        let store = PageGeometryStore.shared
+        let fallbackRatio: CGFloat = 1.35
+        let ratio = store.aspectRatio(for: url)
+            ?? store.neighbouringAspectRatio(for: url, among: pages)
+            ?? fallbackRatio
+        return max(viewport.height, viewport.width * max(ratio, 0.2))
     }
 
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
@@ -3356,7 +3437,10 @@ struct GuidedPanelReader: View {
         let pageURL = page.url
         isDetecting = true
 
-        guard let image = await ReaderImageCache.shared.loadImage(for: pageURL, maxPixelSize: 6144) else {
+        guard let image = await ReaderImageCache.shared.loadImage(
+            for: pageURL,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else {
             guard currentPage?.url == pageURL else { return }
             layout = nil
             sourceSize = .zero
@@ -3366,7 +3450,9 @@ struct GuidedPanelReader: View {
             return
         }
 
-        let detectedSourceSize = CGSize(
+        // Prefer the registered page geometry: it is already known for archive and
+        // local pages and avoids deriving the page aspect from a decoded bitmap.
+        let detectedSourceSize = PageGeometryStore.shared.size(for: pageURL) ?? CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
         )
@@ -3540,14 +3626,14 @@ struct GuidedPanelReader: View {
                 isPanelTransitioning = false
                 return
             }
-            withAnimation(.easeInOut(duration: 0.30)) {
+            withAnimation(.easeInOut(duration: profile.settleDuration)) {
                 layout = nil
                 sourceSize = .zero
                 cameraFocusOverride = nil
                 panelIndex = 0
                 currentPageIndex = pageIndex
             }
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .seconds(profile.settleDuration))
             guard !Task.isCancelled else { return }
             isPanelTransitioning = false
         }
@@ -3560,16 +3646,18 @@ struct GuidedPanelReader: View {
         guard !reduceMotion else { return nil }
         let duration = overrideDuration ?? profile.duration
         switch profile.kind {
-        case .sameRow:
-            return .timingCurve(0.20, 0.62, 0.34, 1.0, duration: duration)
-        case .nearby:
-            return .timingCurve(0.22, 0.58, 0.32, 1.0, duration: duration)
+        case .sameRow, .nearby:
+            // Standard ease-out: the eased distance is spread across the whole
+            // duration. The previous custom curve placed its second control point at
+            // x=0.34, so it covered the entire distance in the first third of the
+            // duration and then coasted — a dead tail that felt like a stall.
+            return .easeOut(duration: duration)
         case .nextRow, .farJump:
-            return .timingCurve(0.22, 0.56, 0.30, 1.0, duration: duration)
+            return .timingCurve(0.24, 0.58, 0.58, 1.0, duration: duration)
         case .pageBoundary:
             return .easeInOut(duration: duration)
         case .focusEntry:
-            return .timingCurve(0.20, 0.64, 0.32, 1.0, duration: duration)
+            return .easeOut(duration: duration)
         }
     }
 }
@@ -5673,7 +5761,9 @@ struct LocalImageView: View {
     }
 
     private var preferredDecodeMaxPixelSize: CGFloat {
-        imageFitMode == .fitWidth ? 8192 : 4096
+        imageFitMode == .fitWidth
+            ? ReaderImageCache.fitWidthMaxPixelSize
+            : ReaderImageCache.fitScreenMaxPixelSize
     }
 
     private func startOCRMagnification() {

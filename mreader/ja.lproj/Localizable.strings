@@ -354,6 +354,8 @@
 "shelf.selectedCount" = "%d 件選択中";
 "shelf.emptyTitle" = "本棚は空です";
 "shelf.emptyDescription" = "画像フォルダ、ZIP、CBZ のインポートに対応しています";
+"shelf.continueReadingEmptyTitle" = "読みかけの漫画はありません";
+"shelf.continueReadingEmptyDescription" = "本棚から開くとここに表示されます。";
 "shelf.importComics" = "漫画ファイルをインポート";
 "shelf.importFolder" = "漫画フォルダをインポート";
 

@@ -357,6 +357,8 @@
 "shelf.selectedCount" = "已选 %d";
 "shelf.emptyTitle" = "书架空空如也";
 "shelf.emptyDescription" = "支持导入图片文件夹、ZIP、CBZ";
+"shelf.continueReadingEmptyTitle" = "还没有在读的漫画";
+"shelf.continueReadingEmptyDescription" = "去书架打开一本，它会出现在这里。";
 "shelf.importComics" = "导入漫画文件";
 "shelf.importFolder" = "导入漫画文件夹";
 

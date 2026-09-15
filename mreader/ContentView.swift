@@ -942,26 +942,51 @@ struct ContentView: View {
     }
 
     private var continueReadingPage: some View {
-        ScrollView {
-            LazyVStack(spacing: 14) {
-                ForEach(continueReadingComics) { comic in
-                    Button {
-                        openReader(comic)
-                    } label: {
-                        ContinueReadingCard(comic: comic)
+        Group {
+            if continueReadingComics.isEmpty {
+                // 只保留有阅读记录的漫画，导入新书后这一页天然是空的。显式给出空状态，
+                // 而不是渲染一个空 LazyVStack，否则整页只剩标题和一大片空白。
+                ScrollView {
+                    ContentUnavailableView {
+                        Label("shelf.continueReadingEmptyTitle".localized, systemImage: "book")
+                    } description: {
+                        Text("shelf.continueReadingEmptyDescription".localized)
+                    } actions: {
+                        Button("tab.library".localized) {
+                            selectedPage = .library
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("mreader.shelf.openLibraryTab")
                     }
-                    .buttonStyle(.plain)
-                    .hapticTap(.light)
-                    .accessibilityIdentifier("mreader.shelf.openReader")
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 460)
                 }
+                .refreshable {
+                    await refreshShelfLibraries()
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(continueReadingComics) { comic in
+                            Button {
+                                openReader(comic)
+                            } label: {
+                                ContinueReadingCard(comic: comic)
+                            }
+                            .buttonStyle(.plain)
+                            .hapticTap(.light)
+                            .accessibilityIdentifier("mreader.shelf.openReader")
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                }
+                .refreshable {
+                    await refreshShelfLibraries()
+                }
+                .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
         }
-        .refreshable {
-            await refreshShelfLibraries()
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
     }
 
     private var readingStatisticsPage: some View {
@@ -1220,7 +1245,10 @@ struct ContentView: View {
 
     private var libraryPage: some View {
         GeometryReader { geometry in
-            let gridLayout = ShelfCardMetrics.gridLayout(for: geometry.size.width)
+            let gridLayout = ShelfCardMetrics.gridLayout(
+                for: geometry.size.width,
+                containerHeight: geometry.size.height
+            )
             let cardWidth = gridLayout.cardWidth
             let displayComics = visibleComics
             let comicIndex = ShelfComicIndex(comics: displayComics)
@@ -2547,6 +2575,10 @@ enum ShelfCardMetrics {
     static let metaHeight: CGFloat = 16
     static let verticalSpacing: CGFloat = 10
     static let debugBorders = false
+    /// 宽窗口反推列数时允许的最小卡宽，避免矮窗口里挤出过窄的封面。
+    static let minimumColumnWidth: CGFloat = 150
+    /// 手机横屏/宽窗口下的列数上限。
+    static let maximumPhoneColumns = 5
 
     static func cardWidth(for containerWidth: CGFloat) -> CGFloat {
         let availableWidth = max(0, containerWidth - horizontalPadding * 2 - columnSpacing)
@@ -2555,9 +2587,30 @@ enum ShelfCardMetrics {
 
     static func gridLayout(
         for containerWidth: CGFloat,
+        containerHeight: CGFloat? = nil,
         idiom: UIUserInterfaceIdiom = UIDevice.current.userInterfaceIdiom
     ) -> (columns: [GridItem], cardWidth: CGFloat) {
         if idiom == .phone {
+            // 竖屏保持两列观感。窗口变宽变矮时（横屏、Mac 上的 iPad 窗口）继续按两列
+            // 排版会得到比屏幕还高的卡片：一行就占满整屏，剩下的大片区域看起来就是空白。
+            // 有容器高度时按“卡高不超过容器高的 78%”反推列数，让一行始终放得下。
+            if let containerHeight, containerWidth > containerHeight {
+                let availableWidth = max(0, containerWidth - horizontalPadding * 2)
+                let heightLimitedCardWidth = max(
+                    minimumColumnWidth,
+                    (containerHeight * 0.78 - cardChromeHeight) * coverAspectRatio
+                )
+                let columnCount = min(
+                    maximumPhoneColumns,
+                    max(2, Int((availableWidth + columnSpacing) / (heightLimitedCardWidth + columnSpacing)))
+                )
+                let width = floor((availableWidth - CGFloat(columnCount - 1) * columnSpacing) / CGFloat(columnCount))
+                return (
+                    Array(repeating: GridItem(.fixed(width), spacing: columnSpacing), count: columnCount),
+                    width
+                )
+            }
+
             let width = cardWidth(for: containerWidth)
             return (
                 [
@@ -2577,12 +2630,20 @@ enum ShelfCardMetrics {
     }
 
     static func coverHeight(for cardWidth: CGFloat) -> CGFloat {
-        floor(cardWidth / 0.68)
+        floor(cardWidth / coverAspectRatio)
     }
 
     static func cardHeight(for cardWidth: CGFloat) -> CGFloat {
-        coverHeight(for: cardWidth) + titleHeight + progressHeight + metaHeight + verticalSpacing * 3
+        coverHeight(for: cardWidth) + cardChromeHeight
     }
+
+    /// 卡片中除封面以外的固定高度（标题 + 进度 + 元信息 + 间距）。
+    static var cardChromeHeight: CGFloat {
+        titleHeight + progressHeight + metaHeight + verticalSpacing * 3
+    }
+
+    /// 封面宽高比。0.68 对应常见漫画封面。
+    static let coverAspectRatio: CGFloat = 0.68
 }
 
 struct ComicCoverCard: View {
@@ -4005,7 +4066,10 @@ struct SeriesDetailView: View {
                 }
             } else {
                 GeometryReader { geometry in
-                    let gridLayout = ShelfCardMetrics.gridLayout(for: geometry.size.width)
+                    let gridLayout = ShelfCardMetrics.gridLayout(
+                        for: geometry.size.width,
+                        containerHeight: geometry.size.height
+                    )
                     let cardWidth = gridLayout.cardWidth
                     ScrollView {
                         LazyVGrid(columns: gridLayout.columns, spacing: 24) {

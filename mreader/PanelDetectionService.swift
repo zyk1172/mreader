@@ -708,16 +708,19 @@ actor PanelDetectionService {
     }
 
     nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {
-        let imageSize = image.cgImage.map { "\($0.width)x\($0.height)" }
-            ?? "\(Int(image.size.width))x\(Int(image.size.height))"
+        // Cache identity belongs to the source page, not to a particular 640/4096/6144
+        // decode. Including the decoded dimensions made the layout cache depend on
+        // whichever decode tier happened to be requested first, so the same page could
+        // be re-detected after any change to the reader's decode policy.
+        _ = image
         let identity: String
         if pageURL.isFileURL {
             let values = try? pageURL.resourceValues(
                 forKeys: [.contentModificationDateKey, .fileSizeKey]
             )
-            identity = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)#\(imageSize)"
+            identity = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         } else {
-            identity = "\(pageURL.absoluteString)#\(imageSize)"
+            identity = pageURL.absoluteString
         }
         return sha256(identity)
     }

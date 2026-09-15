@@ -1465,6 +1465,22 @@ struct mreaderTests {
         #expect(result.cardWidth == 170)
     }
 
+    @Test func phoneShelfWidensColumnsInShortWideWindows() {
+        // 横屏/宽窗口里两列会做出比屏幕还高的卡片，一行占满整屏，其余区域就是空白。
+        let landscape = ShelfCardMetrics.gridLayout(for: 714, containerHeight: 390, idiom: .phone)
+
+        #expect(landscape.columns.count >= 3)
+        #expect(landscape.columns.count <= ShelfCardMetrics.maximumPhoneColumns)
+        #expect(ShelfCardMetrics.cardHeight(for: landscape.cardWidth) <= 390 * 0.85)
+    }
+
+    @Test func phoneShelfKeepsTwoColumnsWhenWidthIsNotWiderThanHeight() {
+        let narrow = ShelfCardMetrics.gridLayout(for: 393, containerHeight: 700, idiom: .phone)
+
+        #expect(narrow.columns.count == 2)
+        #expect(narrow.cardWidth == 170)
+    }
+
     @Test func iPadShelfUsesAdditionalColumns() {
         let result = ShelfCardMetrics.gridLayout(for: 744, idiom: .pad)
 
