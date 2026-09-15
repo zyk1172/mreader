@@ -101,7 +101,7 @@ struct GuidedPanelVisionV2Tests {
         #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
     }
 
-    @Test func farCameraMoveIsSlowerAndUsesContextBridge() {
+    @Test func cameraTravelIsSlowerGatedAndStartsTowardDestination() {
         let source = CGRect(x: 0.60, y: 0.05, width: 0.30, height: 0.24)
         let sameRow = CGRect(x: 0.18, y: 0.06, width: 0.30, height: 0.24)
         let far = CGRect(x: 0.06, y: 0.68, width: 0.28, height: 0.22)
@@ -113,14 +113,27 @@ struct GuidedPanelVisionV2Tests {
             to: nil,
             crossesPageBoundary: true
         )
+        let leadIn = GuidedPanelMotionPlanner.bridgeRect(from: source, to: far)
 
         #expect(rowProfile.kind == .sameRow)
-        #expect(!rowProfile.usesContextBridge)
+        #expect(rowProfile.duration >= 1.20)
+        #expect(rowProfile.usesContextBridge)
         #expect(farProfile.duration > rowProfile.duration)
+        #expect(farProfile.duration >= 1.54)
         #expect(farProfile.usesContextBridge)
         #expect(boundary.kind == .pageBoundary)
-        #expect(boundary.duration >= 0.85)
+        #expect(boundary.duration >= 1.50)
         #expect(boundary.usesContextBridge)
+
+        // The lead-in must already move in the destination's direction, but stay
+        // much closer to the source than the destination. This is what makes the
+        // two-stage camera motion read as acceleration instead of zoom-out/in.
+        #expect(leadIn.midX < source.midX)
+        #expect(leadIn.midX > far.midX)
+        #expect(leadIn.midY > source.midY)
+        #expect(leadIn.midY < far.midY)
+        #expect(abs(leadIn.midX - source.midX) < abs(far.midX - leadIn.midX))
+        #expect(abs(leadIn.midY - source.midY) < abs(far.midY - leadIn.midY))
     }
 
     @Test func smallPanelGetsMoreZoomHeadroomThanLargePanel() {

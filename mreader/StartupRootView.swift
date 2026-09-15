@@ -13,6 +13,10 @@ struct StartupRootView: View {
             LaunchGradientBackground()
 
             ContentView()
+                // Short shelf/statistics pages use pull-to-refresh ScrollViews. Let
+                // SwiftUI bounce only when content actually exceeds the viewport so
+                // dragging a short page cannot reveal a screenful of empty space.
+                .scrollBounceBehavior(.basedOnSize)
                 .transaction { transaction in
                     if launchState.isVisible {
                         transaction.animation = nil
