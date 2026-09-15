@@ -43,22 +43,27 @@ nonisolated enum LocalResourceAccessPolicy {
         location(for: url) == .external
     }
 
+    static func bookmarkCreationOptions(for url: URL) -> URL.BookmarkCreationOptions {
+        requiresSecurityScope(for: url) ? .minimalBookmark : []
+    }
+
     @discardableResult
     static func startAccessingIfNeeded(_ url: URL) -> Bool {
         let location = location(for: url)
         let shouldStart = location == .external
+        let didStart = shouldStart && url.startAccessingSecurityScopedResource()
         #if DEBUG
         logLock.lock()
-        let logKey = "\(location.rawValue)|\(url.standardizedFileURL.path)"
+        let logKey = "\(location.rawValue)|\(shouldStart)|\(didStart)|\(url.standardizedFileURL.path)"
         let shouldLog = loggedDecisions.insert(logKey).inserted
         logLock.unlock()
         if shouldLog {
             MReaderLog.reader.debug(
-                "resource access location=\(location.rawValue, privacy: .public) securityScope=\(shouldStart, privacy: .public) path=\(url.standardizedFileURL.path, privacy: .public)"
+                "resource access location=\(location.rawValue, privacy: .public) securityScopeRequested=\(shouldStart, privacy: .public) didStart=\(didStart, privacy: .public) path=\(url.standardizedFileURL.path, privacy: .public)"
             )
         }
         #endif
-        return shouldStart && url.startAccessingSecurityScopedResource()
+        return didStart
     }
 }
 
@@ -67,6 +72,10 @@ nonisolated final class SecurityScopedResource: @unchecked Sendable {
     private let didStart: Bool
     private let lock = NSLock()
     private var isStopped = false
+
+    var hasAccess: Bool {
+        !LocalResourceAccessPolicy.requiresSecurityScope(for: url) || didStart
+    }
 
     init(url: URL) {
         self.url = url
@@ -218,6 +227,10 @@ class ComicManager {
         do {
             let url = try resolveBookmark(bookmarkData)
             let accessToken = SecurityScopedResource(url: url)
+            guard accessToken.hasAccess else {
+                logger.error("load-pages-security-scope-denied path=\(url.path, privacy: .public)")
+                return nil
+            }
             logMemory("load-pages-start \(url.lastPathComponent)")
             if isReadableArchive(url) {
                 do {
@@ -305,8 +318,9 @@ class ComicManager {
     nonisolated static func resolveBookmark(_ bookmarkData: Data) throws -> URL {
         var isStale = false
         let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
-        if isStale {
-            logger.warning("bookmark-stale resolved-path=\(url.path, privacy: .public)")
+        guard !isStale else {
+            logger.warning("bookmark-stale rejected-path=\(url.path, privacy: .public)")
+            throw CocoaError(.fileReadNoPermission)
         }
         return url
     }
@@ -324,7 +338,12 @@ class ComicManager {
     
     // 统一导入入口
     nonisolated static func importFileOrFolder(url: URL, destinationRoot: URL? = nil) async -> ImportResult? {
+        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
         let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+        guard !requiresAccess || isSecurityScoped else {
+            logger.error("import-security-scope-denied path=\(url.path, privacy: .public)")
+            return nil
+        }
         defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
 
         let ext = url.pathExtension.lowercased()
@@ -465,8 +484,15 @@ class ComicManager {
     
     nonisolated private static func createBookmark(for url: URL) -> Data? {
         do {
-            return try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-        } catch { return nil }
+            return try url.bookmarkData(
+                options: LocalResourceAccessPolicy.bookmarkCreationOptions(for: url),
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            logger.error("bookmark-create-failed path=\(url.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     nonisolated private static func copyImagesToLocalLibrary(from sourceURL: URL, title: String, root: URL? = nil) -> URL? {
@@ -857,17 +883,23 @@ class ComicManager {
     }
 
     nonisolated static func setLibraryRoot(_ url: URL) -> Bool {
+        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
         let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+        guard !requiresAccess || didStartAccessing else {
+            logger.error("library-root-security-scope-denied path=\(url.path, privacy: .public)")
+            return false
+        }
         defer {
             if didStartAccessing {
                 url.stopAccessingSecurityScopedResource()
             }
         }
         do {
-            let bookmark = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            let bookmark = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(bookmark, forKey: libraryRootBookmarkKey)
             return true
         } catch {
+            logger.error("library-root-bookmark-create-failed path=\(url.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             return false
         }
     }
@@ -897,7 +929,12 @@ class ComicManager {
 
     nonisolated static func withSelectedLibraryRoot<T>(_ body: (URL) throws -> T) rethrows -> T? {
         guard let url = selectedLibraryRootURL() else { return nil }
+        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
         let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+        guard !requiresAccess || didStart else {
+            logger.error("library-root-security-scope-denied path=\(url.path, privacy: .public)")
+            return nil
+        }
         defer {
             if didStart {
                 url.stopAccessingSecurityScopedResource()
@@ -917,7 +954,12 @@ class ComicManager {
         guard targetPath == selectedPath || targetPath.hasPrefix(selectedPath + "/") else {
             return nil
         }
+        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: selectedRoot)
         let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(selectedRoot)
+        guard !requiresAccess || didStart else {
+            logger.error("library-write-security-scope-denied path=\(selectedRoot.path, privacy: .public)")
+            return nil
+        }
         defer {
             if didStart {
                 selectedRoot.stopAccessingSecurityScopedResource()
@@ -1008,7 +1050,12 @@ class ComicManager {
     }
 
     nonisolated static func inspectImportFolder(_ url: URL) -> ImportFolderInspection {
+        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
         let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+        guard !requiresAccess || didStart else {
+            logger.error("inspect-import-security-scope-denied path=\(url.path, privacy: .public)")
+            return ImportFolderInspection(hasDirectImages: false, importableChildren: [])
+        }
         defer {
             if didStart {
                 url.stopAccessingSecurityScopedResource()
