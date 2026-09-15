@@ -38,18 +38,18 @@ nonisolated enum GuidedPanelMotionPlanner {
             // 移动到新取景的单次 easeInOut。
             return GuidedPanelMotionProfile(
                 kind: .pageBoundary,
-                duration: 0.42,
+                duration: 0.70,
                 bridgeDuration: 0,
-                settleDuration: 0.42,
+                settleDuration: 0.70,
                 usesContextBridge: false
             )
         }
         guard let source, let destination else {
             return GuidedPanelMotionProfile(
                 kind: .focusEntry,
-                duration: 0.55,
+                duration: 0.85,
                 bridgeDuration: 0,
-                settleDuration: 0.55,
+                settleDuration: 0.85,
                 usesContextBridge: false
             )
         }
@@ -73,7 +73,7 @@ nonisolated enum GuidedPanelMotionPlanner {
             // single stage: a bridge whose lead-in is a few percent of the distance
             // reads as "crawl, then jump" and doubles the transaction count for no
             // perceptible gain.
-            let duration = clamp(0.40 + Double(distance) * 0.14 + Double(scaleChange) * 0.025, 0.42, 0.54)
+            let duration = clamp(0.72 + Double(distance) * 0.22 + Double(scaleChange) * 0.04, 0.75, 0.95)
             return GuidedPanelMotionProfile(
                 kind: .sameRow,
                 duration: duration,
@@ -84,7 +84,7 @@ nonisolated enum GuidedPanelMotionPlanner {
         }
 
         if distance >= 0.56 || scaleChange >= 1.8 {
-            let duration = clamp(0.58 + Double(distance) * 0.16 + Double(scaleChange) * 0.03, 0.60, 0.78)
+            let duration = clamp(1.00 + Double(distance) * 0.24 + Double(scaleChange) * 0.05, 1.05, 1.25)
             let bridgeDuration = duration * 0.30
             return GuidedPanelMotionProfile(
                 kind: .farJump,
@@ -97,7 +97,7 @@ nonisolated enum GuidedPanelMotionPlanner {
 
         let movesDownward = destination.midY > source.midY + 0.05
         if movesDownward, verticalOverlap < 0.32 {
-            let duration = clamp(0.50 + Double(distance) * 0.15 + Double(scaleChange) * 0.03, 0.52, 0.66)
+            let duration = clamp(0.90 + Double(distance) * 0.20 + Double(scaleChange) * 0.05, 0.92, 1.10)
             let bridgeDuration = duration * 0.30
             return GuidedPanelMotionProfile(
                 kind: .nextRow,
@@ -108,7 +108,7 @@ nonisolated enum GuidedPanelMotionPlanner {
             )
         }
 
-        let duration = clamp(0.45 + Double(distance) * 0.13 + Double(scaleChange) * 0.025, 0.46, 0.60)
+        let duration = clamp(0.78 + Double(distance) * 0.20 + Double(scaleChange) * 0.04, 0.80, 1.00)
         return GuidedPanelMotionProfile(
             kind: .nearby,
             duration: duration,

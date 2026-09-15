@@ -1465,30 +1465,43 @@ struct mreaderTests {
         #expect(result.cardWidth == 170)
     }
 
-    @Test func readerImageCacheBudgetKeepsThreeGigabyteDeviceUsable() {
+    @Test func readerMemoryBudgetKeepsThreeGigabyteDeviceUsable() {
         // iPad mini 5（A12 / 3GB）是本工程支持的最低内存机型，它必须拿到足够大的
-        // 解码缓存：单页 4096px 位图约 45MB，180MB 只放得下 4 页。
-        let miniFive = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+        // 解码缓存：单页 4096px 位图约 15-45MB，180MB 只放得下 4-11 页。
+        let miniFive = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
 
-        #expect(miniFive.memoryLimitMB >= ReaderImageCacheBudget.minimumMemoryLimitMB)
-        #expect(miniFive.memoryLimitMB >= 512)
-        #expect(miniFive.preloadMB >= 256)
-        #expect(miniFive.preloadMB < miniFive.memoryLimitMB)
+        #expect(miniFive.decodedImageCacheMB >= ReaderMemoryBudgetPlanner.minimumDecodedImageCacheMB)
+        #expect(miniFive.decodedImageCacheMB >= 512)
+        #expect(miniFive.decodedImagePreloadMB >= 256)
+        #expect(miniFive.decodedImagePreloadMB < miniFive.decodedImageCacheMB)
+        #expect(miniFive.remotePageDataCacheMB >= 128)
+        #expect(miniFive.remotePageDataDiskMB >= 512)
     }
 
-    @Test func readerImageCacheBudgetGrowsWithPhysicalMemory() {
-        let threeGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
-        let fourGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 4 * 1_024 * 1_024 * 1_024)
-        let sixGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 6 * 1_024 * 1_024 * 1_024)
-        let eightGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+    @Test func readerMemoryBudgetGrowsWithPhysicalMemory() {
+        let threeGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+        let fourGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 4 * 1_024 * 1_024 * 1_024)
+        let sixGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 6 * 1_024 * 1_024 * 1_024)
+        let eightGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
-        #expect(threeGB.memoryLimitMB < fourGB.memoryLimitMB)
-        #expect(fourGB.memoryLimitMB < sixGB.memoryLimitMB)
-        #expect(sixGB.memoryLimitMB < eightGB.memoryLimitMB)
+        #expect(threeGB.decodedImageCacheMB < fourGB.decodedImageCacheMB)
+        #expect(fourGB.decodedImageCacheMB < sixGB.decodedImageCacheMB)
+        #expect(sixGB.decodedImageCacheMB < eightGB.decodedImageCacheMB)
+        #expect(threeGB.remotePageDataCacheMB < fourGB.remotePageDataCacheMB)
+        #expect(fourGB.remotePageDataCacheMB < sixGB.remotePageDataCacheMB)
+        #expect(sixGB.remotePageDataCacheMB < eightGB.remotePageDataCacheMB)
         // 预取预算始终小于常驻上限，避免预取把缓存挤满。
-        for limits in [threeGB, fourGB, sixGB, eightGB] {
-            #expect(limits.preloadMB < limits.memoryLimitMB)
+        for budget in [threeGB, fourGB, sixGB, eightGB] {
+            #expect(budget.decodedImagePreloadMB < budget.decodedImageCacheMB)
         }
+    }
+
+    @Test func readerMemoryBudgetDoesNotLeaveRemoteCacheAtLegacyFloor() {
+        // 16 Pro 是 8GB：远程页压缩数据缓存曾经只有 180MB，与解码位图缓存差了一个数量级。
+        let sixteenPro = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+
+        #expect(sixteenPro.remotePageDataCacheMB >= 512)
+        #expect(sixteenPro.decodedImageCacheMB >= 1_024)
     }
 
     @Test func phoneShelfWidensColumnsInShortWideWindows() {

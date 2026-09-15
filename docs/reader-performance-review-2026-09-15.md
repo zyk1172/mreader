@@ -231,6 +231,10 @@ ReaderImageCache.shared.preload(urls, maxPixelSize: isContinuous ? 8192 : 4096,
 | 分镜翻页等待 | 新增邻页布局预取队列（`GuidedPanelLayoutStore`，串行消费、**不随翻页取消**）：当前页布局就绪后立刻预热 `±1 / +2` 页的图片与面板布局，翻页时同步命中本地缓存，不再显示加载圈。同时把 `.guidedPanel` 从 `preanalyze` 里移除——那条任务每次翻页都会被取消，几乎跑不完 | `ReaderView.swift` |
 | 分镜整页过渡 | `pageBoundary` 不再桥接到整页上下文（`bridgeDuration: 0`，0.42s 单段 easeInOut）；删除方向性整页 `transition`。翻页时若预取命中，直接把相机设到目标分镜，读者看到的是「上一个分镜 → 下一个分镜」，中间不出现整页画面；只有预取未落地时才退回整页入场 | `ReaderView.swift`、`GuidedPanelMotionPlanner.swift` |
 | 分镜翻页被永久 gate | `moveWithinPage` 的取消分支会把 `isPanelTransitioning` 留在 `true`，一旦在收尾等待期间被取消，后续 `nextPanel`/`previousPanel` 会被永久拦截。改为 `defer` 复位；同时清理已无读取方的 `panelNavigationDirection` | `ReaderView.swift` |
+| 分镜动画太慢/太快 | 一轮反馈「非常卡」→ 砍到 0.42–0.78s → 二轮反馈「太快」→ 落到中间档：`sameRow` 0.75–0.95s、`nearby` 0.80–1.00s、`nextRow` 0.92–1.10s、`farJump` 1.05–1.25s、`focusEntry` 0.85s、跨页 0.70s。关键是曲线不再把全程距离压进前三分之一，所以同样的时长读起来是均匀的 | `GuidedPanelMotionPlanner.swift` |
+| 内存分档只改了一半 | 新增 `ReaderMemoryBudget`/`ReaderMemoryBudgetPlanner`，把「解码位图缓存 + 预取 + 远程页压缩数据（内存/磁盘）+ 远程预取」统一到一张分档表。`RemotePageLoader` 的 ≥6GB 档原本仍是 `180MB`（16 Pro 上看到的就是它），现在 8GB+ 为 512MB 内存 / 3GB 磁盘；3GB 档为 192MB / 1GB | `ReaderMemoryBudget.swift`（新增）、`ReaderView.swift`、`RemotePageLoader.swift` |
+| 分镜仍会转加载圈 | 三处：① 邻页布局现在带页面像素尺寸一起缓存，翻页不再依赖 `PageGeometryStore` 是否已登记该页（尺寸未知会退回整页入场并显示加载圈）；② 预取范围扩到 `+1/+2/+3` 与 `-1/-2`；③ `detectPanels` 用 `defer` 复位 `isDetecting`——之前取消分支直接 `return` 会让加载圈一直转、并连带把翻页锁死 | `ReaderView.swift` |
+| 三个主页下方一大块空白 | 内容不满一屏时改为垂直居中（`frame(minHeight:alignment:.center)`，内容超一屏时不生效）；新增 `ScrollOffsetClampingView` 把「内容变短后报废的 `contentOffset`」和「手势结束后仍停在非法值上的偏移」夹回合法范围（只在滚动静止时动手，不干扰回弹/惯性） | `ScrollOffsetClampingView.swift`（新增）、`ContentView.swift` |
 
 ### 已验证
 
@@ -246,6 +250,7 @@ ReaderImageCache.shared.preload(urls, maxPixelSize: isContinuous ? 8192 : 4096,
 2. **预取内存估算口径**：`estimatedDecodedCost`（`maxPixelSize²×0.55`）与入缓存的 `image.cacheCost`（实际像素字节数）不一致，长条下相差约 1.8 倍。缓存上限已经上调，这一项的影响随之变小，但仍建议统一。
 3. **继续阅读页的部分填充**：内容确实短于一屏时，剩余区域仍然是背景色。是否要在短页上做填充式布局（居中 / footer）需要先确定目标设备与观感。
 4. **远程页压缩数据缓存**：`RemotePageLoader.remoteCacheLimits()` 在 3GB 机型上是 `(90, 512)`，`180` 那一档只在 ≥6GB 生效。它是压缩后的 `Data`（单页 1–3MB，可放 30–90 页），暂无证据过小，故本次未动。
+5. **爆速连滑后的空白仍未定论**：模拟器上对书架做 34 次连续快速上滑后，页面会只剩空白，无障碍树里 `LazyVGrid` 的 cell 全部消失（`totalTitles=0`）；此时再滑动一下就会恢复（最后一行的 cell 重新实例化）。已确认这不是偏移越界——所以 `ScrollOffsetClampingView` 救不回这个特定状态；看现象更像 SwiftUI 惰性容器在滚动窗口外的实例化失效，或 iOS 26 `TabView` 在该状态下的快照异常（同一帧能看到另一个 tab 的卡片残留）。复现条件与真实用户手势的差异需要真机确认：真机上连续快速滑动是否也能稳定进入该状态，以及「空一片」时轻轻滑一下是否立刻恢复。
 
 | 6 | 三个主页短内容填充/空状态 | 消除底部空白 | `ContentView.swift:944/1221/3136` |
 

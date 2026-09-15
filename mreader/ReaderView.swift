@@ -485,47 +485,6 @@ private final class ReaderProgressThumbnailCache {
     }
 }
 
-/// 解码后位图缓存的预算。
-nonisolated struct ReaderImageCacheLimits: Equatable {
-    /// 解码位图常驻内存上限（NSCache 的 totalCostLimit）。
-    let memoryLimitMB: Int
-    /// 预解码队列的内存预算，控制在途预取量。
-    let preloadMB: Int
-}
-
-/// 解码位图缓存的分档表。
-///
-/// 基线机型是 **iPad mini 5（A12 / 3GB RAM）**：它是本工程支持的最低内存设备
-/// （`IPHONEOS_DEPLOYMENT_TARGET = 26.0`，iPadOS 26 仍支持 iPad mini 5）。
-/// 3GB 机型的单进程 jetsam 上限约 1.3GB，所以最保守的一档必须按「设备能承受多少」
-/// 来给，而不是按「比它更弱的设备」留余量：旧的 180MB 只放得下 4 页 4096px 位图
-/// （单页约 45MB），往回翻一页就要重新解码。
-///
-/// 各档统一取进程预算的三分之一左右：NSCache 在内存压力下会自行逐出，进程收到
-/// memory warning 时 `ReaderImageCache` 还会整体清空，因此上限可以给到这一档。
-nonisolated enum ReaderImageCacheBudget {
-    /// 3GB 机型（iPad mini 5）的解码缓存下限。
-    static let minimumMemoryLimitMB = 512
-
-    static func limits(forPhysicalMemoryBytes bytes: UInt64) -> ReaderImageCacheLimits {
-        let ramGB = Double(bytes) / (1024 * 1024 * 1024)
-        switch ramGB {
-        case 8...:
-            return ReaderImageCacheLimits(memoryLimitMB: 1_280, preloadMB: 960)
-        case 6..<8:
-            return ReaderImageCacheLimits(memoryLimitMB: 1_024, preloadMB: 768)
-        case 4..<6:
-            return ReaderImageCacheLimits(memoryLimitMB: 640, preloadMB: 480)
-        default:
-            return ReaderImageCacheLimits(memoryLimitMB: minimumMemoryLimitMB, preloadMB: 384)
-        }
-    }
-
-    static func limits() -> ReaderImageCacheLimits {
-        limits(forPhysicalMemoryBytes: deviceMemoryBytes())
-    }
-}
-
 private actor ReaderImageDecodeLimiter {
     static let shared = ReaderImageDecodeLimiter(maximumConcurrentDecodes: 2)
 
@@ -581,13 +540,13 @@ private final class ReaderImageCache {
     private let preloadBudgetBytes: Int
 
     private init() {
-        let limits = ReaderImageCacheBudget.limits()
-        preloadBudgetBytes = limits.preloadMB * 1024 * 1024
+        let budget = ReaderMemoryBudgetPlanner.budget()
+        preloadBudgetBytes = budget.decodedImagePreloadMB * 1024 * 1024
         cache.countLimit = 0
-        cache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
+        cache.totalCostLimit = budget.decodedImageCacheMB * 1024 * 1024
         // 分档结果直接落日志：换设备或换机型的现场可以直接核对是否命中了预期档位。
         MReaderLog.reader.debug(
-            "reader image cache limits physicalMemoryMB=\(Int(deviceMemoryBytes() / (1024 * 1024)), privacy: .public) memoryLimitMB=\(limits.memoryLimitMB, privacy: .public) preloadMB=\(limits.preloadMB, privacy: .public)"
+            "reader memory budget physicalMemoryMB=\(Int(deviceMemoryBytes() / (1024 * 1024)), privacy: .public) decodedImageCacheMB=\(budget.decodedImageCacheMB, privacy: .public) decodedImagePreloadMB=\(budget.decodedImagePreloadMB, privacy: .public)"
         )
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -3014,7 +2973,7 @@ private struct ScrollsToTopDisabledView: UIViewRepresentable {
     }
 }
 
-private extension UIView {
+extension UIView {
     var enclosingScrollView: UIScrollView? {
         if let scrollView = self as? UIScrollView {
             return scrollView
@@ -3364,9 +3323,16 @@ struct ContinuousScrollReader: View {
 ///
 /// 翻页时要用到下一页的布局才能“直接落到第一个分镜”，而 `PanelDetectionService`
 /// 的缓存是 actor 隔离的（同步读不到），所以这里在 MainActor 上留一份同步可读的副本。
+/// 副本里连同页面像素尺寸一起存：翻页路径不能再依赖 `PageGeometryStore` 是否已经
+/// 登记过该页，否则尺寸未知时会退回整页入场的兜底路径（读者看到的就是加载圈）。
 /// 用普通引用类型而非 `@State` 字典：预取落地不应该让分镜视图的 body 失效。
 private final class GuidedPanelLayoutStore {
-    var layouts: [String: PanelPageLayout] = [:]
+    struct Entry {
+        let layout: PanelPageLayout
+        let sourceSize: CGSize
+    }
+
+    var entries: [String: Entry] = [:]
     /// 正在排队或正在预取的页，避免重复提交。
     var scheduled: Set<String> = []
     var pending: [Int] = []
@@ -3484,8 +3450,17 @@ struct GuidedPanelReader: View {
     private func detectPanels(for page: ComicPage) async {
         let pageURL = page.url
 
+        // 无论从哪条路径返回，只要当前页还是这一页，就不要把加载圈留在屏幕上。
+        // 之前取消分支直接 return，会让 isDetecting 永久停在 true：加载圈一直在转，
+        // 而且 nextPanel/previousPanel 的 `guard !isDetecting` 会连带把翻页锁死。
+        defer {
+            if currentPage?.url == pageURL {
+                isDetecting = false
+            }
+        }
+
         // 预取命中：布局已经在本地缓存里，直接落到目标分镜，不显示加载圈。
-        if let cached = layoutStore.layouts[pageURL.absoluteString] {
+        if let cached = layoutStore.entries[pageURL.absoluteString] {
             if layoutStore.appliedPageURL != pageURL {
                 applyCachedLayout(cached, for: page)
             }
@@ -3503,7 +3478,6 @@ struct GuidedPanelReader: View {
             layout = nil
             sourceSize = .zero
             cameraFocusOverride = nil
-            isDetecting = false
             isPanelTransitioning = false
             return
         }
@@ -3521,7 +3495,10 @@ struct GuidedPanelReader: View {
             image: image,
             isRightToLeft: readingDirection == .rightToLeft
         )
-        layoutStore.layouts[pageURL.absoluteString] = detectedLayout
+        layoutStore.entries[pageURL.absoluteString] = GuidedPanelLayoutStore.Entry(
+            layout: detectedLayout,
+            sourceSize: detectedSourceSize
+        )
 
         // A cached layout can arrive while the previous page is still completing
         // its short context/slide stage. Do not collapse both motions into one snap.
@@ -3545,21 +3522,18 @@ struct GuidedPanelReader: View {
             cameraFocusOverride = nil
         }
         enterCurrentPageAtLastPanel = false
-        isDetecting = false
 
         // 当前页就绪后立刻预热邻页：读者翻页时布局已经在本地缓存里，不再等检测。
         scheduleNeighbourPrefetch(around: currentPageIndex)
     }
 
     /// 预取命中时的入场：一次把相机设到目标分镜，不做“整页 -> 首分镜”的缩放。
-    private func applyCachedLayout(_ cached: PanelPageLayout, for page: ComicPage) {
-        guard !cached.panels.isEmpty else { return }
-        let lastPanelIndex = max(cached.panels.count - 1, 0)
+    private func applyCachedLayout(_ cached: GuidedPanelLayoutStore.Entry, for page: ComicPage) {
+        guard !cached.layout.panels.isEmpty else { return }
+        let lastPanelIndex = max(cached.layout.panels.count - 1, 0)
         let targetPanelIndex = enterCurrentPageAtLastPanel ? lastPanelIndex : 0
-        layout = cached
-        if let size = PageGeometryStore.shared.size(for: page.url) {
-            sourceSize = size
-        }
+        layout = cached.layout
+        sourceSize = cached.sourceSize
         panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
         cameraFocusOverride = nil
         enterCurrentPageAtLastPanel = false
@@ -3573,9 +3547,11 @@ struct GuidedPanelReader: View {
     /// 取消自己的预分析任务，导致下一页的推理几乎永远跑不完，翻页时又要现场检测并
     /// 显示加载圈。本队列串行消费，翻页只追加目标，不打断进行中的一页。
     private func scheduleNeighbourPrefetch(around pageIndex: Int) {
-        for index in [pageIndex + 1, pageIndex + 2, pageIndex - 1] where pages.indices.contains(index) {
+        // 读者希望「读完一页时后面两三页已经处理完」，所以向前多预取两页。
+        for index in [pageIndex + 1, pageIndex + 2, pageIndex + 3, pageIndex - 1, pageIndex - 2]
+        where pages.indices.contains(index) {
             let identifier = pages[index].url.absoluteString
-            guard layoutStore.layouts[identifier] == nil,
+            guard layoutStore.entries[identifier] == nil,
                   !layoutStore.scheduled.contains(identifier),
                   !layoutStore.pending.contains(index) else { continue }
             layoutStore.scheduled.insert(identifier)
@@ -3600,13 +3576,17 @@ struct GuidedPanelReader: View {
         let page = pages[index]
         let identifier = page.url.absoluteString
         defer { layoutStore.scheduled.remove(identifier) }
-        guard layoutStore.layouts[identifier] == nil else { return }
+        guard layoutStore.entries[identifier] == nil else { return }
         // 图片解码与邻页图片预取共用同一条 4096 档缓存，命中时不会重复解码。
         guard let image = await ReaderImageCache.shared.loadImage(
             for: page.url,
             maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
         ) else { return }
         guard !Task.isCancelled else { return }
+        let sourceSize = PageGeometryStore.shared.size(for: page.url) ?? CGSize(
+            width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
+            height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
+        )
         let prefetched = await PanelDetectionService.shared.layout(
             comicID: comic.id,
             pageIndex: page.index,
@@ -3615,7 +3595,10 @@ struct GuidedPanelReader: View {
             isRightToLeft: readingDirection == .rightToLeft
         )
         guard !Task.isCancelled else { return }
-        layoutStore.layouts[identifier] = prefetched
+        layoutStore.entries[identifier] = GuidedPanelLayoutStore.Entry(
+            layout: prefetched,
+            sourceSize: sourceSize
+        )
     }
 
     private func panelTransform(in viewport: CGSize) -> (scale: CGFloat, offset: CGSize) {
@@ -3732,15 +3715,14 @@ struct GuidedPanelReader: View {
 
         // 预取命中：直接把相机落到目标分镜。新页在同一个 transaction 里替换旧页，
         // 相机从上一页的取景平滑移动到目标分镜取景——读者看到的是“上一个分镜 ->
-        // 下一个分镜”，中间不出现整页画面。
-        if let cached = layoutStore.layouts[targetURL.absoluteString],
-           !cached.panels.isEmpty,
-           let targetSourceSize = PageGeometryStore.shared.size(for: targetURL) {
-            let lastPanelIndex = max(cached.panels.count - 1, 0)
+        // 下一个分镜”，中间不出现整页画面，也不显示加载圈。
+        if let cached = layoutStore.entries[targetURL.absoluteString],
+           !cached.layout.panels.isEmpty {
+            let lastPanelIndex = max(cached.layout.panels.count - 1, 0)
             let targetPanelIndex = enterAtLastPanel ? lastPanelIndex : 0
             withAnimation(cameraAnimation(for: profile)) {
-                layout = cached
-                sourceSize = targetSourceSize
+                layout = cached.layout
+                sourceSize = cached.sourceSize
                 panelIndex = min(max(targetPanelIndex, 0), lastPanelIndex)
                 cameraFocusOverride = nil
                 currentPageIndex = pageIndex

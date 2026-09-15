@@ -942,49 +942,57 @@ struct ContentView: View {
     }
 
     private var continueReadingPage: some View {
-        Group {
-            if continueReadingComics.isEmpty {
-                // 只保留有阅读记录的漫画，导入新书后这一页天然是空的。显式给出空状态，
-                // 而不是渲染一个空 LazyVStack，否则整页只剩标题和一大片空白。
-                ScrollView {
-                    ContentUnavailableView {
-                        Label("shelf.continueReadingEmptyTitle".localized, systemImage: "book")
-                    } description: {
-                        Text("shelf.continueReadingEmptyDescription".localized)
-                    } actions: {
-                        Button("tab.library".localized) {
-                            selectedPage = .library
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("mreader.shelf.openLibraryTab")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(minHeight: 460)
-                }
-                .refreshable {
-                    await refreshShelfLibraries()
-                }
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 14) {
-                        ForEach(continueReadingComics) { comic in
-                            Button {
-                                openReader(comic)
-                            } label: {
-                                ContinueReadingCard(comic: comic)
+        GeometryReader { geometry in
+            Group {
+                if continueReadingComics.isEmpty {
+                    // 只保留有阅读记录的漫画，导入新书后这一页天然是空的。显式给出空状态，
+                    // 而不是渲染一个空 LazyVStack，否则整页只剩标题和一大片空白。
+                    ScrollView {
+                        ContentUnavailableView {
+                            Label("shelf.continueReadingEmptyTitle".localized, systemImage: "book")
+                        } description: {
+                            Text("shelf.continueReadingEmptyDescription".localized)
+                        } actions: {
+                            Button("tab.library".localized) {
+                                selectedPage = .library
                             }
-                            .buttonStyle(.plain)
-                            .hapticTap(.light)
-                            .accessibilityIdentifier("mreader.shelf.openReader")
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("mreader.shelf.openLibraryTab")
                         }
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: max(geometry.size.height, 460))
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
+                    .refreshable {
+                        await refreshShelfLibraries()
+                    }
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 14) {
+                            ForEach(continueReadingComics) { comic in
+                                Button {
+                                    openReader(comic)
+                                } label: {
+                                    ContinueReadingCard(comic: comic)
+                                }
+                                .buttonStyle(.plain)
+                                .hapticTap(.light)
+                                .accessibilityIdentifier("mreader.shelf.openReader")
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        // 内容不满一屏时整体居中：帧高取 max(minHeight, 内容高)，所以内容
+                        // 超过一屏时这条对齐不生效。否则内容会被顶在上方，下方留一大块空白。
+                        .frame(minHeight: geometry.size.height, alignment: .center)
+                        // 条目减少（同步/筛选/删除）时把报废的滚动偏移夹回来，
+                        // 否则内容会整块滑出屏幕、下方留一大块空白。
+                        .background(ScrollOffsetClampingView())
+                    }
+                    .refreshable {
+                        await refreshShelfLibraries()
+                    }
+                    .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
                 }
-                .refreshable {
-                    await refreshShelfLibraries()
-                }
-                .animation(.spring(response: 0.35, dampingFraction: 0.82), value: library.comics)
             }
         }
     }
@@ -1284,6 +1292,11 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 12)
+                // 内容不满一屏时整体居中（内容超过一屏时这条对齐不生效），
+                // 避免内容被顶在上方、下方留一大块空白。
+                .frame(minHeight: geometry.size.height, alignment: .center)
+                // 条目减少时把报废的滚动偏移夹回来（见 ScrollOffsetClampingView）。
+                .background(ScrollOffsetClampingView())
             }
             .refreshable {
                 await refreshShelfLibraries()
@@ -3229,6 +3242,11 @@ struct ReadingStatisticsView: View {
                 .padding(.horizontal, layout.horizontalPadding)
                 .padding(.vertical, 18)
                 .frame(maxWidth: .infinity)
+                // 统计卡片数量固定，短屏/大窗口下一屏放得下时整体居中，
+                // 不再把内容顶在上方、下方留一大块空白。
+                .frame(minHeight: proxy.size.height, alignment: .center)
+                // 漫画数量变化会让统计卡片高度变化，同样需要把报废的偏移夹回来。
+                .background(ScrollOffsetClampingView())
             }
         }
         .background(FitnessPalette.pageBackground.ignoresSafeArea())
