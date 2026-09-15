@@ -16,9 +16,12 @@ nonisolated enum ReaderPrefetchPolicy {
         // `.infiniteScroll` has no independent implementation yet; it currently reuses
         // the continuous-scroll semantics, so it is intentionally treated identically here.
         let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
+        // Paged readers always advance their logical page index with `+1`; RTL only changes
+        // gesture/visual direction. Using `-1` here for RTL meant Japanese manga preloaded the
+        // pages behind the reader while the UI advanced to `currentPageIndex + 1`.
         let forwardStep = isContinuous
             ? (scrollDirection >= 0 ? 1 : -1)
-            : (readingDirection == .rightToLeft ? -1 : 1)
+            : 1
         var indices: [Int] = includesCurrentPage ? [current] : []
         if forwardCount > 0 {
             indices.append(contentsOf: (1...forwardCount).map { current + $0 * forwardStep })
