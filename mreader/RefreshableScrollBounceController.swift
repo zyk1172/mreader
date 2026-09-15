@@ -2,14 +2,14 @@ import SwiftUI
 import UIKit
 
 /// SwiftUI's `.refreshable` installs a `UIRefreshControl` and can force vertical
-/// bouncing back on even when a parent uses `.scrollBounceBehavior(.basedOnSize)`.
+/// bouncing even when a parent uses `.scrollBounceBehavior(.basedOnSize)`.
 /// The three root shelf pages all use `.refreshable`, which is why the previous
 /// SwiftUI-only fix did not stop the large pull-down blank area.
 ///
-/// The shelf already exposes an explicit refresh command in its toolbar, so these
-/// root refreshable scroll views do not need elastic overscroll. This controller
-/// clamps only UIScrollViews that actually own a UIRefreshControl; reader scrolling
-/// and unrelated horizontal scroll views are left untouched.
+/// Only `alwaysBounceVertical` is overridden. Normal `bounces` stays untouched,
+/// so long shelf content retains standard iOS edge elasticity while short pages
+/// can no longer be pulled through a screenful of empty space. Reader scrolling
+/// and unrelated horizontal scroll views are not touched.
 struct RefreshableScrollBounceController: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -49,7 +49,6 @@ struct RefreshableScrollBounceController: UIViewRepresentable {
     final class Coordinator {
         private struct OriginalState {
             weak var scrollView: UIScrollView?
-            let bounces: Bool
             let alwaysBounceVertical: Bool
         }
 
@@ -90,13 +89,11 @@ struct RefreshableScrollBounceController: UIViewRepresentable {
                 if originalStates[id] == nil {
                     originalStates[id] = OriginalState(
                         scrollView: scrollView,
-                        bounces: scrollView.bounces,
                         alwaysBounceVertical: scrollView.alwaysBounceVertical
                     )
                 }
 
                 scrollView.alwaysBounceVertical = false
-                scrollView.bounces = false
             }
         }
 
@@ -105,7 +102,6 @@ struct RefreshableScrollBounceController: UIViewRepresentable {
             pendingWorkItems.removeAll()
             for state in originalStates.values {
                 guard let scrollView = state.scrollView else { continue }
-                scrollView.bounces = state.bounces
                 scrollView.alwaysBounceVertical = state.alwaysBounceVertical
             }
             originalStates.removeAll()
