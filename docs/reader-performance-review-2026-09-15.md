@@ -227,18 +227,21 @@ ReaderImageCache.shared.preload(urls, maxPixelSize: isContinuous ? 8192 : 4096,
 | 滚动状态 | `pageHeights`/`pageFrames` 从 `@State` 移到非观察容器 `ReaderScrollPageMetricsStore`，滚动不再触发 reader body 重建 | `ReaderView.swift` |
 | 长条首开 | 新增 `PageGeometryStore.preloadSizes`：首屏前用 150ms 预算只读图片头部登记前 12 页真实宽高比（本地源）；占位高度增加「就近页比例」兜底，不再直接落到 1.35 | `ReaderView.swift` |
 | 主页空白 | 继续阅读页在无在读漫画时给出显式空状态（可跳转书架）；手机横屏/宽窗口按「卡高不超过容器高 78%」反推列数，避免 2 列做出比屏幕还高的卡片 | `ContentView.swift`、5 个 `Localizable.strings` |
+| 解码缓存预算 | 基线机型改为 iPad mini 5（A12 / 3GB，本工程支持的最低内存机型）。最低档 `(180, 130)` → `(512, 384)`，其余档同步上调为 `(640, 480)` / `(1024, 768)` / `(1280, 960)`；分档改为纯函数 `ReaderImageCacheBudget.limits(forPhysicalMemoryBytes:)` 并被单测锁定；启动时打日志便于在真机核对命中档位 | `ReaderView.swift` |
 
 ### 已验证
 
 - `.scrollBounceBehavior(.basedOnSize)`（`StartupRootView.swift:19`）**确实生效**：模拟器上拖动继续阅读页，卡片位移 0pt。所以空白与回弹无关，属于「内容不满一屏」。
-- 单元测试 396 项通过（含新增的分镜时长契约、网格列数契约）。
+- 单元测试 398 项通过（含新增的分镜时长契约、网格列数契约、缓存预算分档契约）。
 - UI 冒烟测试全部通过。
+- 缓存预算分档在模拟器上无法验证 3GB 档位（模拟器的 `physicalMemory` 返回宿主 Mac 的内存），需在 iPad mini 5 上按启动日志 `reader image cache limits physicalMemoryMB=...` 核对。
 
 ### 未修复（建议单独排期）
 
 1. **长条解码清晰度**：8192 是「最长边」口径，20:1 的长条会被压到约 655px 宽（低于屏幕 1170px）。真正的解法是纵向分片解码，属于独立改动。
-2. **预取内存估算口径**：`estimatedDecodedCost`（`maxPixelSize²×0.55`）与入缓存的 `image.cacheCost`（实际像素字节数）不一致，长条下相差约 1.8 倍。需要实机内存数据后再调，避免反向引入内存压力。
+2. **预取内存估算口径**：`estimatedDecodedCost`（`maxPixelSize²×0.55`）与入缓存的 `image.cacheCost`（实际像素字节数）不一致，长条下相差约 1.8 倍。缓存上限已经上调，这一项的影响随之变小，但仍建议统一。
 3. **继续阅读页的部分填充**：内容确实短于一屏时，剩余区域仍然是背景色。是否要在短页上做填充式布局（居中 / footer）需要先确定目标设备与观感。
+4. **远程页压缩数据缓存**：`RemotePageLoader.remoteCacheLimits()` 在 3GB 机型上是 `(90, 512)`，`180` 那一档只在 ≥6GB 生效。它是压缩后的 `Data`（单页 1–3MB，可放 30–90 页），暂无证据过小，故本次未动。
 
 | 6 | 三个主页短内容填充/空状态 | 消除底部空白 | `ContentView.swift:944/1221/3136` |
 

@@ -485,14 +485,44 @@ private final class ReaderProgressThumbnailCache {
     }
 }
 
-nonisolated private func cacheLimits() -> (memoryLimitMB: Int, preloadMB: Int) {
-    let ramGB = Double(deviceMemoryBytes()) / (1024 * 1024 * 1024)
-    if ramGB >= 6 {
-        return (750, 600)
-    } else if ramGB >= 4 {
-        return (340, 260)
-    } else {
-        return (180, 130)
+/// 解码后位图缓存的预算。
+nonisolated struct ReaderImageCacheLimits: Equatable {
+    /// 解码位图常驻内存上限（NSCache 的 totalCostLimit）。
+    let memoryLimitMB: Int
+    /// 预解码队列的内存预算，控制在途预取量。
+    let preloadMB: Int
+}
+
+/// 解码位图缓存的分档表。
+///
+/// 基线机型是 **iPad mini 5（A12 / 3GB RAM）**：它是本工程支持的最低内存设备
+/// （`IPHONEOS_DEPLOYMENT_TARGET = 26.0`，iPadOS 26 仍支持 iPad mini 5）。
+/// 3GB 机型的单进程 jetsam 上限约 1.3GB，所以最保守的一档必须按「设备能承受多少」
+/// 来给，而不是按「比它更弱的设备」留余量：旧的 180MB 只放得下 4 页 4096px 位图
+/// （单页约 45MB），往回翻一页就要重新解码。
+///
+/// 各档统一取进程预算的三分之一左右：NSCache 在内存压力下会自行逐出，进程收到
+/// memory warning 时 `ReaderImageCache` 还会整体清空，因此上限可以给到这一档。
+nonisolated enum ReaderImageCacheBudget {
+    /// 3GB 机型（iPad mini 5）的解码缓存下限。
+    static let minimumMemoryLimitMB = 512
+
+    static func limits(forPhysicalMemoryBytes bytes: UInt64) -> ReaderImageCacheLimits {
+        let ramGB = Double(bytes) / (1024 * 1024 * 1024)
+        switch ramGB {
+        case 8...:
+            return ReaderImageCacheLimits(memoryLimitMB: 1_280, preloadMB: 960)
+        case 6..<8:
+            return ReaderImageCacheLimits(memoryLimitMB: 1_024, preloadMB: 768)
+        case 4..<6:
+            return ReaderImageCacheLimits(memoryLimitMB: 640, preloadMB: 480)
+        default:
+            return ReaderImageCacheLimits(memoryLimitMB: minimumMemoryLimitMB, preloadMB: 384)
+        }
+    }
+
+    static func limits() -> ReaderImageCacheLimits {
+        limits(forPhysicalMemoryBytes: deviceMemoryBytes())
     }
 }
 
@@ -551,10 +581,14 @@ private final class ReaderImageCache {
     private let preloadBudgetBytes: Int
 
     private init() {
-        let limits = cacheLimits()
+        let limits = ReaderImageCacheBudget.limits()
         preloadBudgetBytes = limits.preloadMB * 1024 * 1024
         cache.countLimit = 0
         cache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
+        // 分档结果直接落日志：换设备或换机型的现场可以直接核对是否命中了预期档位。
+        MReaderLog.reader.debug(
+            "reader image cache limits physicalMemoryMB=\(Int(deviceMemoryBytes() / (1024 * 1024)), privacy: .public) memoryLimitMB=\(limits.memoryLimitMB, privacy: .public) preloadMB=\(limits.preloadMB, privacy: .public)"
+        )
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,

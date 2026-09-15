@@ -1465,6 +1465,32 @@ struct mreaderTests {
         #expect(result.cardWidth == 170)
     }
 
+    @Test func readerImageCacheBudgetKeepsThreeGigabyteDeviceUsable() {
+        // iPad mini 5（A12 / 3GB）是本工程支持的最低内存机型，它必须拿到足够大的
+        // 解码缓存：单页 4096px 位图约 45MB，180MB 只放得下 4 页。
+        let miniFive = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+
+        #expect(miniFive.memoryLimitMB >= ReaderImageCacheBudget.minimumMemoryLimitMB)
+        #expect(miniFive.memoryLimitMB >= 512)
+        #expect(miniFive.preloadMB >= 256)
+        #expect(miniFive.preloadMB < miniFive.memoryLimitMB)
+    }
+
+    @Test func readerImageCacheBudgetGrowsWithPhysicalMemory() {
+        let threeGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
+        let fourGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 4 * 1_024 * 1_024 * 1_024)
+        let sixGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 6 * 1_024 * 1_024 * 1_024)
+        let eightGB = ReaderImageCacheBudget.limits(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+
+        #expect(threeGB.memoryLimitMB < fourGB.memoryLimitMB)
+        #expect(fourGB.memoryLimitMB < sixGB.memoryLimitMB)
+        #expect(sixGB.memoryLimitMB < eightGB.memoryLimitMB)
+        // 预取预算始终小于常驻上限，避免预取把缓存挤满。
+        for limits in [threeGB, fourGB, sixGB, eightGB] {
+            #expect(limits.preloadMB < limits.memoryLimitMB)
+        }
+    }
+
     @Test func phoneShelfWidensColumnsInShortWideWindows() {
         // 横屏/宽窗口里两列会做出比屏幕还高的卡片，一行占满整屏，其余区域就是空白。
         let landscape = ShelfCardMetrics.gridLayout(for: 714, containerHeight: 390, idiom: .phone)
