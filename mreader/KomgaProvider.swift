@@ -382,112 +382,79 @@ nonisolated enum KomgaProvider {
         var hadPartialFailure = false
 
         for library in libraries {
+            async let seriesRequest = client.series(libraryID: library.id)
+            async let booksRequest = client.books(libraryID: library.id)
+
             let seriesList: [KomgaSeriesDTO]
             do {
-                seriesList = try await client.series(libraryID: library.id)
+                seriesList = try await seriesRequest
+            } catch {
+                // Library-level books remain authoritative for membership. Losing series
+                // metadata only degrades title enrichment, so keep syncing the books.
+                MReaderLog.reader.notice(
+                    "Komga library series metadata unavailable library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                )
+                seriesList = []
+            }
+
+            let books: [KomgaBookDTO]
+            do {
+                books = try await booksRequest
             } catch {
                 MReaderLog.reader.error(
-                    "Komga library series request failed library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                    "Komga library books request failed library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
                 )
                 hadPartialFailure = true
                 continue
             }
+
+            let seriesByID = Dictionary(
+                seriesList.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
             var libraryComicCount = 0
-            var libraryBookCount = 0
-            for series in seriesList {
-                let books: [KomgaBookDTO]
+
+            for book in books {
+                guard !seenBookIDs.contains(book.id) else { continue }
+                let pageCount: Int
                 do {
-                    books = try await client.books(seriesID: series.id)
-                    MReaderLog.reader.debug(
-                        "Komga series books loaded series=\(series.id, privacy: .public) books=\(books.count, privacy: .public)"
-                    )
+                    pageCount = try await resolvedPageCount(book: book, client: client)
                 } catch {
                     MReaderLog.reader.error(
-                        "Komga series books request failed series=\(series.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+                        "Komga page count resolution failed book=\(book.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
                     )
                     hadPartialFailure = true
                     continue
                 }
-                libraryBookCount += books.count
-                for book in books {
-                    guard !seenBookIDs.contains(book.id) else { continue }
-                    let pageCount: Int
-                    do {
-                        pageCount = try await resolvedPageCount(book: book, client: client)
-                    } catch {
-                        MReaderLog.reader.error(
-                            "Komga page count resolution failed book=\(book.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
-                        )
-                        hadPartialFailure = true
-                        continue
-                    }
-                    guard pageCount > 0 else {
-                        MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\(book.id, privacy: .public)")
-                        continue
-                    }
-                    seenBookIDs.insert(book.id)
-                    let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
-                    let coverPath = coverResult?.path
-                    if coverResult?.didWrite == true {
-                        coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
-                    }
-                    let title = mergedTitle(series: series, book: book)
-                    var comic = makeComic(source: source, libraryID: library.id, seriesID: series.id, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
-                    applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
-                    comics.append(comic)
-                    libraryComicCount += 1
+                guard pageCount > 0 else {
+                    MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\(book.id, privacy: .public)")
+                    continue
                 }
+                seenBookIDs.insert(book.id)
+                let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                let coverPath = coverResult?.path
+                if coverResult?.didWrite == true {
+                    coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
+                }
+                let series = book.seriesId.flatMap { seriesByID[$0] }
+                let title = series.map { mergedTitle(series: $0, book: book) }
+                    ?? directBookTitle(library: library, book: book)
+                var comic = makeComic(
+                    source: source,
+                    libraryID: library.id,
+                    seriesID: series?.id ?? book.seriesId,
+                    book: book,
+                    title: title,
+                    pageCount: pageCount,
+                    coverPath: coverPath
+                )
+                applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
+                comics.append(comic)
+                libraryComicCount += 1
             }
 
-            if libraryComicCount == 0 {
-                let books: [KomgaBookDTO]
-                do {
-                    books = try await client.books(libraryID: library.id)
-                    MReaderLog.reader.debug(
-                        "Komga library fallback books loaded library=\(library.id, privacy: .public) books=\(books.count, privacy: .public)"
-                    )
-                } catch {
-                    MReaderLog.reader.error(
-                        "Komga library fallback books request failed library=\(library.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
-                    )
-                    MReaderLog.reader.notice(
-                        "Komga library sync partial library=\(library.id, privacy: .public) series=\(seriesList.count, privacy: .public) books=\(libraryBookCount, privacy: .public) comics=\(libraryComicCount, privacy: .public)"
-                    )
-                    hadPartialFailure = true
-                    continue
-                }
-                libraryBookCount += books.count
-                for book in books {
-                    guard !seenBookIDs.contains(book.id) else { continue }
-                    let pageCount: Int
-                    do {
-                        pageCount = try await resolvedPageCount(book: book, client: client)
-                    } catch {
-                        MReaderLog.reader.error(
-                            "Komga page count resolution failed book=\(book.id, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
-                        )
-                        hadPartialFailure = true
-                        continue
-                    }
-                    guard pageCount > 0 else {
-                        MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\(book.id, privacy: .public)")
-                        continue
-                    }
-                    seenBookIDs.insert(book.id)
-                    let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
-                    let coverPath = coverResult?.path
-                    if coverResult?.didWrite == true {
-                        coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
-                    }
-                    let title = directBookTitle(library: library, book: book)
-                    var comic = makeComic(source: source, libraryID: library.id, seriesID: book.seriesId, book: book, title: title, pageCount: pageCount, coverPath: coverPath)
-                    applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
-                    comics.append(comic)
-                    libraryComicCount += 1
-                }
-            }
             MReaderLog.reader.debug(
-                "Komga library sync completed library=\(library.id, privacy: .public) series=\(seriesList.count, privacy: .public) books=\(libraryBookCount, privacy: .public) comics=\(libraryComicCount, privacy: .public)"
+                "Komga library sync completed library=\(library.id, privacy: .public) series=\(seriesList.count, privacy: .public) books=\(books.count, privacy: .public) comics=\(libraryComicCount, privacy: .public) batched=true"
             )
         }
         return KomgaSourceSyncPayload(

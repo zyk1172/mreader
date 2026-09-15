@@ -103,7 +103,10 @@ actor MangaVisionService {
         let sourceSize = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
             ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         let provider = self.provider
-        let task = Task(priority: .userInitiated) {
+        // Inherit the caller's priority. Foreground analysis keeps the priority of the
+        // user-driven task, while Reader preanalysis stays at `.utility` instead of
+        // being promoted to `.userInitiated` for a multi-second Core ML inference.
+        let task = Task {
             try await provider.analyzePage(
                 image: analysisImage,
                 sourceImageSize: sourceSize,
