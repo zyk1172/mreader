@@ -2973,7 +2973,7 @@ private struct ScrollsToTopDisabledView: UIViewRepresentable {
     }
 }
 
-extension UIView {
+private extension UIView {
     var enclosingScrollView: UIScrollView? {
         if let scrollView = self as? UIScrollView {
             return scrollView
@@ -3408,11 +3408,12 @@ struct GuidedPanelReader: View {
                         onShowControls: onShowControls,
                         onHideControls: onHideControls
                     )
-                    .id(page.url)
+                    // 不挂 .id(page.url)：跨页时保留同一个视图身份，相机才能在同一组
+                    // scaleEffect/offset 上从上一页的取景插值到目标分镜；挂上 id 会让
+                    // SwiftUI 把整棵子树当成新视图，结果是硬切、看不到移动。
+                    // 换页后的图片重载由 LocalImageView 里的 loadedPageURL 负责。
                     .scaleEffect(camera.scale)
                     .offset(camera.offset)
-                    // 没有 transition：跨页由 `moveToPage` 直接把相机送到目标分镜，
-                    // 读者看到的应该是“上一个分镜 -> 下一个分镜”，而不是整页画面。
                     .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
                         await detectPanels(for: page)
                     }
@@ -3547,8 +3548,9 @@ struct GuidedPanelReader: View {
     /// 取消自己的预分析任务，导致下一页的推理几乎永远跑不完，翻页时又要现场检测并
     /// 显示加载圈。本队列串行消费，翻页只追加目标，不打断进行中的一页。
     private func scheduleNeighbourPrefetch(around pageIndex: Int) {
-        // 读者希望「读完一页时后面两三页已经处理完」，所以向前多预取两页。
-        for index in [pageIndex + 1, pageIndex + 2, pageIndex + 3, pageIndex - 1, pageIndex - 2]
+        // 向前两页、向后一页：读者读完一页时后面两页已经处理完，同时把每轮
+        // Core ML 推理量压到 3 页以内（再多会明显增加常驻功耗）。
+        for index in [pageIndex + 1, pageIndex + 2, pageIndex - 1]
         where pages.indices.contains(index) {
             let identifier = pages[index].url.absoluteString
             guard layoutStore.entries[identifier] == nil,
@@ -4506,6 +4508,8 @@ struct LocalImageView: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
     @State private var uiImage: UIImage? = nil
+    /// 已经加载进 `uiImage` 的页面。分镜跨页会复用同一个视图身份，靠它判断是否需要重新加载。
+    @State private var loadedPageURL: URL?
 #if DEBUG
     @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
     @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
@@ -4722,7 +4726,10 @@ struct LocalImageView: View {
             }
         }
         .task(id: imageLoadTaskID) {
-            guard uiImage == nil else { return }
+            // 视图身份可能被复用：分镜跨页要靠同一个视图身份才能让相机在
+            // scaleEffect/offset 上插值（否则整页就是硬切）。所以不能只看
+            // uiImage 是否为空，必须比对已经加载的是不是当前这一页。
+            guard loadedPageURL != url || uiImage == nil else { return }
             if imageLoadDelay > 0 {
                 do {
                     try await Task.sleep(for: .seconds(imageLoadDelay))
@@ -5541,6 +5548,7 @@ struct LocalImageView: View {
     }
 
     private func loadImage() async {
+        let pageURL = url
         await MainActor.run {
             translationTask?.cancel()
             translationTask = nil
@@ -5558,9 +5566,11 @@ struct LocalImageView: View {
         let maxPixelSize = preferredDecodeMaxPixelSize
         if let cachedImage = ReaderImageCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
             await MainActor.run {
+                guard self.url == pageURL else { return }
                 isLoadingImage = false
                 loadFailed = false
                 uiImage = cachedImage
+                loadedPageURL = pageURL
                 isOfflineTranslationDisplayed = false
                 textBlocks.removeAll()
                 ocrTextBlocks.removeAll()
@@ -5595,6 +5605,7 @@ struct LocalImageView: View {
             isLoadingImage = true
             loadFailed = false
             uiImage = nil
+            loadedPageURL = nil
             isOfflineTranslationDisplayed = false
             textBlocks.removeAll()
             ocrTextBlocks.removeAll()
@@ -5617,7 +5628,9 @@ struct LocalImageView: View {
 
         let loadedImage = await ReaderImageCache.shared.loadImage(for: url, maxPixelSize: maxPixelSize)
         await MainActor.run {
+            guard self.url == pageURL else { return }
             self.uiImage = loadedImage
+            self.loadedPageURL = loadedImage == nil ? nil : pageURL
             self.loadFailed = loadedImage == nil
             self.isLoadingImage = false
         }

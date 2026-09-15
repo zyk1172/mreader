@@ -120,8 +120,8 @@ struct GuidedPanelVisionV2Tests {
         // "crawl, then jump"), but must remain long enough to be followed: the earlier
         // 0.42-0.54s window was reported as too fast to read.
         #expect(rowProfile.kind == .sameRow)
-        #expect(rowProfile.duration >= 0.75)
-        #expect(rowProfile.duration <= 1.00)
+        #expect(rowProfile.duration >= 0.85)
+        #expect(rowProfile.duration <= 1.15)
         #expect(!rowProfile.usesContextBridge)
         #expect(rowProfile.bridgeDuration == 0)
         #expect(rowProfile.settleDuration == rowProfile.duration)
@@ -129,7 +129,7 @@ struct GuidedPanelVisionV2Tests {
         #expect(farProfile.kind == .farJump)
         #expect(farProfile.usesContextBridge)
         #expect(farProfile.duration > rowProfile.duration)
-        #expect(farProfile.duration <= 1.30)
+        #expect(farProfile.duration <= 1.50)
 
         #expect(boundary.kind == .pageBoundary)
         // 跨页不做桥接：读者从上一页的最后一个分镜直接进入下一页的目标分镜，
@@ -137,8 +137,8 @@ struct GuidedPanelVisionV2Tests {
         #expect(!boundary.usesContextBridge)
         #expect(boundary.bridgeDuration == 0)
         #expect(boundary.duration == boundary.settleDuration)
-        #expect(boundary.duration >= 0.60)
-        #expect(boundary.duration <= 0.85)
+        #expect(boundary.duration >= 0.75)
+        #expect(boundary.duration <= 1.00)
 
         // The lead-in must already move in the destination's direction, stay closer to the
         // source than to the destination, and cover enough ground to be perceptible.
@@ -156,8 +156,8 @@ struct GuidedPanelVisionV2Tests {
         let entry = GuidedPanelMotionPlanner.profile(from: nil, to: nil)
 
         #expect(entry.kind == .focusEntry)
-        #expect(entry.duration >= 0.60)
-        #expect(entry.duration <= 1.00)
+        #expect(entry.duration >= 0.90)
+        #expect(entry.duration <= 1.10)
         #expect(!entry.usesContextBridge)
     }
 
