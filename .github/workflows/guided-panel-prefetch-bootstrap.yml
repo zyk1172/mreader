@@ -1,0 +1,42 @@
+name: Apply Guided Panel Prefetch Patch
+
+on:
+  push:
+    branches:
+      - perf/guided-panel-prefetch-buffer
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          ref: perf/guided-panel-prefetch-buffer
+          fetch-depth: 0
+
+      - name: Apply Guided Panel patch
+        run: python3 .github/scripts/apply_guided_panel_prefetch_patch.py
+
+      - name: Validate patch shape
+        run: |
+          git diff --check
+          grep -q "beginBufferedPageTransition" mreader/ReaderView.swift
+          grep -q "GuidedPanelPrefetchPolicy.visionIndices" mreader/ReaderView.swift
+          grep -q "guided panel page buffer hit" mreader/ReaderView.swift
+
+      - name: Remove bootstrap files
+        run: |
+          rm .github/scripts/apply_guided_panel_prefetch_patch.py
+          rm .github/workflows/guided-panel-prefetch-bootstrap.yml
+
+      - name: Commit patched reader
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Optimize guided panel prefetch and buffered page transitions"
+          git push origin HEAD:perf/guided-panel-prefetch-buffer
