@@ -1,0 +1,458 @@
+name: Apply runtime log and performance fixes
+
+on:
+  push:
+    branches:
+      - fix/runtime-log-performance-cleanup
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-log-performance-cleanup
+          fetch-depth: 0
+      - name: Apply fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # 1) MangaVision: preserve caller priority. Reader preanalysis is launched as .utility,
+          # so the Core ML inference must not silently promote itself back to .userInitiated.
+          path = Path('mreader/MangaVisionService.swift')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              '''        let provider = self.provider
+                  let task = Task(priority: .userInitiated) {
+                      try await provider.analyzePage(
+              ''',
+              '''        let provider = self.provider
+                  // Inherit the caller's priority. Foreground analysis keeps the priority of the
+                  // user-driven task, while Reader preanalysis stays at `.utility` instead of
+                  // being promoted to `.userInitiated` for a multi-second Core ML inference.
+                  let task = Task {
+                      try await provider.analyzePage(
+              ''',
+              'MangaVision inherited priority'
+          )
+          path.write_text(text)
+
+          # 2) Security-scoped resources: use iOS directory bookmark semantics, fail closed when
+          # scope acquisition fails, and log the actual result instead of the intent.
+          path = Path('mreader/ComicManager.swift')
+          text = path.read_text()
+          old = '''    static func requiresSecurityScope(for url: URL) -> Bool {
+                  location(for: url) == .external
+              }
+          
+              @discardableResult
+              static func startAccessingIfNeeded(_ url: URL) -> Bool {
+                  let location = location(for: url)
+                  let shouldStart = location == .external
+                  #if DEBUG
+                  logLock.lock()
+                  let logKey = "\\(location.rawValue)|\\(url.standardizedFileURL.path)"
+                  let shouldLog = loggedDecisions.insert(logKey).inserted
+                  logLock.unlock()
+                  if shouldLog {
+                      MReaderLog.reader.debug(
+                          "resource access location=\\(location.rawValue, privacy: .public) securityScope=\\(shouldStart, privacy: .public) path=\\(url.standardizedFileURL.path, privacy: .public)"
+                      )
+                  }
+                  #endif
+                  return shouldStart && url.startAccessingSecurityScopedResource()
+              }
+          '''
+          new = '''    static func requiresSecurityScope(for url: URL) -> Bool {
+                  location(for: url) == .external
+              }
+          
+              static func bookmarkCreationOptions(for url: URL) -> URL.BookmarkCreationOptions {
+                  requiresSecurityScope(for: url) ? .minimalBookmark : []
+              }
+          
+              @discardableResult
+              static func startAccessingIfNeeded(_ url: URL) -> Bool {
+                  let location = location(for: url)
+                  let shouldStart = location == .external
+                  let didStart = shouldStart && url.startAccessingSecurityScopedResource()
+                  #if DEBUG
+                  logLock.lock()
+                  let logKey = "\\(location.rawValue)|\\(shouldStart)|\\(didStart)|\\(url.standardizedFileURL.path)"
+                  let shouldLog = loggedDecisions.insert(logKey).inserted
+                  logLock.unlock()
+                  if shouldLog {
+                      MReaderLog.reader.debug(
+                          "resource access location=\\(location.rawValue, privacy: .public) securityScopeRequested=\\(shouldStart, privacy: .public) didStart=\\(didStart, privacy: .public) path=\\(url.standardizedFileURL.path, privacy: .public)"
+                      )
+                  }
+                  #endif
+                  return didStart
+              }
+          '''
+          text = replace_once(text, old, new, 'security scope policy')
+
+          old = '''    nonisolated static func loadPages(bookmarkData: Data) -> LoadResult? {
+                  do {
+                      let url = try resolveBookmark(bookmarkData)
+                      let accessToken = SecurityScopedResource(url: url)
+                      logMemory("load-pages-start \\(url.lastPathComponent)")
+          '''
+          new = '''    nonisolated static func loadPages(bookmarkData: Data) -> LoadResult? {
+                  do {
+                      let url = try resolveBookmark(bookmarkData)
+                      let accessToken = SecurityScopedResource(url: url)
+                      guard !LocalResourceAccessPolicy.requiresSecurityScope(for: url) || accessToken.hasAccess else {
+                          logger.error("load-pages-security-scope-denied path=\\(url.path, privacy: .public)")
+                          return nil
+                      }
+                      logMemory("load-pages-start \\(url.lastPathComponent)")
+          '''
+          text = replace_once(text, old, new, 'loadPages access guard')
+
+          old = '''nonisolated final class SecurityScopedResource: @unchecked Sendable {
+              let url: URL
+              private let didStart: Bool
+              private let lock = NSLock()
+              private var isStopped = false
+          
+              init(url: URL) {
+                  self.url = url
+                  didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+              }
+          '''
+          new = '''nonisolated final class SecurityScopedResource: @unchecked Sendable {
+              let url: URL
+              private let didStart: Bool
+              private let lock = NSLock()
+              private var isStopped = false
+          
+              var hasAccess: Bool {
+                  !LocalResourceAccessPolicy.requiresSecurityScope(for: url) || didStart
+              }
+          
+              init(url: URL) {
+                  self.url = url
+                  didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+              }
+          '''
+          text = replace_once(text, old, new, 'SecurityScopedResource access state')
+
+          old = '''    nonisolated static func resolveBookmark(_ bookmarkData: Data) throws -> URL {
+                  var isStale = false
+                  let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                  if isStale {
+                      logger.warning("bookmark-stale resolved-path=\\(url.path, privacy: .public)")
+                  }
+                  return url
+              }
+          '''
+          new = '''    nonisolated static func resolveBookmark(_ bookmarkData: Data) throws -> URL {
+                  var isStale = false
+                  let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                  guard !isStale else {
+                      logger.warning("bookmark-stale rejected-path=\\(url.path, privacy: .public)")
+                      throw CocoaError(.fileReadNoPermission)
+                  }
+                  return url
+              }
+          '''
+          text = replace_once(text, old, new, 'stale bookmark rejection')
+
+          old = '''    nonisolated private static func createBookmark(for url: URL) -> Data? {
+                  do {
+                      return try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                  } catch { return nil }
+              }
+          '''
+          new = '''    nonisolated private static func createBookmark(for url: URL) -> Data? {
+                  do {
+                      return try url.bookmarkData(
+                          options: LocalResourceAccessPolicy.bookmarkCreationOptions(for: url),
+                          includingResourceValuesForKeys: nil,
+                          relativeTo: nil
+                      )
+                  } catch {
+                      logger.error("bookmark-create-failed path=\\(url.path, privacy: .public) error=\\(error.localizedDescription, privacy: .public)")
+                      return nil
+                  }
+              }
+          '''
+          text = replace_once(text, old, new, 'bookmark creation options')
+
+          old = '''    nonisolated static func setLibraryRoot(_ url: URL) -> Bool {
+                  let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  defer {
+                      if didStartAccessing {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  do {
+                      let bookmark = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                      UserDefaults.standard.set(bookmark, forKey: libraryRootBookmarkKey)
+                      return true
+                  } catch {
+                      return false
+                  }
+              }
+          '''
+          new = '''    nonisolated static func setLibraryRoot(_ url: URL) -> Bool {
+                  let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
+                  let didStartAccessing = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  guard !requiresAccess || didStartAccessing else {
+                      logger.error("library-root-security-scope-denied path=\\(url.path, privacy: .public)")
+                      return false
+                  }
+                  defer {
+                      if didStartAccessing {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  do {
+                      // Apple's iOS directory-access guidance uses a minimal bookmark for a
+                      // security-scoped folder selected through UIDocumentPicker.
+                      let bookmark = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+                      UserDefaults.standard.set(bookmark, forKey: libraryRootBookmarkKey)
+                      return true
+                  } catch {
+                      logger.error("library-root-bookmark-create-failed path=\\(url.path, privacy: .public) error=\\(error.localizedDescription, privacy: .public)")
+                      return false
+                  }
+              }
+          '''
+          text = replace_once(text, old, new, 'library root bookmark')
+
+          old = '''    nonisolated static func withSelectedLibraryRoot<T>(_ body: (URL) throws -> T) rethrows -> T? {
+                  guard let url = selectedLibraryRootURL() else { return nil }
+                  let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  defer {
+                      if didStart {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  return try body(url)
+              }
+          '''
+          new = '''    nonisolated static func withSelectedLibraryRoot<T>(_ body: (URL) throws -> T) rethrows -> T? {
+                  guard let url = selectedLibraryRootURL() else { return nil }
+                  let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
+                  let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  guard !requiresAccess || didStart else {
+                      logger.error("library-root-security-scope-denied path=\\(url.path, privacy: .public)")
+                      return nil
+                  }
+                  defer {
+                      if didStart {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  return try body(url)
+              }
+          '''
+          text = replace_once(text, old, new, 'withSelectedLibraryRoot guard')
+
+          old = '''        let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(selectedRoot)
+                  defer {
+                      if didStart {
+                          selectedRoot.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  return try body(targetRoot)
+          '''
+          new = '''        let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: selectedRoot)
+                  let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(selectedRoot)
+                  guard !requiresAccess || didStart else {
+                      logger.error("library-write-security-scope-denied path=\\(selectedRoot.path, privacy: .public)")
+                      return nil
+                  }
+                  defer {
+                      if didStart {
+                          selectedRoot.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  return try body(targetRoot)
+          '''
+          text = replace_once(text, old, new, 'library write access guard')
+
+          old = '''    nonisolated static func importFileOrFolder(url: URL, destinationRoot: URL? = nil) async -> ImportResult? {
+                  let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
+          
+                  let ext = url.pathExtension.lowercased()
+          '''
+          new = '''    nonisolated static func importFileOrFolder(url: URL, destinationRoot: URL? = nil) async -> ImportResult? {
+                  let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
+                  let isSecurityScoped = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  guard !requiresAccess || isSecurityScoped else {
+                      logger.error("import-security-scope-denied path=\\(url.path, privacy: .public)")
+                      return nil
+                  }
+                  defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
+          
+                  let ext = url.pathExtension.lowercased()
+          '''
+          text = replace_once(text, old, new, 'import security guard')
+
+          old = '''    nonisolated static func inspectImportFolder(_ url: URL) -> ImportFolderInspection {
+                  let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  defer {
+                      if didStart {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  guard let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+          '''
+          new = '''    nonisolated static func inspectImportFolder(_ url: URL) -> ImportFolderInspection {
+                  let requiresAccess = LocalResourceAccessPolicy.requiresSecurityScope(for: url)
+                  let didStart = LocalResourceAccessPolicy.startAccessingIfNeeded(url)
+                  guard !requiresAccess || didStart else {
+                      logger.error("inspect-import-security-scope-denied path=\\(url.path, privacy: .public)")
+                      return ImportFolderInspection(hasDirectImages: false, importableChildren: [])
+                  }
+                  defer {
+                      if didStart {
+                          url.stopAccessingSecurityScopedResource()
+                      }
+                  }
+                  guard let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+          '''
+          text = replace_once(text, old, new, 'inspect import security guard')
+          path.write_text(text)
+
+          # 3) Komga: remove per-series N+1 book requests. Fetch one series page set and one
+          # library book page set concurrently, then join locally by book.seriesId.
+          path = Path('mreader/KomgaProvider.swift')
+          text = path.read_text()
+          start = text.index('        for library in libraries {\n', text.index('private static func syncSource'))
+          end = text.index('        return KomgaSourceSyncPayload(', start)
+          new_block = '''        for library in libraries {
+              async let seriesRequest = client.series(libraryID: library.id)
+              async let booksRequest = client.books(libraryID: library.id)
+  
+              let seriesList: [KomgaSeriesDTO]
+              do {
+                  seriesList = try await seriesRequest
+              } catch {
+                  // Books remain authoritative for library membership. Losing series metadata
+                  // degrades titles only, so continue with the library-level books response.
+                  MReaderLog.reader.notice(
+                      "Komga library series metadata unavailable library=\\(library.id, privacy: .public) reason=\\(MReaderLog.describe(error), privacy: .public)"
+                  )
+                  seriesList = []
+              }
+  
+              let books: [KomgaBookDTO]
+              do {
+                  books = try await booksRequest
+              } catch {
+                  MReaderLog.reader.error(
+                      "Komga library books request failed library=\\(library.id, privacy: .public) reason=\\(MReaderLog.describe(error), privacy: .public)"
+                  )
+                  hadPartialFailure = true
+                  continue
+              }
+  
+              let seriesByID = Dictionary(seriesList.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+              var libraryComicCount = 0
+              for book in books {
+                  guard !seenBookIDs.contains(book.id) else { continue }
+                  let pageCount: Int
+                  do {
+                      pageCount = try await resolvedPageCount(book: book, client: client)
+                  } catch {
+                      MReaderLog.reader.error(
+                          "Komga page count resolution failed book=\\(book.id, privacy: .public) reason=\\(MReaderLog.describe(error), privacy: .public)"
+                      )
+                      hadPartialFailure = true
+                      continue
+                  }
+                  guard pageCount > 0 else {
+                      MReaderLog.reader.notice("Komga book skipped pageCount=0 book=\\(book.id, privacy: .public)")
+                      continue
+                  }
+                  seenBookIDs.insert(book.id)
+                  let coverResult = try? await cachedCoverPath(sourceID: source.id, bookID: book.id, client: client)
+                  let coverPath = coverResult?.path
+                  if coverResult?.didWrite == true {
+                      coverRefreshKeys.insert(coverRefreshKey(sourceID: source.id, bookID: book.id))
+                  }
+                  let series = book.seriesId.flatMap { seriesByID[$0] }
+                  let title = series.map { mergedTitle(series: $0, book: book) }
+                      ?? directBookTitle(library: library, book: book)
+                  var comic = makeComic(
+                      source: source,
+                      libraryID: library.id,
+                      seriesID: series?.id ?? book.seriesId,
+                      book: book,
+                      title: title,
+                      pageCount: pageCount,
+                      coverPath: coverPath
+                  )
+                  applyRemoteProgress(from: book, pageCount: pageCount, to: &comic)
+                  comics.append(comic)
+                  libraryComicCount += 1
+              }
+  
+              MReaderLog.reader.debug(
+                  "Komga library sync completed library=\\(library.id, privacy: .public) series=\\(seriesList.count, privacy: .public) books=\\(books.count, privacy: .public) comics=\\(libraryComicCount, privacy: .public) batched=true"
+              )
+          }
+  '''
+          text = text[:start] + new_block + text[end:]
+          path.write_text(text)
+
+          # Regression coverage for the bookmark-access policy. The project uses synchronized
+          # groups, so this test file is automatically part of the unit-test target.
+          Path('mreaderTests/RuntimeAccessPolicyTests.swift').write_text('''import Foundation
+  import Testing
+  @testable import mreader
+  
+  @Suite("Runtime access policy")
+  struct RuntimeAccessPolicyTests {
+      @Test("App-owned paths do not request security scope")
+      func appOwnedPathDoesNotRequestSecurityScope() {
+          let url = FileManager.default.temporaryDirectory.appendingPathComponent("mreader-test")
+          #expect(LocalResourceAccessPolicy.requiresSecurityScope(for: url) == false)
+          #expect(LocalResourceAccessPolicy.bookmarkCreationOptions(for: url).isEmpty)
+      }
+  
+      @Test("External paths use minimal bookmarks")
+      func externalPathUsesMinimalBookmark() {
+          let url = URL(fileURLWithPath: "/external-provider/MReader")
+          #expect(LocalResourceAccessPolicy.requiresSecurityScope(for: url))
+          #expect(LocalResourceAccessPolicy.bookmarkCreationOptions(for: url).contains(.minimalBookmark))
+      }
+  }
+  ''')
+          PY
+      - name: Verify targeted source invariants
+        shell: bash
+        run: |
+          grep -q 'let task = Task {' mreader/MangaVisionService.swift
+          ! grep -q 'let task = Task(priority: .userInitiated)' mreader/MangaVisionService.swift
+          grep -q 'securityScopeRequested=' mreader/ComicManager.swift
+          grep -q 'options: .minimalBookmark' mreader/ComicManager.swift
+          grep -q 'booksRequest = client.books(libraryID: library.id)' mreader/KomgaProvider.swift
+          ! grep -q 'client.books(seriesID: series.id)' mreader/KomgaProvider.swift
+      - name: Commit fixes and remove bootstrap workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/runtime-fix-bootstrap.yml
+          git add mreader/MangaVisionService.swift mreader/ComicManager.swift mreader/KomgaProvider.swift mreaderTests/RuntimeAccessPolicyTests.swift
+          git commit -m "Fix runtime access, vision priority, and Komga sync"
+          git push origin HEAD:fix/runtime-log-performance-cleanup
