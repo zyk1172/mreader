@@ -25,7 +25,10 @@ nonisolated enum GuidedPanelFocusPolicy {
         isLowPowerModeEnabled: Bool,
         thermalState: ProcessInfo.ThermalState
     ) -> Mode {
-        guard !isLowPowerModeEnabled else { return .dimOnly }
+        // Low Power Mode is common during reading sessions. The focus texture is a one-time
+        // <=768px render and remains far cheaper than page decode/Core ML, so do not silently
+        // remove the requested visual effect just because Low Power Mode is enabled.
+        _ = isLowPowerModeEnabled
         switch thermalState {
         case .serious, .critical:
             return .dimOnly
@@ -318,7 +321,7 @@ struct GuidedPanelFocusOverlay: View {
             .task(id: pageURL.absoluteString) {
                 // A notification can arrive while the conditional overlay is absent. Re-read
                 // ProcessInfo whenever this page's overlay appears so cached blur never flashes
-                // under a stale power/thermal mode.
+                // under a stale thermal mode.
                 let currentMode = GuidedPanelFocusPolicy.currentMode
                 if mode != currentMode {
                     mode = currentMode
