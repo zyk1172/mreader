@@ -12,11 +12,14 @@ nonisolated enum GuidedPanelFocusPolicy {
     }
 
     static let previewMaxPixelSize: CGFloat = 768
-    static let previewBlurRadius: CGFloat = 6
+    // The texture is generated only once per warmed page, so a visibly stronger radius has
+    // negligible tap-path cost. Radius 6 was too subtle after downsampling on real devices.
+    static let previewBlurRadius: CGFloat = 14
     static let panelExpansionRatio: CGFloat = 0.02
     static let featherRadius: CGFloat = 14
     static let dimOpacity: Double = 0.12
-    static let maximumCachedPages = 4
+    // Match the deeper forward warm window while leaving a little room for the current/back page.
+    static let maximumCachedPages = 6
 
     static func mode(
         isLowPowerModeEnabled: Bool,
@@ -170,8 +173,14 @@ final class GuidedPanelFocusPreviewStore {
 
     /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.
     /// It never loads from disk/network and never blocks panel navigation waiting for the result.
-    func prewarm(url: URL, image: UIImage) {
-        guard GuidedPanelFocusPolicy.currentMode == .blurred else { return }
+    /// `modeOverride` exists for deterministic rendering tests; production callers leave it nil.
+    func prewarm(
+        url: URL,
+        image: UIImage,
+        modeOverride: GuidedPanelFocusPolicy.Mode? = nil
+    ) {
+        let mode = modeOverride ?? GuidedPanelFocusPolicy.currentMode
+        guard mode == .blurred else { return }
         let key = url.absoluteString
         guard previews[key] == nil, !inFlight.contains(key), let cgImage = image.cgImage else { return }
 
@@ -279,7 +288,9 @@ struct GuidedPanelFocusOverlay: View {
                 cameraOffset: cameraOffset
             )
 
-            let preview = store.preview(for: pageURL)
+            // Read the observed dictionary directly in body. This makes the dependency on the
+            // async preview insertion explicit to SwiftUI instead of hiding it behind a method.
+            let preview = store.previews[pageURL.absoluteString]
 
             ZStack {
                 if GuidedPanelFocusPolicy.shouldDisplayBlur(
