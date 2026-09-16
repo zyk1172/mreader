@@ -41,13 +41,13 @@ nonisolated enum GuidedPanelPrefetchPolicy {
         )
     }
 
-    /// Normal navigation should hit the proactive warm window. When a very short page outruns
-    /// it, the last two panels are the final opportunity to prioritize N+1 before the boundary.
-    /// Lower layers deduplicate completed/in-flight decode and model work.
+    /// Normal pages stay render-only on taps. Only unusually short two/three-panel pages get the
+    /// legacy N+1 promotion because they may be consumed before the proactive warm window has
+    /// time to finish. This avoids reintroducing the PR #71 tap-jank regression on normal pages.
     static func shouldPromoteNextPage(panelIndex: Int, panelCount: Int) -> Bool {
-        guard panelCount > 0 else { return false }
+        guard panelCount >= 2, panelCount <= 3 else { return false }
         let clamped = min(max(panelIndex, 0), panelCount - 1)
-        return panelCount - clamped - 1 <= 2
+        return panelCount - clamped <= 2
     }
 
     private static func prioritizedIndices(
