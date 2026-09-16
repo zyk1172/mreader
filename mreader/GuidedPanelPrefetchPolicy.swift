@@ -19,8 +19,8 @@ nonisolated enum GuidedPanelPrefetchPolicy {
     }
 
     /// Core ML preanalysis does not need the 4096px display decode. Warm the two forward pages
-    /// from small ImageIO thumbnails first so panel inference can finish while the current page
-    /// is still being read.
+    /// from small ImageIO thumbnails as soon as the current page becomes active so inference
+    /// stays outside the visible panel-tap animation path.
     static func visionIndices(currentPageIndex: Int, pageCount: Int) -> [Int] {
         prioritizedIndices(
             currentPageIndex: currentPageIndex,
@@ -29,12 +29,14 @@ nonisolated enum GuidedPanelPrefetchPolicy {
         )
     }
 
-    /// Once only two panels remain, N+1 becomes latency-critical and should be moved to the
-    /// front of any layout/decode queue.
+    /// Panel taps must stay render-only. N+1/N+2 are already queued when the current page
+    /// becomes active, so reaching the last panels must not suddenly start a 4096px decode or
+    /// promote a Core ML request to userInitiated while the camera is animating. The existing
+    /// ReaderView compatibility hook remains in place, but deliberately never fires.
     static func shouldPromoteNextPage(panelIndex: Int, panelCount: Int) -> Bool {
-        guard panelCount > 0 else { return false }
-        let clamped = min(max(panelIndex, 0), panelCount - 1)
-        return panelCount - clamped - 1 <= 2
+        _ = panelIndex
+        _ = panelCount
+        return false
     }
 
     private static func prioritizedIndices(
