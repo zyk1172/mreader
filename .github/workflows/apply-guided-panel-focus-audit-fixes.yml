@@ -1,0 +1,149 @@
+name: Apply Guided Panel Focus Audit Fixes
+
+on:
+  push:
+    branches:
+      - feature/guided-panel-focus-blur
+    paths:
+      - .github/workflows/apply-guided-panel-focus-audit-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/guided-panel-focus-blur
+          fetch-depth: 0
+
+      - name: Apply audit fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          focus_path = Path('mreader/GuidedPanelFocus.swift')
+          focus = focus_path.read_text()
+
+          focus = replace_once(
+              focus,
+              'import CoreGraphics\n',
+              'import Combine\nimport CoreGraphics\n',
+              'Combine import'
+          )
+
+          focus = replace_once(
+              focus,
+              '''    static var currentMode: Mode {\n        mode(\n            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,\n            thermalState: ProcessInfo.processInfo.thermalState\n        )\n    }\n''',
+              '''    static var currentMode: Mode {\n        mode(\n            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,\n            thermalState: ProcessInfo.processInfo.thermalState\n        )\n    }\n\n    static func shouldDisplayBlur(previewAvailable: Bool, mode: Mode) -> Bool {\n        mode == .blurred && previewAvailable\n    }\n''',
+              'display policy helper'
+          )
+
+          focus = replace_once(
+              focus,
+              '''    private var inFlight: Set<String> = []\n    private var tasks: [String: Task<Void, Never>] = [:]\n''',
+              '''    private var inFlight: Set<String> = []\n    private var tasks: [String: Task<Void, Never>] = [:]\n    private var requestIDs: [String: UUID] = [:]\n''',
+              'request id state'
+          )
+
+          focus = replace_once(
+              focus,
+              '''    /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.\n    /// It never loads from disk/network and never blocks panel navigation waiting for the result.\n    func prewarm(url: URL, image: UIImage) {\n''',
+              '''    /// Reuses only an already-decoded ReaderImageCache entry. This is safe to call when a\n    /// cached panel layout is restored or when system power/thermal pressure recovers.\n    func prewarmCached(url: URL) {\n        let key = url.absoluteString\n        guard previews[key] == nil, !inFlight.contains(key) else { return }\n        guard let image = ReaderImageCache.shared.cachedImage(\n            for: url,\n            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize\n        ) else { return }\n        prewarm(url: url, image: image)\n    }\n\n    func handleSystemModeChange(_ mode: GuidedPanelFocusPolicy.Mode, activeURL: URL) {\n        switch mode {\n        case .blurred:\n            prewarmCached(url: activeURL)\n        case .dimOnly:\n            // Stop queued work immediately. Cached previews are retained but hidden so returning\n            // to normal power/thermal state is instant and does not require another blur pass.\n            cancelAll()\n        }\n    }\n\n    /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.\n    /// It never loads from disk/network and never blocks panel navigation waiting for the result.\n    func prewarm(url: URL, image: UIImage) {\n''',
+              'cached prewarm helpers'
+          )
+
+          focus = replace_once(
+              focus,
+              '''        inFlight.insert(key)\n        let immutableSource = GuidedPanelFocusCGImage(value: cgImage)\n        tasks[key] = Task { @MainActor [weak self] in\n            let rendered = await GuidedPanelFocusPreviewRenderer.shared.render(immutableSource)\n            guard let self else { return }\n            self.inFlight.remove(key)\n            self.tasks[key] = nil\n            guard !Task.isCancelled, let rendered else { return }\n\n            self.previews[key] = UIImage(cgImage: rendered.value, scale: 1, orientation: image.imageOrientation)\n''',
+              '''        let requestID = UUID()\n        inFlight.insert(key)\n        requestIDs[key] = requestID\n        let immutableSource = GuidedPanelFocusCGImage(value: cgImage)\n        tasks[key] = Task { @MainActor [weak self] in\n            let rendered = await GuidedPanelFocusPreviewRenderer.shared.render(immutableSource)\n            guard let self, self.requestIDs[key] == requestID else { return }\n            self.inFlight.remove(key)\n            self.tasks[key] = nil\n            self.requestIDs[key] = nil\n            guard !Task.isCancelled, let rendered else { return }\n\n            self.previews[key] = UIImage(cgImage: rendered.value, scale: 1, orientation: image.imageOrientation)\n''',
+              'stale task isolation'
+          )
+
+          focus = replace_once(
+              focus,
+              '''        tasks.removeAll()\n        inFlight.removeAll()\n''',
+              '''        tasks.removeAll()\n        inFlight.removeAll()\n        requestIDs.removeAll()\n''',
+              'cancel request ids'
+          )
+
+          focus = replace_once(
+              focus,
+              '''struct GuidedPanelFocusOverlay: View {\n    let preview: UIImage?\n    let normalizedPanel: CGRect?\n''',
+              '''struct GuidedPanelFocusOverlay: View {\n    @State private var mode = GuidedPanelFocusPolicy.currentMode\n\n    let store: GuidedPanelFocusPreviewStore\n    let pageURL: URL\n    let normalizedPanel: CGRect?\n''',
+              'overlay inputs'
+          )
+
+          focus = replace_once(
+              focus,
+              '''            ZStack {\n                if let preview {\n                    Image(uiImage: preview)\n''',
+              '''            let preview = store.preview(for: pageURL)\n\n            ZStack {\n                if GuidedPanelFocusPolicy.shouldDisplayBlur(\n                    previewAvailable: preview != nil,\n                    mode: mode\n                ), let preview {\n                    Image(uiImage: preview)\n''',
+              'dynamic preview visibility'
+          )
+
+          focus = replace_once(
+              focus,
+              '''            .opacity(opacity)\n            .allowsHitTesting(false)\n            .accessibilityHidden(true)\n        }\n    }\n}\n''',
+              '''            .opacity(opacity)\n            .allowsHitTesting(false)\n            .accessibilityHidden(true)\n            .task(id: pageURL.absoluteString) {\n                if mode == .blurred {\n                    store.prewarmCached(url: pageURL)\n                }\n            }\n            .onReceive(\n                NotificationCenter.default.publisher(for: ProcessInfo.powerStateDidChangeNotification)\n            ) { _ in\n                refreshSystemMode()\n            }\n            .onReceive(\n                NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)\n            ) { _ in\n                refreshSystemMode()\n            }\n        }\n    }\n\n    private func refreshSystemMode() {\n        let nextMode = GuidedPanelFocusPolicy.currentMode\n        guard nextMode != mode else { return }\n        mode = nextMode\n        store.handleSystemModeChange(nextMode, activeURL: pageURL)\n    }\n}\n''',
+              'system mode observation'
+          )
+
+          focus_path.write_text(focus)
+
+          reader_path = Path('mreader/ReaderView.swift')
+          reader = reader_path.read_text()
+
+          reader = replace_once(
+              reader,
+              '''                    GuidedPanelFocusOverlay(\n                        preview: focusStore.preview(for: page.url),\n                        normalizedPanel: currentFocusPanelRect,\n''',
+              '''                    GuidedPanelFocusOverlay(\n                        store: focusStore,\n                        pageURL: page.url,\n                        normalizedPanel: currentFocusPanelRect,\n''',
+              'current overlay store wiring'
+          )
+
+          reader = replace_once(
+              reader,
+              '''                        GuidedPanelFocusOverlay(\n                            preview: focusStore.preview(for: transitionURL),\n                            normalizedPanel: focusPanelRect(\n''',
+              '''                        GuidedPanelFocusOverlay(\n                            store: focusStore,\n                            pageURL: transitionURL,\n                            normalizedPanel: focusPanelRect(\n''',
+              'transition overlay store wiring'
+          )
+
+          reader = replace_once(
+              reader,
+              '''        if let cached = layoutStore.entries[pageURL.absoluteString] {\n            if layoutStore.appliedPageURL != pageURL {\n''',
+              '''        if let cached = layoutStore.entries[pageURL.absoluteString] {\n            // Layout cache and blur-preview cache have independent lifetimes. Recover a missing\n            // preview from ReaderImageCache without disk/network I/O before returning early.\n            focusStore.prewarmCached(url: pageURL)\n            if layoutStore.appliedPageURL != pageURL {\n''',
+              'cached layout preview recovery'
+          )
+
+          reader_path.write_text(reader)
+
+          tests_path = Path('mreaderTests/GuidedPanelFocusTests.swift')
+          tests = tests_path.read_text()
+          tests = replace_once(
+              tests,
+              '''        #expect(\n            GuidedPanelFocusPolicy.mode(\n                isLowPowerModeEnabled: false,\n                thermalState: .critical\n            ) == .dimOnly\n        )\n''',
+              '''        #expect(\n            GuidedPanelFocusPolicy.mode(\n                isLowPowerModeEnabled: false,\n                thermalState: .critical\n            ) == .dimOnly\n        )\n        #expect(\n            GuidedPanelFocusPolicy.shouldDisplayBlur(\n                previewAvailable: true,\n                mode: .blurred\n            )\n        )\n        #expect(\n            !GuidedPanelFocusPolicy.shouldDisplayBlur(\n                previewAvailable: true,\n                mode: .dimOnly\n            )\n        )\n''',
+              'cached preview display regression'
+          )
+          tests_path.write_text(tests)
+          PY
+
+          rm .github/workflows/apply-guided-panel-focus-audit-fixes.yml
+          git diff --check
+
+      - name: Commit audit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mreader/GuidedPanelFocus.swift mreader/ReaderView.swift mreaderTests/GuidedPanelFocusTests.swift .github/workflows/apply-guided-panel-focus-audit-fixes.yml
+          git commit -m "Harden guided panel focus state transitions"
+          git push origin HEAD:feature/guided-panel-focus-blur
