@@ -42,8 +42,8 @@ nonisolated enum GuidedPanelPrefetchPolicy {
     }
 
     /// Normal navigation should hit the proactive warm window. When a very short page outruns
-    /// it, the last two panels are the final opportunity to promote only the missing N+1 work.
-    /// The caller checks cache/in-flight state, so this does not duplicate already-warm work.
+    /// it, the last two panels are the final opportunity to prioritize N+1 before the boundary.
+    /// Lower layers deduplicate completed/in-flight decode and model work.
     static func shouldPromoteNextPage(panelIndex: Int, panelCount: Int) -> Bool {
         guard panelCount > 0 else { return false }
         let clamped = min(max(panelIndex, 0), panelCount - 1)
