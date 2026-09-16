@@ -49,10 +49,15 @@ nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
     func append(_ data: Data) throws {
         if header == nil {
             headerBuffer.append(data)
-            if headerBuffer.count > Self.maxHeaderBytes {
+            guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else {
+                if headerBuffer.count > Self.maxHeaderBytes {
+                    throw HTTPRequestReceiveError.headerTooLarge
+                }
+                return
+            }
+            guard headerEnd.upperBound <= Self.maxHeaderBytes else {
                 throw HTTPRequestReceiveError.headerTooLarge
             }
-            guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
             let headerData = headerBuffer[..<headerEnd.lowerBound]
             header = String(data: headerData, encoding: .utf8) ?? ""
             method = Self.method(from: header ?? "")
@@ -211,9 +216,10 @@ final class LocalWebServer: ObservableObject {
 }
 
 /// Network.framework callbacks, request parsing and all upload file I/O live on
-/// one dedicated serial queue. This keeps mutable connection state ordered without
-/// bouncing every 64 KB receive callback through MainActor, and prevents a large
-/// upload/multipart copy from blocking SwiftUI rendering.
+/// one shared dedicated serial queue. Sharing the queue across worker generations
+/// guarantees an old listener is stopped before a replacement binds the same port,
+/// while still keeping every 64 KB receive callback and large multipart copy away
+/// from MainActor / SwiftUI rendering.
 nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
     enum State: Sendable {
         case ready(address: String)
@@ -226,7 +232,11 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
         let state: HTTPRequestReceiveState
     }
 
-    private let queue = DispatchQueue(label: "com.mreader.local-web-server", qos: .userInitiated)
+    private static let sharedQueue = DispatchQueue(
+        label: "com.mreader.local-web-server",
+        qos: .userInitiated
+    )
+    private let queue: DispatchQueue
     private let stateHandler: @MainActor @Sendable (State) -> Void
     private let uploadHandler: @MainActor @Sendable (URL) -> Void
 
@@ -247,6 +257,7 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
         stateHandler: @escaping @MainActor @Sendable (State) -> Void,
         uploadHandler: @escaping @MainActor @Sendable (URL) -> Void
     ) {
+        self.queue = Self.sharedQueue
         self.stateHandler = stateHandler
         self.uploadHandler = uploadHandler
     }
@@ -321,10 +332,11 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
             let ip = Self.localIPAddress() ?? "127.0.0.1"
             emit(.ready(address: "http://\(ip):\(port)/\(token)/"))
         case .failed(let error):
-            isStopped = true
-            emit(.failed(message: "网页服务启动失败: \(error.localizedDescription)"))
+            let message = "网页服务启动失败: \(error.localizedDescription)"
+            stopOnQueue(notify: false)
+            emit(.failed(message: message))
         case .cancelled:
-            isStopped = true
+            stopOnQueue(notify: false)
             emit(.cancelled)
         default:
             break
