@@ -49,7 +49,7 @@ struct GuidedPanelFocusTests {
         #expect(abs(rect.height - 800) < 0.001)
     }
 
-    @Test func lowPowerAndThermalPressureDisableNewBlurWork() {
+    @Test func lowPowerAndThermalPressureDisableBlurDisplayAndNewWork() {
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
