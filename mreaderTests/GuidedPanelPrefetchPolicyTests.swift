@@ -4,9 +4,9 @@ import Testing
 
 @Suite
 struct GuidedPanelPrefetchPolicyTests {
-    @Test func guidedPanelPrefetchPrioritizesTwoForwardPages() {
-        #expect(GuidedPanelPrefetchPolicy.layoutIndices(currentPageIndex: 4, pageCount: 12) == [5, 6, 3])
-        #expect(GuidedPanelPrefetchPolicy.visionIndices(currentPageIndex: 4, pageCount: 12) == [5, 6])
+    @Test func guidedPanelPrefetchPrioritizesFourForwardPages() {
+        #expect(GuidedPanelPrefetchPolicy.layoutIndices(currentPageIndex: 4, pageCount: 12) == [5, 6, 7, 8, 3])
+        #expect(GuidedPanelPrefetchPolicy.visionIndices(currentPageIndex: 4, pageCount: 12) == [5, 6, 7, 8])
     }
 
     @Test func guidedPanelPrefetchClampsAtBookEdges() {
@@ -15,10 +15,12 @@ struct GuidedPanelPrefetchPolicyTests {
         #expect(GuidedPanelPrefetchPolicy.visionIndices(currentPageIndex: 1, pageCount: 2).isEmpty)
     }
 
-    @Test func panelTapsNeverStartLatencyCriticalPrefetch() {
-        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 2, panelCount: 8))
+    @Test func onlyVeryShortPagesEnableTapTimeSafetyPromotion() {
         #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 5, panelCount: 8))
         #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 7, panelCount: 8))
+        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 0, panelCount: 3))
+        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 1, panelCount: 3))
+        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 1, panelCount: 2))
     }
 
     @Test func inPageCameraProfilesAreSingleStageAndBounded() {
