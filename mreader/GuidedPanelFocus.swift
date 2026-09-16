@@ -310,7 +310,7 @@ struct GuidedPanelFocusOverlay: View {
                 }
             }
             .onReceive(
-                NotificationCenter.default.publisher(for: ProcessInfo.powerStateDidChangeNotification)
+                NotificationCenter.default.publisher(for: Notification.Name.NSProcessInfoPowerStateDidChange)
             ) { _ in
                 refreshSystemMode()
             }
