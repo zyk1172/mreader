@@ -305,8 +305,18 @@ struct GuidedPanelFocusOverlay: View {
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             .task(id: pageURL.absoluteString) {
-                if mode == .blurred {
+                // A notification can arrive while the conditional overlay is absent. Re-read
+                // ProcessInfo whenever this page's overlay appears so cached blur never flashes
+                // under a stale power/thermal mode.
+                let currentMode = GuidedPanelFocusPolicy.currentMode
+                if mode != currentMode {
+                    mode = currentMode
+                }
+                switch currentMode {
+                case .blurred:
                     requestPreview()
+                case .dimOnly:
+                    cancelPreviewWork()
                 }
             }
             .onReceive(
