@@ -15,11 +15,12 @@ struct GuidedPanelPrefetchPolicyTests {
         #expect(GuidedPanelPrefetchPolicy.visionIndices(currentPageIndex: 1, pageCount: 2).isEmpty)
     }
 
-    @Test func lastPanelsEnableShortPageSafetyPromotion() {
-        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 2, panelCount: 8))
-        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 4, panelCount: 8))
-        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 5, panelCount: 8))
-        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 7, panelCount: 8))
+    @Test func onlyVeryShortPagesEnableTapTimeSafetyPromotion() {
+        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 5, panelCount: 8))
+        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 7, panelCount: 8))
+        #expect(!GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 0, panelCount: 3))
+        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 1, panelCount: 3))
+        #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 1, panelCount: 2))
     }
 
     @Test func inPageCameraProfilesAreSingleStageAndBounded() {
