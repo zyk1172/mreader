@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Testing
+import UIKit
 @testable import mreader
 
 @Suite
@@ -86,5 +87,34 @@ struct GuidedPanelFocusTests {
                 mode: .dimOnly
             )
         )
+    }
+
+    @MainActor
+    @Test func gaussianPreviewIsActuallyRenderedAndDiffersFromSource() async throws {
+        let size = CGSize(width: 96, height: 96)
+        let source = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size.width / 2, height: size.height))
+            UIColor.white.setFill()
+            context.fill(CGRect(x: size.width / 2, y: 0, width: size.width / 2, height: size.height))
+        }
+        let url = URL(fileURLWithPath: "/tmp/guided-panel-focus-render-test.png")
+        let store = GuidedPanelFocusPreviewStore()
+
+        store.prewarm(url: url, image: source, modeOverride: .blurred)
+
+        var preview: UIImage?
+        for _ in 0..<100 {
+            if let rendered = store.preview(for: url) {
+                preview = rendered
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let rendered = try #require(preview)
+        #expect(rendered.cgImage?.width == source.cgImage?.width)
+        #expect(rendered.cgImage?.height == source.cgImage?.height)
+        #expect(rendered.pngData() != source.pngData())
     }
 }
