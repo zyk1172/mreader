@@ -160,6 +160,13 @@ final class LocalWebServer: ObservableObject {
     private var generation = UUID()
     private var onUpload: ((URL) -> Void)?
 
+    /// Startup maintenance uses the same cleanup entry point as before the worker
+    /// split. It is intentionally nonisolated because it performs only filesystem
+    /// cleanup and never touches observable UI state.
+    nonisolated static func clearStaleBodyFiles() {
+        LocalWebServerWorker.clearStaleBodyFiles()
+    }
+
     func start(onUpload: @escaping (URL) -> Void) {
         stop()
         self.onUpload = onUpload
@@ -736,7 +743,7 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
         return (parts[0].uppercased(), parts[1])
     }
 
-    private static func clearStaleBodyFiles() {
+    fileprivate static func clearStaleBodyFiles() {
         let tempRoot = FileManager.default.temporaryDirectory
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: tempRoot,
