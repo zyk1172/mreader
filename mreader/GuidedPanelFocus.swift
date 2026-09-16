@@ -1,3 +1,4 @@
+import Combine
 import CoreGraphics
 import CoreImage
 import Observation
@@ -37,6 +38,10 @@ nonisolated enum GuidedPanelFocusPolicy {
             isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             thermalState: ProcessInfo.processInfo.thermalState
         )
+    }
+
+    static func shouldDisplayBlur(previewAvailable: Bool, mode: Mode) -> Bool {
+        mode == .blurred && previewAvailable
     }
 }
 
@@ -151,9 +156,33 @@ final class GuidedPanelFocusPreviewStore {
     private var recency: [String] = []
     private var inFlight: Set<String> = []
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var requestIDs: [String: UUID] = [:]
 
     func preview(for url: URL) -> UIImage? {
         previews[url.absoluteString]
+    }
+
+    /// Reuses only an already-decoded ReaderImageCache entry. This is safe to call when a
+    /// cached panel layout is restored or when system power/thermal pressure recovers.
+    func prewarmCached(url: URL) {
+        let key = url.absoluteString
+        guard previews[key] == nil, !inFlight.contains(key) else { return }
+        guard let image = ReaderImageCache.shared.cachedImage(
+            for: url,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else { return }
+        prewarm(url: url, image: image)
+    }
+
+    func handleSystemModeChange(_ mode: GuidedPanelFocusPolicy.Mode, activeURL: URL) {
+        switch mode {
+        case .blurred:
+            prewarmCached(url: activeURL)
+        case .dimOnly:
+            // Stop queued work immediately. Cached previews are retained but hidden so returning
+            // to normal power/thermal state is instant and does not require another blur pass.
+            cancelAll()
+        }
     }
 
     /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.
@@ -163,13 +192,16 @@ final class GuidedPanelFocusPreviewStore {
         let key = url.absoluteString
         guard previews[key] == nil, !inFlight.contains(key), let cgImage = image.cgImage else { return }
 
+        let requestID = UUID()
         inFlight.insert(key)
+        requestIDs[key] = requestID
         let immutableSource = GuidedPanelFocusCGImage(value: cgImage)
         tasks[key] = Task { @MainActor [weak self] in
             let rendered = await GuidedPanelFocusPreviewRenderer.shared.render(immutableSource)
-            guard let self else { return }
+            guard let self, self.requestIDs[key] == requestID else { return }
             self.inFlight.remove(key)
             self.tasks[key] = nil
+            self.requestIDs[key] = nil
             guard !Task.isCancelled, let rendered else { return }
 
             self.previews[key] = UIImage(cgImage: rendered.value, scale: 1, orientation: image.imageOrientation)
@@ -184,6 +216,7 @@ final class GuidedPanelFocusPreviewStore {
         }
         tasks.removeAll()
         inFlight.removeAll()
+        requestIDs.removeAll()
     }
 
     private func touch(_ key: String) {
@@ -236,7 +269,10 @@ private struct GuidedPanelInverseFocusMask: Shape {
 }
 
 struct GuidedPanelFocusOverlay: View {
-    let preview: UIImage?
+    @State private var mode = GuidedPanelFocusPolicy.currentMode
+
+    let store: GuidedPanelFocusPreviewStore
+    let pageURL: URL
     let normalizedPanel: CGRect?
     let sourceSize: CGSize
     let viewportSize: CGSize
@@ -258,8 +294,13 @@ struct GuidedPanelFocusOverlay: View {
                 cameraOffset: cameraOffset
             )
 
+            let preview = store.preview(for: pageURL)
+
             ZStack {
-                if let preview {
+                if GuidedPanelFocusPolicy.shouldDisplayBlur(
+                    previewAvailable: preview != nil,
+                    mode: mode
+                ), let preview {
                     Image(uiImage: preview)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -278,6 +319,28 @@ struct GuidedPanelFocusOverlay: View {
             .opacity(opacity)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+            .task(id: pageURL.absoluteString) {
+                if mode == .blurred {
+                    store.prewarmCached(url: pageURL)
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: ProcessInfo.powerStateDidChangeNotification)
+            ) { _ in
+                refreshSystemMode()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            ) { _ in
+                refreshSystemMode()
+            }
         }
+    }
+
+    private func refreshSystemMode() {
+        let nextMode = GuidedPanelFocusPolicy.currentMode
+        guard nextMode != mode else { return }
+        mode = nextMode
+        store.handleSystemModeChange(nextMode, activeURL: pageURL)
     }
 }

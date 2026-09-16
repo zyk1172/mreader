@@ -3443,7 +3443,8 @@ struct GuidedPanelReader: View {
                     // The blur texture is precomputed off the tap path; until it is ready this
                     // automatically falls back to the dim-only layer.
                     GuidedPanelFocusOverlay(
-                        preview: focusStore.preview(for: page.url),
+                        store: focusStore,
+                        pageURL: page.url,
                         normalizedPanel: currentFocusPanelRect,
                         sourceSize: sourceSize,
                         viewportSize: proxy.size,
@@ -3468,7 +3469,8 @@ struct GuidedPanelReader: View {
                     if pages.indices.contains(transitionTarget.pageIndex) {
                         let transitionURL = pages[transitionTarget.pageIndex].url
                         GuidedPanelFocusOverlay(
-                            preview: focusStore.preview(for: transitionURL),
+                            store: focusStore,
+                            pageURL: transitionURL,
                             normalizedPanel: focusPanelRect(
                                 for: transitionTarget.entry,
                                 panelIndex: transitionTarget.panelIndex
@@ -3528,6 +3530,9 @@ struct GuidedPanelReader: View {
 
         // 预取命中：布局已经在本地缓存里，直接落到目标分镜，不显示加载圈。
         if let cached = layoutStore.entries[pageURL.absoluteString] {
+            // Layout cache and blur-preview cache have independent lifetimes. Recover a missing
+            // preview from ReaderImageCache without disk/network I/O before returning early.
+            focusStore.prewarmCached(url: pageURL)
             if layoutStore.appliedPageURL != pageURL {
                 applyCachedLayout(cached, for: page)
             }

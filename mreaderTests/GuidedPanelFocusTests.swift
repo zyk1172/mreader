@@ -74,5 +74,17 @@ struct GuidedPanelFocusTests {
                 thermalState: .critical
             ) == .dimOnly
         )
+        #expect(
+            GuidedPanelFocusPolicy.shouldDisplayBlur(
+                previewAvailable: true,
+                mode: .blurred
+            )
+        )
+        #expect(
+            !GuidedPanelFocusPolicy.shouldDisplayBlur(
+                previewAvailable: true,
+                mode: .dimOnly
+            )
+        )
     }
 }
