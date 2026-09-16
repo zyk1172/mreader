@@ -1,6 +1,7 @@
 import Testing
 @testable import mreader
 
+@MainActor
 struct StartupPresentationTests {
     @Test func launchCoverKeepsTheRequestedMinimumDuration() {
         #expect(

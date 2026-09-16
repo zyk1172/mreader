@@ -7,6 +7,7 @@ import XCTest
 /// 上切片的裁剪底边 = 0.50、下切片的裁剪顶边 = 0.45。
 /// 被切开的一半，其 textBox / bubbleBox 必然触及对应的裁剪边缘；
 /// 完整落在切片内部的气泡则达不到，这正是区分「同一句话」与「两个不同气泡」的关键证据。
+@MainActor
 final class VisionSliceMergeTests: XCTestCase {
 
     /// sliceA 覆盖 0.00~0.50，sliceB 覆盖 0.45~1.00。

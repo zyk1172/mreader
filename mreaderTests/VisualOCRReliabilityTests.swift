@@ -1,6 +1,7 @@
 import XCTest
 @testable import mreader
 
+@MainActor
 final class VisualOCRReliabilityTests: XCTestCase {
     func testRegionTextParserAcceptsCoordinateFreeJSON() throws {
         let result = try XCTUnwrap(

@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class mreaderUITests: XCTestCase {
     private let timeout: TimeInterval = 12
     private let semanticFallbackTimeout: TimeInterval = 2

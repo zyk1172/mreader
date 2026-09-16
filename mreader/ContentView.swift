@@ -5,7 +5,7 @@ import ImageIO
 import Combine
 import LocalAuthentication
 
-fileprivate final class SecurityScopeBox: @unchecked Sendable {
+fileprivate nonisolated final class SecurityScopeBox: @unchecked Sendable {
     private var url: URL?
     private var released = false
 
@@ -3477,11 +3477,11 @@ private struct ReadingGoalArcControl: View {
     }
 }
 
-private struct ArcShape: Shape {
+@MainActor private struct ArcShape: Shape {
     var startAngle: Angle
     var endAngle: Angle
 
-    func path(in rect: CGRect) -> Path {
+    nonisolated func path(in rect: CGRect) -> Path {
         let radius = min(rect.width / 2 - 28, rect.height - 28)
         let center = CGPoint(x: rect.midX, y: rect.maxY - 8)
         var path = Path()

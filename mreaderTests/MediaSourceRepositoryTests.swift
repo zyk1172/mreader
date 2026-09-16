@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import mreader
 
+@MainActor
 struct MediaSourceRepositoryTests {
     @Test
     func concurrentSourceUpdatesAreNotLost() async throws {
@@ -84,22 +85,19 @@ struct MediaSourceRepositoryTests {
     }
 
     private func makeRepository() throws -> (MediaSourceRepository, () -> Void) {
-        let fileManager = FileManager.default
-        let directory = fileManager.temporaryDirectory
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MReaderMediaSourceRepository-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suiteName = "mreader.media-source-tests.\(UUID().uuidString)"
-        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
         let repository = MediaSourceRepository(
-            fileManager: fileManager,
             directoryURL: directory,
-            userDefaults: userDefaults
+            userDefaultsSuiteName: suiteName
         )
         return (
             repository,
             {
-                userDefaults.removePersistentDomain(forName: suiteName)
-                try? fileManager.removeItem(at: directory)
+                UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+                try? FileManager.default.removeItem(at: directory)
             }
         )
     }

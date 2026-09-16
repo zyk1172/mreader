@@ -29,10 +29,18 @@ actor MediaSourceRepository {
     init(
         fileManager: FileManager = .default,
         directoryURL: URL? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        userDefaultsSuiteName: String? = nil
     ) {
         self.fileManager = fileManager
-        self.userDefaults = userDefaults
+        if let userDefaultsSuiteName {
+            guard let suite = UserDefaults(suiteName: userDefaultsSuiteName) else {
+                preconditionFailure("Unable to create UserDefaults suite: \(userDefaultsSuiteName)")
+            }
+            self.userDefaults = suite
+        } else {
+            self.userDefaults = userDefaults
+        }
         let support = directoryURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         sourcesURL = support.appendingPathComponent("media_sources.json")
         hiddenComicsURL = support.appendingPathComponent("hidden_komga_comics.json")

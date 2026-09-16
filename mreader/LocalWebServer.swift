@@ -20,13 +20,16 @@ private enum LocalWebServerFileError: LocalizedError {
     }
 }
 
-final class HTTPRequestReceiveState {
+/// Per-connection parser state. Every mutation is confined to
+/// `LocalWebServerWorker.queue`; `@unchecked Sendable` only allows Network/GCD
+/// callbacks to retain the state while that queue provides the synchronization.
+nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
     private static let maxHeaderBytes = 64 * 1024
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
-    private let lock = NSLock()
-    private var idleWorkItem: DispatchWorkItem?
     private var didFinish = false
+    private var idleTimeoutGeneration = 0
+
     private(set) var header: String?
     private(set) var method: String?
     private(set) var contentLength = 0
@@ -41,23 +44,30 @@ final class HTTPRequestReceiveState {
         return receivedBodyBytes == contentLength
     }
 
+    var isFinished: Bool { didFinish }
+
     func append(_ data: Data) throws {
         if header == nil {
             headerBuffer.append(data)
-            if headerBuffer.count > Self.maxHeaderBytes {
+            guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else {
+                if headerBuffer.count > Self.maxHeaderBytes {
+                    throw HTTPRequestReceiveError.headerTooLarge
+                }
+                return
+            }
+            guard headerEnd.upperBound <= Self.maxHeaderBytes else {
                 throw HTTPRequestReceiveError.headerTooLarge
             }
-            guard let headerEnd = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else { return }
             let headerData = headerBuffer[..<headerEnd.lowerBound]
             header = String(data: headerData, encoding: .utf8) ?? ""
-            method = HTTPRequestReceiveState.method(from: header ?? "")
-            hasContentLengthHeader = HTTPRequestReceiveState.hasContentLengthHeader(in: header ?? "")
+            method = Self.method(from: header ?? "")
+            hasContentLengthHeader = Self.hasContentLengthHeader(in: header ?? "")
             // Only the upload endpoint accepts a request body. GET/HEAD and other
             // non-POST requests are complete as soon as their headers arrive;
             // a POST without Content-Length is rejected by respond() instead of
             // waiting for the client to close a keep-alive connection.
             contentLength = method == "POST"
-                ? HTTPRequestReceiveState.contentLength(from: header ?? "") ?? -1
+                ? Self.contentLength(from: header ?? "") ?? -1
                 : 0
             if contentLength > 0 {
                 let url = FileManager.default.temporaryDirectory
@@ -77,44 +87,36 @@ final class HTTPRequestReceiveState {
     }
 
     func cleanup() {
-        lock.lock()
-        idleWorkItem?.cancel()
-        idleWorkItem = nil
-        lock.unlock()
+        invalidateIdleTimeout()
         try? bodyHandle?.close()
         bodyHandle = nil
         if let bodyFileURL {
             try? FileManager.default.removeItem(at: bodyFileURL)
+            self.bodyFileURL = nil
         }
+        headerBuffer.removeAll(keepingCapacity: false)
     }
 
     func markFinished() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
         guard !didFinish else { return false }
         didFinish = true
-        idleWorkItem?.cancel()
-        idleWorkItem = nil
+        invalidateIdleTimeout()
         return true
     }
 
-    var isFinished: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return didFinish
+    /// Returns a monotonically increasing token. Delayed blocks validate the token
+    /// before timing a request out, so re-arming never lets an older timeout win.
+    func nextIdleTimeoutGeneration() -> Int {
+        idleTimeoutGeneration &+= 1
+        return idleTimeoutGeneration
     }
 
-    func armIdleTimeout(after interval: TimeInterval, handler: @escaping () -> Void) {
-        lock.lock()
-        idleWorkItem?.cancel()
-        guard !didFinish else {
-            lock.unlock()
-            return
-        }
-        let workItem = DispatchWorkItem(block: handler)
-        idleWorkItem = workItem
-        lock.unlock()
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + interval, execute: workItem)
+    func shouldFireIdleTimeout(generation: Int) -> Bool {
+        !didFinish && generation == idleTimeoutGeneration
+    }
+
+    private func invalidateIdleTimeout() {
+        idleTimeoutGeneration &+= 1
     }
 
     private func appendBody(_ body: Data.SubSequence) throws {
@@ -153,133 +155,298 @@ final class HTTPRequestReceiveState {
     }
 }
 
+@MainActor
 final class LocalWebServer: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var address = ""
     @Published var errorMessage: String?
 
-    private var listener: NWListener?
+    private var worker: LocalWebServerWorker?
+    private var generation = UUID()
     private var onUpload: ((URL) -> Void)?
+
+    /// Startup maintenance uses the same cleanup entry point as before the worker
+    /// split. It is intentionally nonisolated because it performs only filesystem
+    /// cleanup and never touches observable UI state.
+    nonisolated static func clearStaleBodyFiles() {
+        LocalWebServerWorker.clearStaleBodyFiles()
+    }
+
+    func start(onUpload: @escaping (URL) -> Void) {
+        stop()
+        self.onUpload = onUpload
+        errorMessage = nil
+
+        let generation = UUID()
+        self.generation = generation
+        let worker = LocalWebServerWorker(
+            stateHandler: { [weak self] state in
+                guard let self, self.generation == generation else { return }
+                switch state {
+                case .ready(let address):
+                    self.isRunning = true
+                    self.address = address
+                    self.errorMessage = nil
+                case .failed(let message):
+                    self.isRunning = false
+                    self.address = ""
+                    self.errorMessage = message
+                case .cancelled:
+                    self.isRunning = false
+                    self.address = ""
+                }
+            },
+            uploadHandler: { [weak self] url in
+                guard let self, self.generation == generation else { return }
+                self.onUpload?(url)
+            }
+        )
+        self.worker = worker
+        worker.start()
+    }
+
+    func stop() {
+        generation = UUID()
+        worker?.stop()
+        worker = nil
+        onUpload = nil
+        isRunning = false
+        address = ""
+    }
+}
+
+/// Network.framework callbacks, request parsing and all upload file I/O live on
+/// one shared dedicated serial queue. Sharing the queue across worker generations
+/// guarantees an old listener is stopped before a replacement binds the same port,
+/// while still keeping every 64 KB receive callback and large multipart copy away
+/// from MainActor / SwiftUI rendering.
+nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
+    enum State: Sendable {
+        case ready(address: String)
+        case failed(message: String)
+        case cancelled
+    }
+
+    private struct ActiveConnection {
+        let connection: NWConnection
+        let state: HTTPRequestReceiveState
+    }
+
+    private static let sharedQueue = DispatchQueue(
+        label: "com.mreader.local-web-server",
+        qos: .userInitiated
+    )
+    private let queue: DispatchQueue
+    private let stateHandler: @MainActor @Sendable (State) -> Void
+    private let uploadHandler: @MainActor @Sendable (URL) -> Void
+
+    private var listener: NWListener?
     private var token = ""
+    private var activeConnections: [ObjectIdentifier: ActiveConnection] = [:]
+    private var isStopped = true
+
     private let port: UInt16 = 8080
     private let maxUploadSize = 300 * 1024 * 1024
     private let maximumConnections = 4
     private let idleTimeout: TimeInterval = 30
-    private let connectionLock = NSLock()
-    private var activeConnectionCount = 0
-    private let allowedUploadExtensions: Set<String> = ["zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]
+    private let allowedUploadExtensions: Set<String> = [
+        "zip", "cbz", "epub", "pdf", "jpg", "jpeg", "png", "webp", "gif", "heic", "heif"
+    ]
 
-    nonisolated static func clearStaleBodyFiles() {
-        let tempRoot = FileManager.default.temporaryDirectory
-        guard let files = try? FileManager.default.contentsOfDirectory(at: tempRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
-        for file in files where file.lastPathComponent.hasPrefix("MReaderWebUpload-") && file.pathExtension == "body" {
-            try? FileManager.default.removeItem(at: file)
+    init(
+        stateHandler: @escaping @MainActor @Sendable (State) -> Void,
+        uploadHandler: @escaping @MainActor @Sendable (URL) -> Void
+    ) {
+        self.queue = Self.sharedQueue
+        self.stateHandler = stateHandler
+        self.uploadHandler = uploadHandler
+    }
+
+    func start() {
+        queue.async { [self] in
+            startOnQueue()
         }
     }
 
-    func start(onUpload: @escaping (URL) -> Void) {
-        self.onUpload = onUpload
-        stop()
+    func stop() {
+        queue.async { [self] in
+            stopOnQueue(notify: true)
+        }
+    }
+
+    private func startOnQueue() {
+        guard isStopped else { return }
+        isStopped = false
         token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         Self.clearStaleBodyFiles()
 
         do {
-            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
+            guard let port = NWEndpoint.Port(rawValue: port) else {
+                emit(.failed(message: "网页服务启动失败: 无效端口"))
+                isStopped = true
+                return
+            }
+            let listener = try NWListener(using: .tcp, on: port)
             listener.stateUpdateHandler = { [weak self] state in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    switch state {
-                    case .ready:
-                        self.isRunning = true
-                        self.address = "http://\(Self.localIPAddress() ?? "127.0.0.1"):\(self.port)/\(self.token)/"
-                        self.errorMessage = nil
-                    case .failed(let error):
-                        self.isRunning = false
-                        self.errorMessage = "网页服务启动失败: \(error.localizedDescription)"
-                    case .cancelled:
-                        self.isRunning = false
-                        self.address = ""
-                    default:
-                        break
-                    }
-                }
+                self?.handleListenerState(state)
             }
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handle(connection)
             }
             self.listener = listener
-            listener.start(queue: .global(qos: .userInitiated))
+            listener.start(queue: queue)
         } catch {
-            errorMessage = "网页服务启动失败: \(error.localizedDescription)"
+            isStopped = true
+            emit(.failed(message: "网页服务启动失败: \(error.localizedDescription)"))
         }
     }
 
-    func stop() {
-        listener?.cancel()
-        listener = nil
-        isRunning = false
-        address = ""
+    private func stopOnQueue(notify: Bool) {
+        guard !isStopped || listener != nil || !activeConnections.isEmpty else {
+            if notify { emit(.cancelled) }
+            return
+        }
+        isStopped = true
+
+        if let listener {
+            listener.stateUpdateHandler = nil
+            listener.newConnectionHandler = nil
+            listener.cancel()
+            self.listener = nil
+        }
+
+        for active in activeConnections.values {
+            if active.state.markFinished() {
+                active.state.cleanup()
+            }
+            active.connection.cancel()
+        }
+        activeConnections.removeAll()
+        if notify { emit(.cancelled) }
+    }
+
+    private func handleListenerState(_ state: NWListener.State) {
+        guard !isStopped else { return }
+        switch state {
+        case .ready:
+            let ip = Self.localIPAddress() ?? "127.0.0.1"
+            emit(.ready(address: "http://\(ip):\(port)/\(token)/"))
+        case .failed(let error):
+            let message = "网页服务启动失败: \(error.localizedDescription)"
+            stopOnQueue(notify: false)
+            emit(.failed(message: message))
+        case .cancelled:
+            stopOnQueue(notify: false)
+            emit(.cancelled)
+        default:
+            break
+        }
     }
 
     private func handle(_ connection: NWConnection) {
-        guard acquireConnection() else {
-            connection.start(queue: .global(qos: .utility))
+        guard !isStopped else {
+            connection.cancel()
+            return
+        }
+        guard activeConnections.count < maximumConnections else {
+            connection.start(queue: queue)
             sendResponse(
-                httpResponse(status: "503 Service Unavailable", contentType: "text/plain; charset=utf-8", body: "连接数已达到上限"),
+                httpResponse(
+                    status: "503 Service Unavailable",
+                    contentType: "text/plain; charset=utf-8",
+                    body: "连接数已达到上限"
+                ),
                 on: connection
             )
             return
         }
-        connection.start(queue: .global(qos: .userInitiated))
+
         let state = HTTPRequestReceiveState()
+        activeConnections[ObjectIdentifier(connection)] = ActiveConnection(
+            connection: connection,
+            state: state
+        )
+        connection.start(queue: queue)
         armIdleTimeout(for: connection, state: state)
         receive(on: connection, state: state)
     }
 
     private func receive(on connection: NWConnection, state: HTTPRequestReceiveState) {
-        guard !state.isFinished else { return }
+        guard !state.isFinished, !isStopped else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            guard !state.isFinished else { return }
-            if let data, !data.isEmpty {
-                do {
-                    try state.append(data)
-                } catch let receiveError {
-                    let response: Data
-                    if case HTTPRequestReceiveError.headerTooLarge = receiveError {
-                        response = self.httpResponse(status: "431 Request Header Fields Too Large", contentType: "text/plain; charset=utf-8", body: "请求头过大")
-                    } else {
-                        response = self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(receiveError.localizedDescription)")
-                    }
-                    self.finish(state: state, response: response, on: connection)
-                    return
+            self?.handleReceive(
+                data: data,
+                isComplete: isComplete,
+                error: error,
+                on: connection,
+                state: state
+            )
+        }
+    }
+
+    private func handleReceive(
+        data: Data?,
+        isComplete: Bool,
+        error: NWError?,
+        on connection: NWConnection,
+        state: HTTPRequestReceiveState
+    ) {
+        guard !state.isFinished, !isStopped else { return }
+
+        if let data, !data.isEmpty {
+            do {
+                try state.append(data)
+            } catch let receiveError {
+                let response: Data
+                if case HTTPRequestReceiveError.headerTooLarge = receiveError {
+                    response = httpResponse(
+                        status: "431 Request Header Fields Too Large",
+                        contentType: "text/plain; charset=utf-8",
+                        body: "请求头过大"
+                    )
+                } else {
+                    response = httpResponse(
+                        status: "500 Internal Server Error",
+                        contentType: "text/plain; charset=utf-8",
+                        body: "接收上传数据失败: \(receiveError.localizedDescription)"
+                    )
                 }
-            }
-
-            if state.contentLength > self.maxUploadSize {
-                self.finish(
-                    state: state,
-                    response: self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
-                    on: connection
-                )
+                finish(state: state, response: response, on: connection)
                 return
             }
+        }
 
-            if error != nil {
-                self.finish(
-                    state: state,
-                    response: self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
-                    on: connection
-                )
-                return
-            }
+        if state.contentLength > maxUploadSize {
+            finish(
+                state: state,
+                response: httpResponse(
+                    status: "413 Payload Too Large",
+                    contentType: "text/plain; charset=utf-8",
+                    body: "上传文件过大，最大支持 300MB。"
+                ),
+                on: connection
+            )
+            return
+        }
 
-            if state.isComplete || isComplete {
-                self.respond(to: state, on: connection)
-            } else {
-                self.armIdleTimeout(for: connection, state: state)
-                self.receive(on: connection, state: state)
-            }
+        if error != nil {
+            finish(
+                state: state,
+                response: httpResponse(
+                    status: "400 Bad Request",
+                    contentType: "text/plain; charset=utf-8",
+                    body: "请求读取失败"
+                ),
+                on: connection
+            )
+            return
+        }
+
+        if state.isComplete || isComplete {
+            respond(to: state, on: connection)
+        } else {
+            armIdleTimeout(for: connection, state: state)
+            receive(on: connection, state: state)
         }
     }
 
@@ -295,50 +462,62 @@ final class LocalWebServer: ObservableObject {
             let uploadPath = "/\(token)/upload"
             if request.method == "POST", request.path == uploadPath {
                 if !state.hasContentLengthHeader {
-                    response = httpResponse(status: "411 Length Required", contentType: "text/plain; charset=utf-8", body: "上传请求必须提供 Content-Length。")
+                    response = httpResponse(
+                        status: "411 Length Required",
+                        contentType: "text/plain; charset=utf-8",
+                        body: "上传请求必须提供 Content-Length。"
+                    )
                 } else if state.contentLength < 0 || state.receivedBodyBytes != state.contentLength {
-                    response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传请求的 Content-Length 无效。")
+                    response = httpResponse(
+                        status: "400 Bad Request",
+                        contentType: "text/plain; charset=utf-8",
+                        body: "上传请求的 Content-Length 无效。"
+                    )
                 } else if state.contentLength > maxUploadSize {
-                    response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
+                    response = httpResponse(
+                        status: "413 Payload Too Large",
+                        contentType: "text/plain; charset=utf-8",
+                        body: "上传文件过大，最大支持 300MB。"
+                    )
                 } else {
                     response = handleUpload(header: requestText, bodyURL: state.bodyFileURL)
                 }
             } else if request.method != "POST",
                       request.path == "/\(token)" || request.path == "/\(token)/" {
-                response = httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: uploadPage())
+                response = httpResponse(
+                    status: "200 OK",
+                    contentType: "text/html; charset=utf-8",
+                    body: uploadPage()
+                )
             } else {
-                response = httpResponse(status: "403 Forbidden", contentType: "text/plain; charset=utf-8", body: "Forbidden")
+                response = httpResponse(
+                    status: "403 Forbidden",
+                    contentType: "text/plain; charset=utf-8",
+                    body: "Forbidden"
+                )
             }
         } else {
-            response = httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求格式不正确")
+            response = httpResponse(
+                status: "400 Bad Request",
+                contentType: "text/plain; charset=utf-8",
+                body: "请求格式不正确"
+            )
         }
 
         state.cleanup()
-        releaseConnection()
+        activeConnections.removeValue(forKey: ObjectIdentifier(connection))
         sendResponse(response, on: connection)
     }
 
-    private func acquireConnection() -> Bool {
-        connectionLock.lock()
-        defer { connectionLock.unlock() }
-        guard activeConnectionCount < maximumConnections else { return false }
-        activeConnectionCount += 1
-        return true
-    }
-
-    private func releaseConnection() {
-        connectionLock.lock()
-        activeConnectionCount = max(activeConnectionCount - 1, 0)
-        connectionLock.unlock()
-    }
-
     private func armIdleTimeout(for connection: NWConnection, state: HTTPRequestReceiveState) {
-        state.armIdleTimeout(after: idleTimeout) { [weak self, weak connection] in
+        let generation = state.nextIdleTimeoutGeneration()
+        queue.asyncAfter(deadline: .now() + idleTimeout) { [weak self, weak connection] in
             guard let self,
                   let connection,
+                  state.shouldFireIdleTimeout(generation: generation),
                   state.markFinished() else { return }
             state.cleanup()
-            self.releaseConnection()
+            self.activeConnections.removeValue(forKey: ObjectIdentifier(connection))
             connection.cancel()
         }
     }
@@ -349,15 +528,8 @@ final class LocalWebServer: ObservableObject {
             return
         }
         state.cleanup()
-        releaseConnection()
+        activeConnections.removeValue(forKey: ObjectIdentifier(connection))
         sendResponse(response, on: connection)
-    }
-
-    private static func requestLine(from header: String) -> (method: String, path: String)? {
-        guard let firstLine = header.components(separatedBy: "\r\n").first else { return nil }
-        let parts = firstLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard parts.count >= 2 else { return nil }
-        return (parts[0].uppercased(), parts[1])
     }
 
     private func sendResponse(_ response: Data, on connection: NWConnection) {
@@ -369,17 +541,35 @@ final class LocalWebServer: ObservableObject {
     private func handleUpload(header: String, bodyURL: URL?) -> Data {
         guard let bodyURL,
               let boundary = boundary(from: header) else {
-            return httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "上传格式不正确")
+            return httpResponse(
+                status: "400 Bad Request",
+                contentType: "text/plain; charset=utf-8",
+                body: "上传格式不正确"
+            )
         }
 
         guard let uploadedFile = extractFile(fromBodyFile: bodyURL, boundary: boundary) else {
-            return httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "没有找到上传文件")
+            return httpResponse(
+                status: "400 Bad Request",
+                contentType: "text/plain; charset=utf-8",
+                body: "没有找到上传文件"
+            )
         }
-        guard allowedUploadExtensions.contains(URL(fileURLWithPath: uploadedFile.fileName).pathExtension.lowercased()) else {
-            return httpResponse(status: "415 Unsupported Media Type", contentType: "text/plain; charset=utf-8", body: "仅支持 ZIP、CBZ、EPUB、PDF、JPG、PNG、WebP、HEIC。")
+        guard allowedUploadExtensions.contains(
+            URL(fileURLWithPath: uploadedFile.fileName).pathExtension.lowercased()
+        ) else {
+            return httpResponse(
+                status: "415 Unsupported Media Type",
+                contentType: "text/plain; charset=utf-8",
+                body: "仅支持 ZIP、CBZ、EPUB、PDF、JPG、PNG、WebP、HEIC。"
+            )
         }
         guard uploadedFile.byteCount <= maxUploadSize else {
-            return httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。")
+            return httpResponse(
+                status: "413 Payload Too Large",
+                contentType: "text/plain; charset=utf-8",
+                body: "上传文件过大，最大支持 300MB。"
+            )
         }
 
         do {
@@ -389,13 +579,27 @@ final class LocalWebServer: ObservableObject {
             try? FileManager.default.removeItem(at: destinationURL)
             try copyFileRange(from: bodyURL, range: uploadedFile.range, to: destinationURL)
 
-            DispatchQueue.main.async { [weak self] in
-                self?.onUpload?(destinationURL)
+            Task { @MainActor [uploadHandler] in
+                uploadHandler(destinationURL)
             }
 
-            return httpResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: successPage(fileName: uploadedFile.fileName))
+            return httpResponse(
+                status: "200 OK",
+                contentType: "text/html; charset=utf-8",
+                body: successPage(fileName: uploadedFile.fileName)
+            )
         } catch {
-            return httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "保存上传文件失败: \(error.localizedDescription)")
+            return httpResponse(
+                status: "500 Internal Server Error",
+                contentType: "text/plain; charset=utf-8",
+                body: "保存上传文件失败: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func emit(_ state: State) {
+        Task { @MainActor [stateHandler] in
+            stateHandler(state)
         }
     }
 
@@ -408,7 +612,10 @@ final class LocalWebServer: ObservableObject {
             .trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
     }
 
-    private func extractFile(fromBodyFile bodyURL: URL, boundary: String) -> (fileName: String, range: Range<UInt64>, byteCount: UInt64)? {
+    private func extractFile(
+        fromBodyFile bodyURL: URL,
+        boundary: String
+    ) -> (fileName: String, range: Range<UInt64>, byteCount: UInt64)? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: bodyURL.path),
               let fileSize = attributes[.size] as? NSNumber else { return nil }
         let totalBytes = fileSize.uint64Value
@@ -445,7 +652,11 @@ final class LocalWebServer: ObservableObject {
         }
     }
 
-    private func copyFileRange(from sourceURL: URL, range: Range<UInt64>, to destinationURL: URL) throws {
+    private func copyFileRange(
+        from sourceURL: URL,
+        range: Range<UInt64>,
+        to destinationURL: URL
+    ) throws {
         guard range.lowerBound <= range.upperBound,
               let attributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
               let sourceSize = (attributes[.size] as? NSNumber)?.uint64Value,
@@ -537,6 +748,26 @@ final class LocalWebServer: ObservableObject {
         """
     }
 
+    private static func requestLine(from header: String) -> (method: String, path: String)? {
+        guard let firstLine = header.components(separatedBy: "\r\n").first else { return nil }
+        let parts = firstLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        return (parts[0].uppercased(), parts[1])
+    }
+
+    fileprivate static func clearStaleBodyFiles() {
+        let tempRoot = FileManager.default.temporaryDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: tempRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for file in files
+        where file.lastPathComponent.hasPrefix("MReaderWebUpload-") && file.pathExtension == "body" {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
     private static func localIPAddress() -> String? {
         var address: String?
         var interfaces: UnsafeMutablePointer<ifaddrs>?
@@ -552,7 +783,15 @@ final class LocalWebServer: ObservableObject {
             guard name == "en0" || name == "en1" else { continue }
 
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+            getnameinfo(
+                interface.ifa_addr,
+                socklen_t(interface.ifa_addr.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
             address = String(cString: hostname)
             break
         }
