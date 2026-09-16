@@ -50,7 +50,7 @@ struct GuidedPanelFocusTests {
         #expect(abs(rect.height - 800) < 0.001)
     }
 
-    @Test func lowPowerAndThermalPressureDisableBlurDisplayAndNewWork() {
+    @Test func lowPowerKeepsBlurWhileThermalPressureFallsBackToDimOnly() {
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
@@ -61,7 +61,7 @@ struct GuidedPanelFocusTests {
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .nominal
-            ) == .dimOnly
+            ) == .blurred
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
@@ -71,7 +71,7 @@ struct GuidedPanelFocusTests {
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
-                isLowPowerModeEnabled: false,
+                isLowPowerModeEnabled: true,
                 thermalState: .critical
             ) == .dimOnly
         )
