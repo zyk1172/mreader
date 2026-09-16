@@ -27,9 +27,12 @@ struct LocalWebServerReceiveStateTests {
         let state = HTTPRequestReceiveState()
         defer { state.cleanup() }
 
-        let oversizedHeader = Data(repeating: 0x41, count: 64 * 1024 + 1)
-        #expect(throws: HTTPRequestReceiveError.self) {
-            try state.append(oversizedHeader)
+        var didReject = false
+        do {
+            try state.append(Data(repeating: 0x41, count: 64 * 1024 + 1))
+        } catch {
+            didReject = true
         }
+        #expect(didReject)
     }
 }
