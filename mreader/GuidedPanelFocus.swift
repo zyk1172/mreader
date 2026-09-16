@@ -162,29 +162,6 @@ final class GuidedPanelFocusPreviewStore {
         previews[url.absoluteString]
     }
 
-    /// Reuses only an already-decoded ReaderImageCache entry. This is safe to call when a
-    /// cached panel layout is restored or when system power/thermal pressure recovers.
-    func prewarmCached(url: URL) {
-        let key = url.absoluteString
-        guard previews[key] == nil, !inFlight.contains(key) else { return }
-        guard let image = ReaderImageCache.shared.cachedImage(
-            for: url,
-            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
-        ) else { return }
-        prewarm(url: url, image: image)
-    }
-
-    func handleSystemModeChange(_ mode: GuidedPanelFocusPolicy.Mode, activeURL: URL) {
-        switch mode {
-        case .blurred:
-            prewarmCached(url: activeURL)
-        case .dimOnly:
-            // Stop queued work immediately. Cached previews are retained but hidden so returning
-            // to normal power/thermal state is instant and does not require another blur pass.
-            cancelAll()
-        }
-    }
-
     /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.
     /// It never loads from disk/network and never blocks panel navigation waiting for the result.
     func prewarm(url: URL, image: UIImage) {
@@ -273,6 +250,8 @@ struct GuidedPanelFocusOverlay: View {
 
     let store: GuidedPanelFocusPreviewStore
     let pageURL: URL
+    let requestPreview: () -> Void
+    let cancelPreviewWork: () -> Void
     let normalizedPanel: CGRect?
     let sourceSize: CGSize
     let viewportSize: CGSize
@@ -321,7 +300,7 @@ struct GuidedPanelFocusOverlay: View {
             .accessibilityHidden(true)
             .task(id: pageURL.absoluteString) {
                 if mode == .blurred {
-                    store.prewarmCached(url: pageURL)
+                    requestPreview()
                 }
             }
             .onReceive(
@@ -341,6 +320,12 @@ struct GuidedPanelFocusOverlay: View {
         let nextMode = GuidedPanelFocusPolicy.currentMode
         guard nextMode != mode else { return }
         mode = nextMode
-        store.handleSystemModeChange(nextMode, activeURL: pageURL)
+        switch nextMode {
+        case .blurred:
+            requestPreview()
+        case .dimOnly:
+            // Stop queued work immediately. Cached previews remain hidden and reusable.
+            cancelPreviewWork()
+        }
     }
 }

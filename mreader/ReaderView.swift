@@ -3445,6 +3445,8 @@ struct GuidedPanelReader: View {
                     GuidedPanelFocusOverlay(
                         store: focusStore,
                         pageURL: page.url,
+                        requestPreview: { prewarmFocusPreviewIfCached(for: page.url) },
+                        cancelPreviewWork: { focusStore.cancelAll() },
                         normalizedPanel: currentFocusPanelRect,
                         sourceSize: sourceSize,
                         viewportSize: proxy.size,
@@ -3471,6 +3473,8 @@ struct GuidedPanelReader: View {
                         GuidedPanelFocusOverlay(
                             store: focusStore,
                             pageURL: transitionURL,
+                            requestPreview: { prewarmFocusPreviewIfCached(for: transitionURL) },
+                            cancelPreviewWork: { focusStore.cancelAll() },
                             normalizedPanel: focusPanelRect(
                                 for: transitionTarget.entry,
                                 panelIndex: transitionTarget.panelIndex
@@ -3532,7 +3536,7 @@ struct GuidedPanelReader: View {
         if let cached = layoutStore.entries[pageURL.absoluteString] {
             // Layout cache and blur-preview cache have independent lifetimes. Recover a missing
             // preview from ReaderImageCache without disk/network I/O before returning early.
-            focusStore.prewarmCached(url: pageURL)
+            prewarmFocusPreviewIfCached(for: pageURL)
             if layoutStore.appliedPageURL != pageURL {
                 applyCachedLayout(cached, for: page)
             }
@@ -3682,6 +3686,14 @@ struct GuidedPanelReader: View {
             layout: prefetched,
             sourceSize: sourceSize
         )
+    }
+
+    private func prewarmFocusPreviewIfCached(for url: URL) {
+        guard let image = ReaderImageCache.shared.cachedImage(
+            for: url,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else { return }
+        focusStore.prewarm(url: url, image: image)
     }
 
     private var currentFocusPanelRect: CGRect? {
