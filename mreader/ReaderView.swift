@@ -3381,6 +3381,7 @@ struct GuidedPanelReader: View {
     @State private var isPanelTransitioning = false
     @State private var panelMotionTask: Task<Void, Never>?
     @State private var layoutStore = GuidedPanelLayoutStore()
+    @State private var focusStore = GuidedPanelFocusPreviewStore()
     @State private var pageTransitionTarget: GuidedPanelPageTransitionTarget?
     @State private var pageTransitionProgress: Double = 0
 
@@ -3437,6 +3438,22 @@ struct GuidedPanelReader: View {
                     .task(id: "\(page.url.absoluteString)|\(readingDirection.rawValue)") {
                         await detectPanels(for: page)
                     }
+
+                    // Focus isolation is a cheap overlay: the source page remains untouched.
+                    // The blur texture is precomputed off the tap path; until it is ready this
+                    // automatically falls back to the dim-only layer.
+                    GuidedPanelFocusOverlay(
+                        store: focusStore,
+                        pageURL: page.url,
+                        requestPreview: { prewarmFocusPreviewIfCached(for: page.url) },
+                        cancelPreviewWork: { focusStore.cancelAll() },
+                        normalizedPanel: currentFocusPanelRect,
+                        sourceSize: sourceSize,
+                        viewportSize: proxy.size,
+                        cameraScale: camera.scale,
+                        cameraOffset: camera.offset,
+                        opacity: pageTransitionTarget == nil ? 1 : max(0, 1 - pageTransitionProgress)
+                    )
                 }
 
                 if let transitionTarget = pageTransitionTarget,
@@ -3450,6 +3467,25 @@ struct GuidedPanelReader: View {
                         .opacity(pageTransitionProgress)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
+
+                    if pages.indices.contains(transitionTarget.pageIndex) {
+                        let transitionURL = pages[transitionTarget.pageIndex].url
+                        GuidedPanelFocusOverlay(
+                            store: focusStore,
+                            pageURL: transitionURL,
+                            requestPreview: { prewarmFocusPreviewIfCached(for: transitionURL) },
+                            cancelPreviewWork: { focusStore.cancelAll() },
+                            normalizedPanel: focusPanelRect(
+                                for: transitionTarget.entry,
+                                panelIndex: transitionTarget.panelIndex
+                            ),
+                            sourceSize: transitionTarget.entry.sourceSize,
+                            viewportSize: proxy.size,
+                            cameraScale: transitionCamera.scale,
+                            cameraOffset: transitionCamera.offset,
+                            opacity: pageTransitionProgress
+                        )
+                    }
                 }
 
                 if isDetecting {
@@ -3478,6 +3514,7 @@ struct GuidedPanelReader: View {
             layoutStore.prefetchTask = nil
             layoutStore.pending.removeAll()
             layoutStore.scheduled.removeAll()
+            focusStore.cancelAll()
             pageTransitionTarget = nil
             pageTransitionProgress = 0
         }
@@ -3497,6 +3534,9 @@ struct GuidedPanelReader: View {
 
         // 预取命中：布局已经在本地缓存里，直接落到目标分镜，不显示加载圈。
         if let cached = layoutStore.entries[pageURL.absoluteString] {
+            // Layout cache and blur-preview cache have independent lifetimes. Recover a missing
+            // preview from ReaderImageCache without disk/network I/O before returning early.
+            prewarmFocusPreviewIfCached(for: pageURL)
             if layoutStore.appliedPageURL != pageURL {
                 applyCachedLayout(cached, for: page)
             }
@@ -3517,6 +3557,10 @@ struct GuidedPanelReader: View {
             isPanelTransitioning = false
             return
         }
+
+        // Reuse the already-decoded Guided Panel image. Preview generation is queued
+        // on its own actor and never delays layout detection or the camera animation.
+        focusStore.prewarm(url: pageURL, image: image)
 
         // Prefer the registered page geometry: it is already known for archive and
         // local pages and avoids deriving the page aspect from a decoded bitmap.
@@ -3623,6 +3667,9 @@ struct GuidedPanelReader: View {
             maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
         ) else { return }
         guard !Task.isCancelled else { return }
+        // N+1/N+2 layout prefetch already owns this decoded image, so focus preview
+        // generation adds no disk/network read and stays completely off the tap path.
+        focusStore.prewarm(url: page.url, image: image)
         let sourceSize = PageGeometryStore.shared.size(for: page.url) ?? CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height
@@ -3639,6 +3686,30 @@ struct GuidedPanelReader: View {
             layout: prefetched,
             sourceSize: sourceSize
         )
+    }
+
+    private func prewarmFocusPreviewIfCached(for url: URL) {
+        guard let image = ReaderImageCache.shared.cachedImage(
+            for: url,
+            maxPixelSize: ReaderImageCache.fitScreenMaxPixelSize
+        ) else { return }
+        focusStore.prewarm(url: url, image: image)
+    }
+
+    private var currentFocusPanelRect: CGRect? {
+        guard let layout else { return nil }
+        return layout.panelRects.indices.contains(panelIndex)
+            ? layout.panelRects[panelIndex]
+            : layout.contentBounds.cgRect
+    }
+
+    private func focusPanelRect(
+        for entry: GuidedPanelLayoutStore.Entry,
+        panelIndex: Int
+    ) -> CGRect {
+        entry.layout.panelRects.indices.contains(panelIndex)
+            ? entry.layout.panelRects[panelIndex]
+            : entry.layout.contentBounds.cgRect
     }
 
     private func panelTransform(
