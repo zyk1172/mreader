@@ -8,35 +8,46 @@ nonisolated enum GuidedPanelPrefetchPolicy {
     static let bufferedPageHandoffDelay: TimeInterval = 0.08
     static let bufferedPageRevealDuration: TimeInterval = 0.12
 
-    /// Layout/image work stays tightly bounded: next page first, then one page farther ahead,
-    /// then the previous page for backwards navigation.
+    /// Keep four forward pages warm. Image prefetch already maintains a broad forward window;
+    /// Guided Panel must keep layout/model output at comparable depth or a decoded N+1 page can
+    /// still fall back to the visible detector spinner at the page boundary.
     static func layoutIndices(currentPageIndex: Int, pageCount: Int) -> [Int] {
         prioritizedIndices(
             currentPageIndex: currentPageIndex,
             pageCount: pageCount,
-            candidates: [currentPageIndex + 1, currentPageIndex + 2, currentPageIndex - 1]
+            candidates: [
+                currentPageIndex + 1,
+                currentPageIndex + 2,
+                currentPageIndex + 3,
+                currentPageIndex + 4,
+                currentPageIndex - 1
+            ]
         )
     }
 
-    /// Core ML preanalysis does not need the 4096px display decode. Warm the two forward pages
-    /// from small ImageIO thumbnails as soon as the current page becomes active so inference
-    /// stays outside the visible panel-tap animation path.
+    /// Core ML preanalysis uses small model-sized thumbnails, so warming four forward pages is
+    /// substantially cheaper than four 4096px display decodes and gives short pages enough lead
+    /// time to avoid synchronous-looking page-boundary work.
     static func visionIndices(currentPageIndex: Int, pageCount: Int) -> [Int] {
         prioritizedIndices(
             currentPageIndex: currentPageIndex,
             pageCount: pageCount,
-            candidates: [currentPageIndex + 1, currentPageIndex + 2]
+            candidates: [
+                currentPageIndex + 1,
+                currentPageIndex + 2,
+                currentPageIndex + 3,
+                currentPageIndex + 4
+            ]
         )
     }
 
-    /// Panel taps must stay render-only. N+1/N+2 are already queued when the current page
-    /// becomes active, so reaching the last panels must not suddenly start a 4096px decode or
-    /// promote a Core ML request to userInitiated while the camera is animating. The existing
-    /// ReaderView compatibility hook remains in place, but deliberately never fires.
+    /// Normal navigation should hit the proactive warm window. When a very short page outruns
+    /// it, the last two panels are the final opportunity to promote only the missing N+1 work.
+    /// The caller checks cache/in-flight state, so this does not duplicate already-warm work.
     static func shouldPromoteNextPage(panelIndex: Int, panelCount: Int) -> Bool {
-        _ = panelIndex
-        _ = panelCount
-        return false
+        guard panelCount > 0 else { return false }
+        let clamped = min(max(panelIndex, 0), panelCount - 1)
+        return panelCount - clamped - 1 <= 2
     }
 
     private static func prioritizedIndices(
