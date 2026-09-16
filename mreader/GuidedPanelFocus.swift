@@ -122,6 +122,8 @@ private actor GuidedPanelFocusPreviewRenderer {
     private let context = CIContext()
 
     func render(_ source: GuidedPanelFocusCGImage) -> GuidedPanelFocusCGImage? {
+        guard !Task.isCancelled else { return nil }
+
         let cgImage = source.value
         let width = CGFloat(cgImage.width)
         let height = CGFloat(cgImage.height)
@@ -144,7 +146,11 @@ private actor GuidedPanelFocusPreviewRenderer {
             )
             .cropped(to: targetExtent)
 
+        // Core Image filter construction is lazy. The expensive work starts at createCGImage,
+        // so a cancelled queued render gets one last chance to exit before touching GPU/CPU.
+        guard !Task.isCancelled else { return nil }
         guard let output = context.createCGImage(blurred, from: targetExtent) else { return nil }
+        guard !Task.isCancelled else { return nil }
         return GuidedPanelFocusCGImage(value: output)
     }
 }
