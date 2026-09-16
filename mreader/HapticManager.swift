@@ -38,20 +38,26 @@ final class HapticManager {
         switch level {
         case .light:
             lightGenerator.impactOccurred(intensity: 0.55)
+            lightGenerator.prepare()
         case .medium:
             mediumGenerator.impactOccurred(intensity: 0.7)
+            mediumGenerator.prepare()
         case .heavy:
             heavyGenerator.impactOccurred(intensity: 0.9)
+            heavyGenerator.prepare()
         case .selection:
             selectionGenerator.selectionChanged()
+            selectionGenerator.prepare()
         case .success:
             notificationGenerator.notificationOccurred(.success)
+            notificationGenerator.prepare()
         case .warning:
             notificationGenerator.notificationOccurred(.warning)
+            notificationGenerator.prepare()
         case .error:
             notificationGenerator.notificationOccurred(.error)
+            notificationGenerator.prepare()
         }
-        prepare()
 #endif
     }
 

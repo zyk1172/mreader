@@ -101,7 +101,7 @@ struct GuidedPanelVisionV2Tests {
         #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
     }
 
-    @Test func cameraTravelStaysReadableAndReservesBridgeForLargeMoves() {
+    @Test func cameraTravelUsesSingleStageLatencyBoundedMotion() {
         let source = CGRect(x: 0.60, y: 0.05, width: 0.30, height: 0.24)
         let sameRow = CGRect(x: 0.18, y: 0.06, width: 0.30, height: 0.24)
         let far = CGRect(x: 0.06, y: 0.68, width: 0.28, height: 0.22)
@@ -115,33 +115,29 @@ struct GuidedPanelVisionV2Tests {
         )
         let leadIn = GuidedPanelMotionPlanner.bridgeRect(from: source, to: far)
 
-        // Same-row moves are the most frequent interaction on a page. They stay a single
-        // animation (a bridge whose lead-in is a few percent of the distance reads as
-        // "crawl, then jump"), but must remain long enough to be followed: the earlier
-        // 0.42-0.54s window was reported as too fast to read.
         #expect(rowProfile.kind == .sameRow)
-        #expect(rowProfile.duration >= 0.85)
-        #expect(rowProfile.duration <= 1.15)
+        #expect(rowProfile.duration >= 0.36)
+        #expect(rowProfile.duration <= 0.46)
         #expect(!rowProfile.usesContextBridge)
         #expect(rowProfile.bridgeDuration == 0)
         #expect(rowProfile.settleDuration == rowProfile.duration)
 
         #expect(farProfile.kind == .farJump)
-        #expect(farProfile.usesContextBridge)
+        #expect(!farProfile.usesContextBridge)
+        #expect(farProfile.bridgeDuration == 0)
+        #expect(farProfile.settleDuration == farProfile.duration)
         #expect(farProfile.duration > rowProfile.duration)
-        #expect(farProfile.duration <= 1.50)
+        #expect(farProfile.duration >= 0.62)
+        #expect(farProfile.duration <= 0.76)
 
         #expect(boundary.kind == .pageBoundary)
-        // 跨页不做桥接：读者从上一页的最后一个分镜直接进入下一页的目标分镜，
-        // 中间不出现整页画面（整页上下文阶段曾经是 --bridgeDuration 那段）。
         #expect(!boundary.usesContextBridge)
         #expect(boundary.bridgeDuration == 0)
         #expect(boundary.duration == boundary.settleDuration)
-        #expect(boundary.duration >= 0.75)
-        #expect(boundary.duration <= 1.00)
+        #expect(boundary.duration == 0.58)
 
-        // The lead-in must already move in the destination's direction, stay closer to the
-        // source than to the destination, and cover enough ground to be perceptible.
+        // The geometry helper remains valid even though the active camera path no longer
+        // consumes it. Keep this coverage so any compatibility callers receive a sane rect.
         #expect(leadIn.midX < source.midX)
         #expect(leadIn.midX > far.midX)
         #expect(leadIn.midY > source.midY)
@@ -156,9 +152,10 @@ struct GuidedPanelVisionV2Tests {
         let entry = GuidedPanelMotionPlanner.profile(from: nil, to: nil)
 
         #expect(entry.kind == .focusEntry)
-        #expect(entry.duration >= 0.90)
-        #expect(entry.duration <= 1.10)
+        #expect(entry.duration == 0.52)
         #expect(!entry.usesContextBridge)
+        #expect(entry.bridgeDuration == 0)
+        #expect(entry.settleDuration == entry.duration)
     }
 
     @Test func smallPanelGetsMoreZoomHeadroomThanLargePanel() {
