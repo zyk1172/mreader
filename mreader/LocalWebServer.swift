@@ -205,7 +205,9 @@ final class LocalWebServer: ObservableObject {
                 }
             }
             listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(connection)
+                Task { @MainActor [weak self] in
+                    self?.handle(connection)
+                }
             }
             self.listener = listener
             listener.start(queue: .global(qos: .userInitiated))
@@ -239,47 +241,64 @@ final class LocalWebServer: ObservableObject {
     private func receive(on connection: NWConnection, state: HTTPRequestReceiveState) {
         guard !state.isFinished else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            guard !state.isFinished else { return }
-            if let data, !data.isEmpty {
-                do {
-                    try state.append(data)
-                } catch let receiveError {
-                    let response: Data
-                    if case HTTPRequestReceiveError.headerTooLarge = receiveError {
-                        response = self.httpResponse(status: "431 Request Header Fields Too Large", contentType: "text/plain; charset=utf-8", body: "请求头过大")
-                    } else {
-                        response = self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(receiveError.localizedDescription)")
-                    }
-                    self.finish(state: state, response: response, on: connection)
-                    return
+            Task { @MainActor [weak self] in
+                self?.handleReceive(
+                    data: data,
+                    isComplete: isComplete,
+                    error: error,
+                    on: connection,
+                    state: state
+                )
+            }
+        }
+    }
+
+    private func handleReceive(
+        data: Data?,
+        isComplete: Bool,
+        error: NWError?,
+        on connection: NWConnection,
+        state: HTTPRequestReceiveState
+    ) {
+        guard !state.isFinished else { return }
+        if let data, !data.isEmpty {
+            do {
+                try state.append(data)
+            } catch let receiveError {
+                let response: Data
+                if case HTTPRequestReceiveError.headerTooLarge = receiveError {
+                    response = self.httpResponse(status: "431 Request Header Fields Too Large", contentType: "text/plain; charset=utf-8", body: "请求头过大")
+                } else {
+                    response = self.httpResponse(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8", body: "接收上传数据失败: \(receiveError.localizedDescription)")
                 }
-            }
-
-            if state.contentLength > self.maxUploadSize {
-                self.finish(
-                    state: state,
-                    response: self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
-                    on: connection
-                )
+                self.finish(state: state, response: response, on: connection)
                 return
             }
+        }
 
-            if error != nil {
-                self.finish(
-                    state: state,
-                    response: self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
-                    on: connection
-                )
-                return
-            }
+        if state.contentLength > self.maxUploadSize {
+            self.finish(
+                state: state,
+                response: self.httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大，最大支持 300MB。"),
+                on: connection
+            )
+            return
+        }
 
-            if state.isComplete || isComplete {
-                self.respond(to: state, on: connection)
-            } else {
-                self.armIdleTimeout(for: connection, state: state)
-                self.receive(on: connection, state: state)
-            }
+        if error != nil {
+            self.finish(
+                state: state,
+                response: self.httpResponse(status: "400 Bad Request", contentType: "text/plain; charset=utf-8", body: "请求读取失败"),
+                on: connection
+            )
+            return
+        }
+
+        if state.isComplete || isComplete {
+            self.respond(to: state, on: connection)
+        } else {
+            self.armIdleTimeout(for: connection, state: state)
+            self.receive(on: connection, state: state)
         }
     }
 
@@ -334,12 +353,14 @@ final class LocalWebServer: ObservableObject {
 
     private func armIdleTimeout(for connection: NWConnection, state: HTTPRequestReceiveState) {
         state.armIdleTimeout(after: idleTimeout) { [weak self, weak connection] in
-            guard let self,
-                  let connection,
-                  state.markFinished() else { return }
-            state.cleanup()
-            self.releaseConnection()
-            connection.cancel()
+            Task { @MainActor [weak self, weak connection] in
+                guard let self,
+                      let connection,
+                      state.markFinished() else { return }
+                state.cleanup()
+                self.releaseConnection()
+                connection.cancel()
+            }
         }
     }
 

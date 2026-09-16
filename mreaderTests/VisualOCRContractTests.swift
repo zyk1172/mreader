@@ -1,6 +1,7 @@
 import XCTest
 @testable import mreader
 
+@MainActor
 final class VisualOCRContractTests: XCTestCase {
     func testRecognitionPromptRequestsLayoutSafeRegion() {
         let prompt = AITranslator.visionRecognitionPromptForDiagnostics(isRightToLeft: true)

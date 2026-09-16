@@ -1,6 +1,7 @@
 import XCTest
 @testable import mreader
 
+@MainActor
 final class ReaderStateMutationTests: XCTestCase {
     func testSinglePageGateOnlyAllowsPageTurnAtUnitScale() {
         XCTAssertTrue(ReaderGestureGate.allowsSinglePageTurn(isZoomed: false))
@@ -112,6 +113,7 @@ final class ReaderStateMutationTests: XCTestCase {
 }
 
 
+@MainActor
 final class ReadingProgressResetRegressionTests: XCTestCase {
     func testNewerResetCanReduceCurrentAndFurthestProgressToZero() {
         let older = Date(timeIntervalSince1970: 10)

@@ -2,6 +2,7 @@ import UIKit
 import XCTest
 @testable import mreader
 
+@MainActor
 final class TranslationComicIntegrationRegressionTests: XCTestCase {
     func testDisplayPolicyKeepsInPlaceOptInAndSoundEffectsAsAnnotations() {
         XCTAssertEqual(

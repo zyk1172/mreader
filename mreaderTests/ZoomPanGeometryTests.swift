@@ -5,6 +5,7 @@ import XCTest
 /// 审查 #4：平移边界必须基于「缩放后的图片是否超出 viewport」。
 /// 直接用 `imageRect * (scale - 1) / 2` 只在图片恰好铺满容器时成立，
 /// letterbox（fitScreen / fitHeight）与 original 都会算错并允许拖出空白。
+@MainActor
 final class ZoomPanGeometryTests: XCTestCase {
 
     private let container = CGSize(width: 1_000, height: 1_000)

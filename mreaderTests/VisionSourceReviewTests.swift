@@ -4,6 +4,7 @@ import XCTest
 /// 审查 #3 / #6 的回归：
 /// - Vision 原文真实性复核的“可疑判据”必须只在真正可疑时才触发；
 /// - 自定义 Vision Prompt 模板缺协议锚点必须被提前发现并回退默认模板。
+@MainActor
 final class VisionSourceReviewTests: XCTestCase {
 
     private func block(

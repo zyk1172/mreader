@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import mreader
 
+@MainActor
 struct ICloudMetadataSyncTests {
     @Test
     func sourceIdentityIsStableAcrossURLEdits() {

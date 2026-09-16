@@ -233,8 +233,9 @@ actor AITranslationPageCoordinator {
             return try await existing.value.blocks
         }
 
-        let task = Task.detached(priority: .userInitiated) {
-            try await AITranslationPagePipeline.translate(contextualRequest)
+        let pipelineRequest = contextualRequest
+        let task = Task(priority: .userInitiated) {
+            try await AITranslationPagePipeline.translate(pipelineRequest)
         }
         inFlight[key] = task
         do {

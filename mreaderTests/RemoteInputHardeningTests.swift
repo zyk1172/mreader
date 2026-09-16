@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import mreader
 
+@MainActor
 struct RemoteInputHardeningTests {
     @Test
     func boundedResponseReaderCollectsMegabyteChunks() async throws {
