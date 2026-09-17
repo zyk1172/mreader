@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class TranslationComicIntegrationRegressionTests: XCTestCase {
-    func testDisplayPolicyKeepsInPlaceOptInAndSoundEffectsAsAnnotations() {
+    func testDisplayPolicyKeepsColorfulModeAndMakesNeutralModeUniform() {
         XCTAssertEqual(
             TranslationDisplayPolicy.mode(
                 contentRole: .dialogue,
@@ -15,20 +15,39 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         )
         XCTAssertEqual(
             TranslationDisplayPolicy.mode(
-                contentRole: .dialogue,
-                hasReliableDetectedBubble: true,
-                prefersInPlace: true
-            ),
-            .inPlace
-        )
-        XCTAssertEqual(
-            TranslationDisplayPolicy.mode(
                 contentRole: .soundEffect,
                 hasReliableDetectedBubble: true,
-                prefersInPlace: true
+                prefersInPlace: false
             ),
             .annotation
         )
+
+        for role in [TranslationContentRole.dialogue, .narration, .soundEffect, .other] {
+            XCTAssertEqual(
+                TranslationDisplayPolicy.mode(
+                    contentRole: role,
+                    hasReliableDetectedBubble: role == .dialogue,
+                    prefersInPlace: true
+                ),
+                .inPlace
+            )
+        }
+    }
+
+    func testPreferredTranslationFontSizeDoesNotDependOnBubbleDetection() {
+        let withBubble = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: true,
+            automaticFontSize: 28,
+            measuredTextFontSize: 16
+        )
+        let withoutBubble = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: false,
+            automaticFontSize: 4,
+            measuredTextFontSize: 16
+        )
+
+        XCTAssertEqual(withBubble, 16, accuracy: 0.001)
+        XCTAssertEqual(withoutBubble, 16, accuracy: 0.001)
     }
 
     func testOverflowPreviewIsCompactAnchoredAndBoundedForHorizontalText() {

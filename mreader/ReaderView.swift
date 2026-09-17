@@ -1713,7 +1713,7 @@ struct ReaderView: View {
                             Text(style.title).tag(style.rawValue)
                         }
                     }
-                    .disabled(!comic.isAITranslationEnabled)
+                    .disabled(!comic.isAITranslationEnabled || comic.prefersInPlaceTranslation)
 
                     Picker("ocr.targetLanguage".localized, selection: $translationTargetLanguage) {
                         ForEach(TranslationTargetLanguage.allCases) { language in
@@ -1804,10 +1804,14 @@ struct ReaderView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        Toggle("ocr.inPlaceTranslation".localized, isOn: Binding(
+                        Picker("ocr.inPlaceTranslation".localized, selection: Binding(
                             get: { comic.prefersInPlaceTranslation },
                             set: { newValue in updateComic { $0.prefersInPlaceTranslation = newValue } }
-                        ))
+                        )) {
+                            Text("ocr.presentationStyle.colorful".localized).tag(false)
+                            Text("ocr.presentationStyle.neutral".localized).tag(true)
+                        }
+                        .pickerStyle(.segmented)
                         .disabled(!comic.isAITranslationEnabled)
                         Text("ocr.inPlaceTranslationDescription".localized)
                             .font(.caption)
@@ -5530,6 +5534,15 @@ struct LocalImageView: View {
             within: allowedBounds,
             imageBounds: imageBounds
         )
+        // Geometry and presentation are independent. Both paths normally start from the
+        // reader-selected preferred size. Reliable bubbles additionally provide the OCR-derived
+        // automatic estimate so the sizing policy can reject pathological geometry before layout.
+        let configuredFontSize = CGFloat(
+            ComicBook.clampedMeasuredTextTranslationFontSize(
+                comic?.measuredTextTranslationFontSize
+                    ?? ComicBook.defaultMeasuredTextTranslationFontSize
+            )
+        )
         let automaticFontSize = hasReliableBubble
             ? preferredTranslationFontSize(
                 for: block,
@@ -5537,11 +5550,11 @@ struct LocalImageView: View {
                 textRect: textRect,
                 sizingMode: .bubble
             )
-            : 1
+            : configuredFontSize
         let requestedFontSize = OCRBubbleLayoutEngine.requestedTranslationFontSize(
             hasReliableBubble: hasReliableBubble,
             automaticFontSize: automaticFontSize,
-            measuredTextFontSize: measuredTextTranslationFontSize
+            measuredTextFontSize: configuredFontSize
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: effectiveTranslation,

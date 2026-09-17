@@ -50,35 +50,45 @@ struct GuidedPanelFocusTests {
         #expect(abs(rect.height - 800) < 0.001)
     }
 
-    @Test func spotlightModeIsStableAcrossPowerAndThermalStates() {
+    @Test func gaussianModeIsStableAcrossPowerAndThermalStates() {
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .nominal
-            ) == .spotlight
+            ) == .gaussian
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .nominal
-            ) == .spotlight
+            ) == .gaussian
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .serious
-            ) == .spotlight
+            ) == .gaussian
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .critical
-            ) == .spotlight
+            ) == .gaussian
         )
     }
 
+    @Test func featherAlphaIsLinearAndContinuous() {
+        let width: CGFloat = 100
+        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: -10, featherWidth: width) == 0)
+        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 0, featherWidth: width) == 0)
+        #expect(abs(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 25, featherWidth: width) - 0.25) < 0.0001)
+        #expect(abs(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 50, featherWidth: width) - 0.50) < 0.0001)
+        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 100, featherWidth: width) == 1)
+        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 140, featherWidth: width) == 1)
+    }
+
     @MainActor
-    @Test func spotlightDoesNotGenerateGaussianPreviewCopies() async {
+    @Test func gaussianPreviewIsGeneratedAndCached() async {
         let source = UIGraphicsImageRenderer(size: CGSize(width: 96, height: 96)).image { context in
             UIColor.black.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 48, height: 96))
@@ -88,8 +98,12 @@ struct GuidedPanelFocusTests {
         let url = URL(fileURLWithPath: "/tmp/guided-panel-focus-render-test.png")
         let store = GuidedPanelFocusPreviewStore()
 
-        store.prewarm(url: url, image: source, modeOverride: .spotlight)
-        #expect(store.preview(for: url) == nil)
-        #expect(store.previews.isEmpty)
+        store.prewarm(url: url, image: source, modeOverride: .gaussian)
+        for _ in 0..<80 where store.preview(for: url) == nil {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(store.preview(for: url) != nil)
+        #expect(store.previews[url.absoluteString] != nil)
     }
 }

@@ -1,2 +1,9 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple Translation";
+"ocr.colorStyle" = "Colorful translation palette";
+"ocr.measuredTextFontSize" = "Preferred translation size";
+"ocr.measuredTextFontSizeDescription" = "Both detected bubbles and measured-text layouts start at this size, then shrink only when needed to stay inside the bubble or safe layout region.";
+"ocr.inPlaceTranslation" = "Translation style";
+"ocr.inPlaceTranslationDescription" = "Neutral uses a consistent white surface with black text for every translation. Colorful keeps the existing colorful presentation. Bubble detection affects layout only.";
+"ocr.presentationStyle.colorful" = "Colorful";
+"ocr.presentationStyle.neutral" = "Neutral";

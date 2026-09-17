@@ -1,3 +1,10 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple 번역";
+"ocr.colorStyle" = "컬러 번역 팔레트";
 "ocr.colorStyle.jewel" = "주얼 톤";
+"ocr.measuredTextFontSize" = "번역 기본 글자 크기";
+"ocr.measuredTextFontSizeDescription" = "감지된 말풍선과 측정 텍스트 레이아웃 모두 이 크기에서 시작하며, 말풍선 또는 안전한 배치 영역에 맞지 않을 때만 자동으로 줄어듭니다.";
+"ocr.inPlaceTranslation" = "번역 스타일";
+"ocr.inPlaceTranslationDescription" = "중립은 모든 번역을 흰 배경과 검은 글자로 통일합니다. 컬러는 기존 컬러 번역 스타일을 유지합니다. 말풍선 감지는 레이아웃에만 영향을 줍니다.";
+"ocr.presentationStyle.colorful" = "컬러";
+"ocr.presentationStyle.neutral" = "중립 흑백";

@@ -53,9 +53,15 @@ nonisolated enum TranslationDisplayPolicy {
         hasReliableDetectedBubble: Bool,
         prefersInPlace: Bool
     ) -> TranslationDisplayMode {
-        switch contentRole {
-        case .dialogue where hasReliableDetectedBubble && prefersInPlace:
+        // `prefersInPlace` is the reader's neutral presentation choice. Once selected,
+        // every translated content role uses the same white-surface/black-glyph renderer.
+        // Bubble detection still controls geometry only; it must not switch the visual style.
+        if prefersInPlace {
+            _ = hasReliableDetectedBubble
             return .inPlace
+        }
+
+        switch contentRole {
         case .soundEffect:
             return .annotation
         case .dialogue, .narration, .other:

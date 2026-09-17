@@ -101,15 +101,15 @@ struct ComicBook: Identifiable, Codable, Hashable, Sendable {
     var ocrTextScale: Double
     var ocrSafeAreaInset: Double
     var ocrMinimumTextHeight: Double
-    /// measuredText 表面使用的译文字号；这是显示参数，不参与 OCR/翻译缓存。
+    /// 所有译文表面共享的首选字号；空间不足时布局引擎只向下缩小。
     /// 属性名保留旧版 Codable 字段名，以兼容已有阅读设置。
     var borderlessTranslationFontSize: Double
     /// Preferred readability floor for in-page translation. Extremely small
     /// regions may shrink below this preference so the translation can remain
     /// visible in place without an interactive expansion overlay.
     var minimumReadableTranslationFontSize: Double
-    /// Opt-in, non-destructive original-position rendering for reliable dialogue bubbles.
-    /// The image itself is never modified; disabling this immediately restores the artwork.
+    /// Translation presentation choice persisted with the comic. `true` selects the neutral
+    /// white-surface/black-text style; `false` keeps the original colorful presentation.
     var prefersInPlaceTranslation: Bool
 
     var measuredTextTranslationFontSize: Double {

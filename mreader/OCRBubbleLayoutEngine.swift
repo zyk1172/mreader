@@ -138,20 +138,43 @@ nonisolated enum OCRBubbleLayoutEngine {
         min(max(sourceFontSize, 1), TranslationLayoutMetrics.absoluteFontSizeCap)
     }
 
-    /// 有可靠气泡时沿用 OCR 几何字号；没有可靠气泡时，OCR 框不参与字号决策，
-    /// 改用用户设置的 measured-text 字号。
-    /// 后续布局仍会在 allowedBounds 内按实际文本测量结果缩小字号。
+    /// Measured-text size remains the shared reader preference in normal cases. A reliable
+    /// bubble also carries an OCR-derived automatic size; if the measured value is invalid or
+    /// implausibly tiny relative to that bounded automatic estimate, discard it rather than
+    /// allowing pathological OCR geometry to collapse the translation.
     static func requestedTranslationFontSize(
         hasReliableBubble: Bool,
         automaticFontSize: CGFloat,
         measuredTextFontSize: CGFloat
     ) -> CGFloat {
-        guard !hasReliableBubble else {
-            return preferredTranslationFontSize(sourceFontSize: automaticFontSize)
+        let safeMeasuredTextSize: CGFloat
+        if measuredTextFontSize.isFinite, measuredTextFontSize > 0 {
+            safeMeasuredTextSize = CGFloat(
+                ComicBook.clampedMeasuredTextTranslationFontSize(Double(measuredTextFontSize))
+            )
+        } else {
+            safeMeasuredTextSize = CGFloat(ComicBook.defaultMeasuredTextTranslationFontSize)
         }
-        return CGFloat(
-            ComicBook.clampedMeasuredTextTranslationFontSize(Double(measuredTextFontSize))
+
+        guard hasReliableBubble,
+              automaticFontSize.isFinite,
+              automaticFontSize > 0 else {
+            return safeMeasuredTextSize
+        }
+
+        let boundedAutomatic = min(
+            max(automaticFontSize, 1),
+            TranslationLayoutMetrics.absoluteFontSizeCap
         )
+        let isPathologicalMeasurement =
+            !measuredTextFontSize.isFinite ||
+            measuredTextFontSize <= 0 ||
+            measuredTextFontSize < boundedAutomatic * 0.2
+
+        if isPathologicalMeasurement {
+            return boundedAutomatic
+        }
+        return min(safeMeasuredTextSize, boundedAutomatic)
     }
 
     /// measuredText 卡片每一边的 padding。这个值必须由最终字号重新计算，不能
