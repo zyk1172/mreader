@@ -1072,26 +1072,68 @@ nonisolated enum OCRBubbleLayoutEngine {
             return clampedOriginal
         }
 
-        let stepY = max(original.height * 0.85, 22)
-        let stepX = max(original.width * 0.45, 32)
+        // Search the local neighbourhood first so translations stay close to
+        // their source text whenever a nearby slot exists.
+        let stepY = max(clampedOriginal.height * 0.85, 22)
+        let stepX = max(clampedOriginal.width * 0.45, 32)
         var candidates: [CGRect] = []
-        for distance in 1...6 {
+        for distance in 1...10 {
             let dy = CGFloat(distance) * stepY
             let dx = CGFloat(distance) * stepX
-            candidates.append(original.offsetBy(dx: 0, dy: -dy))
-            candidates.append(original.offsetBy(dx: 0, dy: dy))
-            candidates.append(original.offsetBy(dx: -dx, dy: 0))
-            candidates.append(original.offsetBy(dx: dx, dy: 0))
-            candidates.append(original.offsetBy(dx: -dx * 0.65, dy: -dy * 0.65))
-            candidates.append(original.offsetBy(dx: dx * 0.65, dy: -dy * 0.65))
-            candidates.append(original.offsetBy(dx: -dx * 0.65, dy: dy * 0.65))
-            candidates.append(original.offsetBy(dx: dx * 0.65, dy: dy * 0.65))
+            candidates.append(clampedOriginal.offsetBy(dx: 0, dy: -dy))
+            candidates.append(clampedOriginal.offsetBy(dx: 0, dy: dy))
+            candidates.append(clampedOriginal.offsetBy(dx: -dx, dy: 0))
+            candidates.append(clampedOriginal.offsetBy(dx: dx, dy: 0))
+            candidates.append(clampedOriginal.offsetBy(dx: -dx * 0.65, dy: -dy * 0.65))
+            candidates.append(clampedOriginal.offsetBy(dx: dx * 0.65, dy: -dy * 0.65))
+            candidates.append(clampedOriginal.offsetBy(dx: -dx * 0.65, dy: dy * 0.65))
+            candidates.append(clampedOriginal.offsetBy(dx: dx * 0.65, dy: dy * 0.65))
         }
 
-        return candidates
-            .map { clamped($0, to: bounds, margin: margin) }
-            .min { layoutScore($0, anchor: anchor, occupiedRects: occupiedRects) < layoutScore($1, anchor: anchor, occupiedRects: occupiedRects) }
-            ?? clampedOriginal
+        // Clamping radial candidates near an edge can collapse many of them onto
+        // the same occupied location. Add a deterministic packing grid across
+        // the legal region before accepting any overlap.
+        let usableBounds = bounds.insetBy(dx: margin, dy: margin)
+        let packingBounds = usableBounds.width > 0 && usableBounds.height > 0
+            ? usableBounds
+            : bounds
+        let availableX = max(packingBounds.width - clampedOriginal.width, 0)
+        let availableY = max(packingBounds.height - clampedOriginal.height, 0)
+        let fractions: [CGFloat] = [0, 1.0 / 6.0, 2.0 / 6.0, 0.5, 4.0 / 6.0, 5.0 / 6.0, 1]
+        for y in fractions {
+            for x in fractions {
+                candidates.append(
+                    CGRect(
+                        x: packingBounds.minX + availableX * x,
+                        y: packingBounds.minY + availableY * y,
+                        width: clampedOriginal.width,
+                        height: clampedOriginal.height
+                    )
+                )
+            }
+        }
+
+        let normalizedCandidates = candidates.map {
+            clamped($0, to: bounds, margin: margin)
+        }
+        if let free = normalizedCandidates
+            .filter({ candidate in
+                !occupiedRects.contains(where: { $0.intersects(candidate) })
+            })
+            .min(by: {
+                hypot($0.midX - anchor.x, $0.midY - anchor.y)
+                    < hypot($1.midX - anchor.x, $1.midY - anchor.y)
+            }) {
+            return free
+        }
+
+        // The legal region itself may genuinely be too small. Only then fall
+        // back to the minimum-overlap position instead of choosing overlap while
+        // a free slot still exists elsewhere on the page.
+        return normalizedCandidates.min {
+            layoutScore($0, anchor: anchor, occupiedRects: occupiedRects)
+                < layoutScore($1, anchor: anchor, occupiedRects: occupiedRects)
+        } ?? clampedOriginal
     }
 
     private static func layoutScore(
