@@ -19,3 +19,6 @@
 
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple 原生翻译";
+"ocr.colorStyle" = "彩色译文配色";
+"ocr.inPlaceTranslation" = "中性黑白译文";
+"ocr.inPlaceTranslationDescription" = "开启后，所有译文统一使用白底黑字；关闭后保留原来的彩色译文样式。气泡检测只决定排版范围，不再改变视觉样式。";
