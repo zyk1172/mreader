@@ -14,7 +14,10 @@ nonisolated private func mreaderLocalizedString(_ key: String) -> String {
          "import.webServer",
          "import.webServerDescription",
          "ocr.appleTranslation",
-         "ocr.colorStyle.jewel":
+         "ocr.colorStyle",
+         "ocr.colorStyle.jewel",
+         "ocr.inPlaceTranslation",
+         "ocr.inPlaceTranslationDescription":
         let polished = NSLocalizedString(
             key,
             tableName: "CopyPolish",
