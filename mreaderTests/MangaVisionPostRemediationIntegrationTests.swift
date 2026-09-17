@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Testing
+import UIKit
 @testable import mreader
 
 @Suite(.serialized)
@@ -122,6 +123,43 @@ struct MangaVisionPostRemediationIntegrationTests {
         )
     }
 
+    @Test func serviceSnapshotSeparatesPageAnalysesFromAdaptiveModelPasses() async throws {
+        let base = MangaVisionPassCountingFakeProvider()
+        let adaptive = AdaptiveMangaVisionProvider(
+            base: base,
+            resourceStateOverride: MangaVisionResourceState(
+                lowPowerModeEnabled: false,
+                thermalLevel: .nominal
+            )
+        )
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mreader-post-remediation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let service = MangaVisionService(
+            provider: adaptive,
+            cacheDirectory: cacheDirectory
+        )
+        let cgImage = try #require(makeImage(width: 128, height: 2_560))
+        let pageURL = cacheDirectory.appendingPathComponent("long-strip.png")
+
+        _ = try await service.analysis(
+            comicID: UUID(uuidString: "EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE"),
+            pageIndex: 0,
+            pageURL: pageURL,
+            image: UIImage(cgImage: cgImage),
+            contentIdentity: PageContentIdentity(
+                source: "test",
+                revision: "long-strip-v1"
+            )
+        )
+
+        let snapshot = await service.performanceSnapshot()
+        let providerPassCount = await adaptive.totalInferencePassCountForDiagnostics()
+        #expect(snapshot.inferenceCount == 1)
+        #expect(providerPassCount == MangaVisionInferencePlanner.maximumInferencePassCount)
+        #expect(snapshot.modelInferencePassCount == providerPassCount)
+    }
+
     private func analysis(
         identifier: MangaPageIdentifier,
         balloons: [MangaVisionRegion] = [],
@@ -136,6 +174,52 @@ struct MangaVisionPostRemediationIntegrationTests {
             faces: faces,
             bodies: [],
             modelIdentifier: "post-remediation-fixture",
+            modelVersion: 1
+        )
+    }
+
+    private func makeImage(width: Int, height: Int) -> CGImage? {
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+}
+
+private actor MangaVisionPassCountingFakeProvider: MangaVisionProvider {
+    var descriptor: MangaVisionProviderDescriptor {
+        get async {
+            MangaVisionProviderDescriptor(
+                modelIdentifier: "post-remediation-pass-counting-fake",
+                modelVersion: 1,
+                inputSize: CGSize(width: 640, height: 640),
+                supportedRegionTypes: [.panel, .text, .balloon]
+            )
+        }
+    }
+
+    func analyzePage(
+        image: CGImage,
+        sourceImageSize: CGSize,
+        pageIdentifier: MangaPageIdentifier
+    ) async throws -> MangaPageAnalysis {
+        MangaPageAnalysis(
+            pageIdentifier: pageIdentifier,
+            imageSize: sourceImageSize,
+            panels: [],
+            texts: [],
+            balloons: [],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "post-remediation-pass-counting-fake",
             modelVersion: 1
         )
     }
