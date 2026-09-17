@@ -35,12 +35,6 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let descriptor: MangaVisionProviderDescriptor
     }
 
-    private struct DetectionTensorLayout {
-        let rowMajor: Bool
-        let instanceCount: Int
-        let featureCount: Int
-    }
-
     private struct DecodedCandidate {
         let region: MangaVisionRegion
         let instanceIndex: Int
@@ -100,7 +94,10 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let featureArrays = (request.results ?? [])
             .compactMap { $0 as? VNCoreMLFeatureValueObservation }
             .compactMap { $0.featureValue.multiArrayValue }
-        guard let detectionIndex = featureArrays.firstIndex(where: Self.looksLikeDetectionTensor) else {
+        guard let detectionIndex = MangaVisionOutputContract.firstDetectionTensorIndex(in: featureArrays) else {
+            MReaderLog.aiVision.error(
+                "MangaVision output contract failed at runtime revision=\(MangaVisionOutputContract.revision, privacy: .public) reason=missing-compatible-detection-output"
+            )
             throw MangaVisionProviderError.unsupportedOutput
         }
         let detectionOutput = featureArrays[detectionIndex]
@@ -108,27 +105,24 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
             index == detectionIndex ? nil : array
         }
 
+        let profile = MangaVisionCalibrationProfile.bundled
         let decoded = Self.decodeRegions(
             detectionOutput,
             segmentationOutputs: segmentationOutputs,
             analysisImageSize: CGSize(width: image.width, height: image.height),
             labelsByClassID: runtime.labelsByClassID,
             inputSize: runtime.descriptor.inputSize,
-            thresholds: Self.defaultConfidenceThresholds
+            thresholds: profile.confidenceThresholds
         )
         let grouped = Dictionary(grouping: decoded, by: \.type)
         return MangaPageAnalysis(
             pageIdentifier: pageIdentifier,
             imageSize: sourceImageSize,
             panels: grouped[.panel] ?? [],
-            texts: MangaVisionRegionPostProcessor.deduplicated(grouped[.text] ?? []),
-            balloons: MangaVisionRegionPostProcessor.deduplicated(
-                grouped[.balloon] ?? [],
-                iouThreshold: 0.58,
-                containmentThreshold: 0.90
-            ),
-            faces: MangaVisionRegionPostProcessor.deduplicated(grouped[.face] ?? []),
-            bodies: MangaVisionRegionPostProcessor.deduplicated(grouped[.body] ?? []),
+            texts: profile.deduplicated(grouped[.text] ?? [], type: .text),
+            balloons: profile.deduplicated(grouped[.balloon] ?? [], type: .balloon),
+            faces: profile.deduplicated(grouped[.face] ?? [], type: .face),
+            bodies: profile.deduplicated(grouped[.body] ?? [], type: .body),
             modelIdentifier: runtime.descriptor.modelIdentifier,
             modelVersion: runtime.descriptor.modelVersion
         )
@@ -147,18 +141,28 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuAndNeuralEngine
         let model = try MLModel(contentsOf: modelURL, configuration: configuration)
-        let visionModel = try VNCoreMLModel(for: model)
         let metadataLabels = Self.classLabels(from: model.modelDescription.metadata)
         // The fallback is a checked manifest for the exact bundled checkpoint,
         // used only when the Core ML export omits/loses creator-defined `names`.
         let labels = metadataLabels.isEmpty ? Self.bundledCheckpointLabels : metadataLabels
         let supported = Set(labels.values.compactMap(Self.semanticRegionType(forLabel:)))
+        let contractViolations = MangaVisionOutputContract.validate(
+            modelDescription: model.modelDescription,
+            supportedRegionTypes: supported
+        )
+        guard contractViolations.isEmpty else {
+            MReaderLog.aiVision.error(
+                "MangaVision bundled model rejected contract=\(MangaVisionOutputContract.revision, privacy: .public) violations=\(contractViolations.joined(separator: ","), privacy: .public)"
+            )
+            throw MangaVisionProviderError.unsupportedOutput
+        }
+        let visionModel = try VNCoreMLModel(for: model)
         let descriptor = MangaVisionProviderDescriptor(
             modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
             // v4 consumes frame/text/balloon together and decodes instance-mask
             // outputs when the bundled Core ML export exposes them.
             modelVersion: 4,
-            inputSize: CGSize(width: 640, height: 640),
+            inputSize: MangaVisionOutputContract.expectedInputSize,
             supportedRegionTypes: supported
         )
         let loaded = Runtime(
@@ -183,17 +187,9 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
     private static let fallbackDescriptor = MangaVisionProviderDescriptor(
         modelIdentifier: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
         modelVersion: 4,
-        inputSize: CGSize(width: 640, height: 640),
-        supportedRegionTypes: [.panel, .text, .balloon]
+        inputSize: MangaVisionOutputContract.expectedInputSize,
+        supportedRegionTypes: MangaVisionOutputContract.requiredSemanticClasses
     )
-
-    private static let defaultConfidenceThresholds: [MangaRegionType: Float] = [
-        .panel: 0.24,
-        .text: 0.18,
-        .balloon: 0.20,
-        .face: 0.20,
-        .body: 0.20
-    ]
 
     private static func classLabels(from metadata: [MLModelMetadataKey: Any]) -> [Int: String] {
         guard let creatorValue = metadata[.creatorDefinedKey] else { return [:] }
@@ -258,28 +254,12 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         }
     }
 
-    private static func looksLikeDetectionTensor(_ output: MLMultiArray) -> Bool {
-        detectionTensorLayout(output) != nil
-    }
-
-    private static func detectionTensorLayout(_ output: MLMultiArray) -> DetectionTensorLayout? {
-        let shape = output.shape.map(\.intValue)
-        guard shape.count == 3, shape.first == 1 else { return nil }
-        if shape[2] >= 6, shape[2] <= 256, shape[1] >= 1, shape[1] <= 2_000 {
-            return DetectionTensorLayout(rowMajor: true, instanceCount: shape[1], featureCount: shape[2])
-        }
-        if shape[1] >= 6, shape[1] <= 256, shape[2] >= 1, shape[2] <= 2_000 {
-            return DetectionTensorLayout(rowMajor: false, instanceCount: shape[2], featureCount: shape[1])
-        }
-        return nil
-    }
-
     static func decodeForDiagnostics(
         _ output: MLMultiArray,
         segmentationOutput: MLMultiArray? = nil,
         analysisImageSize: CGSize,
         labelsByClassID: [Int: String],
-        inputSize: CGSize = CGSize(width: 640, height: 640),
+        inputSize: CGSize = MangaVisionOutputContract.expectedInputSize,
         thresholds: [MangaRegionType: Float]? = nil
     ) -> [MangaVisionRegion] {
         decodeRegions(
@@ -288,7 +268,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
             analysisImageSize: analysisImageSize,
             labelsByClassID: labelsByClassID,
             inputSize: inputSize,
-            thresholds: thresholds ?? defaultConfidenceThresholds
+            thresholds: thresholds ?? MangaVisionCalibrationProfile.bundled.confidenceThresholds
         )
     }
 
@@ -300,7 +280,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         inputSize: CGSize,
         thresholds: [MangaRegionType: Float]
     ) -> [MangaVisionRegion] {
-        guard let tensorLayout = detectionTensorLayout(output),
+        guard let tensorLayout = MangaVisionOutputContract.detectionTensorLayout(for: output),
               analysisImageSize.width > 0,
               analysisImageSize.height > 0 else { return [] }
 
