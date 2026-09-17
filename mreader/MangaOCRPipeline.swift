@@ -339,7 +339,7 @@ nonisolated enum MangaOCRPipeline {
         options: OCRPreprocessor.Options,
         mangaAnalysis: MangaPageAnalysis? = nil
     ) async throws -> OCRPipelineResult {
-        let candidateResult = try await OCRPreprocessor.recognizeCandidatesWithReference(
+        let candidateResult = try await OCRROICoverageRecognizer.recognizeCandidatesWithReference(
             in: image,
             options: options,
             visionTextRegions: mangaAnalysis?.texts ?? []
