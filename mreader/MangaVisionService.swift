@@ -19,7 +19,9 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// It owns page/model cache identity and in-flight coalescing so consumers never
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
-    static let shared = MangaVisionService(provider: YOLOMangaVisionProvider.shared)
+    static let shared = MangaVisionService(
+        provider: AdaptiveMangaVisionProvider(base: YOLOMangaVisionProvider.shared)
+    )
     nonisolated static let analysisRevision = "manga-vision-page-v3-runtime-foundation"
 
     private struct CacheEnvelope: Codable {
@@ -91,7 +93,8 @@ actor MangaVisionService {
         pageIndex: Int?,
         pageURL: URL,
         image: UIImage,
-        contentIdentity: PageContentIdentity? = nil
+        contentIdentity: PageContentIdentity? = nil,
+        requestClass: MangaVisionRequestClass = .interactive
     ) async throws -> MangaPageAnalysis {
         let analysisStart = ContinuousClock.now
         let manifest = await modelManifest()
@@ -157,10 +160,22 @@ actor MangaVisionService {
             }
         }
 
-        guard let analysisImage = Self.analysisCGImage(
-            from: image,
-            maximumDimension: Int(max(manifest.inputSize.width, manifest.inputSize.height))
-        ) else {
+        let sourceSize = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        let provider = self.provider
+        let sourceAnalyzer = provider as? any MangaVisionSourceImageAnalyzing
+        let analysisImage: CGImage?
+        if sourceAnalyzer != nil {
+            // Adaptive providers need the largest already-decoded source image so tiles can
+            // recover detail that would be destroyed by a single 640px full-page shrink.
+            analysisImage = image.cgImage
+        } else {
+            analysisImage = Self.analysisCGImage(
+                from: image,
+                maximumDimension: Int(max(manifest.inputSize.width, manifest.inputSize.height))
+            )
+        }
+        guard let analysisImage else {
             let error = MangaVisionProviderError.modelUnavailable
             recordFailure(
                 error,
@@ -172,15 +187,20 @@ actor MangaVisionService {
             throw error
         }
 
-        let sourceSize = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
-            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
-        let provider = self.provider
         let generation = requestGeneration
         let requestID = UUID()
-        // The Task inherits foreground/background priority. Cancellation remains cooperative;
-        // generation validation below is the authoritative stale-result barrier.
+        // The task inherits the caller's scheduling priority. The adaptive provider also
+        // receives an explicit request class so prefetch work cannot outrank reader work.
         let task = Task {
-            try await provider.analyzePage(
+            if let sourceAnalyzer {
+                return try await sourceAnalyzer.analyzeSourceImage(
+                    image: analysisImage,
+                    sourceImageSize: sourceSize,
+                    pageIdentifier: identity,
+                    requestClass: requestClass
+                )
+            }
+            return try await provider.analyzePage(
                 image: analysisImage,
                 sourceImageSize: sourceSize,
                 pageIdentifier: identity
@@ -253,8 +273,24 @@ actor MangaVisionService {
         indices: [Int]
     ) async {
         let manifest = await modelManifest()
-        let maximumDimension = Int(max(manifest.inputSize.width, manifest.inputSize.height))
-        for index in indices.prefix(3) {
+        let inputMaximum = Int(max(manifest.inputSize.width, manifest.inputSize.height))
+        let resourceState = MangaVisionResourceState.current
+        let usesAdaptiveSource = provider is any MangaVisionSourceImageAnalyzing
+        let maximumDimension: Int
+        let pageLimit: Int
+        if usesAdaptiveSource {
+            guard let adaptiveMaximum = MangaVisionInferencePlanner.prefetchMaximumSourceDimension(
+                inputSize: manifest.inputSize,
+                resourceState: resourceState
+            ) else { return }
+            maximumDimension = adaptiveMaximum
+            pageLimit = MangaVisionInferencePlanner.prefetchPageLimit(resourceState: resourceState)
+        } else {
+            maximumDimension = inputMaximum
+            pageLimit = 3
+        }
+
+        for index in indices.prefix(pageLimit) {
             guard pages.indices.contains(index), !Task.isCancelled else { return }
             let page = pages[index]
             let contentIdentity = PageContentIdentityResolver.identity(for: page.url)
@@ -267,7 +303,8 @@ actor MangaVisionService {
                 pageIndex: index,
                 pageURL: page.url,
                 image: image,
-                contentIdentity: contentIdentity
+                contentIdentity: contentIdentity,
+                requestClass: .prefetch
             )
         }
     }
