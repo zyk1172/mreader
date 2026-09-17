@@ -138,17 +138,15 @@ nonisolated enum OCRBubbleLayoutEngine {
         min(max(sourceFontSize, 1), TranslationLayoutMetrics.absoluteFontSizeCap)
     }
 
-    /// 有可靠气泡时沿用 OCR 几何字号；没有可靠气泡时，OCR 框不参与字号决策，
-    /// 改用用户设置的 measured-text 字号。
-    /// 后续布局仍会在 allowedBounds 内按实际文本测量结果缩小字号。
+    /// Bubble detection decides geometry, never typography. Every translation starts from
+    /// the same reader-selected preferred size and may only shrink to fit its available region.
     static func requestedTranslationFontSize(
         hasReliableBubble: Bool,
         automaticFontSize: CGFloat,
         measuredTextFontSize: CGFloat
     ) -> CGFloat {
-        guard !hasReliableBubble else {
-            return preferredTranslationFontSize(sourceFontSize: automaticFontSize)
-        }
+        _ = hasReliableBubble
+        _ = automaticFontSize
         return CGFloat(
             ComicBook.clampedMeasuredTextTranslationFontSize(Double(measuredTextFontSize))
         )
