@@ -5534,14 +5534,27 @@ struct LocalImageView: View {
             within: allowedBounds,
             imageBounds: imageBounds
         )
-        // Geometry and presentation are independent. Both real-bubble and measured-text
-        // layouts start from the same reader-selected preferred size, then the layout engine
-        // only shrinks when the available region cannot fit the translated text.
-        let requestedFontSize = CGFloat(
+        // Geometry and presentation are independent. Both paths normally start from the
+        // reader-selected preferred size. Reliable bubbles additionally provide the OCR-derived
+        // automatic estimate so the sizing policy can reject pathological geometry before layout.
+        let configuredFontSize = CGFloat(
             ComicBook.clampedMeasuredTextTranslationFontSize(
                 comic?.measuredTextTranslationFontSize
                     ?? ComicBook.defaultMeasuredTextTranslationFontSize
             )
+        )
+        let automaticFontSize = hasReliableBubble
+            ? preferredTranslationFontSize(
+                for: block,
+                in: size,
+                textRect: textRect,
+                sizingMode: .bubble
+            )
+            : configuredFontSize
+        let requestedFontSize = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: hasReliableBubble,
+            automaticFontSize: automaticFontSize,
+            measuredTextFontSize: configuredFontSize
         )
         let choice = OCRBubbleLayoutEngine.preferredTranslationLayout(
             translation: effectiveTranslation,
