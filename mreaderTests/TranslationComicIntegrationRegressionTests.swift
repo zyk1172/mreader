@@ -34,6 +34,22 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         }
     }
 
+    func testPreferredTranslationFontSizeDoesNotDependOnBubbleDetection() {
+        let withBubble = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: true,
+            automaticFontSize: 28,
+            measuredTextFontSize: 16
+        )
+        let withoutBubble = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: false,
+            automaticFontSize: 4,
+            measuredTextFontSize: 16
+        )
+
+        XCTAssertEqual(withBubble, 16, accuracy: 0.001)
+        XCTAssertEqual(withoutBubble, 16, accuracy: 0.001)
+    }
+
     func testOverflowPreviewIsCompactAnchoredAndBoundedForHorizontalText() {
         let bounds = CGRect(x: 10, y: 20, width: 360, height: 520)
         let source = CGRect(x: 150, y: 180, width: 210, height: 90)
