@@ -50,45 +50,57 @@ struct GuidedPanelFocusTests {
         #expect(abs(rect.height - 800) < 0.001)
     }
 
-    @Test func gaussianModeIsStableAcrossPowerAndThermalStates() {
+    @Test func liquidGlassModeIsStableAcrossPowerAndThermalStates() {
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .nominal
-            ) == .gaussian
+            ) == .liquidGlass
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .nominal
-            ) == .gaussian
+            ) == .liquidGlass
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .serious
-            ) == .gaussian
+            ) == .liquidGlass
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .critical
-            ) == .gaussian
+            ) == .liquidGlass
         )
     }
 
-    @Test func featherAlphaIsLinearAndContinuous() {
-        let width: CGFloat = 100
-        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: -10, featherWidth: width) == 0)
-        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 0, featherWidth: width) == 0)
-        #expect(abs(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 25, featherWidth: width) - 0.25) < 0.0001)
-        #expect(abs(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 50, featherWidth: width) - 0.50) < 0.0001)
-        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 100, featherWidth: width) == 1)
-        #expect(GuidedPanelFocusPolicy.linearFeatherAlpha(distanceFromFocus: 140, featherWidth: width) == 1)
+    @Test func featherCurveIsContinuousAndAcceleratesOutward() {
+        let a0 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(0)
+        let a1 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(0.25)
+        let a2 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(0.50)
+        let a3 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(0.75)
+        let a4 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(1)
+
+        #expect(a0 == 0)
+        #expect(abs(a1 - 0.015625) < 0.000001)
+        #expect(abs(a2 - 0.125) < 0.000001)
+        #expect(abs(a3 - 0.421875) < 0.000001)
+        #expect(a4 == 1)
+
+        let increments = [a1 - a0, a2 - a1, a3 - a2, a4 - a3]
+        #expect(increments[0] < increments[1])
+        #expect(increments[1] < increments[2])
+        #expect(increments[2] < increments[3])
+
+        #expect(GuidedPanelFocusPolicy.acceleratedFeatherAlpha(-1) == 0)
+        #expect(GuidedPanelFocusPolicy.acceleratedFeatherAlpha(2) == 1)
     }
 
     @MainActor
-    @Test func gaussianPreviewIsGeneratedAndCached() async {
+    @Test func liquidGlassPrewarmDoesNotGenerateCompetingPageBitmap() async {
         let source = UIGraphicsImageRenderer(size: CGSize(width: 96, height: 96)).image { context in
             UIColor.black.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 48, height: 96))
@@ -98,12 +110,10 @@ struct GuidedPanelFocusTests {
         let url = URL(fileURLWithPath: "/tmp/guided-panel-focus-render-test.png")
         let store = GuidedPanelFocusPreviewStore()
 
-        store.prewarm(url: url, image: source, modeOverride: .gaussian)
-        for _ in 0..<80 where store.preview(for: url) == nil {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        store.prewarm(url: url, image: source, modeOverride: .liquidGlass)
+        try? await Task.sleep(for: .milliseconds(40))
 
-        #expect(store.preview(for: url) != nil)
-        #expect(store.previews[url.absoluteString] != nil)
+        #expect(store.preview(for: url) == nil)
+        #expect(store.previews.isEmpty)
     }
 }

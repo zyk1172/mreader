@@ -1,5 +1,4 @@
 import CoreGraphics
-import CoreImage
 import Foundation
 import Observation
 import SwiftUI
@@ -7,29 +6,32 @@ import UIKit
 
 nonisolated enum GuidedPanelFocusPolicy {
     enum Mode: Equatable, Sendable {
+        case liquidGlass
+        // Source compatibility for older callers/tests. Guided Panel now always resolves
+        // to native Liquid Glass and never generates a blurred page bitmap.
         case gaussian
-        // Source-compatibility for older callers/tests. New code always resolves to gaussian.
         case spotlight
     }
 
     static let panelExpansionRatio: CGFloat = 0.018
-    static let dimOpacity: Double = 0.34
-    static let featherWidth: CGFloat = 96
-    static let gaussianPreviewRadius: CGFloat = 42
-    static let previewMaxDimension: CGFloat = 960
-    static let focusStrokeOpacity: Double = 0.12
+    static let featherWidth: CGFloat = 112
+    static let featherBlurRadius: CGFloat = 52
+    static let nearClearance: CGFloat = 22
+    static let glassTintOpacity: Double = 0.82
+    static let farDimOpacity: Double = 0.22
+    static let focusStrokeOpacity: Double = 0.10
     static let focusCornerRadius: CGFloat = 9
 
     static func mode(
         isLowPowerModeEnabled: Bool,
         thermalState: ProcessInfo.ThermalState
     ) -> Mode {
-        // The Gaussian layer is rendered once into a bounded low-resolution preview,
-        // not recomputed every animation frame. Keep the same treatment under power
-        // and thermal pressure so Guided Panel does not visibly change style mid-read.
+        // Liquid Glass is a native compositing effect. Unlike the old Gaussian preview,
+        // it does not compete with N+1 image decode / panel inference, so the visual style
+        // remains stable under power and thermal pressure.
         _ = isLowPowerModeEnabled
         _ = thermalState
-        return .gaussian
+        return .liquidGlass
     }
 
     static var currentMode: Mode {
@@ -39,14 +41,12 @@ nonisolated enum GuidedPanelFocusPolicy {
         )
     }
 
-    /// Linear alpha ramp used by the focus feather: the active panel is fully clear,
-    /// then opacity grows continuously with distance until the configured feather edge.
-    static func linearFeatherAlpha(
-        distanceFromFocus: CGFloat,
-        featherWidth: CGFloat = GuidedPanelFocusPolicy.featherWidth
-    ) -> Double {
-        guard featherWidth > 0 else { return distanceFromFocus > 0 ? 1 : 0 }
-        return Double(min(max(distanceFromFocus / featherWidth, 0), 1))
+    /// Convex opacity response applied to the already-smooth feather alpha.
+    /// f(t) = t^3 is continuous, starts with zero slope, and accelerates monotonically:
+    /// glass is only faint near the active panel, then becomes rapidly stronger farther away.
+    static func acceleratedFeatherAlpha(_ alpha: Double) -> Double {
+        let t = min(max(alpha, 0), 1)
+        return t * t * t
     }
 }
 
@@ -115,21 +115,19 @@ nonisolated enum GuidedPanelFocusGeometry {
     }
 }
 
-/// Bounded Gaussian preview cache used by Guided Panel focus isolation.
-///
-/// The source reader image remains untouched. Each page produces at most one <= 960px
-/// blurred copy off the main actor, which is then transformed with the same camera as the
-/// live page. This keeps the effect stable without blurring the full-resolution page every frame.
+/// Compatibility shell retained so the reader's page-transition code does not need to change
+/// identity or state ownership. Liquid Glass is rendered directly by SwiftUI, therefore this
+/// store deliberately performs no bitmap generation, Core Image work, or page-cache reads.
+/// Keeping `prewarm` as a no-op also removes the regression where focus-preview work competed
+/// with N+1 decode and panel-layout prefetch at the exact moment the reader approached a page edge.
 @MainActor
 @Observable
 final class GuidedPanelFocusPreviewStore {
     private(set) var previews: [String: UIImage] = [:]
-    private var pending: Set<String> = []
-    private var generation = UUID()
-    private let maximumCachedPreviews = 4
 
     func preview(for url: URL) -> UIImage? {
-        previews[url.absoluteString]
+        _ = url
+        return nil
     }
 
     func prewarm(
@@ -137,59 +135,13 @@ final class GuidedPanelFocusPreviewStore {
         image: UIImage,
         modeOverride: GuidedPanelFocusPolicy.Mode? = nil
     ) {
-        _ = modeOverride ?? GuidedPanelFocusPolicy.currentMode
-        let key = url.absoluteString
-        guard previews[key] == nil, !pending.contains(key) else { return }
-        pending.insert(key)
-        let expectedGeneration = generation
-
-        Task { [weak self] in
-            let preview = await Task.detached(priority: .utility) {
-                Self.makeGaussianPreview(from: image)
-            }.value
-            guard let self, self.generation == expectedGeneration else { return }
-            self.pending.remove(key)
-            guard let preview else { return }
-            self.previews[key] = preview
-            self.trimCache(keeping: key)
-        }
+        _ = url
+        _ = image
+        _ = modeOverride
     }
 
     func cancelAll() {
-        generation = UUID()
-        pending.removeAll(keepingCapacity: true)
         previews.removeAll(keepingCapacity: true)
-    }
-
-    private func trimCache(keeping key: String) {
-        while previews.count > maximumCachedPreviews,
-              let victim = previews.keys.first(where: { $0 != key }) {
-            previews.removeValue(forKey: victim)
-        }
-    }
-
-    private nonisolated static func makeGaussianPreview(from image: UIImage) -> UIImage? {
-        guard let input = CIImage(image: image) else { return nil }
-        let sourceExtent = input.extent.standardized
-        guard sourceExtent.width > 0, sourceExtent.height > 0 else { return nil }
-
-        let longestSide = max(sourceExtent.width, sourceExtent.height)
-        let scale = min(1, GuidedPanelFocusPolicy.previewMaxDimension / longestSide)
-        let resized = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let extent = resized.extent.standardized.integral
-        guard extent.width > 0, extent.height > 0 else { return nil }
-
-        let blurred = resized
-            .clampedToExtent()
-            .applyingFilter(
-                "CIGaussianBlur",
-                parameters: [kCIInputRadiusKey: GuidedPanelFocusPolicy.gaussianPreviewRadius]
-            )
-            .cropped(to: extent)
-
-        let context = CIContext(options: [CIContextOption.cacheIntermediates: false])
-        guard let output = context.createCGImage(blurred, from: extent) else { return nil }
-        return UIImage(cgImage: output)
     }
 }
 
@@ -232,58 +184,36 @@ private struct GuidedPanelInverseFocusMask: Shape {
     }
 }
 
-/// Piecewise linear distance feather around the focused panel.
+/// A smooth distance-like feather generated entirely by SwiftUI compositing.
 ///
-/// The four strips are exactly linear on each panel edge. Their overlap at corners remains
-/// continuous, while the far field is filled by the inverse outer rectangle. This avoids the
-/// old hard cut at the panel boundary and does not use a radial gradient centered on the panel.
-private struct GuidedPanelLinearFeatherMask: View {
+/// The inverse rounded-rectangle mask is first blurred, which makes alpha continuous across
+/// edges and corners. Applying that same smooth mask three times multiplies alpha by itself,
+/// producing the convex response f(t)=t^3: change is deliberately slow next to the active
+/// panel and progressively faster outward. `nearClearance` shifts the blur away from the panel
+/// so the first visible glass remains only faintly translucent rather than starting at 50%.
+private struct GuidedPanelGlassFeatherMask: View {
     let focusRect: CGRect
     let viewportSize: CGSize
-    let featherWidth: CGFloat
+
+    private var expandedFocusRect: CGRect {
+        focusRect.insetBy(
+            dx: -GuidedPanelFocusPolicy.nearClearance,
+            dy: -GuidedPanelFocusPolicy.nearClearance
+        )
+    }
+
+    private var baseMask: some View {
+        GuidedPanelInverseFocusMask(focusRect: expandedFocusRect)
+            .fill(Color.white, style: FillStyle(eoFill: true))
+            .blur(radius: GuidedPanelFocusPolicy.featherBlurRadius)
+            .frame(width: viewportSize.width, height: viewportSize.height)
+            .clipped()
+    }
 
     var body: some View {
-        let feather = max(featherWidth, 1)
-        let outerRect = focusRect.insetBy(dx: -feather, dy: -feather)
-
-        ZStack {
-            GuidedPanelInverseFocusMask(focusRect: outerRect)
-                .fill(Color.white, style: FillStyle(eoFill: true))
-
-            LinearGradient(
-                colors: [.white, .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(width: max(outerRect.width, 1), height: feather)
-            .position(x: focusRect.midX, y: focusRect.minY - feather / 2)
-
-            LinearGradient(
-                colors: [.clear, .white],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(width: max(outerRect.width, 1), height: feather)
-            .position(x: focusRect.midX, y: focusRect.maxY + feather / 2)
-
-            LinearGradient(
-                colors: [.white, .clear],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: feather, height: max(focusRect.height, 1))
-            .position(x: focusRect.minX - feather / 2, y: focusRect.midY)
-
-            LinearGradient(
-                colors: [.clear, .white],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: feather, height: max(focusRect.height, 1))
-            .position(x: focusRect.maxX + feather / 2, y: focusRect.midY)
-        }
-        .frame(width: viewportSize.width, height: viewportSize.height)
-        .clipped()
+        baseMask
+            .mask { baseMask }
+            .mask { baseMask }
     }
 }
 
@@ -314,23 +244,23 @@ struct GuidedPanelFocusOverlay: View {
             )
 
             ZStack {
-                if let preview = store.preview(for: pageURL) {
-                    Image(uiImage: preview)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: viewportSize.width, height: viewportSize.height)
-                        .scaleEffect(cameraScale)
-                        .offset(cameraOffset)
-                }
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: viewportSize.width, height: viewportSize.height)
+                    .glassEffect(
+                        .regular.tint(Color.black.opacity(GuidedPanelFocusPolicy.glassTintOpacity)),
+                        in: Rectangle()
+                    )
 
-                Color.black.opacity(GuidedPanelFocusPolicy.dimOpacity)
+                // A restrained dark veil makes the far field effectively unreadable while
+                // preserving the native refractive/color response of Liquid Glass underneath.
+                Color.black.opacity(GuidedPanelFocusPolicy.farDimOpacity)
             }
             .frame(width: viewportSize.width, height: viewportSize.height)
             .mask {
-                GuidedPanelLinearFeatherMask(
+                GuidedPanelGlassFeatherMask(
                     focusRect: focusRect,
-                    viewportSize: viewportSize,
-                    featherWidth: GuidedPanelFocusPolicy.featherWidth
+                    viewportSize: viewportSize
                 )
             }
             .overlay {
@@ -340,19 +270,21 @@ struct GuidedPanelFocusOverlay: View {
                 )
                 .strokeBorder(
                     Color.white.opacity(GuidedPanelFocusPolicy.focusStrokeOpacity),
-                    lineWidth: 0.7
+                    lineWidth: 0.6
                 )
                 .frame(width: max(focusRect.width, 0), height: max(focusRect.height, 0))
                 .position(x: focusRect.midX, y: focusRect.midY)
-                .shadow(color: .black.opacity(0.24), radius: 1.5)
+                .shadow(color: .black.opacity(0.18), radius: 1.2)
             }
             .opacity(opacity)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             .onAppear {
-                // The normal Guided Panel path prewarms during panel detection/prefetch.
-                // This is a zero-I/O fallback when the decoded page is already cached.
-                requestPreview()
+                // Keep the old call-site contract inert. In particular, do not request or
+                // generate a per-page focus bitmap here; next-page buffering has priority.
+                _ = store
+                _ = pageURL
+                _ = requestPreview
                 _ = cancelPreviewWork
             }
         }
