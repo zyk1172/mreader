@@ -85,9 +85,9 @@ struct GuidedPanelFocusTests {
         let a4 = GuidedPanelFocusPolicy.acceleratedFeatherAlpha(1)
 
         #expect(a0 == 0)
-        #expect(abs(a1 - 0.015625) < 0.000001)
-        #expect(abs(a2 - 0.125) < 0.000001)
-        #expect(abs(a3 - 0.421875) < 0.000001)
+        #expect(abs(a1 - 0.0625) < 0.000001)
+        #expect(abs(a2 - 0.25) < 0.000001)
+        #expect(abs(a3 - 0.5625) < 0.000001)
         #expect(a4 == 1)
 
         let increments = [a1 - a0, a2 - a1, a3 - a2, a4 - a3]
