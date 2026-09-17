@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "revision": "manga-vision-regression-corpus-2026-09-17-v1",
+  "notes": "24 deterministic image-input cases derived from two pinned repository fixtures. These are model/runtime stability cases, not a substitute for human-verified accuracy labels. Accuracy metrics are reportable only when the referenced gold annotation is humanVerified.",
+  "cases": [
+    {"id":"shirohage-100","image":"sample_shirohage_manga.jpg","scale":1.00},
+    {"id":"shirohage-095","image":"sample_shirohage_manga.jpg","scale":0.95},
+    {"id":"shirohage-090","image":"sample_shirohage_manga.jpg","scale":0.90},
+    {"id":"shirohage-085","image":"sample_shirohage_manga.jpg","scale":0.85},
+    {"id":"shirohage-080","image":"sample_shirohage_manga.jpg","scale":0.80},
+    {"id":"shirohage-075","image":"sample_shirohage_manga.jpg","scale":0.75},
+    {"id":"shirohage-070","image":"sample_shirohage_manga.jpg","scale":0.70},
+    {"id":"shirohage-065","image":"sample_shirohage_manga.jpg","scale":0.65},
+    {"id":"shirohage-060","image":"sample_shirohage_manga.jpg","scale":0.60},
+    {"id":"shirohage-055","image":"sample_shirohage_manga.jpg","scale":0.55},
+    {"id":"shirohage-050","image":"sample_shirohage_manga.jpg","scale":0.50},
+    {"id":"shirohage-045","image":"sample_shirohage_manga.jpg","scale":0.45},
+    {"id":"publicdomainq-100","image":"manga_page_publicdomainq.png","scale":1.00},
+    {"id":"publicdomainq-095","image":"manga_page_publicdomainq.png","scale":0.95},
+    {"id":"publicdomainq-090","image":"manga_page_publicdomainq.png","scale":0.90},
+    {"id":"publicdomainq-085","image":"manga_page_publicdomainq.png","scale":0.85},
+    {"id":"publicdomainq-080","image":"manga_page_publicdomainq.png","scale":0.80},
+    {"id":"publicdomainq-075","image":"manga_page_publicdomainq.png","scale":0.75},
+    {"id":"publicdomainq-070","image":"manga_page_publicdomainq.png","scale":0.70},
+    {"id":"publicdomainq-065","image":"manga_page_publicdomainq.png","scale":0.65},
+    {"id":"publicdomainq-060","image":"manga_page_publicdomainq.png","scale":0.60},
+    {"id":"publicdomainq-055","image":"manga_page_publicdomainq.png","scale":0.55},
+    {"id":"publicdomainq-050","image":"manga_page_publicdomainq.png","scale":0.50},
+    {"id":"publicdomainq-045","image":"manga_page_publicdomainq.png","scale":0.45}
+  ]
+}
