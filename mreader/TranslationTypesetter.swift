@@ -117,12 +117,17 @@ nonisolated enum TranslationTypesetter {
         color: UIColor
     ) {
         guard !text.isEmpty, bounds.width > 0, bounds.height > 0 else { return }
+        // Classic/readable translation surfaces historically rendered neutral black text.
+        // Recent style plumbing started forwarding UIColor.label, which can become dynamic
+        // and visually diverge from the old overlay. Normalize only `.label`; explicit
+        // colors such as the vivid style's white remain untouched.
+        let resolvedColor = color.isEqual(UIColor.label) ? UIColor.black : color
         let attributed = attributedString(
             text: text,
             fontSize: fontSize,
             orientation: orientation,
             lineSpacing: lineSpacing,
-            color: color
+            color: resolvedColor
         )
         let framesetter = CTFramesetterCreateWithAttributedString(attributed)
         let frame = makeFrame(
