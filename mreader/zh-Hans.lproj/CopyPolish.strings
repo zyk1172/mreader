@@ -20,5 +20,9 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple 原生翻译";
 "ocr.colorStyle" = "彩色译文配色";
-"ocr.inPlaceTranslation" = "中性黑白译文";
-"ocr.inPlaceTranslationDescription" = "开启后，所有译文统一使用白底黑字；关闭后保留原来的彩色译文样式。气泡检测只决定排版范围，不再改变视觉样式。";
+"ocr.measuredTextFontSize" = "译文首选字号";
+"ocr.measuredTextFontSizeDescription" = "真实气泡和测量文本都从这个字号开始；空间不足时自动缩小，不会为了字号突破气泡或安全排版范围。";
+"ocr.inPlaceTranslation" = "译文样式";
+"ocr.inPlaceTranslationDescription" = "中性黑白会将所有译文统一为白底黑字；彩色保留原来的彩色译文样式。气泡检测只决定排版范围，不再改变视觉风格。";
+"ocr.presentationStyle.colorful" = "彩色";
+"ocr.presentationStyle.neutral" = "中性黑白";
