@@ -32,7 +32,11 @@ nonisolated struct MangaVisionRegressionMetrics: Sendable, Equatable {
     let balloonRecall: Double?
     let ocrFinalRecall: Double?
     let fallbackRate: Double
+    /// Mean model-pass cost across the measured pages.
     let inferenceCountPerPage: Double
+    /// Worst single-page model-pass cost. This protects the adaptive planner's hard budget;
+    /// an inexpensive average must not hide one page that exceeded the contract.
+    let maximumInferenceCountOnPage: Int
     let pageCount: Int
 
     static func aggregate(
@@ -71,6 +75,7 @@ nonisolated struct MangaVisionRegressionMetrics: Sendable, Equatable {
             inferenceCountPerPage: pages == 0
                 ? 0
                 : Double(observations.reduce(0) { $0 + $1.inferenceCount }) / Double(pages),
+            maximumInferenceCountOnPage: observations.map(\.inferenceCount).max() ?? 0,
             pageCount: pages
         )
     }
@@ -111,7 +116,7 @@ nonisolated struct MangaVisionRegressionGate: Sendable, Equatable {
         minimumBalloonRecall: 0.70,
         minimumOCRFinalRecall: 0.80,
         maximumFallbackRate: 0.20,
-        maximumInferenceCountPerPage: 4.0
+        maximumInferenceCountPerPage: Double(MangaVisionInferencePlanner.maximumInferencePassCount)
     )
 
     func failures(for metrics: MangaVisionRegressionMetrics) -> [String] {
@@ -143,9 +148,9 @@ nonisolated struct MangaVisionRegressionGate: Sendable, Equatable {
         if metrics.fallbackRate > maximumFallbackRate {
             failures.append("fallback-rate:\(formatted(metrics.fallbackRate))>\(formatted(maximumFallbackRate))")
         }
-        if metrics.inferenceCountPerPage > maximumInferenceCountPerPage {
+        if Double(metrics.maximumInferenceCountOnPage) > maximumInferenceCountPerPage {
             failures.append(
-                "inference-count-per-page:\(formatted(metrics.inferenceCountPerPage))>\(formatted(maximumInferenceCountPerPage))"
+                "maximum-inference-count-on-page:\(metrics.maximumInferenceCountOnPage)>\(formatted(maximumInferenceCountPerPage))"
             )
         }
         return failures

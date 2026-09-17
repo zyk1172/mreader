@@ -6,7 +6,11 @@ import os
 
 nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
     let modelIdentifier: String
+    /// Number of uncached page analyses committed by the service.
     let inferenceCount: Int
+    /// Number of actual provider model passes. Adaptive long pages may contribute
+    /// more than one pass while still committing exactly one page analysis.
+    let modelInferencePassCount: Int
     let memoryCacheHitCount: Int
     let diskCacheHitCount: Int
     let diskReconciliationCount: Int
@@ -319,9 +323,17 @@ actor MangaVisionService {
 
     func performanceSnapshot() async -> MangaVisionPerformanceSnapshot {
         let manifest = await modelManifest()
+        let modelInferencePassCount: Int
+        if let diagnostics = provider as? any MangaVisionInferencePassDiagnosticsProviding {
+            modelInferencePassCount = await diagnostics.totalInferencePassCountForDiagnostics()
+        } else {
+            // Compatibility providers perform one provider call per uncached service analysis.
+            modelInferencePassCount = inferenceCount
+        }
         return MangaVisionPerformanceSnapshot(
             modelIdentifier: manifest.modelID,
             inferenceCount: inferenceCount,
+            modelInferencePassCount: modelInferencePassCount,
             memoryCacheHitCount: memoryCacheHitCount,
             diskCacheHitCount: diskCacheHitCount,
             diskReconciliationCount: diskReconciliationCount,

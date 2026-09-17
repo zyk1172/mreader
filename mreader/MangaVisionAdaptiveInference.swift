@@ -71,6 +71,12 @@ nonisolated enum MangaVisionInferencePlanner {
     private static let tileOverlapFraction: CGFloat = 0.18
     private static let nominalMaximumTileCount = 6
 
+    /// One full-page baseline plus the bounded refinement tiles.
+    /// Regression/performance gates must use this contract instead of duplicating a limit.
+    static var maximumInferencePassCount: Int {
+        1 + nominalMaximumTileCount
+    }
+
     static func plan(
         sourceSize: CGSize,
         inputSize: CGSize,
@@ -241,6 +247,10 @@ nonisolated protocol MangaVisionSourceImageAnalyzing: Sendable {
     ) async throws -> MangaPageAnalysis
 }
 
+nonisolated protocol MangaVisionInferencePassDiagnosticsProviding: Sendable {
+    func totalInferencePassCountForDiagnostics() async -> Int
+}
+
 nonisolated enum MangaVisionAdaptiveInferenceError: Error, Sendable, Equatable {
     case backgroundDeferred
 }
@@ -292,10 +302,11 @@ actor MangaVisionInferenceScheduler {
     }
 }
 
-actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing {
+actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing, MangaVisionInferencePassDiagnosticsProviding {
     private let base: any MangaVisionProvider
     private let scheduler: MangaVisionInferenceScheduler
     private let resourceStateOverride: MangaVisionResourceState?
+    private var totalInferencePassCount = 0
 
     init(
         base: any MangaVisionProvider,
@@ -424,6 +435,10 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
         await scheduler.snapshotForDiagnostics()
     }
 
+    func totalInferencePassCountForDiagnostics() async -> Int {
+        totalInferencePassCount
+    }
+
     private func performPass(
         image: CGImage,
         sourceImageSize: CGSize,
@@ -433,6 +448,7 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
         await scheduler.acquire(for: requestClass)
         do {
             try Task.checkCancellation()
+            totalInferencePassCount += 1
             let result = try await base.analyzePage(
                 image: image,
                 sourceImageSize: sourceImageSize,
@@ -542,30 +558,26 @@ nonisolated enum MangaVisionAnalysisComposer {
         baseline: MangaPageAnalysis,
         refinements: [MangaPageAnalysis]
     ) -> MangaPageAnalysis {
-        let panels = MangaVisionRegionPostProcessor.deduplicated(
+        let profile = MangaVisionCalibrationProfile.bundled
+        let panels = profile.deduplicated(
             baseline.panels + refinements.flatMap(\.panels),
-            iouThreshold: 0.50,
-            containmentThreshold: 0.88
+            type: .panel
         )
-        let texts = MangaVisionRegionPostProcessor.deduplicated(
+        let texts = profile.deduplicated(
             baseline.texts + refinements.flatMap(\.texts),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .text
         )
-        let balloons = MangaVisionRegionPostProcessor.deduplicated(
+        let balloons = profile.deduplicated(
             baseline.balloons + refinements.flatMap(\.balloons),
-            iouThreshold: 0.54,
-            containmentThreshold: 0.88
+            type: .balloon
         )
-        let faces = MangaVisionRegionPostProcessor.deduplicated(
+        let faces = profile.deduplicated(
             baseline.faces + refinements.flatMap(\.faces),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .face
         )
-        let bodies = MangaVisionRegionPostProcessor.deduplicated(
+        let bodies = profile.deduplicated(
             baseline.bodies + refinements.flatMap(\.bodies),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .body
         )
         return MangaPageAnalysis(
             pageIdentifier: baseline.pageIdentifier,
