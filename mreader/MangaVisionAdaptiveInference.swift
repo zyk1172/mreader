@@ -71,6 +71,12 @@ nonisolated enum MangaVisionInferencePlanner {
     private static let tileOverlapFraction: CGFloat = 0.18
     private static let nominalMaximumTileCount = 6
 
+    /// One full-page baseline plus the bounded refinement tiles.
+    /// Regression/performance gates must use this contract instead of duplicating a limit.
+    static var maximumInferencePassCount: Int {
+        1 + nominalMaximumTileCount
+    }
+
     static func plan(
         sourceSize: CGSize,
         inputSize: CGSize,
@@ -542,30 +548,26 @@ nonisolated enum MangaVisionAnalysisComposer {
         baseline: MangaPageAnalysis,
         refinements: [MangaPageAnalysis]
     ) -> MangaPageAnalysis {
-        let panels = MangaVisionRegionPostProcessor.deduplicated(
+        let profile = MangaVisionCalibrationProfile.bundled
+        let panels = profile.deduplicated(
             baseline.panels + refinements.flatMap(\.panels),
-            iouThreshold: 0.50,
-            containmentThreshold: 0.88
+            type: .panel
         )
-        let texts = MangaVisionRegionPostProcessor.deduplicated(
+        let texts = profile.deduplicated(
             baseline.texts + refinements.flatMap(\.texts),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .text
         )
-        let balloons = MangaVisionRegionPostProcessor.deduplicated(
+        let balloons = profile.deduplicated(
             baseline.balloons + refinements.flatMap(\.balloons),
-            iouThreshold: 0.54,
-            containmentThreshold: 0.88
+            type: .balloon
         )
-        let faces = MangaVisionRegionPostProcessor.deduplicated(
+        let faces = profile.deduplicated(
             baseline.faces + refinements.flatMap(\.faces),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .face
         )
-        let bodies = MangaVisionRegionPostProcessor.deduplicated(
+        let bodies = profile.deduplicated(
             baseline.bodies + refinements.flatMap(\.bodies),
-            iouThreshold: 0.55,
-            containmentThreshold: 0.90
+            type: .body
         )
         return MangaPageAnalysis(
             pageIdentifier: baseline.pageIdentifier,
