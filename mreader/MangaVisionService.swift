@@ -9,6 +9,7 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
     let inferenceCount: Int
     let memoryCacheHitCount: Int
     let diskCacheHitCount: Int
+    let diskReconciliationCount: Int
     let lastInferenceMilliseconds: Double?
     let averageInferenceMilliseconds: Double?
     let lastAnalysisMilliseconds: Double?
@@ -19,16 +20,42 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
     static let shared = MangaVisionService(provider: YOLOMangaVisionProvider.shared)
-    static let analysisRevision = "manga-vision-page-v2-mask-structure"
+    nonisolated static let analysisRevision = "manga-vision-page-v3-runtime-foundation"
+
+    private struct CacheEnvelope: Codable {
+        let manifestIdentity: String
+        let analysis: MangaPageAnalysis
+    }
+
+    private struct InFlightRequest {
+        let id: UUID
+        let generation: MangaVisionRequestGeneration
+        let startedAt: ContinuousClock.Instant
+        let task: Task<MangaPageAnalysis, Error>
+    }
+
+    private struct DiskEntry {
+        let url: URL
+        let bytes: Int64
+        let modifiedAt: Date
+    }
 
     private let provider: any MangaVisionProvider
     private let fileManager: FileManager
     private let cacheDirectory: URL
+    private var cachedManifest: MangaVisionModelManifest?
     private var memoryCache: [String: MangaPageAnalysis] = [:]
     private var memoryOrder: [String] = []
-    private var inFlight: [String: Task<MangaPageAnalysis, Error>] = [:]
+    private var inFlight: [String: InFlightRequest] = [:]
+    private var requestGeneration = MangaVisionRequestGeneration(rawValue: 0)
     private let memoryPageLimit = 48
     private let diskByteLimit: Int64 = 24 * 1024 * 1024
+    private let diskHighWaterBytes: Int64 = 27 * 1024 * 1024
+
+    private var estimatedDiskBytes: Int64
+    private var writesSinceDiskReconciliation = 0
+    private var lastDiskReconciliationDate = Date()
+    private var diskReconciliationCount = 0
 
     private var inferenceCount = 0
     private var memoryCacheHitCount = 0
@@ -36,6 +63,7 @@ actor MangaVisionService {
     private var totalInferenceMilliseconds: Double = 0
     private var lastInferenceMilliseconds: Double?
     private var lastAnalysisMilliseconds: Double?
+    private var lastDiagnostic: MangaVisionDiagnosticRecord?
 
     init(
         provider: any MangaVisionProvider,
@@ -51,24 +79,31 @@ actor MangaVisionService {
             self.cacheDirectory = root.appendingPathComponent("MangaVision", isDirectory: true)
         }
         try? fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
+        self.estimatedDiskBytes = Self.diskUsageBytes(
+            in: self.cacheDirectory,
+            fileManager: fileManager
+        )
+        self.diskReconciliationCount = 1
     }
 
     func analysis(
         comicID: UUID?,
         pageIndex: Int?,
         pageURL: URL,
-        image: UIImage
+        image: UIImage,
+        contentIdentity: PageContentIdentity? = nil
     ) async throws -> MangaPageAnalysis {
         let analysisStart = ContinuousClock.now
-        let descriptor = await provider.descriptor
-        let sourceFingerprint = Self.sourceFingerprint(pageURL: pageURL, image: image)
+        let manifest = await modelManifest()
+        let resolvedContentIdentity = contentIdentity ?? PageContentIdentityResolver.identity(for: pageURL)
+        let sourceFingerprint = resolvedContentIdentity.fingerprint
         let identity = MangaPageIdentifier(
             scope: comicID?.uuidString.lowercased()
                 ?? "legacy-\(Self.sha256(pageURL.deletingLastPathComponent().absoluteString))",
             pageIndex: max(pageIndex ?? 0, 0),
             sourceFingerprint: sourceFingerprint
         )
-        let modelKey = Self.modelCacheKey(descriptor)
+        let modelKey = manifest.cacheIdentity
         let key = "\(modelKey)|\(identity.scope)|\(identity.pageIndex)|\(sourceFingerprint)"
 
         if let cached = memoryCache[key] {
@@ -77,10 +112,11 @@ actor MangaVisionService {
             lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
             return cached
         }
+
         let diskURL = cacheURL(modelKey: modelKey, identity: identity)
         if let cached = readValidCache(
             from: diskURL,
-            descriptor: descriptor,
+            manifest: manifest,
             identity: identity
         ) {
             diskCacheHitCount += 1
@@ -88,24 +124,61 @@ actor MangaVisionService {
             lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
             return cached
         }
-        if let existing = inFlight[key] {
-            let value = try await existing.value
-            lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
-            return value
+
+        if let existing = inFlight[key], existing.generation == requestGeneration {
+            do {
+                let value = try await existing.task.value
+                guard existing.generation == requestGeneration else {
+                    throw MangaVisionServiceError.staleResult
+                }
+                if let committed = memoryCache[key] {
+                    lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
+                    return committed
+                }
+                return try finalize(
+                    value,
+                    request: existing,
+                    key: key,
+                    diskURL: diskURL,
+                    manifest: manifest,
+                    identity: identity,
+                    analysisStart: analysisStart
+                )
+            } catch {
+                handleFailure(
+                    error,
+                    request: existing,
+                    key: key,
+                    manifest: manifest,
+                    identity: identity,
+                    analysisStart: analysisStart
+                )
+                throw error
+            }
         }
 
         guard let analysisImage = Self.analysisCGImage(
             from: image,
-            maximumDimension: Int(max(descriptor.inputSize.width, descriptor.inputSize.height))
+            maximumDimension: Int(max(manifest.inputSize.width, manifest.inputSize.height))
         ) else {
-            throw MangaVisionProviderError.modelUnavailable
+            let error = MangaVisionProviderError.modelUnavailable
+            recordFailure(
+                error,
+                manifest: manifest,
+                identity: identity,
+                analysisStart: analysisStart,
+                outcome: .failure
+            )
+            throw error
         }
+
         let sourceSize = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
             ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         let provider = self.provider
-        // Inherit the caller's priority. Foreground analysis keeps the priority of the
-        // user-driven task, while Reader preanalysis stays at `.utility` instead of
-        // being promoted to `.userInitiated` for a multi-second Core ML inference.
+        let generation = requestGeneration
+        let requestID = UUID()
+        // The Task inherits foreground/background priority. Cancellation remains cooperative;
+        // generation validation below is the authoritative stale-result barrier.
         let task = Task {
             try await provider.analyzePage(
                 image: analysisImage,
@@ -113,26 +186,34 @@ actor MangaVisionService {
                 pageIdentifier: identity
             )
         }
-        inFlight[key] = task
+        let request = InFlightRequest(
+            id: requestID,
+            generation: generation,
+            startedAt: .now,
+            task: task
+        )
+        inFlight[key] = request
+
         do {
-            let inferenceStart = ContinuousClock.now
             let result = try await task.value
-            let inferenceMS = Self.milliseconds(inferenceStart.duration(to: .now))
-            inFlight[key] = nil
-            inferenceCount += 1
-            totalInferenceMilliseconds += inferenceMS
-            lastInferenceMilliseconds = inferenceMS
-            insertIntoMemory(result, forKey: key)
-            write(result, to: diskURL)
-            lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
-            let inferenceLabel = String(format: "%.1f", inferenceMS)
-            MReaderLog.aiVision.debug(
-                "MangaVision analyze model=\(descriptor.modelIdentifier, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) face=\(result.faces.count, privacy: .public) body=\(result.bodies.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
+            return try finalize(
+                result,
+                request: request,
+                key: key,
+                diskURL: diskURL,
+                manifest: manifest,
+                identity: identity,
+                analysisStart: analysisStart
             )
-            return result
         } catch {
-            inFlight[key] = nil
-            lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
+            handleFailure(
+                error,
+                request: request,
+                key: key,
+                manifest: manifest,
+                identity: identity,
+                analysisStart: analysisStart
+            )
             throw error
         }
     }
@@ -141,22 +222,25 @@ actor MangaVisionService {
         comicID: UUID?,
         pageIndex: Int?,
         pageURL: URL,
-        image: UIImage
+        image: UIImage,
+        contentIdentity: PageContentIdentity? = nil
     ) async -> MangaPageAnalysis? {
-        let descriptor = await provider.descriptor
-        let sourceFingerprint = Self.sourceFingerprint(pageURL: pageURL, image: image)
+        _ = image
+        let manifest = await modelManifest()
+        let resolvedContentIdentity = contentIdentity ?? PageContentIdentityResolver.identity(for: pageURL)
+        let sourceFingerprint = resolvedContentIdentity.fingerprint
         let identity = MangaPageIdentifier(
             scope: comicID?.uuidString.lowercased()
                 ?? "legacy-\(Self.sha256(pageURL.deletingLastPathComponent().absoluteString))",
             pageIndex: max(pageIndex ?? 0, 0),
             sourceFingerprint: sourceFingerprint
         )
-        let modelKey = Self.modelCacheKey(descriptor)
+        let modelKey = manifest.cacheIdentity
         let key = "\(modelKey)|\(identity.scope)|\(identity.pageIndex)|\(sourceFingerprint)"
         if let value = memoryCache[key] { return value }
         return readValidCache(
             from: cacheURL(modelKey: modelKey, identity: identity),
-            descriptor: descriptor,
+            manifest: manifest,
             identity: identity
         )
     }
@@ -168,11 +252,12 @@ actor MangaVisionService {
         pages: [ComicPage],
         indices: [Int]
     ) async {
-        let descriptor = await provider.descriptor
-        let maximumDimension = Int(max(descriptor.inputSize.width, descriptor.inputSize.height))
+        let manifest = await modelManifest()
+        let maximumDimension = Int(max(manifest.inputSize.width, manifest.inputSize.height))
         for index in indices.prefix(3) {
             guard pages.indices.contains(index), !Task.isCancelled else { return }
             let page = pages[index]
+            let contentIdentity = PageContentIdentityResolver.identity(for: page.url)
             guard let image = await Self.loadAnalysisImage(
                 from: page.url,
                 maximumDimension: maximumDimension
@@ -181,22 +266,28 @@ actor MangaVisionService {
                 comicID: comicID,
                 pageIndex: index,
                 pageURL: page.url,
-                image: image
+                image: image,
+                contentIdentity: contentIdentity
             )
         }
     }
 
     func providerDescriptor() async -> MangaVisionProviderDescriptor {
-        await provider.descriptor
+        await modelManifest().compatibilityDescriptor
+    }
+
+    func modelManifestForDiagnostics() async -> MangaVisionModelManifest {
+        await modelManifest()
     }
 
     func performanceSnapshot() async -> MangaVisionPerformanceSnapshot {
-        let descriptor = await provider.descriptor
+        let manifest = await modelManifest()
         return MangaVisionPerformanceSnapshot(
-            modelIdentifier: descriptor.modelIdentifier,
+            modelIdentifier: manifest.modelID,
             inferenceCount: inferenceCount,
             memoryCacheHitCount: memoryCacheHitCount,
             diskCacheHitCount: diskCacheHitCount,
+            diskReconciliationCount: diskReconciliationCount,
             lastInferenceMilliseconds: lastInferenceMilliseconds,
             averageInferenceMilliseconds: inferenceCount > 0
                 ? totalInferenceMilliseconds / Double(inferenceCount)
@@ -205,39 +296,230 @@ actor MangaVisionService {
         )
     }
 
+    func lastDiagnosticSnapshot() -> MangaVisionDiagnosticRecord? {
+        lastDiagnostic
+    }
+
+    func diskReconciliationCountForDiagnostics() -> Int {
+        diskReconciliationCount
+    }
+
+    func currentGenerationForDiagnostics() -> MangaVisionRequestGeneration {
+        requestGeneration
+    }
+
+    /// Invalidates outstanding requests without deleting valid cached results. This is used
+    /// when a reader/session boundary makes old work irrelevant even if Core ML cannot stop.
+    func invalidateInFlightAnalyses() {
+        advanceGenerationAndCancelInFlight()
+    }
+
     func clearCache() {
-        for task in inFlight.values { task.cancel() }
-        inFlight.removeAll()
+        advanceGenerationAndCancelInFlight()
         memoryCache.removeAll()
         memoryOrder.removeAll()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        estimatedDiskBytes = 0
+        writesSinceDiskReconciliation = 0
+        lastDiskReconciliationDate = Date()
+    }
+
+    private func modelManifest() async -> MangaVisionModelManifest {
+        if let cachedManifest { return cachedManifest }
+
+        let manifest: MangaVisionModelManifest
+        if let manifestProvider = provider as? any MangaVisionManifestProviding {
+            manifest = await manifestProvider.mangaVisionManifest()
+        } else {
+            // Compatibility providers (primarily tests/alternate adapters) still work.
+            // Their descriptor is consulted only when they do not implement the static
+            // manifest contract; the bundled YOLO provider never takes this path.
+            let descriptor = await provider.descriptor
+            let compatibilityIdentity = "descriptor:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
+            manifest = MangaVisionModelManifest(
+                modelID: descriptor.modelIdentifier,
+                modelBuildID: compatibilityIdentity,
+                modelFileHash: Self.sha256(compatibilityIdentity),
+                inputSize: descriptor.inputSize,
+                semanticClasses: descriptor.supportedRegionTypes,
+                outputContractRevision: "compatibility-output-v1",
+                analysisSchemaRevision: "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)",
+                postProcessRevision: "compatibility-postprocess-v1",
+                calibrationRevision: "compatibility-calibration-v1"
+            )
+        }
+        cachedManifest = manifest
+        return manifest
+    }
+
+    private func finalize(
+        _ result: MangaPageAnalysis,
+        request: InFlightRequest,
+        key: String,
+        diskURL: URL,
+        manifest: MangaVisionModelManifest,
+        identity: MangaPageIdentifier,
+        analysisStart: ContinuousClock.Instant
+    ) throws -> MangaPageAnalysis {
+        guard request.generation == requestGeneration else {
+            let totalMS = Self.milliseconds(analysisStart.duration(to: .now))
+            lastAnalysisMilliseconds = totalMS
+            lastDiagnostic = MangaVisionDiagnosticRecord(
+                timestamp: Date(),
+                outcome: .staleDiscarded,
+                modelID: manifest.modelID,
+                modelBuildID: manifest.modelBuildID,
+                pageIndex: identity.pageIndex,
+                reason: "request generation changed before commit",
+                inferenceMilliseconds: nil,
+                analysisTotalMilliseconds: totalMS,
+                panelCount: result.panels.count,
+                textCount: result.texts.count,
+                balloonCount: result.balloons.count
+            )
+            throw MangaVisionServiceError.staleResult
+        }
+
+        if let cached = memoryCache[key] {
+            lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
+            return cached
+        }
+
+        guard let current = inFlight[key], current.id == request.id else {
+            throw MangaVisionServiceError.staleResult
+        }
+
+        inFlight[key] = nil
+        let inferenceMS = Self.milliseconds(request.startedAt.duration(to: .now))
+        inferenceCount += 1
+        totalInferenceMilliseconds += inferenceMS
+        lastInferenceMilliseconds = inferenceMS
+        insertIntoMemory(result, forKey: key)
+        write(result, manifest: manifest, to: diskURL)
+        let totalMS = Self.milliseconds(analysisStart.duration(to: .now))
+        lastAnalysisMilliseconds = totalMS
+        lastDiagnostic = MangaVisionDiagnosticRecord(
+            timestamp: Date(),
+            outcome: .success,
+            modelID: manifest.modelID,
+            modelBuildID: manifest.modelBuildID,
+            pageIndex: identity.pageIndex,
+            reason: nil,
+            inferenceMilliseconds: inferenceMS,
+            analysisTotalMilliseconds: totalMS,
+            panelCount: result.panels.count,
+            textCount: result.texts.count,
+            balloonCount: result.balloons.count
+        )
+        let inferenceLabel = String(format: "%.1f", inferenceMS)
+        MReaderLog.aiVision.debug(
+            "MangaVision analyze model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) balloon=\(result.balloons.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
+        )
+        return result
+    }
+
+    private func handleFailure(
+        _ error: Error,
+        request: InFlightRequest,
+        key: String,
+        manifest: MangaVisionModelManifest,
+        identity: MangaPageIdentifier,
+        analysisStart: ContinuousClock.Instant
+    ) {
+        if inFlight[key]?.id == request.id {
+            inFlight[key] = nil
+        }
+        let outcome: MangaVisionDiagnosticOutcome = request.generation == requestGeneration
+            ? .failure
+            : .staleDiscarded
+        recordFailure(
+            error,
+            manifest: manifest,
+            identity: identity,
+            analysisStart: analysisStart,
+            outcome: outcome
+        )
+    }
+
+    private func recordFailure(
+        _ error: Error,
+        manifest: MangaVisionModelManifest,
+        identity: MangaPageIdentifier,
+        analysisStart: ContinuousClock.Instant,
+        outcome: MangaVisionDiagnosticOutcome
+    ) {
+        let totalMS = Self.milliseconds(analysisStart.duration(to: .now))
+        lastAnalysisMilliseconds = totalMS
+        let reason = MReaderLog.describe(error)
+        lastDiagnostic = MangaVisionDiagnosticRecord(
+            timestamp: Date(),
+            outcome: outcome,
+            modelID: manifest.modelID,
+            modelBuildID: manifest.modelBuildID,
+            pageIndex: identity.pageIndex,
+            reason: reason,
+            inferenceMilliseconds: nil,
+            analysisTotalMilliseconds: totalMS,
+            panelCount: 0,
+            textCount: 0,
+            balloonCount: 0
+        )
+        MReaderLog.aiVision.error(
+            "MangaVision primary inference failed model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+    }
+
+    private func advanceGenerationAndCancelInFlight() {
+        requestGeneration = requestGeneration.advanced()
+        for request in inFlight.values {
+            request.task.cancel()
+        }
+        inFlight.removeAll()
     }
 
     private func readValidCache(
         from url: URL,
-        descriptor: MangaVisionProviderDescriptor,
+        manifest: MangaVisionModelManifest,
         identity: MangaPageIdentifier
     ) -> MangaPageAnalysis? {
         guard let data = try? Data(contentsOf: url),
-              let cached = try? JSONDecoder().decode(MangaPageAnalysis.self, from: data),
-              cached.schemaVersion == MangaPageAnalysis.schemaVersion,
-              cached.modelIdentifier == descriptor.modelIdentifier,
-              cached.modelVersion == descriptor.modelVersion,
-              cached.pageIdentifier == identity else {
+              let envelope = try? JSONDecoder().decode(CacheEnvelope.self, from: data),
+              envelope.manifestIdentity == manifest.cacheIdentity,
+              envelope.analysis.schemaVersion == MangaPageAnalysis.schemaVersion,
+              envelope.analysis.pageIdentifier == identity else {
             return nil
         }
-        return cached
+        return envelope.analysis
     }
 
-    private func write(_ analysis: MangaPageAnalysis, to url: URL) {
-        guard let data = try? JSONEncoder().encode(analysis) else { return }
+    private func write(
+        _ analysis: MangaPageAnalysis,
+        manifest: MangaVisionModelManifest,
+        to url: URL
+    ) {
+        let envelope = CacheEnvelope(
+            manifestIdentity: manifest.cacheIdentity,
+            analysis: analysis
+        )
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
         try? fileManager.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try? data.write(to: url, options: .atomic)
-        pruneDiskCacheIfNeeded()
+        let oldBytes = Int64(
+            (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        )
+        do {
+            try data.write(to: url, options: .atomic)
+            estimatedDiskBytes = max(0, estimatedDiskBytes - oldBytes + Int64(data.count))
+            writesSinceDiskReconciliation += 1
+            reconcileDiskCacheIfNeeded()
+        } catch {
+            MReaderLog.aiVision.error(
+                "MangaVision cache write failed path=\(url.lastPathComponent, privacy: .public) reason=\(MReaderLog.describe(error), privacy: .public)"
+            )
+        }
     }
 
     private func insertIntoMemory(_ analysis: MangaPageAnalysis, forKey key: String) {
@@ -262,44 +544,64 @@ actor MangaVisionService {
             .appendingPathExtension("json")
     }
 
-    private func pruneDiskCacheIfNeeded() {
+    private func reconcileDiskCacheIfNeeded() {
+        let now = Date()
+        let periodicReconciliationDue = writesSinceDiskReconciliation >= 32
+            && now.timeIntervalSince(lastDiskReconciliationDate) >= 15 * 60
+        guard estimatedDiskBytes > diskHighWaterBytes || periodicReconciliationDue else {
+            return
+        }
+        reconcileAndPruneDiskCache()
+    }
+
+    private func reconcileAndPruneDiskCache() {
+        let scan = Self.scanDiskCache(in: cacheDirectory, fileManager: fileManager)
+        diskReconciliationCount += 1
+        writesSinceDiskReconciliation = 0
+        lastDiskReconciliationDate = Date()
+        var totalBytes = scan.totalBytes
+        if totalBytes > diskByteLimit {
+            for entry in scan.entries.sorted(by: { $0.modifiedAt < $1.modifiedAt })
+            where totalBytes > diskByteLimit {
+                try? fileManager.removeItem(at: entry.url)
+                totalBytes -= entry.bytes
+            }
+        }
+        estimatedDiskBytes = max(totalBytes, 0)
+    }
+
+    nonisolated private static func diskUsageBytes(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> Int64 {
+        scanDiskCache(in: directory, fileManager: fileManager).totalBytes
+    }
+
+    nonisolated private static func scanDiskCache(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> (totalBytes: Int64, entries: [DiskEntry]) {
         guard let enumerator = fileManager.enumerator(
-            at: cacheDirectory,
+            at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
-        ) else { return }
-        var entries: [(URL, Int64, Date)] = []
+        ) else { return (0, []) }
+        var entries: [DiskEntry] = []
         var totalBytes: Int64 = 0
         for case let url as URL in enumerator {
             guard url.pathExtension == "json",
-                  let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { continue }
+                  let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+                continue
+            }
             let bytes = Int64(values.fileSize ?? 0)
             totalBytes += bytes
-            entries.append((url, bytes, values.contentModificationDate ?? .distantPast))
+            entries.append(DiskEntry(
+                url: url,
+                bytes: bytes,
+                modifiedAt: values.contentModificationDate ?? .distantPast
+            ))
         }
-        guard totalBytes > diskByteLimit else { return }
-        for entry in entries.sorted(by: { $0.2 < $1.2 }) where totalBytes > diskByteLimit {
-            try? fileManager.removeItem(at: entry.0)
-            totalBytes -= entry.1
-        }
-    }
-
-    nonisolated private static func modelCacheKey(_ descriptor: MangaVisionProviderDescriptor) -> String {
-        sha256("\(analysisRevision)|\(descriptor.modelIdentifier)|\(descriptor.modelVersion)")
-    }
-
-    nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {
-        // Cache identity belongs to the source page, not to a particular 640/4096/6144
-        // decode. This is what lets Guided Panel and OCR join the same inference.
-        _ = image
-        let source: String
-        if pageURL.isFileURL {
-            let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            source = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-        } else {
-            source = pageURL.absoluteString
-        }
-        return sha256(source)
+        return (totalBytes, entries)
     }
 
     nonisolated private static func sha256(_ value: String) -> String {

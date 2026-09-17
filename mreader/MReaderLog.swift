@@ -67,8 +67,33 @@ nonisolated enum AIErrorLogSummary {
         if error is CancellationError {
             return "CancellationError"
         }
-        // 未知错误只记录类型：`localizedDescription` 可能内嵌响应体或部分 JSON。
-        return "error(\(String(describing: type(of: error))))"
+
+        let typeName = String(describing: type(of: error))
+        if let caseName = enumCaseIdentifier(for: error) {
+            return "error(\(typeName):\(caseName))"
+        }
+
+        // 未知的非枚举错误仍然只记录类型：`localizedDescription` 可能内嵌响应体或部分 JSON。
+        return "error(\(typeName))"
+    }
+
+    /// 对未知 `enum Error` 只保留 case 标识符，不保留任何关联值。
+    /// 这让结构化诊断能区分 `inferenceFailed` 一类错误，同时避免把错误正文写入日志。
+    private static func enumCaseIdentifier(for error: Error) -> String? {
+        guard Mirror(reflecting: error).displayStyle == .enum else { return nil }
+
+        let description = String(describing: error)
+        let head = description.split(separator: "(", maxSplits: 1, omittingEmptySubsequences: false).first
+        guard let head else { return nil }
+        let candidate = String(head.split(separator: ".").last ?? head[...])
+        guard !candidate.isEmpty, candidate.count <= 80 else { return nil }
+        guard candidate.range(
+            of: "^[A-Za-z_][A-Za-z0-9_]*$",
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return candidate
     }
 }
 
