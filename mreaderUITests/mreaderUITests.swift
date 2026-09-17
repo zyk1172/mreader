@@ -7,6 +7,11 @@ final class mreaderUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+
+        // Launch screenshot tests intentionally exercise multiple orientations and
+        // can leave the shared simulator in landscape. Keep smoke-test geometry
+        // deterministic so lazy settings rows use the expected portrait viewport.
+        XCUIDevice.shared.orientation = .portrait
     }
 
     private func launchApp() -> XCUIApplication {
