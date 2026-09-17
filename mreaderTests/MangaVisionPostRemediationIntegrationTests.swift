@@ -147,8 +147,9 @@ struct MangaVisionPostRemediationIntegrationTests {
             pageIndex: 0,
             pageURL: pageURL,
             image: UIImage(cgImage: cgImage),
-            contentIdentity: PageContentIdentity(
-                source: "test",
+            contentIdentity: .remote(
+                provider: "test",
+                resource: "long-strip",
                 revision: "long-strip-v1"
             )
         )
