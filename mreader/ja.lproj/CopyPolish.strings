@@ -1,3 +1,6 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple 翻訳";
+"ocr.colorStyle" = "カラフル翻訳の配色";
 "ocr.colorStyle.jewel" = "ジュエルトーン";
+"ocr.inPlaceTranslation" = "ニュートラル白黒翻訳";
+"ocr.inPlaceTranslationDescription" = "オンにすると、すべての翻訳を白い背景と黒い文字で統一します。オフでは従来のカラフルな翻訳表示を維持します。吹き出し検出はレイアウトだけに影響します。";
