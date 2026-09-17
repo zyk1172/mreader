@@ -52,12 +52,12 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
             modelID: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
             modelBuildID: buildID,
             modelFileHash: fileHash,
-            inputSize: CGSize(width: 640, height: 640),
-            semanticClasses: [.panel, .text, .balloon],
-            outputContractRevision: "yolo-seg-compatible-v1",
+            inputSize: MangaVisionOutputContract.expectedInputSize,
+            semanticClasses: MangaVisionOutputContract.requiredSemanticClasses,
+            outputContractRevision: MangaVisionOutputContract.revision,
             analysisSchemaRevision: "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)",
             postProcessRevision: "manga-vision-postprocess-v1",
-            calibrationRevision: "manga-vision-calibration-v1"
+            calibrationRevision: MangaVisionCalibrationProfile.bundled.revision
         )
     }
 
