@@ -1,3 +1,6 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple 번역";
+"ocr.colorStyle" = "컬러 번역 팔레트";
 "ocr.colorStyle.jewel" = "주얼 톤";
+"ocr.inPlaceTranslation" = "중립 흑백 번역";
+"ocr.inPlaceTranslationDescription" = "켜면 모든 번역을 흰 배경과 검은 글자로 통일합니다. 끄면 기존의 컬러 번역 스타일을 유지합니다. 말풍선 감지는 레이아웃에만 영향을 줍니다.";
