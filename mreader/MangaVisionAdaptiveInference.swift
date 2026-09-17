@@ -247,6 +247,10 @@ nonisolated protocol MangaVisionSourceImageAnalyzing: Sendable {
     ) async throws -> MangaPageAnalysis
 }
 
+nonisolated protocol MangaVisionInferencePassDiagnosticsProviding: Sendable {
+    func totalInferencePassCountForDiagnostics() async -> Int
+}
+
 nonisolated enum MangaVisionAdaptiveInferenceError: Error, Sendable, Equatable {
     case backgroundDeferred
 }
@@ -298,10 +302,11 @@ actor MangaVisionInferenceScheduler {
     }
 }
 
-actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing {
+actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing, MangaVisionInferencePassDiagnosticsProviding {
     private let base: any MangaVisionProvider
     private let scheduler: MangaVisionInferenceScheduler
     private let resourceStateOverride: MangaVisionResourceState?
+    private var totalInferencePassCount = 0
 
     init(
         base: any MangaVisionProvider,
@@ -430,6 +435,10 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
         await scheduler.snapshotForDiagnostics()
     }
 
+    func totalInferencePassCountForDiagnostics() async -> Int {
+        totalInferencePassCount
+    }
+
     private func performPass(
         image: CGImage,
         sourceImageSize: CGSize,
@@ -439,6 +448,7 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
         await scheduler.acquire(for: requestClass)
         do {
             try Task.checkCancellation()
+            totalInferencePassCount += 1
             let result = try await base.analyzePage(
                 image: image,
                 sourceImageSize: sourceImageSize,
