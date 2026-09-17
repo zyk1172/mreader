@@ -1,6 +1,7 @@
 import CoreML
 import Foundation
 @preconcurrency import Vision
+import os
 
 nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     let modelIdentifier: String
