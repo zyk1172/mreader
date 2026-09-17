@@ -20,6 +20,14 @@ Impact: a legitimate extreme long page could require up to seven bounded passes 
 
 Fix: the planner now owns `maximumInferencePassCount`; the release gate imports that hard limit. Metrics retain mean passes/page for reporting and additionally record the maximum observed single-page count so a cheap average cannot hide a page that exceeds the contract.
 
+### 3. Service observability counted page analyses rather than adaptive model passes
+
+`MangaVisionService` incremented its existing `inferenceCount` once when an uncached page analysis committed. That was accurate before adaptive inference, but after PR #76 one page can perform a baseline plus multiple tile passes.
+
+Impact: production diagnostics could report one inference for an extreme long page that actually invoked the model seven times, hiding the cost that the PR #78 regression policy is intended to control.
+
+Fix: the existing service analysis counter is preserved for compatibility, while `AdaptiveMangaVisionProvider` now records actual model-pass attempts and `MangaVisionPerformanceSnapshot` exposes them separately as `modelInferencePassCount`.
+
 ## Cross-PR regression coverage
 
 `MangaVisionPostRemediationIntegrationTests` verifies:
@@ -28,6 +36,7 @@ Fix: the planner now owns `maximumInferencePassCount`; the release gate imports 
 - the planner and release gate share one pass-budget contract;
 - the maximum legal adaptive pass count is accepted;
 - one pass above the planner budget is rejected;
-- a low corpus average cannot hide a single over-budget page.
+- a low corpus average cannot hide a single over-budget page;
+- a Service -> Adaptive long-page run reports one committed page analysis while exposing all seven actual model passes.
 
-This follow-up does not change model weights, OCR recognition policy, translation behavior, reading order, tiling geometry, or the thermal/Low Power policy.
+This follow-up does not change model weights, OCR recognition policy, translation behavior, reading order, tiling geometry, scheduler ordering, or the thermal/Low Power policy.
