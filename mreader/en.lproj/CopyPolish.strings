@@ -1,2 +1,5 @@
 /* OCR Settings */
 "ocr.appleTranslation" = "Apple Translation";
+"ocr.colorStyle" = "Colorful translation palette";
+"ocr.inPlaceTranslation" = "Neutral black-and-white translation";
+"ocr.inPlaceTranslationDescription" = "When enabled, every translation uses a consistent white surface with black text. When disabled, the existing colorful translation style is preserved. Bubble detection affects layout only.";
