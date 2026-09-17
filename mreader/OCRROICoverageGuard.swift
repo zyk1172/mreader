@@ -207,7 +207,7 @@ nonisolated enum OCRROICoverageGuard {
     }
 
     private static func mergedRecoveryRegions(for blocks: [TextBlock]) -> [CGRect] {
-        var regions: [CGRect] = blocks.map { block in
+        let regions: [CGRect] = blocks.map { block in
             let rect = MangaPageCoordinateSpace.clampedNormalizedRect(block.boundingBox.standardized)
             let dx = max(rect.width * 0.30, 0.012)
             let dy = max(rect.height * 0.30, 0.012)
