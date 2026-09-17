@@ -37,7 +37,7 @@ The provider validates this contract when the compiled model is loaded and throw
 
 ## Versioned calibration
 
-`MangaVisionCalibrationProfile.bundled` is the single production source for confidence filtering and same-class deduplication parameters. The current profile keeps confidence thresholds at:
+`MangaVisionCalibrationProfile.bundled` is the single production source for confidence filtering and same-class deduplication parameters. The same profile is used both by the base YOLO provider and when adaptive full-page/tile results are merged. The current profile keeps confidence thresholds at:
 
 | Semantic class | Confidence | NMS IoU | Containment |
 | --- | ---: | ---: | ---: |
@@ -65,8 +65,11 @@ The 24 cases are listed in `mreaderTests/Fixtures/manga_vision_regression_corpus
 - balloon recall;
 - final OCR recall;
 - fallback rate;
-- inference count per page.
+- average inference count per page;
+- maximum inference count observed on any page.
 
 The release gate does **not** convert missing ground-truth labels into a fake pass or failure. Recall dimensions are gated only when verified expected regions exist. Existing translation/OCR gold files that remain `candidate` are not represented as human-verified accuracy truth.
 
-The default release thresholds are panel recall >= 0.80, text recall >= 0.75, balloon recall >= 0.70, final OCR recall >= 0.80, fallback rate <= 0.20, and inference count/page <= 4.0. Changing these thresholds should be treated as a reviewed quality-policy change rather than a test workaround.
+The adaptive inference budget is owned by `MangaVisionInferencePlanner`: one full-page baseline plus at most six refinement tiles, so a single page may legitimately perform up to seven model passes. The release gate imports that planner-owned hard limit instead of maintaining another numeric copy. It gates the **maximum observed single-page count**, while the average remains a reporting metric; therefore a cheap corpus average cannot hide a page that exceeded the planner contract.
+
+The default release thresholds are panel recall >= 0.80, text recall >= 0.75, balloon recall >= 0.70, final OCR recall >= 0.80, fallback rate <= 0.20, and maximum model passes on any page <= `MangaVisionInferencePlanner.maximumInferencePassCount` (currently 7). Changing these thresholds or the planner budget should be treated as a reviewed quality-policy change rather than a test workaround.
