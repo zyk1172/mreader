@@ -53,11 +53,36 @@ nonisolated enum AIProviderModelSelectionPolicy {
 }
 
 nonisolated enum AIVisionConnectionProbe {
-    static let prompt = "读取图片中央的 6 位大写字母/数字验证码。答案只存在于图片中。只返回你看到的验证码，不要解释。"
+    static let prompt = "这是视觉连通性测试。图片中央只有一行 6 位大写字母/数字验证码。请读取图片本身，只返回这 6 位验证码，不要解释、不要 JSON、不要猜测；确实看不清时返回 UNREADABLE。"
 
     static func makeChallengeCode(length: Int = 6) -> String {
         let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         return String((0..<max(length, 1)).compactMap { _ in alphabet.randomElement() })
+    }
+
+    static func response(_ response: String, contains challenge: String) -> Bool {
+        let expected = normalizedASCIIAlphanumerics(challenge)
+        guard !expected.isEmpty else { return false }
+        return normalizedASCIIAlphanumerics(response).contains(expected)
+    }
+
+    private static func normalizedASCIIAlphanumerics(_ value: String) -> String {
+        value.uppercased().unicodeScalars
+            .filter { $0.value < 128 && CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+    }
+}
+
+
+nonisolated enum AITextConnectionProbe {
+    static func makeChallengeCode(length: Int = 6) -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return "MR" + String((0..<max(length, 1)).compactMap { _ in alphabet.randomElement() })
+    }
+
+    static func prompt(for challenge: String) -> String {
+        "这是 API 文本连通性测试。请只回复下面这一串验证码，不要解释、不要 Markdown、不要 JSON：\n\(challenge)"
     }
 
     static func response(_ response: String, contains challenge: String) -> Bool {
@@ -504,68 +529,65 @@ private struct AIProviderEditorView: View {
             testMessage = "当前模型明确不支持视觉输入。"
             return
         }
+
         testingKind = kind
         testMessage = nil
         testFailed = false
         Task {
-            // 无论成功/失败/提前 return，都要清理测试状态，避免 spinner 卡住（项5）
             defer { testingKind = nil }
             do {
                 let request: AITransportRequest
-                let visionChallenge = kind == .vision ? AIVisionConnectionProbe.makeChallengeCode() : nil
-                let expectedItems = [
-                    AIPageTranslationItem(id: "b0", sourceText: "Hello!", order: 0),
-                    AIPageTranslationItem(id: "b1", sourceText: "Where are you going?", order: 1)
-                ]
+                let challenge: String
                 if kind == .vision {
-                    guard let challenge = visionChallenge,
-                          let imageURL = visionProbePNGDataURL(code: challenge) else {
+                    challenge = AIVisionConnectionProbe.makeChallengeCode()
+                    guard let imageURL = visionProbePNGDataURL(code: challenge) else {
                         throw AITranslationRequestError.invalidConfiguration("settings.imageEncodingFailed".localized)
                     }
                     request = AITransportRequest(
                         model: modelDescriptor,
+                        systemPrompt: "你正在执行视觉 API 连通性测试。必须实际读取用户提供的图片并按用户要求给出最终文本答案。",
                         userPrompt: AIVisionConnectionProbe.prompt,
                         imageDataURL: imageURL,
-                        maxTokens: 32,
+                        temperature: 0,
+                        maxTokens: 512,
                         timeout: AITranslationRequestPolicy.connectionTestTimeout,
                         kind: .connectionTest
                     )
                 } else {
-                    let prompt = try AIPageTranslationPromptBuilder.prompt(
-                        items: expectedItems,
-                        sourceLanguage: nil,
-                        target: .simplifiedChinese,
-                        styleInstructions: AITranslator.defaultTranslationStyleInstructions
-                    )
+                    challenge = AITextConnectionProbe.makeChallengeCode()
                     request = AITransportRequest(
                         model: modelDescriptor,
-                        systemPrompt: "你只做漫画整页翻译。必须保留输入 id，只输出严格 JSON。",
-                        userPrompt: prompt,
-                        responseFormat: .jsonObject,
-                        temperature: 0.15,
-                        maxTokens: 200,
+                        systemPrompt: "你正在执行 API 连通性测试。请直接给出用户要求的最终文本，不要进入长推理。",
+                        userPrompt: AITextConnectionProbe.prompt(for: challenge),
+                        temperature: 0,
+                        maxTokens: 256,
                         timeout: AITranslationRequestPolicy.connectionTestTimeout,
                         kind: .connectionTest
                     )
                 }
+
                 let data = try await AITranslationClient(apiKey: apiKey, baseURL: baseURL).send(request)
+                let decoded = AIChatResponseDecoder.decode(data)
+                guard let rawContent = decoded.content else {
+                    testFailed = true
+                    testMessage = decoded.hasReasoningOnly
+                        ? "接口已返回，但输出预算被推理内容占用，没有最终答案。已提高测试预算；若仍出现此提示，请检查模型/API 协议。"
+                        : "接口已返回，但没有可读取的最终文本。请检查模型对应的 API 协议。"
+                    HapticManager.shared.play(.error)
+                    return
+                }
+                let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !content.isEmpty else {
+                    testFailed = true
+                    testMessage = "接口已返回空文本。请检查模型对应的 API 协议。"
+                    HapticManager.shared.play(.error)
+                    return
+                }
+
+                let passed: Bool
                 if kind == .vision {
-                    let decoded = AIChatResponseDecoder.decode(data)
-                    guard let challenge = visionChallenge,
-                          let content = decoded.content else {
-                        testFailed = true
-                        testMessage = "视觉请求已返回，但没有可验证的文本响应。请检查视觉模型和 API 协议。"
-                        HapticManager.shared.play(.error)
-                        return
-                    }
-                    guard AIVisionConnectionProbe.response(content, contains: challenge) else {
-                        testFailed = true
-                        let excerpt = String(content.prefix(160)).replacingOccurrences(of: "\n", with: " ")
-                        testMessage = "视觉接口可连接，但模型没有读出测试图片中的验证码。请检查视觉模型和 API 协议。返回：\(excerpt)"
-                        HapticManager.shared.play(.error)
-                        return
-                    }
-                    if modelDescriptor.supportsVision != true {
+                    passed = AIVisionConnectionProbe.response(content, contains: challenge)
+                    if passed, modelDescriptor.supportsVision != true {
                         modelDescriptors[model] = AIModelDescriptor(
                             id: modelDescriptor.id,
                             apiProtocol: modelDescriptor.apiProtocol,
@@ -573,30 +595,19 @@ private struct AIProviderEditorView: View {
                         )
                     }
                 } else {
-                    let decoded = AIChatResponseDecoder.decode(data)
-                    guard let content = decoded.content else {
-                        testFailed = true
-                        testMessage = "settings.textProtocolNoContent".localized
-                        HapticManager.shared.play(.error)
-                        return
-                    }
-                    do {
-                        let result = try AIPageTranslationParser.parse(
-                            content,
-                            expectedItems: expectedItems,
-                            target: .simplifiedChinese
-                        )
-                        guard !result.items.isEmpty else {
-                            throw AIPageTranslationParserError.emptyResult
-                        }
-                    } catch {
-                        testFailed = true
-                        let excerpt = String(content.prefix(300))
-                        testMessage = "settings.textProtocolIncompatible".localizedFormat(model, excerpt)
-                        HapticManager.shared.play(.error)
-                        return
-                    }
+                    passed = AITextConnectionProbe.response(content, contains: challenge)
                 }
+
+                guard passed else {
+                    testFailed = true
+                    let excerpt = String(content.prefix(180)).replacingOccurrences(of: "\n", with: " ")
+                    testMessage = kind == .vision
+                        ? "视觉接口可连接，但模型没有读出测试图片验证码。请检查视觉能力或 API 协议。返回：\(excerpt)"
+                        : "文本接口可连接，但没有按测试协议返回验证码。请检查 API 协议。返回：\(excerpt)"
+                    HapticManager.shared.play(.error)
+                    return
+                }
+
                 testFailed = false
                 let kindLabel = kind == .text
                     ? "settings.testTextConnection".localized

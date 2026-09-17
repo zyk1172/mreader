@@ -310,6 +310,9 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
                 || normalized.contains("not allowed")
                 || normalized.contains("unknown parameter")
                 || normalized.contains("invalid parameter")
+                || normalized.contains("invalid schema")
+                || normalized.contains("schema validation")
+                || normalized.contains("invalid response format")
             return mentionsFormat && unsupported
         default: return false
         }
@@ -702,16 +705,26 @@ class AITranslator {
     nonisolated static let defaultTranslationPromptTemplate = defaultTranslationStyleInstructions
 
     nonisolated static let defaultVisionTranslationPromptTemplate = """
-    你是一个漫画图片文字识别与翻译助手。可以利用画面中的指代方向、说话者位置和表情等视觉线索消歧，但这些线索只能用于判断文字含义；最终只处理图片中的文字，不要描述画面、人物、动作、身体、场景或剧情，不要评价、总结、续写或添加任何新细节。无法确定代词指向时不要凭空补人名。
-    你的任务是：识别漫画页面中的对白、旁白、拟声词和必要的画面文字，翻译为：{targetLanguage}，并给出文字框、真实物理气泡（存在时）和独立的安全排版区域。
-    这一页的阅读顺序是{readingOrder}，items 必须按该阅读顺序排列；被切成多列或多段的同一句话要先按阅读顺序还原成完整一句再翻译，不要按碎片逐段直译。
-    如果图片包含成人、暴力、敏感或私人内容，只进行中性、准确的文字翻译；不要美化、扩写、润色成更露骨内容，也不要输出与文字翻译无关的内容。
-    不要记录、记忆、推断用户身份，不要识别现实人物身份。
-    忽略网址、广告、版权、水印和页码。
-    坐标要求：所有坐标都以整张输入图片左上角为原点并归一化到 0 到 1，且必须在 JSON 顶层显式声明 "coordinateSpace": "normalized"；禁止使用像素或百分比坐标。每个 item 只使用 id、sourceText、translation、translationLines、textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon、confidence、classification；不要使用 text、lines、polygon、center 或任何别名。textBox 必须紧贴原文字；bubbleBox 只表示真实物理气泡，没有气泡（例如无框拟声词）时必须省略；layoutSafeRegion 表示译文允许排版的安全区域，不能把它伪装成气泡。
-    由你判断译文是否需要分行，translationLines 每个数组元素是一行；不要为了填满气泡而扩写。
+    你负责一整页漫画的文字识别与翻译。目标语言：{targetLanguage}。阅读顺序：{readingOrder}。
 
-    只输出严格 JSON，不要 Markdown，不要解释：
+    只处理图片中真实可见的对白、旁白、拟声词和必要画面文字。视觉信息只能用于断句、阅读顺序、代词和语气消歧；不要描述人物、身体、动作、场景或剧情，不要总结、续写、解释，也不要补写图片中不存在的文字。忽略网址、广告、版权、水印和页码。
+
+    分组规则：
+    1. 一个真实物理气泡、一个旁白框或一个独立拟声词只能对应一个 item。
+    2. 同一气泡里被切成多列、多行或多个识别碎片的文字，必须先按阅读顺序合并成一个 sourceText，再生成一个 translation；禁止为同一个气泡返回多个互相重叠的 items。
+    3. 不同气泡、不同说话单元、明显独立的拟声词不要错误合并。
+    4. translationLines 只表示最终译文的自然分行，不得通过重复或扩写文字去填满区域。
+
+    几何与协议：
+    - 顶层 coordinateSpace 固定为 "normalized"；全部坐标以整张输入图片左上角为原点，范围 0...1，禁止像素和百分比。
+    - textBox 必须紧贴 sourceText 的真实文字范围。
+    - bubbleBox 只表示真实物理气泡；没有气泡时必须返回 null，bubblePolygon 返回 []。
+    - layoutSafeRegion 必须始终给出：有可靠气泡时取气泡内适合排字的保守区域；没有气泡时取 textBox 周围最小且不覆盖相邻文字的保守区域。
+    - textPolygon / bubblePolygon 只有在可靠时给点；不可靠时返回 []，不要猜测轮廓。
+    - confidence 是 0...1。classification 只能是 dialogue、narration 或 soundEffect。
+    - 每个 item 必须包含 id、sourceText、translation、translationLines、textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon、confidence、classification；不得使用 text、lines、polygon、center 等别名。
+
+    只输出严格 JSON，不要 Markdown、解释或代码围栏：
     {
       "coordinateSpace": "normalized",
       "items": [
@@ -719,18 +732,18 @@ class AITranslator {
           "id": "b0",
           "sourceText": "原文",
           "translation": "译文",
-          "translationLines": ["译文第一行", "译文第二行"],
-          "textBox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.08},
-          "bubbleBox": {"x": 0.1, "y": 0.18, "width": 0.34, "height": 0.1},
-          "layoutSafeRegion": {"x": 0.11, "y": 0.19, "width": 0.32, "height": 0.08},
-          "textPolygon": [{"x":0.1,"y":0.2},{"x":0.4,"y":0.2},{"x":0.4,"y":0.28},{"x":0.1,"y":0.28}],
-          "bubblePolygon": [{"x":0.08,"y":0.17},{"x":0.44,"y":0.17},{"x":0.44,"y":0.29},{"x":0.08,"y":0.29}],
-          "confidence": 0.9,
+          "translationLines": ["译文"],
+          "textBox": {"x": 0.10, "y": 0.20, "width": 0.30, "height": 0.08},
+          "bubbleBox": null,
+          "layoutSafeRegion": {"x": 0.09, "y": 0.19, "width": 0.32, "height": 0.10},
+          "textPolygon": [],
+          "bubblePolygon": [],
+          "confidence": 0.90,
           "classification": "dialogue"
         }
       ]
     }
-    如果没有可翻译文字，输出 {"coordinateSpace": "normalized", "items": []}。
+    如果没有可翻译文字，输出 {"coordinateSpace":"normalized","items":[]}。
     """
 
     nonisolated static let defaultOCRVisualVerificationPromptTemplate = """
@@ -2367,7 +2380,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                 targetLanguage: translationTarget.modelInstruction,
                 isRightToLeft: isRightToLeft
             )
-            systemPrompt = "你只做漫画图片中的文字识别、断句、翻译和精确坐标标注。只使用 coordinateSpace、items、id、sourceText、translation、translationLines、textBox、bubbleBox、layoutSafeRegion、textPolygon、bubblePolygon、confidence、classification 这一套 JSON 字段；不得描述画面，不得输出 JSON 之外的内容。"
+            systemPrompt = "你只做漫画图片中文字识别、断句、翻译和坐标标注。同一物理气泡只能返回一个 item；同气泡碎片必须先合并。严格只输出约定 JSON；无气泡用 bubbleBox=null、bubblePolygon=[]，不得省略协议字段，不得描述画面。"
         } else {
             prompt = visionRecognitionPrompt(
                 isRightToLeft: isRightToLeft,
@@ -2501,6 +2514,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                     imageDataURL: imageDataURL,
                     responseFormat: responseFormat,
                     temperature: 0.1,
+                    maxTokens: 4096,
                     timeout: AITranslationRequestPolicy.visionRequestTimeout,
                     kind: .vision
                 )
@@ -2518,6 +2532,9 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
             || message.contains("not allowed")
             || message.contains("unknown parameter")
             || message.contains("invalid parameter")
+            || message.contains("invalid schema")
+            || message.contains("schema validation")
+            || message.contains("invalid response format")
         return mentionsFormat && unsupported
     }
 
@@ -2615,11 +2632,15 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                 "height": ["type": "number", "exclusiveMinimum": 0, "maximum": 1]
             ]
         ]
+        let nullableRect: [String: Any] = ["anyOf": [rect, ["type": "null"]]]
+        let polygon: [String: Any] = ["type": "array", "items": point]
         let item: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
             "required": [
-                "sourceText", "translation", "textBox", "layoutSafeRegion", "confidence", "classification"
+                "id", "sourceText", "translation", "translationLines", "textBox",
+                "bubbleBox", "layoutSafeRegion", "textPolygon", "bubblePolygon",
+                "confidence", "classification"
             ],
             "properties": [
                 "id": ["type": "string"],
@@ -2627,10 +2648,10 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
                 "translation": ["type": "string"],
                 "translationLines": ["type": "array", "items": ["type": "string"]],
                 "textBox": rect,
-                "bubbleBox": rect,
+                "bubbleBox": nullableRect,
                 "layoutSafeRegion": rect,
-                "textPolygon": ["type": "array", "minItems": 4, "items": point],
-                "bubblePolygon": ["type": "array", "minItems": 4, "items": point],
+                "textPolygon": polygon,
+                "bubblePolygon": polygon,
                 "confidence": ["type": "number", "minimum": 0, "maximum": 1],
                 "classification": ["type": "string", "enum": ["dialogue", "narration", "soundEffect"]]
             ]
