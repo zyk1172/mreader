@@ -1,42 +1,30 @@
-import Combine
 import CoreGraphics
-import CoreImage
+import Foundation
 import Observation
 import SwiftUI
 import UIKit
 
 nonisolated enum GuidedPanelFocusPolicy {
     enum Mode: Equatable, Sendable {
-        case blurred
-        case dimOnly
+        case spotlight
     }
 
-    static let previewMaxPixelSize: CGFloat = 768
-    // The texture is generated only once per warmed page, so a visibly stronger radius has
-    // negligible tap-path cost. Radius 6 was too subtle after downsampling on real devices.
-    static let previewBlurRadius: CGFloat = 14
-    static let panelExpansionRatio: CGFloat = 0.02
-    static let featherRadius: CGFloat = 14
-    static let dimOpacity: Double = 0.12
-    // Match the deeper forward warm window while leaving a little room for the current/back page.
-    static let maximumCachedPages = 6
+    static let panelExpansionRatio: CGFloat = 0.018
+    static let dimOpacity: Double = 0.30
+    static let vignetteOpacity: Double = 0.16
+    static let focusStrokeOpacity: Double = 0.18
+    static let focusCornerRadius: CGFloat = 9
 
     static func mode(
         isLowPowerModeEnabled: Bool,
         thermalState: ProcessInfo.ThermalState
     ) -> Mode {
-        // Low Power Mode is common during reading sessions. The focus texture is a one-time
-        // <=768px render and remains far cheaper than page decode/Core ML, so do not silently
-        // remove the requested visual effect just because Low Power Mode is enabled.
+        // Spotlight uses only lightweight vector compositing. There is no duplicate
+        // page texture or Gaussian render, so the same visual treatment is safe in
+        // Low Power Mode and under thermal pressure.
         _ = isLowPowerModeEnabled
-        switch thermalState {
-        case .serious, .critical:
-            return .dimOnly
-        case .nominal, .fair:
-            return .blurred
-        @unknown default:
-            return .dimOnly
-        }
+        _ = thermalState
+        return .spotlight
     }
 
     static var currentMode: Mode {
@@ -44,10 +32,6 @@ nonisolated enum GuidedPanelFocusPolicy {
             isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             thermalState: ProcessInfo.processInfo.thermalState
         )
-    }
-
-    static func shouldDisplayBlur(previewAvailable: Bool, mode: Mode) -> Bool {
-        mode == .blurred && previewAvailable
     }
 }
 
@@ -116,114 +100,31 @@ nonisolated enum GuidedPanelFocusGeometry {
     }
 }
 
-/// Immutable Core Graphics images are safe to hand to the serial preview actor. The wrapper
-/// makes that ownership explicit without making UIImage itself cross an isolation boundary.
-private struct GuidedPanelFocusCGImage: @unchecked Sendable {
-    let value: CGImage
-}
-
-private actor GuidedPanelFocusPreviewRenderer {
-    static let shared = GuidedPanelFocusPreviewRenderer()
-
-    private let context = CIContext()
-
-    func render(_ source: GuidedPanelFocusCGImage) -> GuidedPanelFocusCGImage? {
-        guard !Task.isCancelled else { return nil }
-
-        let cgImage = source.value
-        let width = CGFloat(cgImage.width)
-        let height = CGFloat(cgImage.height)
-        let longestSide = max(width, height)
-        guard longestSide > 0 else { return nil }
-
-        let resizeScale = min(1, GuidedPanelFocusPolicy.previewMaxPixelSize / longestSide)
-        let input = CIImage(cgImage: cgImage)
-        let resized = input.transformed(
-            by: CGAffineTransform(scaleX: resizeScale, y: resizeScale)
-        )
-        let targetExtent = resized.extent.integral
-        guard !targetExtent.isEmpty else { return nil }
-
-        let blurred = resized
-            .clampedToExtent()
-            .applyingFilter(
-                "CIGaussianBlur",
-                parameters: [kCIInputRadiusKey: GuidedPanelFocusPolicy.previewBlurRadius]
-            )
-            .cropped(to: targetExtent)
-
-        // Core Image filter construction is lazy. The expensive work starts at createCGImage,
-        // so a cancelled queued render gets one last chance to exit before touching GPU/CPU.
-        guard !Task.isCancelled else { return nil }
-        guard let output = context.createCGImage(blurred, from: targetExtent) else { return nil }
-        guard !Task.isCancelled else { return nil }
-        return GuidedPanelFocusCGImage(value: output)
-    }
-}
-
+/// Compatibility object retained for GuidedPanelReader. The old implementation
+/// cached low-resolution Gaussian copies of pages; spotlight rendering no longer
+/// needs those copies or background Core Image work.
 @MainActor
 @Observable
 final class GuidedPanelFocusPreviewStore {
     private(set) var previews: [String: UIImage] = [:]
-    private var recency: [String] = []
-    private var inFlight: Set<String> = []
-    private var tasks: [String: Task<Void, Never>] = [:]
-    private var requestIDs: [String: UUID] = [:]
 
     func preview(for url: URL) -> UIImage? {
-        previews[url.absoluteString]
+        _ = url
+        return nil
     }
 
-    /// Starts only from an image that Guided Panel already decoded for layout/prefetch work.
-    /// It never loads from disk/network and never blocks panel navigation waiting for the result.
-    /// `modeOverride` exists for deterministic rendering tests; production callers leave it nil.
     func prewarm(
         url: URL,
         image: UIImage,
         modeOverride: GuidedPanelFocusPolicy.Mode? = nil
     ) {
-        let mode = modeOverride ?? GuidedPanelFocusPolicy.currentMode
-        guard mode == .blurred else { return }
-        let key = url.absoluteString
-        guard previews[key] == nil, !inFlight.contains(key), let cgImage = image.cgImage else { return }
-
-        let requestID = UUID()
-        inFlight.insert(key)
-        requestIDs[key] = requestID
-        let immutableSource = GuidedPanelFocusCGImage(value: cgImage)
-        tasks[key] = Task { @MainActor [weak self] in
-            let rendered = await GuidedPanelFocusPreviewRenderer.shared.render(immutableSource)
-            guard let self, self.requestIDs[key] == requestID else { return }
-            self.inFlight.remove(key)
-            self.tasks[key] = nil
-            self.requestIDs[key] = nil
-            guard !Task.isCancelled, let rendered else { return }
-
-            self.previews[key] = UIImage(cgImage: rendered.value, scale: 1, orientation: image.imageOrientation)
-            self.touch(key)
-            self.trimIfNeeded()
-        }
+        _ = url
+        _ = image
+        _ = modeOverride
     }
 
     func cancelAll() {
-        for task in tasks.values {
-            task.cancel()
-        }
-        tasks.removeAll()
-        inFlight.removeAll()
-        requestIDs.removeAll()
-    }
-
-    private func touch(_ key: String) {
-        recency.removeAll { $0 == key }
-        recency.append(key)
-    }
-
-    private func trimIfNeeded() {
-        while recency.count > GuidedPanelFocusPolicy.maximumCachedPages {
-            let victim = recency.removeFirst()
-            previews[victim] = nil
-        }
+        previews.removeAll(keepingCapacity: true)
     }
 }
 
@@ -256,7 +157,10 @@ private struct GuidedPanelInverseFocusMask: Shape {
         if focusRect.width > 0, focusRect.height > 0 {
             path.addRoundedRect(
                 in: focusRect,
-                cornerSize: CGSize(width: 8, height: 8)
+                cornerSize: CGSize(
+                    width: GuidedPanelFocusPolicy.focusCornerRadius,
+                    height: GuidedPanelFocusPolicy.focusCornerRadius
+                )
             )
         }
         return path
@@ -264,8 +168,6 @@ private struct GuidedPanelInverseFocusMask: Shape {
 }
 
 struct GuidedPanelFocusOverlay: View {
-    @State private var mode = GuidedPanelFocusPolicy.currentMode
-
     let store: GuidedPanelFocusPreviewStore
     let pageURL: URL
     let requestPreview: () -> Void
@@ -290,72 +192,54 @@ struct GuidedPanelFocusOverlay: View {
                 cameraScale: cameraScale,
                 cameraOffset: cameraOffset
             )
-
-            // Read the observed dictionary directly in body. This makes the dependency on the
-            // async preview insertion explicit to SwiftUI instead of hiding it behind a method.
-            let preview = store.previews[pageURL.absoluteString]
+            let gradientCenter = UnitPoint(
+                x: min(max(focusRect.midX / viewportSize.width, 0), 1),
+                y: min(max(focusRect.midY / viewportSize.height, 0), 1)
+            )
+            let startRadius = max(min(focusRect.width, focusRect.height) * 0.40, 1)
+            let endRadius = max(viewportSize.width, viewportSize.height) * 0.90
 
             ZStack {
-                if GuidedPanelFocusPolicy.shouldDisplayBlur(
-                    previewAvailable: preview != nil,
-                    mode: mode
-                ), let preview {
-                    Image(uiImage: preview)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: viewportSize.width, height: viewportSize.height)
-                        .scaleEffect(cameraScale)
-                        .offset(cameraOffset)
-                }
                 Color.black.opacity(GuidedPanelFocusPolicy.dimOpacity)
+                RadialGradient(
+                    colors: [
+                        .clear,
+                        Color.black.opacity(GuidedPanelFocusPolicy.vignetteOpacity)
+                    ],
+                    center: gradientCenter,
+                    startRadius: startRadius,
+                    endRadius: endRadius
+                )
             }
             .frame(width: viewportSize.width, height: viewportSize.height)
             .mask {
                 GuidedPanelInverseFocusMask(focusRect: focusRect)
                     .fill(Color.white, style: FillStyle(eoFill: true))
-                    .blur(radius: GuidedPanelFocusPolicy.featherRadius)
+            }
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: GuidedPanelFocusPolicy.focusCornerRadius,
+                    style: .continuous
+                )
+                .strokeBorder(
+                    Color.white.opacity(GuidedPanelFocusPolicy.focusStrokeOpacity),
+                    lineWidth: 0.8
+                )
+                .frame(width: max(focusRect.width, 0), height: max(focusRect.height, 0))
+                .position(x: focusRect.midX, y: focusRect.midY)
+                .shadow(color: .black.opacity(0.30), radius: 1.5)
             }
             .opacity(opacity)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            .task(id: pageURL.absoluteString) {
-                // A notification can arrive while the conditional overlay is absent. Re-read
-                // ProcessInfo whenever this page's overlay appears so cached blur never flashes
-                // under a stale thermal mode.
-                let currentMode = GuidedPanelFocusPolicy.currentMode
-                if mode != currentMode {
-                    mode = currentMode
-                }
-                switch currentMode {
-                case .blurred:
-                    requestPreview()
-                case .dimOnly:
-                    cancelPreviewWork()
-                }
+            .onAppear {
+                // Stop any legacy blur render that may still belong to a live reader
+                // instance from before the view was rebuilt.
+                cancelPreviewWork()
+                _ = store
+                _ = pageURL
+                _ = requestPreview
             }
-            .onReceive(
-                NotificationCenter.default.publisher(for: Notification.Name.NSProcessInfoPowerStateDidChange)
-            ) { _ in
-                refreshSystemMode()
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-            ) { _ in
-                refreshSystemMode()
-            }
-        }
-    }
-
-    private func refreshSystemMode() {
-        let nextMode = GuidedPanelFocusPolicy.currentMode
-        guard nextMode != mode else { return }
-        mode = nextMode
-        switch nextMode {
-        case .blurred:
-            requestPreview()
-        case .dimOnly:
-            // Stop queued work immediately. Cached previews remain hidden and reusable.
-            cancelPreviewWork()
         }
     }
 }
