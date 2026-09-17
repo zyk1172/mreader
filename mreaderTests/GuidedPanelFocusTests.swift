@@ -50,71 +50,46 @@ struct GuidedPanelFocusTests {
         #expect(abs(rect.height - 800) < 0.001)
     }
 
-    @Test func lowPowerKeepsBlurWhileThermalPressureFallsBackToDimOnly() {
+    @Test func spotlightModeIsStableAcrossPowerAndThermalStates() {
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .nominal
-            ) == .blurred
+            ) == .spotlight
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .nominal
-            ) == .blurred
+            ) == .spotlight
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: false,
                 thermalState: .serious
-            ) == .dimOnly
+            ) == .spotlight
         )
         #expect(
             GuidedPanelFocusPolicy.mode(
                 isLowPowerModeEnabled: true,
                 thermalState: .critical
-            ) == .dimOnly
-        )
-        #expect(
-            GuidedPanelFocusPolicy.shouldDisplayBlur(
-                previewAvailable: true,
-                mode: .blurred
-            )
-        )
-        #expect(
-            !GuidedPanelFocusPolicy.shouldDisplayBlur(
-                previewAvailable: true,
-                mode: .dimOnly
-            )
+            ) == .spotlight
         )
     }
 
     @MainActor
-    @Test func gaussianPreviewIsActuallyRenderedAndDiffersFromSource() async throws {
-        let size = CGSize(width: 96, height: 96)
-        let source = UIGraphicsImageRenderer(size: size).image { context in
+    @Test func spotlightDoesNotGenerateGaussianPreviewCopies() async {
+        let source = UIGraphicsImageRenderer(size: CGSize(width: 96, height: 96)).image { context in
             UIColor.black.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: size.width / 2, height: size.height))
+            context.fill(CGRect(x: 0, y: 0, width: 48, height: 96))
             UIColor.white.setFill()
-            context.fill(CGRect(x: size.width / 2, y: 0, width: size.width / 2, height: size.height))
+            context.fill(CGRect(x: 48, y: 0, width: 48, height: 96))
         }
         let url = URL(fileURLWithPath: "/tmp/guided-panel-focus-render-test.png")
         let store = GuidedPanelFocusPreviewStore()
 
-        store.prewarm(url: url, image: source, modeOverride: .blurred)
-
-        var preview: UIImage?
-        for _ in 0..<100 {
-            if let rendered = store.preview(for: url) {
-                preview = rendered
-                break
-            }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-
-        let rendered = try #require(preview)
-        #expect(rendered.cgImage?.width == source.cgImage?.width)
-        #expect(rendered.cgImage?.height == source.cgImage?.height)
-        #expect(rendered.pngData() != source.pngData())
+        store.prewarm(url: url, image: source, modeOverride: .spotlight)
+        #expect(store.preview(for: url) == nil)
+        #expect(store.previews.isEmpty)
     }
 }
