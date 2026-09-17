@@ -105,4 +105,13 @@ final class TranslationReadabilityRegressionTests: XCTestCase {
         )
         XCTAssertEqual(size, 14)
     }
+
+    func testInvalidMeasuredFontFallsBackSafelyForReliableBubble() {
+        let size = OCRBubbleLayoutEngine.requestedTranslationFontSize(
+            hasReliableBubble: true,
+            automaticFontSize: 80,
+            measuredTextFontSize: .nan
+        )
+        XCTAssertEqual(size, TranslationLayoutMetrics.absoluteFontSizeCap)
+    }
 }
