@@ -21,7 +21,14 @@ enum ReaderUITestFixture {
             .appendingPathComponent("MReaderUITestReader", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            for (index, color) in [UIColor.systemIndigo, UIColor.systemTeal].enumerated() {
+            let colors: [UIColor] = [
+                .systemIndigo,
+                .systemTeal,
+                .systemOrange,
+                .systemPurple,
+                .systemGreen
+            ]
+            for (index, color) in colors.enumerated() {
                 let pageURL = root.appendingPathComponent(String(format: "%02d.png", index + 1))
                 if !FileManager.default.fileExists(atPath: pageURL.path) {
                     try pageData(color: color).write(to: pageURL, options: .atomic)
@@ -37,7 +44,7 @@ enum ReaderUITestFixture {
                 id: UUID(uuidString: "A0D0C0DE-7E57-4D2C-9B2A-7D6F2C2B9E01")!,
                 title: "UI Test Reader",
                 bookmarkData: bookmarkData,
-                totalPages: 2,
+                totalPages: colors.count,
                 coverImagePath: firstPage.path,
                 fileSize: 2,
                 libraryPath: root.path,

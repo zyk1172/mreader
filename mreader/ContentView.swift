@@ -977,7 +977,11 @@ struct ContentView: View {
                             }
                             .buttonStyle(.plain)
                             .hapticTap(.light)
-                            .accessibilityIdentifier("mreader.shelf.openReader")
+                            .accessibilityIdentifier(
+                                comic.id == uiTestingFixtureComic?.id
+                                    ? "mreader.shelf.uiTestingFixture"
+                                    : "mreader.shelf.openReader"
+                            )
                         }
                     }
                     .padding(.horizontal, 18)
@@ -1222,6 +1226,10 @@ struct ContentView: View {
         visibleComics
             .filter { $0.hasBeenOpened || readingActivity.hasActivity(for: $0.id) }
             .sorted { lhs, rhs in
+                if let fixtureID = uiTestingFixtureComic?.id {
+                    if lhs.id == fixtureID { return true }
+                    if rhs.id == fixtureID { return false }
+                }
                 let lhsFinished = ComicReadingProgress.isFinished(lhs)
                 let rhsFinished = ComicReadingProgress.isFinished(rhs)
                 if lhsFinished != rhsFinished { return !lhsFinished }
@@ -1831,9 +1839,10 @@ struct ContentView: View {
     }
 
     private func readerDestination(for comic: ComicBook) -> some View {
-        ReaderContainerView(
+        let isFixture = uiTestingFixtureComic?.id == comic.id
+        return ReaderContainerView(
             comic: comic,
-            showsControlsForTesting: uiTestingFixtureComic?.id == comic.id
+            showsControlsForTesting: isFixture
         ) { updatedComic in
             if uiTestingFixtureComic?.id == updatedComic.id {
                 uiTestingFixtureComic = updatedComic

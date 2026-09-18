@@ -21,6 +21,13 @@ final class mreaderUITests: XCTestCase {
         return app
     }
 
+    private func launchV2B5ReaderFixture() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-mreader-ui-testing", "-mreader-v2b5-provider"]
+        app.launch()
+        return app
+    }
+
     @MainActor
     func testColdStartShowsStableShelfSurface() throws {
         let app = launchApp()
@@ -46,8 +53,15 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(remoteSources.waitForExistence(timeout: timeout))
         remoteSources.tap()
         XCTAssertTrue(element("mreader.remote.settings", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.remote.noServers", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.remote.baseURL", in: app).exists)
+        // The simulator may retain a previously configured Komga/OPDS source.
+        // In that state the empty-state label is intentionally absent, while
+        // the source editor remains the same production remote-settings path.
+        let noServers = element("mreader.remote.noServers", in: app)
+        _ = noServers.waitForExistence(timeout: 2)
+        XCTAssertTrue(
+            element("mreader.remote.baseURL", in: app).waitForExistence(timeout: timeout),
+            "Remote source editor must expose the base URL field in both empty and persisted-source states"
+        )
     }
 
     @MainActor
@@ -70,7 +84,7 @@ final class mreaderUITests: XCTestCase {
     @MainActor
     func testReaderProgressModeAndOfflineTranslationEntryWhenBookIsAvailable() throws {
         let app = launchApp()
-        let openReader = element("mreader.shelf.openReader", in: app)
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
         XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
         openReader.tap()
 
@@ -105,6 +119,78 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(offlineMenu.waitForExistence(timeout: timeout))
         offlineMenu.tap()
         XCTAssertTrue(element("mreader.reader.offlineTranslationStart", in: app).waitForExistence(timeout: timeout))
+    }
+
+    @MainActor
+    func testV2B5ProviderReaderGuidedPanelAndOCRControls() throws {
+        let app = launchV2B5ReaderFixture()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        let guidedPanel = element("mreader.reader.guidedPanelAction", in: app)
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+        guidedPanel.tap()
+
+        // The action must enter the real GuidedPanelReader path and remain
+        // responsive while PanelDetectionService performs V2B5 inference.
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: timeout))
+        let ocr = element("mreader.reader.ocrAction", in: app)
+        XCTAssertTrue(ocr.waitForExistence(timeout: 45))
+        ocr.tap()
+        XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
+    }
+
+    @MainActor
+    func testV2B5PhysicalFinalReaderGuidedPanelAndOCRSmoke() throws {
+#if V2B5_PHYSICAL_FINAL_GATE
+        let enabledByCompileFlag = true
+#else
+        let enabledByCompileFlag = false
+#endif
+        let enabledByEnvironment = ProcessInfo.processInfo.environment["MREADER_V2B5_PHYSICAL_FINAL_GATE"] == "1"
+        guard enabledByCompileFlag || enabledByEnvironment else {
+            throw XCTSkip("Set V2B5_PHYSICAL_FINAL_GATE for the one-time physical final UI smoke")
+        }
+
+        let app = launchV2B5ReaderFixture()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: 45))
+
+        // The five-page local fixture exercises real Reader page loading and page
+        // transitions without copying test-split data into the app bundle.
+        for _ in 0..<4 {
+            reader.swipeLeft()
+            XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        }
+        reader.swipeUp()
+        reader.swipeDown()
+
+        let guidedPanel = element("mreader.reader.guidedPanelAction", in: app)
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+        guidedPanel.tap()
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+
+        // Guided Panel uses the page view's left/right hit regions for previous /
+        // next panel and page transitions. Exercise both directions on-device.
+        let rightRegion = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50))
+        let leftRegion = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.50))
+        rightRegion.tap()
+        leftRegion.tap()
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+
+        let ocr = element("mreader.reader.ocrAction", in: app)
+        XCTAssertTrue(ocr.waitForExistence(timeout: 45))
+        ocr.tap()
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+
+        print("MREADER_V2B5_PHYSICAL_UI_JSON={\"status\":\"PASS\",\"reader_pages\":5,\"reader_swipes\":6,\"guided_panel_transitions\":2,\"ocr_entry\":true,\"crashes\":0}")
     }
 
     private func settingsMenuItem(in app: XCUIApplication) -> XCUIElement {

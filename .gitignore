@@ -10,3 +10,8 @@ build/
 
 # macOS
 .DS_Store
+
+# Local-only V2B5 physical-device benchmark resources and scratch output.
+.local-bench/
+mreaderTests/BenchModels/
+mreaderTests/V2B5ValSamples/

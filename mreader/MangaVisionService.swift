@@ -24,7 +24,7 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
     static let shared = MangaVisionService(
-        provider: AdaptiveMangaVisionProvider(base: YOLOMangaVisionProvider.shared)
+        provider: AdaptiveMangaVisionProvider(base: MangaVisionProviderRouter.shared)
     )
     nonisolated static let analysisRevision = "manga-vision-page-v3-runtime-foundation"
 
