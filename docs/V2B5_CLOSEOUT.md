@@ -49,6 +49,7 @@ The pre-test snapshot intentionally records `test_opened=false` and `test_infere
 - Raw MangaSegmentation data, raw annotations, test images, checkpoint files, and prediction archives are not packaged in mReader.
 - Attribution remains in `docs/licensing/mangasegmentation-attribution.md`.
 - OLD and `PanelDetector` remain available for rollback.
-- Mainline merge commit will be recorded in the production manifest after the merge.
+- Documentation commit: `a399ac5a2ab917f53c2ade6b78a920c4520bd093`.
+- Mainline merge commit: `8777456c08a6da050a133f633b74845dba6f496e`.
 
 MANGA VISION V2B5 PRODUCTION COMPLETE

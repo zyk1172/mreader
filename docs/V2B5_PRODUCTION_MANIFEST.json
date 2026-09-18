@@ -456,7 +456,7 @@
   },
   "mainline": {
     "production_switch_branch": "codex/v2b5-production-switch",
-    "documentation_commit": null,
-    "main_merge_commit": null
+    "documentation_commit": "a399ac5a2ab917f53c2ade6b78a920c4520bd093",
+    "main_merge_commit": "8777456c08a6da050a133f633b74845dba6f496e"
   }
 }

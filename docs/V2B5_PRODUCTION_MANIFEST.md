@@ -188,3 +188,9 @@ No new PASS threshold is introduced by this report.
 
 - Required attribution: [`docs/licensing/mangasegmentation-attribution.md`](licensing/mangasegmentation-attribution.md)
 - Raw MangaSegmentation annotations and Manga109-s images are not packaged as app resources.
+
+## Mainline
+
+- Production switch branch: `codex/v2b5-production-switch`
+- Documentation commit: `a399ac5a2ab917f53c2ade6b78a920c4520bd093`
+- Main merge commit: `8777456c08a6da050a133f633b74845dba6f496e`
