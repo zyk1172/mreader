@@ -153,32 +153,137 @@ changed the PASS result; these logs are not evidence of iPhone hardware performa
 
 ## Physical Final Verification
 
-Phase B was not run in this simulator-first round.
+Phase B was executed only against the physical iPhone 16 Pro, using the desktop
+copy `/Users/zhengyunkai/Desktop/mreader`. No simulator was started during this
+phase, and the formal mReader checkout remained clean.
 
 | Field | Result |
 | --- | --- |
-| iPhone deployment count in this review | 0 |
-| iPhone V2B5 latency | Not measured in this round |
-| iPhone V2B5-only memory | Not measured in this round |
-| iPhone thermal/stability | Not measured in this round |
-| Physical Reader/Guided Panel/OCR smoke | Not run in this round |
+| Device | iPhone 16 Pro (`iPhone17,1`), `00008140-000A6D6A2143801C` |
+| OS/build | iOS 27.0 / `24A437` |
+| Architecture | `arm64e` |
+| Deployment count | 2; first combined gate invocation, second UI-only retry |
+| Low Power Mode | Off at start and end |
+| Thermal | `nominal` at start, after benchmark, and after smoke |
+| V2B5-only provider gate | PASS; 40/40 val-only pages |
+| Strict output contract | PASS; 12-output contract |
+| Model load count | 1 |
+| Prediction / contract failures | 0 / 0 |
+| Crashes / memory warning | 0 / 0 |
+| Main-thread blocking | NO |
 
-The simulator evidence authorizes a later, single-device performance review; it does
-not establish the final iPhone Gate and does not authorize a production switch by
-itself.
+### V2B5-only memory
+
+The run used only `MangaVisionV2B5Provider`; the OLD provider was not loaded.
+The initial allocation rises during model warm-up and representative image/cache
+work, then settles rather than growing monotonically through the final pages.
+
+| Sample | Physical footprint |
+| --- | ---: |
+| M0 before model load | 57.033 MB |
+| M1 after model load | 68.736 MB |
+| M2 after first warm inference | 235.721 MB |
+| M3 after representative pages | 308.159 MB |
+| M4 after 40 pages | 306.409 MB |
+| Sampled maximum | 369.299 MB |
+| Model load count | 1 |
+| Memory warning | No |
+
+The final 10-page footprint was not monotonically increasing, and M4 was below
+M3. The 40-page delta relative to the post-warm sample was `+70.688 MB`; this
+is recorded as initial/cache allocation behavior, not a demonstrated unbounded
+retention leak.
+
+### Physical provider performance
+
+All timings are release-like Swift `-O` measurements over the same 40 frozen
+val-only pages. They are physical-device measurements, not simulator values.
+
+| Stage | Mean ms | Median ms | P95 ms | Min ms | Max ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Preprocess | 44.107 | 44.311 | 46.135 | 35.695 | 46.833 |
+| Core ML model | 25.534 | 22.932 | 27.337 | 16.691 | 142.428 |
+| Postprocess/NMS/domain conversion | 7.899 | 8.025 | 8.943 | 6.148 | 9.399 |
+| Provider total | 77.559 | 74.889 | 78.378 | 67.352 | 190.127 |
+
+Compared with the prior physical provider baseline:
+
+| Stage | Before mean ms | After mean ms | Improvement |
+| --- | ---: | ---: | ---: |
+| Preprocess | 56.477 | 44.107 | 1.280x faster |
+| Model | 29.352 | 25.534 | 1.149x faster |
+| Postprocess | 267.799 | 7.899 | 33.903x faster |
+| Total | 353.649 | 77.559 | 4.560x faster |
+
+The prior postprocess and total figures are the pre-optimization physical
+provider baseline recorded for this review. The large postprocess improvement is
+the intended result of the optimized V2B5 path.
+
+### Sustained run and thermal
+
+| Measure | Result |
+| --- | ---: |
+| First 10 pages median total | 73.477 ms |
+| Last 10 pages median total | 76.720 ms |
+| Drift | 4.413% |
+| Thermal start / after benchmark / end | nominal / nominal / nominal |
+
+### Domain smoke on the physical device
+
+The provider test exercised the physical-device Reader domain, Guided Panel
+layout, and actual OCR services over five val-only pages:
+
+| Area | Result |
+| --- | --- |
+| Reader semantic/domain pages | 5, PASS |
+| Guided Panel domain pages | 5, PASS |
+| OCR pages / raw blocks | 5 / 715, PASS |
+| OCR failures / invalid ROI | 0 / 0 |
+| Balloon contour | `nil` |
+| Mask-required consumer | None exercised |
+
+These are real physical-device service/domain calls. They are not a substitute
+for the requested UI-runner interaction smoke.
+
+### UI runner limitation
+
+The first consolidated `xcodebuild test` invocation completed the V2B5 physical
+unit/provider gate, but could not install `mreaderUITests-Runner` because the
+device had reached the free developer-profile app limit. After one app was
+removed, the second and final allowed invocation installed the runner, but the
+runner exited with code `74` before establishing the XCTest connection:
+
+```text
+Early unexpected exit, operation never finished bootstrapping
+```
+
+The UI test method therefore did not execute and emitted no UI smoke JSON. The
+following items remain unverified on the physical UI surface:
+
+| UI item | Result |
+| --- | --- |
+| Reader open / swipe / dismiss | Not executed; runner bootstrap failure |
+| Guided Panel UI transitions | Not executed; runner bootstrap failure |
+| OCR UI entry / mapping | Not executed; runner bootstrap failure |
+
+No further device deployment was attempted after the two allowed invocations.
+
+The physical Provider and domain results are valid, but the explicit physical UI
+smoke gate is incomplete. This does not authorize a production switch.
 
 ## Decision
 
 **B. `V2B5_PRODUCTION_REVIEW_PARTIAL`**
 
-The complete simulator Phase A passed: golden, Reader, Guided Panel, actual OCR,
-balloon bbox compatibility, optimized output path, and the full simulator regression
-all passed with zero failures. The overall production-switch review remains partial
-because the explicitly required one-time physical iPhone final verification has not
-been performed. Production remains on the OLD provider.
+The simulator Phase A and the physical V2B5-only Provider Gate passed, including
+40-page inference, output contract, memory sampling, thermal sampling, optimized
+postprocess timing, Reader/Guided Panel/OCR domain calls, and balloon nil-contour
+compatibility. The review remains partial because the required physical UI Runner
+smoke did not bootstrap. Production remains on the OLD provider.
 
 ## Next Allowed Step
 
-After explicit approval, perform one consolidated iPhone 16 Pro deployment/review for
-device latency, V2B5-only memory, thermal/stability, and Reader/Guided Panel/OCR smoke.
-Do not run Final Test or access test images as part of that review.
+Resolve the device UI-runner bootstrap constraint with a compatible signed test
+environment before any further physical UI review. Do not run Final Test, access test
+images, switch the production default, or modify the formal mReader checkout as part
+of this review.

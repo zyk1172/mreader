@@ -5,6 +5,8 @@
     "formal_project_touched": false,
     "branch": "codex/v2b5-production-review",
     "simulator_first": true,
+    "physical_phase_b_attempted": true,
+    "physical_ui_gate_complete": false,
     "production_switch_applied": false,
     "final_test_run": false,
     "test_images_accessed": false,
@@ -17,7 +19,21 @@
     "udid": "A301890E-55DE-46F4-8917-8C96742C30C6",
     "architecture": "arm64",
     "concurrent_simulators": 1,
-    "swift_optimization": "-O"
+    "swift_optimization": "-O",
+    "physical_device": {
+      "name": "郑云凯",
+      "marketing_name": "iPhone 16 Pro",
+      "product_type": "iPhone17,1",
+      "udid": "00008140-000A6D6A2143801C",
+      "architecture": "arm64e",
+      "os": "iOS 27.0",
+      "build": "24A437",
+      "low_power_mode_start": false,
+      "low_power_mode_end": false,
+      "thermal_start": "nominal",
+      "thermal_after_benchmark": "nominal",
+      "thermal_end": "nominal"
+    }
   },
   "model": {
     "architecture": "MangaVisionDetectorV2B5",
@@ -130,20 +146,150 @@
     "xcodebuild": "TEST SUCCEEDED"
   },
   "physical_final_verification": {
-    "performed": false,
-    "iphone_deployments": 0,
-    "latency": "not measured",
-    "memory": "not measured",
-    "thermal": "not measured",
-    "reader_guided_panel_ocr_smoke": "not run"
+    "performed": true,
+    "complete": false,
+    "device": {
+      "marketing_name": "iPhone 16 Pro",
+      "product_type": "iPhone17,1",
+      "udid": "00008140-000A6D6A2143801C",
+      "os": "iOS 27.0",
+      "build": "24A437",
+      "architecture": "arm64e"
+    },
+    "iphone_deployments": 2,
+    "deployment_details": {
+      "first_invocation": {
+        "provider_gate": "PASS",
+        "ui_runner_install": "BLOCKED_FREE_DEVELOPER_PROFILE_APP_LIMIT"
+      },
+      "second_invocation": {
+        "scope": "UI-only",
+        "ui_runner_install": "PASS",
+        "ui_runner_bootstrap": "FAIL",
+        "exit_code": 74,
+        "ui_test_method_executed": false
+      }
+    },
+    "provider_gate": {
+      "status": "PASS",
+      "pages": 40,
+      "prediction_failures": 0,
+      "contract_failures": 0,
+      "crashes": 0,
+      "model_load_count": 1,
+      "strict_output_contract": "PASS",
+      "main_thread_blocking": false
+    },
+    "latency_ms": {
+      "measurement": "40 frozen val-only pages, physical iPhone 16 Pro, Swift -O",
+      "preprocess": {
+        "mean": 44.10719055,
+        "median": 44.31075,
+        "p95": 46.135083,
+        "min": 35.695,
+        "max": 46.83275
+      },
+      "model": {
+        "mean": 25.534112475,
+        "median": 22.932292,
+        "p95": 27.3375,
+        "min": 16.69075,
+        "max": 142.42775
+      },
+      "postprocess": {
+        "mean": 7.898897875,
+        "median": 8.025167,
+        "p95": 8.942916,
+        "min": 6.1475,
+        "max": 9.398542
+      },
+      "total": {
+        "mean": 77.558589625,
+        "median": 74.889208,
+        "p95": 78.378167,
+        "min": 67.35175,
+        "max": 190.126917
+      }
+    },
+    "before_after_mean_speedup": {
+      "preprocess": {
+        "before_ms": 56.477,
+        "after_ms": 44.10719055,
+        "speedup": 1.280
+      },
+      "model": {
+        "before_ms": 29.352,
+        "after_ms": 25.534112475,
+        "speedup": 1.149
+      },
+      "postprocess": {
+        "before_ms": 267.799,
+        "after_ms": 7.898897875,
+        "speedup": 33.903
+      },
+      "total": {
+        "before_ms": 353.649,
+        "after_ms": 77.558589625,
+        "speedup": 4.560
+      }
+    },
+    "memory_mb": {
+      "M0_before_load": 57.033164978,
+      "M1_after_load": 68.736335754,
+      "M2_after_warm": 235.720802307,
+      "M3_after_representative_pages": 308.158622742,
+      "M4_after_40_pages": 306.408828735,
+      "sampled_max": 369.299110413,
+      "load_delta": 11.703170776,
+      "warm_delta": 166.984466553,
+      "40_page_delta_from_warm": 70.688026428,
+      "last_10_non_decreasing": false,
+      "memory_warning": false,
+      "model_load_count": 1
+    },
+    "sustained": {
+      "first_10_median_ms": 73.477375,
+      "last_10_median_ms": 76.719709,
+      "drift_percent": 4.412697106
+    },
+    "domain_smoke": {
+      "reader_semantic_pages": 5,
+      "guided_panel_pages": 5,
+      "ocr_pages": 5,
+      "ocr_raw_blocks": 715,
+      "ocr_failures": 0,
+      "invalid_roi": 0,
+      "balloon_contour": "nil",
+      "mask_required_consumer": "none exercised"
+    },
+    "ui_smoke": {
+      "reader": "NOT EXECUTED",
+      "guided_panel": "NOT EXECUTED",
+      "ocr": "NOT EXECUTED",
+      "reason": "mreaderUITests-Runner exited with code 74 before XCTest bootstrap"
+    },
+    "thermal": {
+      "start": "nominal",
+      "after_benchmark": "nominal",
+      "end": "nominal",
+      "low_power_mode_start": false,
+      "low_power_mode_end": false
+    },
+    "test_split": {
+      "images_accessed": false,
+      "inference": false,
+      "final_test": "NOT RUN"
+    }
   },
   "warnings": [
     "Core ML simulator emitted the known MPSGraph/Espresso backend warning; tests still passed.",
-    "Tesseract emitted font construction diagnostics on some OCR paths; tests still passed."
+    "Tesseract emitted font construction diagnostics on some OCR paths; tests still passed.",
+    "The first physical UI runner install was blocked by the free developer-profile app limit.",
+    "The second physical UI runner installed but exited with code 74 before XCTest bootstrap; no physical UI smoke method executed."
   ],
   "decision": {
     "code": "B",
     "value": "V2B5_PRODUCTION_REVIEW_PARTIAL",
-    "reason": "Simulator Phase A passed, but the required one-time physical iPhone final verification was not performed in this simulator-first round."
+    "reason": "Simulator Phase A and the physical V2B5-only provider/domain gate passed, but the required physical UI Reader/Guided Panel/OCR smoke did not bootstrap after two allowed deployment invocations."
   }
 }

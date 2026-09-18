@@ -583,6 +583,8 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
 
     private var runtime: Runtime?
     private var measuredColdLoadMilliseconds: Double?
+    private var runtimeLoadCount = 0
+    private var mainThreadExecutionObserved = false
 
     var descriptor: MangaVisionProviderDescriptor {
         get async {
@@ -609,6 +611,7 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
         sourceImageSize: CGSize,
         pageIdentifier: MangaPageIdentifier
     ) async throws -> MangaVisionTimedAnalysis {
+        noteMainThreadExecutionIfNeeded()
         let totalStart = ContinuousClock.now
         let runtime = try loadRuntime()
         let preprocessStart = ContinuousClock.now
@@ -654,8 +657,17 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
         measuredColdLoadMilliseconds
     }
 
+    func runtimeLoadCountForDiagnostics() -> Int {
+        runtimeLoadCount
+    }
+
+    func mainThreadExecutionObservedForDiagnostics() -> Bool {
+        mainThreadExecutionObserved
+    }
+
     private func loadRuntime() throws -> Runtime {
         if let runtime { return runtime }
+        noteMainThreadExecutionIfNeeded()
         let started = ContinuousClock.now
         guard let modelURL = Bundle.main.url(
             forResource: Self.modelResourceName,
@@ -680,8 +692,15 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
         )
         let loaded = Runtime(model: model, descriptor: descriptor)
         runtime = loaded
+        runtimeLoadCount += 1
         measuredColdLoadMilliseconds = Self.milliseconds(started.duration(to: .now))
         return loaded
+    }
+
+    private func noteMainThreadExecutionIfNeeded() {
+        if Thread.isMainThread {
+            mainThreadExecutionObserved = true
+        }
     }
 
     private static let fallbackDescriptor = MangaVisionProviderDescriptor(

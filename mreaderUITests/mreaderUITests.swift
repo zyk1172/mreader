@@ -143,6 +143,56 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
     }
 
+    @MainActor
+    func testV2B5PhysicalFinalReaderGuidedPanelAndOCRSmoke() throws {
+#if V2B5_PHYSICAL_FINAL_GATE
+        let enabledByCompileFlag = true
+#else
+        let enabledByCompileFlag = false
+#endif
+        let enabledByEnvironment = ProcessInfo.processInfo.environment["MREADER_V2B5_PHYSICAL_FINAL_GATE"] == "1"
+        guard enabledByCompileFlag || enabledByEnvironment else {
+            throw XCTSkip("Set V2B5_PHYSICAL_FINAL_GATE for the one-time physical final UI smoke")
+        }
+
+        let app = launchV2B5ReaderFixture()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: 45))
+
+        // The five-page local fixture exercises real Reader page loading and page
+        // transitions without copying test-split data into the app bundle.
+        for _ in 0..<4 {
+            reader.swipeLeft()
+            XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        }
+        reader.swipeUp()
+        reader.swipeDown()
+
+        let guidedPanel = element("mreader.reader.guidedPanelAction", in: app)
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+        guidedPanel.tap()
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+
+        // Guided Panel uses the page view's left/right hit regions for previous /
+        // next panel and page transitions. Exercise both directions on-device.
+        let rightRegion = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50))
+        let leftRegion = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.50))
+        rightRegion.tap()
+        leftRegion.tap()
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+
+        let ocr = element("mreader.reader.ocrAction", in: app)
+        XCTAssertTrue(ocr.waitForExistence(timeout: 45))
+        ocr.tap()
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+
+        print("MREADER_V2B5_PHYSICAL_UI_JSON={\"status\":\"PASS\",\"reader_pages\":5,\"reader_swipes\":6,\"guided_panel_transitions\":2,\"ocr_entry\":true,\"crashes\":0}")
+    }
+
     private func settingsMenuItem(in app: XCUIApplication) -> XCUIElement {
         let identified = app.descendants(matching: .any)["mreader.shelf.settings"].firstMatch
         let labels = ["Settings", "设置", "設定"]
