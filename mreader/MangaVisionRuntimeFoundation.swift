@@ -6,6 +6,7 @@ import Foundation
 /// Cache validity is derived from this manifest instead of a manually incremented integer.
 nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
     let modelID: String
+    let modelVersion: Int
     let modelBuildID: String
     let modelFileHash: String
     let inputSize: CGSize
@@ -14,6 +15,30 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
     let analysisSchemaRevision: String
     let postProcessRevision: String
     let calibrationRevision: String
+
+    init(
+        modelID: String,
+        modelVersion: Int = 4,
+        modelBuildID: String,
+        modelFileHash: String,
+        inputSize: CGSize,
+        semanticClasses: Set<MangaRegionType>,
+        outputContractRevision: String,
+        analysisSchemaRevision: String,
+        postProcessRevision: String,
+        calibrationRevision: String
+    ) {
+        self.modelID = modelID
+        self.modelVersion = modelVersion
+        self.modelBuildID = modelBuildID
+        self.modelFileHash = modelFileHash
+        self.inputSize = inputSize
+        self.semanticClasses = semanticClasses
+        self.outputContractRevision = outputContractRevision
+        self.analysisSchemaRevision = analysisSchemaRevision
+        self.postProcessRevision = postProcessRevision
+        self.calibrationRevision = calibrationRevision
+    }
 
     var cacheIdentity: String {
         let classes = semanticClasses.map(\.rawValue).sorted().joined(separator: ",")
@@ -35,7 +60,7 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
     var compatibilityDescriptor: MangaVisionProviderDescriptor {
         MangaVisionProviderDescriptor(
             modelIdentifier: modelID,
-            modelVersion: 4,
+            modelVersion: modelVersion,
             inputSize: inputSize,
             supportedRegionTypes: semanticClasses
         )
@@ -50,6 +75,7 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
             : "sha256:\(fileHash.prefix(20))"
         return MangaVisionModelManifest(
             modelID: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
+            modelVersion: 4,
             modelBuildID: buildID,
             modelFileHash: fileHash,
             inputSize: MangaVisionOutputContract.expectedInputSize,

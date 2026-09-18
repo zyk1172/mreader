@@ -345,6 +345,7 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
         }
         return MangaVisionModelManifest(
             modelID: manifest.modelID,
+            modelVersion: manifest.modelVersion,
             modelBuildID: manifest.modelBuildID,
             modelFileHash: manifest.modelFileHash,
             inputSize: manifest.inputSize,
