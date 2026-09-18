@@ -1,24 +1,59 @@
 {
-  "status": "frozen production candidate",
+  "schema": "manga-vision-v2b5-production-manifest-v2",
+  "model_status": "PRODUCTION_FROZEN",
+  "status": "PRODUCTION_FROZEN",
   "model": "MangaVisionDetectorV2B5",
-  "precision": "FP32",
+  "precision": "Full FP32",
   "artifact": {
     "path": "mreader/MangaVisionV2B5.mlpackage",
     "tree_sha256": "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5",
+    "sha256_method": "manga-vision-mlpackage-tree-v1",
     "file_count": 4,
     "source_bytes": 5908245
   },
-  "input": [1, 3, 640, 640],
+  "freeze": {
+    "production_freeze_commit": "e47e0177c3d2080f2fe89d0d927505da1b138108",
+    "training_head": "84b1aacee50926b95837f043b10bd5cab58da217",
+    "final_test_commit": "6d6f9118d026287da1167d4cf2d187ca1b4c1435",
+    "checkpoint_path": "checkpoints/v2b5-transfer-a/best.pt",
+    "checkpoint_sha256": "cb8947236e62bcf0fb516cd777886fce96f7cea52a29414d1408d0666edaf63f",
+    "calibration_revision": "v2b5-calibration-v1",
+    "calibration_sha256": "981693b9cac5a8e1be1e2f45d9042d5949d504a6c68c5514fabc4aa1a1c3056a",
+    "evaluator": "scripts/finalize_v2b5_candidate.py",
+    "evaluator_sha256": "5550111814b712c2fec053328a481e3dfb5deb6c8333ccd6f422c3d98b8bcef5"
+  },
+  "input": [
+    1,
+    3,
+    640,
+    640
+  ],
   "parameters": 1390954,
   "classes": [
-    {"id": 0, "name": "frame"},
-    {"id": 1, "name": "text"},
-    {"id": 2, "name": "face"},
-    {"id": 3, "name": "body"},
-    {"id": 4, "name": "balloon"}
+    {
+      "id": 0,
+      "name": "frame"
+    },
+    {
+      "id": 1,
+      "name": "text"
+    },
+    {
+      "id": 2,
+      "name": "face"
+    },
+    {
+      "id": 3,
+      "name": "body"
+    },
+    {
+      "id": 4,
+      "name": "balloon"
+    }
   ],
   "calibration": {
     "revision": "v2b5-calibration-v1",
+    "sha256": "981693b9cac5a8e1be1e2f45d9042d5949d504a6c68c5514fabc4aa1a1c3056a",
     "score_threshold": 0.05,
     "max_detections": 300,
     "nms": {
@@ -31,37 +66,397 @@
   },
   "routing": {
     "production_provider": "V2B5",
+    "production_implementation": "MangaVisionV2B5Provider",
     "fallback_provider": "OLD PanelDetector",
-    "debug_modes": ["OLD", "V2B5", "COMPARE"],
+    "fallback_implementation": "YOLOMangaVisionProvider",
+    "debug_modes": [
+      "OLD",
+      "V2B5",
+      "COMPARE"
+    ],
     "balloon_mask": "unsupported / contour nil"
   },
-  "contract": {
-    "levels": ["P2", "P3", "P4", "P5"],
-    "raw_tensor_count": 12,
-    "classification_channels": 5,
-    "bbox_channels": 4,
-    "centerness_channels": 1
+  "pre_test_manifest": {
+    "type": "historical_snapshot",
+    "source_document": "v2b5-sealed-test-manifest.md",
+    "test_opened": false,
+    "test_inference_started": false,
+    "meaning": "Written before the one-time final evaluation."
   },
-  "validation": {
-    "integration_review_commit": "c9e1ee9",
-    "physical_review": "PASS",
-    "release_app_build": "PASS",
-    "unit_tests": {"passed": 598, "skipped": 11, "failed": 0},
-    "functional_ui_tests": {"passed": 5, "skipped": 1, "failed": 0},
-    "production_default_test": "PASS",
-    "old_rollback_test": "PASS",
-    "final_test": "NOT RUN",
-    "test_split_accessed": false,
-    "test_inference": false
+  "final_test_state": {
+    "source_document": "v2b5-sealed-test-manifest.json",
+    "metrics_source_document": "v2b5-sealed-final-test.json",
+    "test_opened": true,
+    "test_inference_started": true,
+    "status": "COMPLETE",
+    "test_split_status": "OBSERVED"
+  },
+  "final_test": {
+    "status": "COMPLETE",
+    "test_split_status": "OBSERVED",
+    "dataset": "Manga109-s-v2026",
+    "canonical_version": "5-class canonical v2",
+    "val_preflight": "PASS",
+    "books": 9,
+    "book_names": [
+      "AosugiruHaru",
+      "BEMADER_P",
+      "EienNoWith",
+      "MagicianLoad",
+      "RinToSiteSippuNoNaka",
+      "RisingGirl",
+      "TetsuSan",
+      "TouyouKidan",
+      "UltraEleven"
+    ],
+    "pages": 991,
+    "train_overlap": 0,
+    "val_overlap": 0,
+    "book_leakage": 0,
+    "unknown_pages": 0,
+    "test_reruns": 0,
+    "full": {
+      "pages": 991,
+      "overall_ap50": 0.6782244626867042,
+      "recall": 0.7908991446310768,
+      "per_class": {
+        "frame": {
+          "ap50": 0.8349989744904774,
+          "recall": 0.8646709042444125,
+          "gt": 9754,
+          "predictions": 11307,
+          "small_recall": 0.15170278637770898,
+          "small_gt": 323
+        },
+        "text": {
+          "ap50": 0.8979732750106517,
+          "recall": 0.9194309356173332,
+          "gt": 13777,
+          "predictions": 21902,
+          "small_recall": 0.921413813459268,
+          "small_gt": 13552
+        },
+        "face": {
+          "ap50": 0.5267405485067185,
+          "recall": 0.6707051585423568,
+          "gt": 10565,
+          "predictions": 16074,
+          "small_recall": 0.6494562348220885,
+          "small_gt": 9471
+        },
+        "body": {
+          "ap50": 0.4370370710255367,
+          "recall": 0.6713709677419355,
+          "gt": 13888,
+          "predictions": 35630,
+          "small_recall": 0.48790194205666987,
+          "small_gt": 6282
+        },
+        "balloon": {
+          "ap50": 0.6943724444001369,
+          "recall": 0.8283177570093458,
+          "gt": 10700,
+          "predictions": 16340,
+          "small_recall": 0.7994930291508239,
+          "small_gt": 7890
+        }
+      },
+      "view_counts": null,
+      "elapsed_seconds": 38.292358300008345,
+      "duplicate_by_class": {
+        "frame": {
+          "matched_gt": 8434,
+          "duplicated_gt": 341,
+          "duplicate_percent": 0.04043158643585487,
+          "extra_predictions": 2521,
+          "duplicate_extras": 352,
+          "extras": 2873,
+          "mean_extras_per_duplicated_gt": 1.032258064516129
+        },
+        "text": {
+          "matched_gt": 12667,
+          "duplicated_gt": 1037,
+          "duplicate_percent": 0.08186626667719271,
+          "extra_predictions": 8107,
+          "duplicate_extras": 1128,
+          "extras": 9235,
+          "mean_extras_per_duplicated_gt": 1.0877531340405016
+        },
+        "face": {
+          "matched_gt": 7086,
+          "duplicated_gt": 295,
+          "duplicate_percent": 0.041631385831216484,
+          "extra_predictions": 8687,
+          "duplicate_extras": 301,
+          "extras": 8988,
+          "mean_extras_per_duplicated_gt": 1.0203389830508474
+        },
+        "body": {
+          "matched_gt": 9324,
+          "duplicated_gt": 3466,
+          "duplicate_percent": 0.3717288717288717,
+          "extra_predictions": 22261,
+          "duplicate_extras": 4045,
+          "extras": 26306,
+          "mean_extras_per_duplicated_gt": 1.1670513560300058
+        },
+        "balloon": {
+          "matched_gt": 8863,
+          "duplicated_gt": 433,
+          "duplicate_percent": 0.048854789574636126,
+          "extra_predictions": 7041,
+          "duplicate_extras": 436,
+          "extras": 7477,
+          "mean_extras_per_duplicated_gt": 1.0069284064665127
+        }
+      }
+    },
+    "halves": {
+      "pages": 991,
+      "overall_ap50": 0.7370353503422589,
+      "recall": 0.8651302689924355,
+      "per_class": {
+        "frame": {
+          "ap50": 0.8543537986219041,
+          "recall": 0.8947268588770865,
+          "gt": 5272,
+          "predictions": 7695,
+          "small_recall": 0.1,
+          "small_gt": 20
+        },
+        "text": {
+          "ap50": 0.9154698256193994,
+          "recall": 0.9457199734571997,
+          "gt": 7535,
+          "predictions": 16869,
+          "small_recall": 0.9449035812672176,
+          "small_gt": 6534
+        },
+        "face": {
+          "ap50": 0.5886050841499622,
+          "recall": 0.7786885245901639,
+          "gt": 5734,
+          "predictions": 13842,
+          "small_recall": 0.7537829658452226,
+          "small_gt": 4626
+        },
+        "body": {
+          "ap50": 0.5149155928447241,
+          "recall": 0.7874338624338625,
+          "gt": 7560,
+          "predictions": 31684,
+          "small_recall": 0.5523959978936283,
+          "small_gt": 1899
+        },
+        "balloon": {
+          "ap50": 0.8118324504753045,
+          "recall": 0.9190821256038647,
+          "gt": 5796,
+          "predictions": 12005,
+          "small_recall": 0.8857266062958171,
+          "small_gt": 2319
+        }
+      },
+      "view_counts": {
+        "full": 102,
+        "half_left": 428,
+        "half_right": 461
+      },
+      "elapsed_seconds": 37.023804800002836,
+      "duplicate_by_class": {
+        "frame": {
+          "matched_gt": 4717,
+          "duplicated_gt": 383,
+          "duplicate_percent": 0.08119567521729913,
+          "extra_predictions": 2578,
+          "duplicate_extras": 400,
+          "extras": 2978,
+          "mean_extras_per_duplicated_gt": 1.0443864229765014
+        },
+        "text": {
+          "matched_gt": 7126,
+          "duplicated_gt": 1345,
+          "duplicate_percent": 0.18874543923659837,
+          "extra_predictions": 8254,
+          "duplicate_extras": 1489,
+          "extras": 9743,
+          "mean_extras_per_duplicated_gt": 1.1070631970260223
+        },
+        "face": {
+          "matched_gt": 4465,
+          "duplicated_gt": 285,
+          "duplicate_percent": 0.06382978723404255,
+          "extra_predictions": 9080,
+          "duplicate_extras": 297,
+          "extras": 9377,
+          "mean_extras_per_duplicated_gt": 1.0421052631578946
+        },
+        "body": {
+          "matched_gt": 5953,
+          "duplicated_gt": 2801,
+          "duplicate_percent": 0.4705190660171342,
+          "extra_predictions": 22245,
+          "duplicate_extras": 3486,
+          "extras": 25731,
+          "mean_extras_per_duplicated_gt": 1.244555515887183
+        },
+        "balloon": {
+          "matched_gt": 5327,
+          "duplicated_gt": 252,
+          "duplicate_percent": 0.04730617608409987,
+          "extra_predictions": 6425,
+          "duplicate_extras": 253,
+          "extras": 6678,
+          "mean_extras_per_duplicated_gt": 1.003968253968254
+        }
+      }
+    },
+    "generalization": {
+      "full_delta": {
+        "overall_ap50": -0.016653520566085045,
+        "recall": -0.02013203607830416,
+        "frame": -0.06277087122939606,
+        "text": -0.014050497233582537,
+        "face": 0.02749022886012442,
+        "body": -0.013768113534755044,
+        "balloon": -0.02016834969281589,
+        "small_text": -0.01665802018912521,
+        "small_face": 0.04403355213719928,
+        "small_balloon": -0.029311682400507966
+      },
+      "halves_delta": {
+        "overall_ap50": 0.00816241641608273,
+        "recall": 0.005213422323251393,
+        "frame": -0.04514099895821633,
+        "text": -0.012030205350662238,
+        "face": 0.06722023557119294,
+        "body": 0.013631427634228976,
+        "balloon": 0.017131623183870293,
+        "small_text": -0.013744849947585291,
+        "small_face": 0.08796134796091748,
+        "small_balloon": 0.026285054000502406
+      }
+    },
+    "prediction_archive": {
+      "path": "reports/final/artifacts/v2b5-test-predictions.json.gz",
+      "size": 7272848,
+      "sha256": "02f09135b7c9f6e5012423168e466d195293b6c9289859ad90f4656071ec8270"
+    },
+    "protocol": {
+      "checkpoint_changed": false,
+      "calibration_changed": false,
+      "evaluator_changed": false,
+      "nms_sweep": false,
+      "score_sweep": false,
+      "checkpoint_comparison": false,
+      "manual_test_page_selection": false,
+      "manual_test_image_inspection": false,
+      "model_comparison_on_test": false,
+      "test_reruns": 0
+    },
+    "decision": "A. SEALED_FINAL_TEST_COMPLETE — PRODUCTION CANDIDATE CHARACTERIZED"
+  },
+  "closeout_verification": {
+    "handoff_zip": {
+      "status": "PASS",
+      "size": 10703,
+      "sha256": "efaca8cf4d5ade00c01f45862b4fb3184a13207871333f3a25967e15928d08d9"
+    },
+    "handoff_payload": {
+      "status": "PASS",
+      "expected": 6,
+      "verified": 6,
+      "failed": 0
+    },
+    "targeted_tests": {
+      "status": "PASS",
+      "passed": 18,
+      "skipped": 0,
+      "failed": 0
+    },
+    "unit_tests": {
+      "status": "PASS",
+      "suite": "mreaderTests",
+      "total": 605,
+      "passed": 594,
+      "skipped": 11,
+      "failed": 0
+    },
+    "ui_tests": {
+      "status": "PASS",
+      "suite": "key mreaderUITests",
+      "total": 5,
+      "passed": 5,
+      "skipped": 0,
+      "failed": 0
+    },
+    "production_default": "PASS",
+    "old_rollback_availability": "PASS",
+    "release_build": {
+      "status": "PASS",
+      "configuration": "Release",
+      "destination": "generic/platform=iOS"
+    },
+    "release_bundle": {
+      "v2b5_compiled_model": true,
+      "old_panel_detector_compiled_model": true
+    },
+    "final_test_rerun": false,
+    "physical_benchmark_rerun": false,
+    "physical_ui_rerun": false
+  },
+  "future_v3_research_notes": {
+    "status": "FUTURE_WORK_ONLY",
+    "v2b5_further_tuning": "PROHIBITED",
+    "full_view_frame": {
+      "val": 0.8977698457198735,
+      "test": 0.8349989744904774,
+      "delta": -0.06277087122939606
+    },
+    "body_duplicate_extras": {
+      "full": {
+        "gt": 13888,
+        "predictions": 35630,
+        "duplicated_gt": 3466,
+        "duplicate_ratio": 0.3717288717288717,
+        "extras": 26306
+      },
+      "halves": {
+        "gt": 7560,
+        "predictions": 31684,
+        "duplicated_gt": 2801,
+        "duplicate_ratio": 0.4705190660171342,
+        "extras": 25731
+      }
+    }
+  },
+  "rollback": {
+    "production": "V2B5",
+    "fallback": "OLD PanelDetector",
+    "minimum_retention": "at least one formal release cycle",
+    "trigger_examples": [
+      "V2B5 model load failure",
+      "severe production crash",
+      "severe Reader regression",
+      "severe device compatibility issue"
+    ],
+    "action": "Switch only the production provider default to OLD.",
+    "forbidden_changes": [
+      "user data",
+      "calibration",
+      "database",
+      "V2B5 artifact"
+    ]
   },
   "attribution": {
     "path": "docs/licensing/mangasegmentation-attribution.md",
-    "raw_dataset_packaged": false
+    "exists": true,
+    "raw_dataset_packaged": false,
+    "raw_annotations_packaged": false
   },
-  "size": {
-    "old_compiled_model_bytes": 21061392,
-    "v2b5_compiled_model_bytes": 5771747,
-    "release_app_bundle_bytes": 100605443,
-    "model_resource_delta_bytes": 5771747
+  "mainline": {
+    "production_switch_branch": "codex/v2b5-production-switch",
+    "documentation_commit": null,
+    "main_merge_commit": null
   }
 }
