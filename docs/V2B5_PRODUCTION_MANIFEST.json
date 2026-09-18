@@ -1,0 +1,67 @@
+{
+  "status": "frozen production candidate",
+  "model": "MangaVisionDetectorV2B5",
+  "precision": "FP32",
+  "artifact": {
+    "path": "mreader/MangaVisionV2B5.mlpackage",
+    "tree_sha256": "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5",
+    "file_count": 4,
+    "source_bytes": 5908245
+  },
+  "input": [1, 3, 640, 640],
+  "parameters": 1390954,
+  "classes": [
+    {"id": 0, "name": "frame"},
+    {"id": 1, "name": "text"},
+    {"id": 2, "name": "face"},
+    {"id": 3, "name": "body"},
+    {"id": 4, "name": "balloon"}
+  ],
+  "calibration": {
+    "revision": "v2b5-calibration-v1",
+    "score_threshold": 0.05,
+    "max_detections": 300,
+    "nms": {
+      "frame": 0.5,
+      "text": 0.55,
+      "face": 0.45,
+      "body": 0.55,
+      "balloon": 0.45
+    }
+  },
+  "routing": {
+    "production_provider": "V2B5",
+    "fallback_provider": "OLD PanelDetector",
+    "debug_modes": ["OLD", "V2B5", "COMPARE"],
+    "balloon_mask": "unsupported / contour nil"
+  },
+  "contract": {
+    "levels": ["P2", "P3", "P4", "P5"],
+    "raw_tensor_count": 12,
+    "classification_channels": 5,
+    "bbox_channels": 4,
+    "centerness_channels": 1
+  },
+  "validation": {
+    "integration_review_commit": "c9e1ee9",
+    "physical_review": "PASS",
+    "release_app_build": "PASS",
+    "unit_tests": {"passed": 598, "skipped": 11, "failed": 0},
+    "functional_ui_tests": {"passed": 5, "skipped": 1, "failed": 0},
+    "production_default_test": "PASS",
+    "old_rollback_test": "PASS",
+    "final_test": "NOT RUN",
+    "test_split_accessed": false,
+    "test_inference": false
+  },
+  "attribution": {
+    "path": "docs/licensing/mangasegmentation-attribution.md",
+    "raw_dataset_packaged": false
+  },
+  "size": {
+    "old_compiled_model_bytes": 21061392,
+    "v2b5_compiled_model_bytes": 5771747,
+    "release_app_bundle_bytes": 100605443,
+    "model_resource_delta_bytes": 5771747
+  }
+}

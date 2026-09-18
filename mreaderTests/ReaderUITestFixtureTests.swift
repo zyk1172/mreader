@@ -9,7 +9,7 @@ final class ReaderUITestFixtureTests: XCTestCase {
         }
 
         let result = ComicManager.loadPages(bookmarkData: comic.bookmarkData)
-        XCTAssertEqual(result?.pages.count, 2)
+        XCTAssertEqual(result?.pages.count, 5)
         XCTAssertEqual(
             result?.pages.map(\.url.lastPathComponent),
             ["01.png", "02.png", "03.png", "04.png", "05.png"]

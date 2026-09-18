@@ -10,6 +10,26 @@ import XCTest
 /// Core ML inference and local OCR rather than a lightweight unit check.
 @MainActor
 final class V2B5ProductionReviewTests: XCTestCase {
+    func testProductionDefaultProviderIsV2B5() {
+#if DEBUG
+        // DEBUG keeps the diagnostic selector independently configurable. The
+        // compile-time production choice is still asserted here so it cannot
+        // silently drift from the Release router branch.
+        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .v2b5)
+#else
+        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .v2b5)
+#endif
+    }
+
+    func testOldProviderStillAvailableForRollback() async {
+        XCTAssertEqual(MangaVisionProviderMode.oldProduction.rawValue, "OLD")
+        let descriptor = await YOLOMangaVisionProvider.shared.descriptor
+        XCTAssertEqual(
+            descriptor.modelIdentifier,
+            "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision"
+        )
+    }
+
     func testV2B5SimulatorValOnlyReview() async throws {
         #if V2B5_SIMULATOR_REVIEW
         let enabledByCompileFlag = true
@@ -31,10 +51,10 @@ final class V2B5ProductionReviewTests: XCTestCase {
         XCTAssertTrue(manifest.pages.allSatisfy { $0.split == "val" })
 
         // The review explicitly selects the new provider in DEBUG only. The
-        // application default remains OLD in production builds.
+        // production default is covered by testProductionDefaultProviderIsV2B5.
         MangaVisionProviderMode.setForDiagnostics(.v2b5)
         // Never leak the diagnostic provider choice into a later test launch;
-        // the reviewed application default remains OLD.
+        // DEBUG diagnostics are restored to the rollback provider.
         defer { MangaVisionProviderMode.setForDiagnostics(.oldProduction) }
 
         await OCRRecognitionCache.shared.clearCache()

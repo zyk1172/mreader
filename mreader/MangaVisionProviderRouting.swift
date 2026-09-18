@@ -7,6 +7,8 @@ nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
     case compare = "COMPARE"
 
     static let userDefaultsKey = "mreader.mangaVision.providerMode"
+    /// Frozen production choice. DEBUG diagnostics remain independently selectable.
+    static let productionDefault: Self = .v2b5
 
     static var currentForDiagnostics: Self {
 #if DEBUG
@@ -21,9 +23,10 @@ nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
         }
         return mode
 #else
-        // The production build is intentionally hard-wired to the existing
-        // provider until a separately reviewed switch is approved.
-        return .oldProduction
+        // The production candidate has completed the V2B5 integration and
+        // physical UI review. Keep OLD available through the router for
+        // rollback, but make V2B5 the non-DEBUG default.
+        return productionDefault
 #endif
     }
 
