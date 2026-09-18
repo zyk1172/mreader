@@ -14,12 +14,11 @@ nonisolated enum GuidedPanelFocusPolicy {
     }
 
     static let panelExpansionRatio: CGFloat = 0.018
-    static let featherWidth: CGFloat = 112
-    static let featherBlurRadius: CGFloat = 52
-    static let nearClearance: CGFloat = 22
-    static let glassTintOpacity: Double = 0.82
-    static let farDimOpacity: Double = 0.22
-    static let focusStrokeOpacity: Double = 0.10
+    static let featherBlurRadius: CGFloat = 88
+    static let nearClearance: CGFloat = 38
+    static let glassTintOpacity: Double = 0.24
+    static let farDimOpacity: Double = 0.06
+    static let focusStrokeOpacity: Double = 0.08
     static let focusCornerRadius: CGFloat = 9
 
     static func mode(
@@ -41,12 +40,12 @@ nonisolated enum GuidedPanelFocusPolicy {
         )
     }
 
-    /// Convex opacity response applied to the already-smooth feather alpha.
-    /// f(t) = t^3 is continuous, starts with zero slope, and accelerates monotonically:
-    /// glass is only faint near the active panel, then becomes rapidly stronger farther away.
+    /// Smooth convex response used by the distance feather.
+    /// f(t) = t² is C1-continuous on [0, 1], starts with zero slope and accelerates
+    /// monotonically without the abrupt mid-field darkening produced by the old t³ ramp.
     static func acceleratedFeatherAlpha(_ alpha: Double) -> Double {
         let t = min(max(alpha, 0), 1)
-        return t * t * t
+        return t * t
     }
 }
 
@@ -184,13 +183,12 @@ private struct GuidedPanelInverseFocusMask: Shape {
     }
 }
 
-/// A smooth distance-like feather generated entirely by SwiftUI compositing.
+/// Smooth continuous feather for Liquid Glass.
 ///
-/// The inverse rounded-rectangle mask is first blurred, which makes alpha continuous across
-/// edges and corners. Applying that same smooth mask three times multiplies alpha by itself,
-/// producing the convex response f(t)=t^3: change is deliberately slow next to the active
-/// panel and progressively faster outward. `nearClearance` shifts the blur away from the panel
-/// so the first visible glass remains only faintly translucent rather than starting at 50%.
+/// One blurred inverse rounded-rectangle gives a single continuous 2D field across edges and
+/// corners. Squaring that field by masking it with itself implements f(t)=t²: the change rate
+/// starts near zero beside the active panel, then increases steadily with distance. The larger
+/// clearance keeps the first visible glass faint instead of producing a dark ring at the panel.
 private struct GuidedPanelGlassFeatherMask: View {
     let focusRect: CGRect
     let viewportSize: CGSize
@@ -212,7 +210,6 @@ private struct GuidedPanelGlassFeatherMask: View {
 
     var body: some View {
         baseMask
-            .mask { baseMask }
             .mask { baseMask }
     }
 }
@@ -252,8 +249,8 @@ struct GuidedPanelFocusOverlay: View {
                         in: Rectangle()
                     )
 
-                // A restrained dark veil makes the far field effectively unreadable while
-                // preserving the native refractive/color response of Liquid Glass underneath.
+                // Keep only a very small neutral veil. The obscuring effect now comes from
+                // Liquid Glass itself rather than a black curtain, so the material stays visible.
                 Color.black.opacity(GuidedPanelFocusPolicy.farDimOpacity)
             }
             .frame(width: viewportSize.width, height: viewportSize.height)
@@ -270,11 +267,11 @@ struct GuidedPanelFocusOverlay: View {
                 )
                 .strokeBorder(
                     Color.white.opacity(GuidedPanelFocusPolicy.focusStrokeOpacity),
-                    lineWidth: 0.6
+                    lineWidth: 0.5
                 )
                 .frame(width: max(focusRect.width, 0), height: max(focusRect.height, 0))
                 .position(x: focusRect.midX, y: focusRect.midY)
-                .shadow(color: .black.opacity(0.18), radius: 1.2)
+                .shadow(color: .black.opacity(0.12), radius: 1)
             }
             .opacity(opacity)
             .allowsHitTesting(false)
