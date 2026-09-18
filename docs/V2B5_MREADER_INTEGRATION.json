@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "project_copy": "/Users/zhengyunkai/Desktop/mreader",
+  "branch": "codex/v2b5-mreader-integration",
+  "formal_project_touched": false,
+  "production_default": "OLD",
+  "model": {
+    "artifact_source": "/Users/zhengyunkai/Documents/开发项目/正式项目/工具/manga-vision-training/exports/coreml/diagnostic/MangaVisionV2B5_FP32.mlpackage",
+    "bundled_resource": "mreader/MangaVisionV2B5.mlpackage",
+    "architecture": "MangaVisionDetectorV2B5",
+    "precision": "FP32",
+    "tree_sha256": "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5",
+    "tree_bytes": 5908245,
+    "input": [1, 3, 640, 640],
+    "parameters": 1390954,
+    "classes": ["frame", "text", "face", "body", "balloon"],
+    "calibration_revision": "v2b5-calibration-v1",
+    "score_threshold": 0.05,
+    "max_detections": 300,
+    "nms": {
+      "frame": 0.5,
+      "text": 0.55,
+      "face": 0.45,
+      "body": 0.55,
+      "balloon": 0.45
+    }
+  },
+  "providers": {
+    "old": "YOLOMangaVisionProvider / PanelDetector",
+    "v2b5": "MangaVisionV2B5Provider / MangaVisionV2B5",
+    "router_modes": ["OLD", "V2B5", "COMPARE"],
+    "release_mode": "OLD"
+  },
+  "output_contract": [
+    {"semantic": "p2_cls", "output": "conv2d_77", "level": "p2", "role": "classification", "shape": [1, 5, 160, 160], "stride": 4},
+    {"semantic": "p2_bbox", "output": "conv2d_78", "level": "p2", "role": "bbox", "shape": [1, 4, 160, 160], "stride": 4},
+    {"semantic": "p2_centerness", "output": "conv2d_79", "level": "p2", "role": "centerness", "shape": [1, 1, 160, 160], "stride": 4},
+    {"semantic": "p3_cls", "output": "conv2d_88", "level": "p3", "role": "classification", "shape": [1, 5, 80, 80], "stride": 8},
+    {"semantic": "p3_bbox", "output": "conv2d_89", "level": "p3", "role": "bbox", "shape": [1, 4, 80, 80], "stride": 8},
+    {"semantic": "p3_centerness", "output": "conv2d_90", "level": "p3", "role": "centerness", "shape": [1, 1, 80, 80], "stride": 8},
+    {"semantic": "p4_cls", "output": "conv2d_99", "level": "p4", "role": "classification", "shape": [1, 5, 40, 40], "stride": 16},
+    {"semantic": "p4_bbox", "output": "conv2d_100", "level": "p4", "role": "bbox", "shape": [1, 4, 40, 40], "stride": 16},
+    {"semantic": "p4_centerness", "output": "conv2d_101", "level": "p4", "role": "centerness", "shape": [1, 1, 40, 40], "stride": 16},
+    {"semantic": "p5_cls", "output": "conv2d_110", "level": "p5", "role": "classification", "shape": [1, 5, 20, 20], "stride": 32},
+    {"semantic": "p5_bbox", "output": "conv2d_111", "level": "p5", "role": "bbox", "shape": [1, 4, 20, 20], "stride": 32},
+    {"semantic": "p5_centerness", "output": "conv2d_112", "level": "p5", "role": "centerness", "shape": [1, 1, 20, 20], "stride": 32}
+  ],
+  "capabilities": {
+    "old": {"frame": true, "text": true, "face": false, "body": false, "balloon_bbox": true, "balloon_mask": true},
+    "v2b5": {"frame": true, "text": true, "face": true, "body": true, "balloon_bbox": true, "balloon_mask": false}
+  },
+  "decoder_verification": {
+    "swift_provider_tests": {"passed": 8, "failed": 0},
+    "compiled_model_contract": "PASS",
+    "python_raw_tensor_golden_fixture_in_this_copy": false,
+    "python_reference": "Prior frozen training-repository Stage 1/2 correctness evidence"
+  },
+  "sample_package": {
+    "package": "v2b5-coreml-val-samples",
+    "split": "val",
+    "pages": 40,
+    "books": 9,
+    "model_predictions_used": false,
+    "test_images_accessed": false,
+    "test_inference": false
+  },
+  "ab": {
+    "device": "iPhone 16 Pro",
+    "os": "iOS 27.0 (24A437)",
+    "old_detections": 2048,
+    "v2b5_detections": 4681,
+    "same_class_matched": 1633,
+    "old_only": 415,
+    "v2b5_only": 3048,
+    "cross_class_flips": 49,
+    "per_class": {
+      "frame": {"old": 511, "v2b5": 528, "matched": 446, "old_only": 65, "v2b5_only": 82},
+      "text": {"old": 815, "v2b5": 1163, "matched": 585, "old_only": 230, "v2b5_only": 578},
+      "balloon": {"old": 722, "v2b5": 891, "matched": 602, "old_only": 120, "v2b5_only": 289},
+      "face": {"old": 0, "v2b5": 685, "matched": 0, "old_only": 0, "v2b5_only": 685},
+      "body": {"old": 0, "v2b5": 1414, "matched": 0, "old_only": 0, "v2b5_only": 1414}
+    },
+    "guided_panel_semantic_pages": 40,
+    "ocr_roi_pages": 40,
+    "face_detections": 685,
+    "body_detections": 1414,
+    "prediction_failures": 0,
+    "output_contract_failures": 0,
+    "crashes": 0,
+    "duration_seconds": 815.333
+  },
+  "timing_ms": {
+    "old": {
+      "preprocess": {"mean": 0.0, "median": 0.0, "p95": 0.0},
+      "model": {"mean": 15.112128075, "median": 16.063459, "p95": 18.302875},
+      "postprocess": {"mean": 18240.37221355, "median": 18927.614792, "p95": 24448.849458},
+      "total": {"mean": 18260.696245875, "median": 18949.482709, "p95": 24467.265125}
+    },
+    "v2b5": {
+      "preprocess": {"mean": 56.477345875, "median": 55.292, "p95": 63.829083},
+      "model": {"mean": 29.3521729, "median": 29.292833, "p95": 31.922625},
+      "postprocess": {"mean": 267.798538425, "median": 258.3945, "p95": 334.032708},
+      "total": {"mean": 353.649227025, "median": 343.293666, "p95": 427.122291}
+    }
+  },
+  "memory_mb": {
+    "before_load": 45.580017,
+    "after_old_warm": 103.674041,
+    "after_both_warm": 300.533462,
+    "v2b5_increment_while_both_resident": 196.859421,
+    "v2b5_only_isolated": null
+  },
+  "tests": {
+    "physical_ab": {"passed": 1, "failed": 0},
+    "full_debug_device": {
+      "passed": 588,
+      "device_run_entries": 592,
+      "skipped": 9,
+      "failed": 2,
+      "total_entries": 599,
+      "failed_tests": [
+        "localResourceAccessPolicyStartsSecurityScopeOnlyForExternalURLs()",
+        "RuntimeAccessPolicyTests.appOwnedPathDoesNotRequestSecurityScope()"
+      ],
+      "unmodified_by_this_change": true
+    }
+  },
+  "decision": "B. V2B5_INTEGRATION_PARTIAL - DOWNSTREAM COMPATIBILITY REVIEW NEEDED"
+}
