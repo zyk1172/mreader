@@ -245,6 +245,35 @@ layout, and actual OCR services over five val-only pages:
 These are real physical-device service/domain calls. They are not a substitute
 for the requested UI-runner interaction smoke.
 
+### Physical Manual UI Smoke
+
+The required manual UI smoke was completed on the physical iPhone using the
+already-installed Debug app from `/Users/zhengyunkai/Desktop/mreader`. No new
+deployment was performed (`additional deployments: 0`). The session was started
+with the existing diagnostic launch arguments:
+
+```text
+-mreader-ui-testing -mreader-v2b5-provider
+```
+
+The diagnostic selector maps `-mreader-v2b5-provider` to the V2B5 provider for
+that process. No UserDefaults value or Release default was changed; the
+production default remains `OLD`.
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| Reader | Fixture Reader pages 1–5; open, forward/back navigation, scroll attempt, dismiss, and reopen | PASS; no visible freeze; no crash |
+| Guided Panel | Real local comic pages 338–342; enter, next panel, previous panel, cross-page transition, exit/re-enter | PASS; no visible detection issue or UI freeze |
+| OCR UI | Real local comic pages 336, 337, 338; three UI-triggered requests with visible result overlays | PASS; 3/3 results, 0 UI failures, 0 invalid ROI |
+| Balloon compatibility | `contour = nil` through the exercised Reader/Guided Panel/OCR UI paths | PASS; no mask-dependent UI failure |
+| Responsiveness | Manual interaction during the above flows | No visible main-thread stall; no crash |
+
+The Reader UI path was exercised over five pages, including dismiss/reopen. The
+Guided Panel UI path was exercised over five real pages and visibly changed the
+camera crop when moving between panels. OCR results were shown in the Reader UI
+on all three exercised pages. No user manga screenshots or recordings were added
+to the repository.
+
 ### UI runner limitation
 
 The first consolidated `xcodebuild test` invocation completed the V2B5 physical
@@ -257,33 +286,38 @@ runner exited with code `74` before establishing the XCTest connection:
 Early unexpected exit, operation never finished bootstrapping
 ```
 
-The UI test method therefore did not execute and emitted no UI smoke JSON. The
-following items remain unverified on the physical UI surface:
+The UI test method therefore did not execute and emitted no UI smoke JSON. This
+is classified as a test-infrastructure limitation, not a product failure,
+because the same physical UI paths were subsequently completed manually using
+the installed Debug app.
 
 | UI item | Result |
 | --- | --- |
-| Reader open / swipe / dismiss | Not executed; runner bootstrap failure |
-| Guided Panel UI transitions | Not executed; runner bootstrap failure |
-| OCR UI entry / mapping | Not executed; runner bootstrap failure |
+| Reader open / swipe / dismiss | Manually verified: PASS |
+| Guided Panel UI transitions | Manually verified: PASS |
+| OCR UI entry / mapping | Manually verified: PASS |
 
 No further device deployment was attempted after the two allowed invocations.
 
-The physical Provider and domain results are valid, but the explicit physical UI
-smoke gate is incomplete. This does not authorize a production switch.
+The physical Provider, domain, and manual UI results complete the requested
+physical UI gate. The XCTest runner limitation remains recorded for future test
+infrastructure work and does not block this product review. This still does not
+change the production default or authorize an automatic production switch.
 
 ## Decision
 
-**B. `V2B5_PRODUCTION_REVIEW_PARTIAL`**
+**A. `V2B5_READY_FOR_PRODUCTION_SWITCH`**
 
 The simulator Phase A and the physical V2B5-only Provider Gate passed, including
 40-page inference, output contract, memory sampling, thermal sampling, optimized
 postprocess timing, Reader/Guided Panel/OCR domain calls, and balloon nil-contour
-compatibility. The review remains partial because the required physical UI Runner
-smoke did not bootstrap. Production remains on the OLD provider.
+compatibility. The final manual physical UI smoke also passed for Reader,
+Guided Panel, and OCR with no crash, visible freeze, invalid ROI, or
+mask-dependent UI failure. The XCTest runner code 74 is retained as
+`TEST_INFRASTRUCTURE_LIMITATION`. Production remains on the OLD provider.
 
 ## Next Allowed Step
 
-Resolve the device UI-runner bootstrap constraint with a compatible signed test
-environment before any further physical UI review. Do not run Final Test, access test
-images, switch the production default, or modify the formal mReader checkout as part
-of this review.
+Await explicit approval for the separate production-switch and sealed Final Test
+step. Do not switch the production default, remove OLD, run Final Test, access test
+images, or modify the formal mReader checkout as part of this completed review.

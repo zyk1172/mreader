@@ -6,7 +6,7 @@
     "branch": "codex/v2b5-production-review",
     "simulator_first": true,
     "physical_phase_b_attempted": true,
-    "physical_ui_gate_complete": false,
+    "physical_ui_gate_complete": true,
     "production_switch_applied": false,
     "final_test_run": false,
     "test_images_accessed": false,
@@ -147,7 +147,7 @@
   },
   "physical_final_verification": {
     "performed": true,
-    "complete": false,
+    "complete": true,
     "device": {
       "marketing_name": "iPhone 16 Pro",
       "product_type": "iPhone17,1",
@@ -157,6 +157,7 @@
       "architecture": "arm64e"
     },
     "iphone_deployments": 2,
+    "additional_manual_ui_deployments": 0,
     "deployment_details": {
       "first_invocation": {
         "provider_gate": "PASS",
@@ -262,11 +263,56 @@
       "balloon_contour": "nil",
       "mask_required_consumer": "none exercised"
     },
-    "ui_smoke": {
-      "reader": "NOT EXECUTED",
-      "guided_panel": "NOT EXECUTED",
-      "ocr": "NOT EXECUTED",
-      "reason": "mreaderUITests-Runner exited with code 74 before XCTest bootstrap"
+    "manual_ui_smoke": {
+      "provider": "V2B5",
+      "provider_evidence": "Existing installed Debug app launched with -mreader-ui-testing -mreader-v2b5-provider; diagnostic selector maps the argument to .v2b5.",
+      "additional_deployments": 0,
+      "reader": {
+        "pages": 5,
+        "open": "PASS",
+        "navigation": "PASS",
+        "dismiss_reopen": "PASS",
+        "visible_freeze": false,
+        "crash": false
+      },
+      "guided_panel": {
+        "pages": 5,
+        "pages_exercised": [338, 339, 340, 341, 342],
+        "enter": "PASS",
+        "next_previous_panel": "PASS",
+        "page_transition": "PASS",
+        "exit_reenter": "PASS",
+        "visible_detection_issue": false,
+        "ui_freeze": false,
+        "crash": false
+      },
+      "ocr": {
+        "pages": 3,
+        "pages_exercised": [336, 337, 338],
+        "requests": 3,
+        "successful_results": 3,
+        "ui_failures": 0,
+        "empty_results": 0,
+        "invalid_roi": 0,
+        "crash": false
+      },
+      "balloon": {
+        "contour": "nil",
+        "mask_dependent_ui_issue": false,
+        "note": "No exercised physical UI consumer requires precise balloon mask."
+      },
+      "responsiveness": {
+        "visible_main_thread_stall": false,
+        "memory_warning": false,
+        "thermal_start": "nominal",
+        "thermal_end": "nominal"
+      }
+    },
+    "xctest_ui_runner": {
+      "result": "BOOTSTRAP FAILED",
+      "exit_code": 74,
+      "classification": "TEST_INFRASTRUCTURE_LIMITATION",
+      "manual_ui_gate_supersedes_runner": true
     },
     "thermal": {
       "start": "nominal",
@@ -285,11 +331,11 @@
     "Core ML simulator emitted the known MPSGraph/Espresso backend warning; tests still passed.",
     "Tesseract emitted font construction diagnostics on some OCR paths; tests still passed.",
     "The first physical UI runner install was blocked by the free developer-profile app limit.",
-    "The second physical UI runner installed but exited with code 74 before XCTest bootstrap; no physical UI smoke method executed."
+    "The second physical UI runner installed but exited with code 74 before XCTest bootstrap; manual physical UI smoke was completed separately with the existing installed Debug app."
   ],
   "decision": {
-    "code": "B",
-    "value": "V2B5_PRODUCTION_REVIEW_PARTIAL",
-    "reason": "Simulator Phase A and the physical V2B5-only provider/domain gate passed, but the required physical UI Reader/Guided Panel/OCR smoke did not bootstrap after two allowed deployment invocations."
+    "code": "A",
+    "value": "V2B5_READY_FOR_PRODUCTION_SWITCH",
+    "reason": "Simulator Phase A, the physical V2B5-only provider/domain gate, and the manual physical Reader/Guided Panel/OCR UI smoke all passed. Production default remains OLD pending explicit switch approval."
   }
 }
