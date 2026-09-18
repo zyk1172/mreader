@@ -10,6 +10,40 @@ nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     let supportedRegionTypes: Set<MangaRegionType>
 }
 
+/// Capabilities are intentionally separate from semantic class support. A detector may
+/// expose balloon boxes while not exposing the instance contour required by mask-aware
+/// consumers. This keeps V2B5 honest: it is bbox-only for every class.
+nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
+    let supportsFrame: Bool
+    let supportsText: Bool
+    let supportsFace: Bool
+    let supportsBody: Bool
+    let supportsBalloon: Bool
+    let supportsBalloonMask: Bool
+
+    init(
+        supportedRegionTypes: Set<MangaRegionType>,
+        supportsBalloonMask: Bool
+    ) {
+        supportsFrame = supportedRegionTypes.contains(.panel)
+        supportsText = supportedRegionTypes.contains(.text)
+        supportsFace = supportedRegionTypes.contains(.face)
+        supportsBody = supportedRegionTypes.contains(.body)
+        supportsBalloon = supportedRegionTypes.contains(.balloon)
+        self.supportsBalloonMask = supportsBalloonMask
+    }
+}
+
+extension MangaVisionProviderDescriptor {
+    var capabilities: MangaVisionProviderCapabilities {
+        let isV2B5 = modelIdentifier == MangaVisionV2B5Provider.modelIdentifier
+        return MangaVisionProviderCapabilities(
+            supportedRegionTypes: supportedRegionTypes,
+            supportsBalloonMask: !isV2B5 && supportedRegionTypes.contains(.balloon)
+        )
+    }
+}
+
 nonisolated protocol MangaVisionProvider: Sendable {
     var descriptor: MangaVisionProviderDescriptor { get async }
     func analyzePage(
@@ -22,6 +56,22 @@ nonisolated protocol MangaVisionProvider: Sendable {
 nonisolated enum MangaVisionProviderError: Error, Sendable {
     case modelUnavailable
     case unsupportedOutput
+}
+
+/// Stage timings are diagnostic evidence only. They do not change the provider
+/// contract or production routing. The old Vision adapter attributes Vision's
+/// internal image preparation to its model stage because `VNImageRequestHandler`
+/// owns that work; V2B5 exposes the explicit preprocessing boundary.
+nonisolated struct MangaVisionProviderTiming: Sendable, Equatable {
+    let preprocessMilliseconds: Double
+    let modelMilliseconds: Double
+    let postprocessMilliseconds: Double
+    let totalMilliseconds: Double
+}
+
+nonisolated struct MangaVisionTimedAnalysis: Sendable {
+    let analysis: MangaPageAnalysis
+    let timing: MangaVisionProviderTiming
 }
 
 /// Adapter for the bundled Ultralytics segmentation export. Class IDs, tensor
@@ -86,11 +136,27 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
         sourceImageSize: CGSize,
         pageIdentifier: MangaPageIdentifier
     ) async throws -> MangaPageAnalysis {
+        try await analyzePageWithTiming(
+            image: image,
+            sourceImageSize: sourceImageSize,
+            pageIdentifier: pageIdentifier
+        ).analysis
+    }
+
+    func analyzePageWithTiming(
+        image: CGImage,
+        sourceImageSize: CGSize,
+        pageIdentifier: MangaPageIdentifier
+    ) async throws -> MangaVisionTimedAnalysis {
+        let totalStart = ContinuousClock.now
         let runtime = try loadRuntime()
         let request = VNCoreMLRequest(model: runtime.visionModel)
         request.imageCropAndScaleOption = .scaleFit
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
+        let modelStart = ContinuousClock.now
         try handler.perform([request])
+        let modelMilliseconds = Self.milliseconds(modelStart.duration(to: .now))
+        let postprocessStart = ContinuousClock.now
 
         let featureArrays = (request.results ?? [])
             .compactMap { $0 as? VNCoreMLFeatureValueObservation }
@@ -116,7 +182,7 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
             thresholds: profile.confidenceThresholds
         )
         let grouped = Dictionary(grouping: decoded, by: \.type)
-        return MangaPageAnalysis(
+        let analysis = MangaPageAnalysis(
             pageIdentifier: pageIdentifier,
             imageSize: sourceImageSize,
             panels: grouped[.panel] ?? [],
@@ -126,6 +192,17 @@ actor YOLOMangaVisionProvider: MangaVisionProvider {
             bodies: profile.deduplicated(grouped[.body] ?? [], type: .body),
             modelIdentifier: runtime.descriptor.modelIdentifier,
             modelVersion: runtime.descriptor.modelVersion
+        )
+        return MangaVisionTimedAnalysis(
+            analysis: analysis,
+            timing: MangaVisionProviderTiming(
+                // Vision performs preprocessing inside handler.perform; it is
+                // intentionally documented as part of the model-stage timing.
+                preprocessMilliseconds: 0,
+                modelMilliseconds: modelMilliseconds,
+                postprocessMilliseconds: Self.milliseconds(postprocessStart.duration(to: .now)),
+                totalMilliseconds: Self.milliseconds(totalStart.duration(to: .now))
+            )
         )
     }
 
