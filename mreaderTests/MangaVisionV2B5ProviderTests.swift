@@ -1,6 +1,8 @@
 import CoreGraphics
 import CoreML
+import CryptoKit
 import Foundation
+import ImageIO
 import XCTest
 @testable import mreader
 
@@ -83,6 +85,97 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         }
     }
 
+    func testPythonGoldenFixturesPreserveFrozenContract() throws {
+        let synthetic: SyntheticGoldenFixture = try decodeFixture("v2b5_synthetic")
+        XCTAssertEqual(synthetic.inputSeed, 109)
+        XCTAssertEqual(synthetic.inputShape, [1, 3, 640, 640])
+        XCTAssertEqual(synthetic.classes, ["frame", "text", "face", "body", "balloon"])
+        XCTAssertEqual(synthetic.calibrationRevision, "v2b5-calibration-v1")
+        XCTAssertEqual(synthetic.maxDetections, 300)
+        XCTAssertEqual(synthetic.rawOutputContract.count, 12)
+        XCTAssertEqual(
+            synthetic.rawOutputContract.map(\.tensor),
+            [
+                "p2_cls", "p2_bbox", "p2_centerness",
+                "p3_cls", "p3_bbox", "p3_centerness",
+                "p4_cls", "p4_bbox", "p4_centerness",
+                "p5_cls", "p5_bbox", "p5_centerness"
+            ]
+        )
+        XCTAssertEqual(MangaVisionV2B5Decoder.nmsThresholds, [0.50, 0.55, 0.45, 0.55, 0.45])
+    }
+
+    func testPythonGoldenRealValPageMatchesSwiftProvider() async throws {
+        let fixture: RealGoldenFixture = try decodeFixture("v2b5_real_val")
+        XCTAssertEqual(fixture.checkpointSHA256, "cb8947236e62bcf0fb516cd777886fce96f7cea52a29414d1408d0666edaf63f")
+        XCTAssertEqual(fixture.calibrationRevision, "v2b5-calibration-v1")
+        XCTAssertEqual(fixture.split, "val")
+        XCTAssertEqual(fixture.classes, ["frame", "text", "face", "body", "balloon"])
+
+        let imageURL = try XCTUnwrap(bundledResourceURL(named: fixture.page.bundledResource))
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(imageURL as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(image.width, fixture.page.width)
+        XCTAssertEqual(image.height, fixture.page.height)
+        let prepared = try MangaVisionV2B5Preprocessor.makeInput(from: image)
+        let inputData = Data(
+            bytes: UnsafeRawPointer(prepared.array.dataPointer),
+            count: 1 * 3 * 640 * 640 * MemoryLayout<Float32>.stride
+        )
+        let swiftInputSHA = SHA256.hash(data: inputData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        print("V2B5 golden input SHA python=\(fixture.inputSHA256) swift=\(swiftInputSHA) exact=\(swiftInputSHA == fixture.inputSHA256)")
+        for (key, expected) in fixture.inputSamples.sorted(by: { $0.key < $1.key }) {
+            let parts = key.split(separator: ",").compactMap { Int($0) }
+            guard parts.count == 2 else { continue }
+            let actual = (0..<3).map {
+                prepared.array[[0, $0, parts[1], parts[0]].map(NSNumber.init)].floatValue
+            }
+            for channel in 0..<min(expected.count, actual.count) {
+                XCTAssertEqual(actual[channel], Float(expected[channel]), accuracy: 0.001, "input sample \(key) channel \(channel)")
+            }
+        }
+
+        let identifier = MangaPageIdentifier(
+            scope: "v2b5-python-swift-golden",
+            pageIndex: 0,
+            sourceFingerprint: fixture.page.filename
+        )
+        let analysis = try await MangaVisionV2B5Provider.shared.analyzePage(
+            image: image,
+            sourceImageSize: CGSize(width: image.width, height: image.height),
+            pageIdentifier: identifier
+        )
+
+        for className in fixture.classes {
+            let expected = fixture.detections.filter { $0.className == className }
+            let actualType: MangaRegionType = switch className {
+            case "frame": .panel
+            case "text": .text
+            case "face": .face
+            case "body": .body
+            case "balloon": .balloon
+            default: throw GoldenFixtureError.unknownClass(className)
+            }
+            let actual = analysis.regions(of: actualType)
+            XCTAssertEqual(actual.count, expected.count, className)
+            var remaining = actual
+            for item in expected {
+                guard let bestIndex = remaining.indices.max(by: { lhs, rhs in
+                    iou(remaining[lhs].normalizedRect, item.rect) < iou(remaining[rhs].normalizedRect, item.rect)
+                }) else {
+                    XCTFail("missing Swift detection for \(className)")
+                    continue
+                }
+                let best = remaining.remove(at: bestIndex)
+                XCTAssertGreaterThan(iou(best.normalizedRect, item.rect), 0.99, className)
+                XCTAssertLessThan(abs(Double(best.confidence) - item.score), 0.02, className)
+                XCTAssertNil(best.contour, className)
+            }
+        }
+    }
+
     func testBundledModelDescriptionMatchesTheFrozenContract() throws {
         let modelURL = try XCTUnwrap(bundledModelURL())
         let configuration = MLModelConfiguration()
@@ -106,6 +199,13 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         for channel in 0..<4 {
             p2BBox[[0, channel, y, x].map(NSNumber.init)] = NSNumber(value: 0)
         }
+
+        let reader = try MangaVisionV2B5TensorReader(
+            array: p2Class,
+            name: "test.p2_cls",
+            expectedShape: [1, 5, 160, 160]
+        )
+        XCTAssertEqual(reader.value(channel: 4, y: y, x: x), 12, accuracy: 0.000_001)
 
         let detections = try MangaVisionV2B5Decoder.decode(
             rawOutputs: raw,
@@ -199,6 +299,42 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         )
     }
 
+    private func bundledResourceURL(named name: String) -> URL? {
+        let resource = URL(fileURLWithPath: name)
+        let bundles = [Bundle(for: Self.self), Bundle.main] + Bundle.allBundles
+        return bundles.first { bundle in
+            bundle.url(
+                forResource: resource.deletingPathExtension().lastPathComponent,
+                withExtension: resource.pathExtension
+            ) != nil
+        }?.url(
+            forResource: resource.deletingPathExtension().lastPathComponent,
+            withExtension: resource.pathExtension
+        )
+    }
+
+    private func decodeFixture<T: Decodable>(_ name: String) throws -> T {
+        let bundles = [Bundle(for: Self.self), Bundle.main] + Bundle.allBundles
+        for bundle in bundles {
+            if let url = bundle.url(
+                forResource: name,
+                withExtension: "json",
+                subdirectory: "Fixtures/v2b5_golden"
+            ) ?? bundle.url(forResource: name, withExtension: "json") {
+                return try JSONDecoder().decode(T.self, from: Data(contentsOf: url))
+            }
+        }
+        throw GoldenFixtureError.fixtureMissing(name)
+    }
+
+    private func iou(_ lhs: CGRect, _ rhs: CGRect) -> Double {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        let area = max(intersection.width, 0) * max(intersection.height, 0)
+        let union = lhs.width * lhs.height + rhs.width * rhs.height - area
+        return Double(area / max(union, 0.000_001))
+    }
+
     private func bundledModelURL() -> URL? {
         let bundles = [Bundle.main, Bundle(for: Self.self)] + Bundle.allBundles + Bundle.allFrameworks
         for bundle in bundles {
@@ -208,6 +344,85 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         }
         return nil
     }
+}
+
+private struct SyntheticGoldenFixture: Decodable {
+    let inputSeed: Int
+    let inputShape: [Int]
+    let classes: [String]
+    let calibrationRevision: String
+    let maxDetections: Int
+    let rawOutputContract: [SyntheticTensor]
+
+    enum CodingKeys: String, CodingKey {
+        case inputSeed = "input_seed"
+        case inputShape = "input_shape"
+        case classes
+        case calibrationRevision = "calibration_revision"
+        case maxDetections = "max_detections"
+        case rawOutputContract = "raw_output_contract"
+    }
+}
+
+private struct SyntheticTensor: Decodable {
+    let tensor: String
+}
+
+private struct RealGoldenFixture: Decodable {
+    let checkpointSHA256: String
+    let calibrationRevision: String
+    let classes: [String]
+        let split: String
+        let inputSHA256: String
+        let page: RealGoldenPage
+        let inputSamples: [String: [Double]]
+    let detections: [RealGoldenDetection]
+
+    enum CodingKeys: String, CodingKey {
+        case checkpointSHA256 = "checkpoint_sha256"
+        case calibrationRevision = "calibration_revision"
+            case classes
+            case split
+            case inputSHA256 = "input_sha256"
+            case inputSamples = "input_samples"
+            case page
+        case detections
+    }
+}
+
+private struct RealGoldenPage: Decodable {
+    let filename: String
+    let bundledResource: String
+    let width: Int
+    let height: Int
+
+    enum CodingKeys: String, CodingKey {
+        case filename
+        case bundledResource = "bundled_resource"
+        case width
+        case height
+    }
+}
+
+private struct RealGoldenDetection: Decodable {
+    let className: String
+    let score: Double
+    let bbox: [Double]
+
+    var rect: CGRect {
+        CGRect(x: bbox[0], y: bbox[1], width: bbox[2] - bbox[0], height: bbox[3] - bbox[1])
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case className = "class"
+        case score
+        case bbox
+    }
+}
+
+private enum GoldenFixtureError: Error {
+    case fixtureMissing(String)
+    case unknownClass(String)
 }
 
 private final class FeatureProvider: NSObject, MLFeatureProvider {

@@ -1,0 +1,149 @@
+{
+  "schema": "v2b5-mreader-production-switch-review-v1",
+  "scope": {
+    "project": "/Users/zhengyunkai/Desktop/mreader",
+    "formal_project_touched": false,
+    "branch": "codex/v2b5-production-review",
+    "simulator_first": true,
+    "production_switch_applied": false,
+    "final_test_run": false,
+    "test_images_accessed": false,
+    "test_inference": false
+  },
+  "environment": {
+    "xcode": "/Applications/Xcode-beta.app",
+    "simulator_name": "测试",
+    "runtime": "iOS 26.5",
+    "udid": "A301890E-55DE-46F4-8917-8C96742C30C6",
+    "architecture": "arm64",
+    "concurrent_simulators": 1,
+    "swift_optimization": "-O"
+  },
+  "model": {
+    "architecture": "MangaVisionDetectorV2B5",
+    "artifact": "mreader/MangaVisionV2B5.mlpackage",
+    "precision": "full_fp32",
+    "tree_sha256": "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5",
+    "tree_bytes": 5908245,
+    "input": "1x3x640x640",
+    "parameters": 1390954,
+    "classes": ["frame", "text", "face", "body", "balloon"],
+    "calibration_revision": "v2b5-calibration-v1",
+    "score_threshold": 0.05,
+    "max_detections": 300,
+    "nms": {
+      "frame": 0.5,
+      "text": 0.55,
+      "face": 0.45,
+      "body": 0.55,
+      "balloon": 0.45
+    }
+  },
+  "provider_policy": {
+    "release_default": "OLD",
+    "debug_selector": "-mreader-v2b5-provider",
+    "persisted_v2b5_mode_after_review": false,
+    "old_provider_removed": false,
+    "diagnostic_mode_restored": "oldProduction"
+  },
+  "golden": {
+    "synthetic_contract": "PASS",
+    "real_page": "Donburakokko/070",
+    "real_page_split": "val",
+    "python_detections": 83,
+    "detection_equivalence": "PASS",
+    "sample_value_equivalence": "PASS",
+    "contours": "nil",
+    "input_sha_note": "Pillow and ImageIO JPEG decoding are not byte-identical; sample values and detections are compared within the frozen tolerance contract."
+  },
+  "sample_package": {
+    "package": "v2b5-coreml-val-samples",
+    "source_dataset": "Manga109-s-v2026",
+    "split": "val",
+    "pages": 40,
+    "books": 9,
+    "model_predictions_used": false,
+    "test_images_accessed": false,
+    "test_inference": false
+  },
+  "simulator_review": {
+    "status": "PASS",
+    "semantic_pages": 40,
+    "panel_pages": 40,
+    "balloon_regions": 874,
+    "ocr_pages": 10,
+    "ocr_roi_pages": 10,
+    "ocr_raw_blocks": 1420,
+    "contours": "nil for every V2B5 region and panel",
+    "v2b5_related_failures": 0
+  },
+  "latency_ms": {
+    "measurement": "40 val-only pages, optimized arm64 iOS 26.5 simulator",
+    "not_representative_of_iphone_ane_or_gpu": true,
+    "preprocess": {
+      "mean": 56.107893675,
+      "median": 55.532125,
+      "p95": 60.718166,
+      "min": 53.138541,
+      "max": 62.348625
+    },
+    "model": {
+      "mean": 109.18026345,
+      "median": 107.250875,
+      "p95": 118.393833,
+      "min": 104.115584,
+      "max": 135.161291
+    },
+    "postprocess": {
+      "mean": 7.815346925,
+      "median": 7.827083,
+      "p95": 8.723917,
+      "min": 6.602375,
+      "max": 9.104125
+    },
+    "total": {
+      "mean": 178.912085425,
+      "median": 170.395583,
+      "p95": 186.4295,
+      "min": 166.752458,
+      "max": 425.28625
+    }
+  },
+  "tests": {
+    "golden_provider_targeted": {
+      "passed": 10,
+      "failed": 0
+    },
+    "v2b5_simulator_review": {
+      "passed": 1,
+      "failed": 0
+    },
+    "unit": {
+      "executed": 152,
+      "skipped": 10,
+      "failed": 0
+    },
+    "ui": {
+      "executed": 37,
+      "failed": 0
+    },
+    "xcodebuild": "TEST SUCCEEDED"
+  },
+  "physical_final_verification": {
+    "performed": false,
+    "iphone_deployments": 0,
+    "latency": "not measured",
+    "memory": "not measured",
+    "thermal": "not measured",
+    "reader_guided_panel_ocr_smoke": "not run"
+  },
+  "warnings": [
+    "Core ML simulator emitted the known MPSGraph/Espresso backend warning; tests still passed.",
+    "Tesseract emitted font construction diagnostics on some OCR paths; tests still passed."
+  ],
+  "decision": {
+    "code": "B",
+    "value": "V2B5_PRODUCTION_REVIEW_PARTIAL",
+    "reason": "Simulator Phase A passed, but the required one-time physical iPhone final verification was not performed in this simulator-first round."
+  }
+}

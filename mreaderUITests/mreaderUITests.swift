@@ -21,6 +21,13 @@ final class mreaderUITests: XCTestCase {
         return app
     }
 
+    private func launchV2B5ReaderFixture() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-mreader-ui-testing", "-mreader-v2b5-provider"]
+        app.launch()
+        return app
+    }
+
     @MainActor
     func testColdStartShowsStableShelfSurface() throws {
         let app = launchApp()
@@ -46,8 +53,15 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(remoteSources.waitForExistence(timeout: timeout))
         remoteSources.tap()
         XCTAssertTrue(element("mreader.remote.settings", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.remote.noServers", in: app).waitForExistence(timeout: timeout))
-        XCTAssertTrue(element("mreader.remote.baseURL", in: app).exists)
+        // The simulator may retain a previously configured Komga/OPDS source.
+        // In that state the empty-state label is intentionally absent, while
+        // the source editor remains the same production remote-settings path.
+        let noServers = element("mreader.remote.noServers", in: app)
+        _ = noServers.waitForExistence(timeout: 2)
+        XCTAssertTrue(
+            element("mreader.remote.baseURL", in: app).waitForExistence(timeout: timeout),
+            "Remote source editor must expose the base URL field in both empty and persisted-source states"
+        )
     }
 
     @MainActor
@@ -70,7 +84,7 @@ final class mreaderUITests: XCTestCase {
     @MainActor
     func testReaderProgressModeAndOfflineTranslationEntryWhenBookIsAvailable() throws {
         let app = launchApp()
-        let openReader = element("mreader.shelf.openReader", in: app)
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
         XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
         openReader.tap()
 
@@ -105,6 +119,28 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(offlineMenu.waitForExistence(timeout: timeout))
         offlineMenu.tap()
         XCTAssertTrue(element("mreader.reader.offlineTranslationStart", in: app).waitForExistence(timeout: timeout))
+    }
+
+    @MainActor
+    func testV2B5ProviderReaderGuidedPanelAndOCRControls() throws {
+        let app = launchV2B5ReaderFixture()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        let guidedPanel = element("mreader.reader.guidedPanelAction", in: app)
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: 45))
+        guidedPanel.tap()
+
+        // The action must enter the real GuidedPanelReader path and remain
+        // responsive while PanelDetectionService performs V2B5 inference.
+        XCTAssertTrue(guidedPanel.waitForExistence(timeout: timeout))
+        let ocr = element("mreader.reader.ocrAction", in: app)
+        XCTAssertTrue(ocr.waitForExistence(timeout: 45))
+        ocr.tap()
+        XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
     }
 
     private func settingsMenuItem(in app: XCUIApplication) -> XCUIElement {

@@ -10,6 +10,11 @@ nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
 
     static var currentForDiagnostics: Self {
 #if DEBUG
+        // UI tests use an argument instead of mutating shared simulator
+        // defaults. This is DEBUG-only and cannot change the Release default.
+        if ProcessInfo.processInfo.arguments.contains("-mreader-v2b5-provider") {
+            return .v2b5
+        }
         guard let raw = UserDefaults.standard.string(forKey: userDefaultsKey),
               let mode = Self(rawValue: raw) else {
             return .oldProduction

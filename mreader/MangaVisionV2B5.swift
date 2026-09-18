@@ -137,6 +137,7 @@ nonisolated enum MangaVisionV2B5Error: Error, Sendable, Equatable {
     case missingOutput(String)
     case outputShape(name: String, actual: [Int], expected: [Int])
     case invalidInput(String)
+    case unsupportedOutputDataType(name: String, actual: String)
 }
 
 /// Exact letterbox metadata retained with each model input. The model sees only
@@ -196,49 +197,60 @@ nonisolated enum MangaVisionV2B5Preprocessor {
         let height = Int(inputSize.height)
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
             | CGBitmapInfo.byteOrder32Big.rawValue
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: bitmapInfo
-        ) else {
-            throw MangaVisionV2B5Error.invalidInput("cannot allocate RGB letterbox canvas")
-        }
-
-        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        // CGContext's bitmap origin is bottom-left. Flip the draw so the pixel
-        // rows read below are in the same top-left order as the training tensor.
-        context.saveGState()
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-        context.interpolationQuality = .medium
-        context.draw(
-            image,
-            in: CGRect(
-                x: letterbox.paddingXY.x,
-                y: letterbox.paddingXY.y,
-                width: CGFloat(resizedWidth),
-                height: CGFloat(resizedHeight)
+        var sourcePixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        var sourceContextCreated = false
+        sourcePixels.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress,
+                  let sourceContext = CGContext(
+                      data: baseAddress,
+                      width: image.width,
+                      height: image.height,
+                      bitsPerComponent: 8,
+                      bytesPerRow: image.width * 4,
+                      space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: bitmapInfo
+                  ) else { return }
+            sourceContext.interpolationQuality = .none
+            sourceContext.draw(
+                image,
+                in: CGRect(x: 0, y: 0, width: image.width, height: image.height)
             )
-        )
-        context.restoreGState()
-
-        guard let data = context.data else {
-            throw MangaVisionV2B5Error.invalidInput("letterbox canvas has no pixel data")
+            sourceContextCreated = true
         }
-        let pixels = data.assumingMemoryBound(to: UInt8.self)
+        guard sourceContextCreated else {
+            throw MangaVisionV2B5Error.invalidInput("cannot allocate RGB source canvas")
+        }
+
+        // Build the letterbox in top-left row order. The training transform
+        // uses Pillow's downsampling implementation, whose bilinear filter
+        // widens with the scale factor and is applied as two fixed-point
+        // separable passes. Reproduce that contract here instead of relying on
+        // Core Graphics' platform-dependent interpolation kernel.
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        let resized = pillowBilinearResize(
+            sourcePixels: sourcePixels,
+            sourceWidth: image.width,
+            sourceHeight: image.height,
+            destinationWidth: resizedWidth,
+            destinationHeight: resizedHeight
+        )
+        for y in 0..<resizedHeight {
+            for x in 0..<resizedWidth {
+                let sourceOffset = (y * resizedWidth + x) * 3
+                let destinationOffset = ((Int(letterbox.paddingXY.y) + y) * width
+                    + Int(letterbox.paddingXY.x) + x) * 4
+                pixels[destinationOffset] = resized[sourceOffset]
+                pixels[destinationOffset + 1] = resized[sourceOffset + 1]
+                pixels[destinationOffset + 2] = resized[sourceOffset + 2]
+                pixels[destinationOffset + 3] = 255
+            }
+        }
+
         let planeSize = width * height
         var values = [Float32](repeating: 0, count: planeSize * 3)
         for y in 0..<height {
-            // The backing store is bottom-up even though the drawn image is
-            // top-left aligned.
-            let bitmapY = height - 1 - y
             for x in 0..<width {
-                let sourceOffset = bitmapY * context.bytesPerRow + x * 4
+                let sourceOffset = (y * width + x) * 4
                 let destinationOffset = y * width + x
                 values[destinationOffset] = Float32(pixels[sourceOffset]) / 255
                 values[planeSize + destinationOffset] = Float32(pixels[sourceOffset + 1]) / 255
@@ -258,6 +270,85 @@ nonisolated enum MangaVisionV2B5Preprocessor {
         }
         return MangaVisionV2B5PreparedInput(array: array, letterbox: letterbox)
     }
+
+    private static func pillowBilinearResize(
+        sourcePixels: [UInt8],
+        sourceWidth: Int,
+        sourceHeight: Int,
+        destinationWidth: Int,
+        destinationHeight: Int
+    ) -> [UInt8] {
+        let precisionBits = 22
+        let fixedScale = 1 << precisionBits
+
+        func coefficients(sourceSize: Int, destinationSize: Int) -> [(start: Int, weights: [Int])] {
+            let scale = Double(sourceSize) / Double(destinationSize)
+            let filterScale = max(scale, 1.0)
+            let support = filterScale
+            let kernelSize = Int(ceil(support)) * 2 + 1
+            return (0..<destinationSize).map { outputIndex in
+                let center = (Double(outputIndex) + 0.5) * scale
+                var start = Int(center - support + 0.5)
+                start = max(start, 0)
+                var end = Int(center + support + 0.5)
+                end = min(end, sourceSize)
+                let count = max(end - start, 0)
+                var raw = [Double](repeating: 0, count: count)
+                var sum = 0.0
+                for index in 0..<count {
+                    let distance = (Double(index + start) - center + 0.5) / filterScale
+                    let absoluteDistance = abs(distance)
+                    let weight = absoluteDistance < 1.0 ? 1.0 - absoluteDistance : 0.0
+                    raw[index] = weight
+                    sum += weight
+                }
+                var fixed = [Int](repeating: 0, count: kernelSize)
+                if sum != 0 {
+                    for index in 0..<count {
+                        fixed[index] = Int(0.5 + raw[index] / sum * Double(fixedScale))
+                    }
+                }
+                return (start, fixed)
+            }
+        }
+
+        let horizontalCoefficients = coefficients(sourceSize: sourceWidth, destinationSize: destinationWidth)
+        let verticalCoefficients = coefficients(sourceSize: sourceHeight, destinationSize: destinationHeight)
+        var horizontal = [UInt8](repeating: 0, count: sourceHeight * destinationWidth * 3)
+        for y in 0..<sourceHeight {
+            for x in 0..<destinationWidth {
+                let coefficient = horizontalCoefficients[x]
+                for channel in 0..<3 {
+                    var accumulator = 1 << (precisionBits - 1)
+                    for index in coefficient.weights.indices {
+                        let sourceX = coefficient.start + index
+                        guard sourceX < sourceWidth else { continue }
+                        accumulator += Int(sourcePixels[(y * sourceWidth + sourceX) * 4 + channel])
+                            * coefficient.weights[index]
+                    }
+                    horizontal[(y * destinationWidth + x) * 3 + channel] = UInt8(max(min(accumulator >> precisionBits, 255), 0))
+                }
+            }
+        }
+
+        var output = [UInt8](repeating: 0, count: destinationHeight * destinationWidth * 3)
+        for y in 0..<destinationHeight {
+            let coefficient = verticalCoefficients[y]
+            for x in 0..<destinationWidth {
+                for channel in 0..<3 {
+                    var accumulator = 1 << (precisionBits - 1)
+                    for index in coefficient.weights.indices {
+                        let sourceY = coefficient.start + index
+                        guard sourceY < sourceHeight else { continue }
+                        accumulator += Int(horizontal[(sourceY * destinationWidth + x) * 3 + channel])
+                            * coefficient.weights[index]
+                    }
+                    output[(y * destinationWidth + x) * 3 + channel] = UInt8(max(min(accumulator >> precisionBits, 255), 0))
+                }
+            }
+        }
+        return output
+    }
 }
 
 nonisolated struct MangaVisionV2B5Detection: Sendable, Equatable {
@@ -265,6 +356,54 @@ nonisolated struct MangaVisionV2B5Detection: Sendable, Equatable {
     let normalizedRect: CGRect
     let confidence: Float
     let pyramidLevel: String
+}
+
+/// A validated, stride-aware view over one Core ML output tensor.
+///
+/// `MLMultiArray` subscripting allocates an NSNumber index array for every
+/// scalar read. V2B5 has millions of scalar reads per page, so the decoder
+/// keeps the array alive and reads its validated Float32 storage directly.
+/// The offset uses the runtime-provided strides; this deliberately does not
+/// assume that Core ML returned a contiguous tensor.
+nonisolated struct MangaVisionV2B5TensorReader {
+    private let storage: MLMultiArray
+    private let pointer: UnsafeRawPointer
+    private let strides: [Int]
+
+    init(array: MLMultiArray, name: String, expectedShape: [Int]) throws {
+        let actualShape = array.shape.map(\.intValue)
+        guard actualShape == expectedShape else {
+            throw MangaVisionV2B5Error.outputShape(
+                name: name,
+                actual: actualShape,
+                expected: expectedShape
+            )
+        }
+        guard array.dataType == .float32 else {
+            throw MangaVisionV2B5Error.unsupportedOutputDataType(
+                name: name,
+                actual: String(describing: array.dataType)
+            )
+        }
+        let actualStrides = array.strides.map(\.intValue)
+        guard actualStrides.count == expectedShape.count,
+              actualStrides.allSatisfy({ $0 >= 0 }) else {
+            throw MangaVisionV2B5Error.invalidInput(
+                "invalid strides for \(name): \(actualStrides)"
+            )
+        }
+        storage = array
+        pointer = UnsafeRawPointer(array.dataPointer)
+        strides = actualStrides
+    }
+
+    @inline(__always)
+    func value(channel: Int, y: Int, x: Int) -> Float {
+        // The decoder only consumes batch 0; do not add the batch stride for
+        // that fixed index.
+        let elementOffset = channel * strides[1] + y * strides[2] + x * strides[3]
+        return pointer.load(fromByteOffset: elementOffset * MemoryLayout<Float32>.stride, as: Float32.self)
+    }
 }
 
 nonisolated enum MangaVisionV2B5Decoder {
@@ -297,28 +436,29 @@ nonisolated enum MangaVisionV2B5Decoder {
             let center = rawOutputs[centerSpec.outputName] else {
                 throw MangaVisionV2B5Error.missingOutput(level)
             }
-            let expectedShapes = [
-                [1, clsSpec.channels, clsSpec.height, clsSpec.width],
-                [1, bboxSpec.channels, bboxSpec.height, bboxSpec.width],
-                [1, centerSpec.channels, centerSpec.height, centerSpec.width]
-            ]
-            for (array, expected) in zip([cls, bbox, center], expectedShapes) {
-                guard array.shape.map(\.intValue) == expected else {
-                    throw MangaVisionV2B5Error.outputShape(
-                        name: level,
-                        actual: array.shape.map(\.intValue),
-                        expected: expected
-                    )
-                }
-            }
+            let clsReader = try MangaVisionV2B5TensorReader(
+                array: cls,
+                name: "\(level).classification",
+                expectedShape: [1, clsSpec.channels, clsSpec.height, clsSpec.width]
+            )
+            let bboxReader = try MangaVisionV2B5TensorReader(
+                array: bbox,
+                name: "\(level).bbox",
+                expectedShape: [1, bboxSpec.channels, bboxSpec.height, bboxSpec.width]
+            )
+            let centerReader = try MangaVisionV2B5TensorReader(
+                array: center,
+                name: "\(level).centerness",
+                expectedShape: [1, centerSpec.channels, centerSpec.height, centerSpec.width]
+            )
 
             for y in 0..<clsSpec.height {
                 for x in 0..<clsSpec.width {
-                    let centerness = sigmoid(value(center, channel: 0, y: y, x: x))
+                    let centerness = sigmoid(centerReader.value(channel: 0, y: y, x: x))
                     var bestScore: Float = 0
                     var bestClass = 0
                     for classID in 0..<MangaVisionV2B5ClassOrder.regionTypes.count {
-                        let classification = sigmoid(value(cls, channel: classID, y: y, x: x))
+                        let classification = sigmoid(clsReader.value(channel: classID, y: y, x: x))
                         let score = sqrt(max(classification * centerness, 0))
                         if score > bestScore {
                             bestScore = score
@@ -328,10 +468,10 @@ nonisolated enum MangaVisionV2B5Decoder {
                     guard bestScore >= scoreThreshold else { continue }
                     let pointX = (Float(x) + 0.5) * Float(clsSpec.stride)
                     let pointY = (Float(y) + 0.5) * Float(clsSpec.stride)
-                    let left = softplus(value(bbox, channel: 0, y: y, x: x)) * Float(clsSpec.stride)
-                    let top = softplus(value(bbox, channel: 1, y: y, x: x)) * Float(clsSpec.stride)
-                    let right = softplus(value(bbox, channel: 2, y: y, x: x)) * Float(clsSpec.stride)
-                    let bottom = softplus(value(bbox, channel: 3, y: y, x: x)) * Float(clsSpec.stride)
+                    let left = softplus(bboxReader.value(channel: 0, y: y, x: x)) * Float(clsSpec.stride)
+                    let top = softplus(bboxReader.value(channel: 1, y: y, x: x)) * Float(clsSpec.stride)
+                    let right = softplus(bboxReader.value(channel: 2, y: y, x: x)) * Float(clsSpec.stride)
+                    let bottom = softplus(bboxReader.value(channel: 3, y: y, x: x)) * Float(clsSpec.stride)
                     let inputRect = CGRect(
                         x: CGFloat(max(pointX - left, 0)),
                         y: CGFloat(max(pointY - top, 0)),
@@ -407,10 +547,6 @@ nonisolated enum MangaVisionV2B5Decoder {
             if lhs.classID != rhs.classID { return lhs.classID < rhs.classID }
             return lhs.level < rhs.level
         }
-    }
-
-    private static func value(_ array: MLMultiArray, channel: Int, y: Int, x: Int) -> Float {
-        array[[0, channel, y, x].map { NSNumber(value: $0) }].floatValue
     }
 
     private static func sigmoid(_ value: Float) -> Float {
