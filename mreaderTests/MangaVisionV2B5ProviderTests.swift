@@ -247,25 +247,6 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         XCTAssertEqual(MangaVisionV2B5Decoder.nmsThresholds, [0.50, 0.55, 0.45, 0.55, 0.45])
     }
 
-    func testABComparatorReportsCrossClassFlipWithoutTreatingItAsSameClassMatch() {
-        let identifier = MangaPageIdentifier(scope: "test", pageIndex: 0, sourceFingerprint: "fixture")
-        let rect = CGRect(x: 0.2, y: 0.2, width: 0.3, height: 0.2)
-        let old = analysis(
-            identifier: identifier,
-            balloons: [MangaVisionRegion(type: .balloon, normalizedRect: rect, confidence: 0.9)]
-        )
-        let v2b5 = analysis(
-            identifier: identifier,
-            texts: [MangaVisionRegion(type: .text, normalizedRect: rect, confidence: 0.9)]
-        )
-
-        let comparison = MangaVisionABComparator.compare(old: old, v2b5: v2b5)
-        XCTAssertEqual(comparison.matched, 0)
-        XCTAssertEqual(comparison.oldOnly, 1)
-        XCTAssertEqual(comparison.v2b5Only, 1)
-        XCTAssertEqual(comparison.classFlips, 1)
-    }
-
     private func makeRawOutputs() throws -> [String: MLMultiArray] {
         var result: [String: MLMultiArray] = [:]
         for spec in MangaVisionV2B5OutputContract.specs {
@@ -279,24 +260,6 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
             result[spec.outputName] = array
         }
         return result
-    }
-
-    private func analysis(
-        identifier: MangaPageIdentifier,
-        texts: [MangaVisionRegion] = [],
-        balloons: [MangaVisionRegion] = []
-    ) -> MangaPageAnalysis {
-        MangaPageAnalysis(
-            pageIdentifier: identifier,
-            imageSize: CGSize(width: 640, height: 640),
-            panels: [],
-            texts: texts,
-            balloons: balloons,
-            faces: [],
-            bodies: [],
-            modelIdentifier: "test",
-            modelVersion: 1
-        )
     }
 
     private func bundledResourceURL(named name: String) -> URL? {

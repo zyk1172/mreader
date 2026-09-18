@@ -1,5 +1,4 @@
 import CoreGraphics
-import CoreML
 import Foundation
 import Testing
 @testable import mreader
@@ -168,35 +167,6 @@ struct GuidedPanelVisionV2Tests {
 
         #expect(small.maximumScale > large.maximumScale)
         #expect(small.contextPadding >= large.contextPadding)
-    }
-
-    @Test func directSegmentationMaskProducesPageContour() throws {
-        let detections = try MLMultiArray(shape: [1, 1, 6], dataType: .float32)
-        detections[0] = 80
-        detections[1] = 80
-        detections[2] = 560
-        detections[3] = 560
-        detections[4] = 0.95
-        detections[5] = 0
-
-        let masks = try MLMultiArray(shape: [1, 1, 8, 8], dataType: .float32)
-        for y in 2...5 {
-            for x in 2...5 {
-                masks[y * 8 + x] = 1
-            }
-        }
-
-        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
-            detections,
-            segmentationOutput: masks,
-            analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame"]
-        )
-
-        #expect(regions.count == 1)
-        #expect(regions[0].type == .panel)
-        #expect((regions[0].contour?.points.count ?? 0) >= 3)
-        #expect((regions[0].contour?.bounds.width ?? 0) > 0.2)
     }
 
     @Test func guidedPanelDirectionSurvivesComicBookCodingIndependently() throws {

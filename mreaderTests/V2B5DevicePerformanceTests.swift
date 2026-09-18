@@ -35,10 +35,6 @@ final class V2B5DevicePerformanceTests: XCTestCase {
         try run(.fp16, computeUnits: .all)
     }
 
-    func testOldProductionAll() throws {
-        try run(.oldProduction, computeUnits: .all)
-    }
-
     private func run(
         _ modelKind: BenchModelKind,
         computeUnits: BenchComputeUnits
@@ -86,14 +82,12 @@ private enum BenchModelKind: String {
     case fullFP32 = "FULL_FP32"
     case mp5 = "MP5_P3_PREFIX_FP32"
     case fp16 = "FP16"
-    case oldProduction = "OLD_PRODUCTION"
 
     var resourceName: String {
         switch self {
         case .fullFP32: return "MangaVisionV2B5_FP32"
         case .mp5: return "MangaVisionV2B5_P3PrefixFP32"
         case .fp16: return "MangaVisionV2B5_FP16"
-        case .oldProduction: return "PanelDetector"
         }
     }
 
@@ -105,8 +99,6 @@ private enum BenchModelKind: String {
             return "66d748301674aac1b9510a8d6c5695ccbe537b380f9aa9dda53a8ff2107f9426"
         case .fp16:
             return "4f8722d22e4ad049b990b56a02c075c806ebd2e366277f04aef796ed60dba638"
-        case .oldProduction:
-            return nil
         }
     }
 
@@ -115,11 +107,10 @@ private enum BenchModelKind: String {
         case .fullFP32: return 5_908_245
         case .mp5: return 4_098_956
         case .fp16: return 3_165_210
-        case .oldProduction: return nil
         }
     }
 
-    var isV2B5: Bool { self != .oldProduction }
+    var isV2B5: Bool { true }
 }
 
 private enum BenchComputeUnits: String {
@@ -158,9 +149,6 @@ private struct BenchRunner {
         }
 
         guard let modelURL = modelURL() else {
-            if modelKind == .oldProduction {
-                throw BenchError.oldModelUnavailable
-            }
             throw BenchError.modelResourceMissing(modelKind.resourceName)
         }
 
@@ -428,7 +416,6 @@ private struct DeviceSnapshot {
 private enum BenchError: Error, CustomStringConvertible {
     case thermalTooHigh(String)
     case modelResourceMissing(String)
-    case oldModelUnavailable
     case modelLoadFailed(String)
     case inputMissing
     case inputUnsupported(String)
@@ -440,7 +427,6 @@ private enum BenchError: Error, CustomStringConvertible {
         switch self {
         case let .thermalTooHigh(state): return "thermal state is too high: \(state)"
         case let .modelResourceMissing(name): return "model resource missing: \(name).mlmodelc"
-        case .oldModelUnavailable: return "old production PanelDetector unavailable"
         case let .modelLoadFailed(error): return "model load failed: \(error)"
         case .inputMissing: return "model input missing"
         case let .inputUnsupported(type): return "unsupported model input: \(type)"

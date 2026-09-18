@@ -66,27 +66,6 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
         )
     }
 
-    static func bundledPanelDetector(bundle: Bundle = .main) -> MangaVisionModelManifest {
-        let resourceName = "PanelDetector"
-        let compiledURL = bundle.url(forResource: resourceName, withExtension: "mlmodelc")
-        let fileHash = compiledURL.flatMap(Self.hashModelDirectory) ?? "missing:\(resourceName)"
-        let buildID = fileHash == "missing:\(resourceName)"
-            ? fileHash
-            : "sha256:\(fileHash.prefix(20))"
-        return MangaVisionModelManifest(
-            modelID: "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
-            modelVersion: 4,
-            modelBuildID: buildID,
-            modelFileHash: fileHash,
-            inputSize: MangaVisionOutputContract.expectedInputSize,
-            semanticClasses: MangaVisionOutputContract.requiredSemanticClasses,
-            outputContractRevision: MangaVisionOutputContract.revision,
-            analysisSchemaRevision: "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)",
-            postProcessRevision: "manga-vision-postprocess-v1",
-            calibrationRevision: MangaVisionCalibrationProfile.bundled.revision
-        )
-    }
-
     /// Public to the test target so replacing any byte in a model artifact can be
     /// proven to change the build identity without loading Core ML.
     static func hashModelDirectoryForDiagnostics(_ url: URL) -> String? {
@@ -136,12 +115,6 @@ nonisolated struct MangaVisionModelManifest: Sendable, Equatable {
 /// Providers that can describe their cache/model contract without constructing MLModel.
 nonisolated protocol MangaVisionManifestProviding: Sendable {
     func mangaVisionManifest() async -> MangaVisionModelManifest
-}
-
-extension YOLOMangaVisionProvider: MangaVisionManifestProviding {
-    nonisolated func mangaVisionManifest() async -> MangaVisionModelManifest {
-        MangaVisionModelManifest.bundledPanelDetector()
-    }
 }
 
 /// Content identity belongs to the source layer. Manga Vision consumes this opaque

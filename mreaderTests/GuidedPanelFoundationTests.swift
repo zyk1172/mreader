@@ -1,5 +1,4 @@
 import CoreGraphics
-import CoreML
 import Foundation
 import Testing
 @testable import mreader
@@ -98,76 +97,6 @@ struct GuidedPanelFoundationTests {
 
         #expect(processed.count == 4)
         #expect(PanelLayoutQuality.isUsable(processed))
-    }
-
-    @Test func mangaVisionDecoderPreservesPanelGeometryWhileSeparatingText() throws {
-        let output = try MLMultiArray(shape: [1, 3, 6], dataType: .float32)
-
-        func set(_ instance: Int, _ feature: Int, _ value: Double) {
-            output[instance * 6 + feature] = NSNumber(value: value)
-        }
-
-        set(0, 0, 160)
-        set(0, 1, 80)
-        set(0, 2, 480)
-        set(0, 3, 400)
-        set(0, 4, 0.93)
-        set(0, 5, 0)
-
-        set(1, 0, 220)
-        set(1, 1, 120)
-        set(1, 2, 340)
-        set(1, 3, 190)
-        set(1, 4, 0.99)
-        set(1, 5, 1)
-
-        set(2, 0, 210)
-        set(2, 1, 200)
-        set(2, 2, 360)
-        set(2, 3, 300)
-        set(2, 4, 0.98)
-        set(2, 5, 2)
-
-        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
-            output,
-            analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame", 1: "text", 2: "balloon"]
-        )
-        let panels = regions.filter { $0.type == .panel }
-        let texts = regions.filter { $0.type == .text }
-        let balloons = regions.filter { $0.type == .balloon }
-
-        #expect(regions.count == 3)
-        #expect(panels.count == 1)
-        #expect(texts.count == 1)
-        #expect(balloons.count == 1)
-        #expect(abs(panels[0].confidence - 0.93) < 0.001)
-        #expect(abs(panels[0].normalizedRect.width - 0.5) < 0.001)
-    }
-
-    @Test func mangaVisionDecoderAcceptsTransposedDetectionTensor() throws {
-        let output = try MLMultiArray(shape: [1, 6, 1], dataType: .float32)
-
-        func set(_ feature: Int, _ value: Double) {
-            output[feature] = NSNumber(value: value)
-        }
-
-        set(0, 160)
-        set(1, 80)
-        set(2, 480)
-        set(3, 400)
-        set(4, 0.88)
-        set(5, 0)
-
-        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
-            output,
-            analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame"]
-        )
-
-        #expect(regions.count == 1)
-        #expect(regions[0].type == .panel)
-        #expect(abs(regions[0].normalizedRect.width - 0.5) < 0.001)
     }
 
     @Test func layoutQualityRejectsImplausibleResults() {

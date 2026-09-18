@@ -48,14 +48,6 @@ final class V2B5PhysicalFinalGateTests: XCTestCase {
             return PhysicalFinalGatePage(page: page, url: imageURL, image: image)
         }
 
-        // This is a transient DEBUG diagnostic selection. Always restore the old
-        // production mode and remove the UserDefaults key before the test exits.
-        MangaVisionProviderMode.setForDiagnostics(.v2b5)
-        defer {
-            MangaVisionProviderMode.setForDiagnostics(.oldProduction)
-            UserDefaults.standard.removeObject(forKey: MangaVisionProviderMode.userDefaultsKey)
-        }
-
         await OCRRecognitionCache.shared.clearCache()
         await PanelDetectionService.shared.clearCache()
 

@@ -1,5 +1,4 @@
 import CoreGraphics
-import CoreML
 import Foundation
 import Testing
 import UIKit
@@ -8,49 +7,6 @@ import UIKit
 @Suite(.serialized)
 @MainActor
 struct MangaVisionLayerTests {
-    @Test func adapterMapsFiveSemanticClassesWithoutExposingIDsUpstream() throws {
-        let output = try detectionTensor(rows: [
-            [64, 64, 256, 256, 0.91, 0],
-            [300, 80, 420, 180, 0.82, 1],
-            [280, 60, 450, 210, 0.79, 2],
-            [100, 300, 180, 380, 0.77, 3],
-            [80, 280, 230, 560, 0.74, 4]
-        ])
-        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
-            output,
-            analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame", 1: "text", 2: "balloon", 3: "face", 4: "body"]
-        )
-        #expect(Set(regions.map(\.type)) == Set(MangaRegionType.allCases))
-    }
-
-    @Test func adapterReadsUltralyticsMetadataLabelSyntax() {
-        let labels = YOLOMangaVisionProvider.parseClassLabelsForDiagnostics(
-            "{0: 'frame', 1: 'text', 2: 'balloon', 3: \"face\", 4: 'body'}"
-        )
-        #expect(labels[0] == "frame")
-        #expect(labels[1] == "text")
-        #expect(labels[2] == "balloon")
-        #expect(labels[3] == "face")
-        #expect(labels[4] == "body")
-    }
-
-    @Test func adapterUsesPerSemanticConfidenceThresholds() throws {
-        let output = try detectionTensor(rows: [
-            [40, 40, 180, 180, 0.23, 0],
-            [200, 40, 300, 140, 0.17, 1],
-            [200, 160, 340, 300, 0.19, 2],
-            [40, 220, 120, 300, 0.20, 3],
-            [200, 220, 340, 500, 0.19, 4]
-        ])
-        let regions = YOLOMangaVisionProvider.decodeForDiagnostics(
-            output,
-            analysisImageSize: CGSize(width: 640, height: 640),
-            labelsByClassID: [0: "frame", 1: "text", 2: "balloon", 3: "face", 4: "body"]
-        )
-        #expect(regions.map(\.type) == [.face])
-    }
-
     @Test func mangaBalloonGeometryCombinesVerticalColumnsIntoOneTranslationUnit() {
         let balloon = region(
             .balloon,
@@ -371,19 +327,6 @@ struct MangaVisionLayerTests {
             comicID: comicID, pageIndex: 2, pageURL: url, image: image
         )
         #expect(await v2.calls() == 1)
-    }
-
-    private func detectionTensor(rows: [[Double]]) throws -> MLMultiArray {
-        let output = try MLMultiArray(
-            shape: [1, NSNumber(value: rows.count), 6],
-            dataType: .float32
-        )
-        for (row, values) in rows.enumerated() {
-            for (feature, value) in values.enumerated() {
-                output[row * 6 + feature] = NSNumber(value: value)
-            }
-        }
-        return output
     }
 
     private func region(

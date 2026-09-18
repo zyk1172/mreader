@@ -1,11 +1,16 @@
 # Manga Vision V2B5 Rollback
 
-## Current production
+## Active production
 
 - Production provider: V2B5 (`MangaVisionV2B5Provider`)
-- Fallback provider: OLD (`YOLOMangaVisionProvider` / `PanelDetector`)
+- Active model resource: `MangaVisionV2B5.mlmodelc`
 - Core ML precision: Full FP32
-- OLD retention: keep OLD for at least one formal release cycle after the V2B5 release.
+- Active runtime fallback: none
+- Active OLD/COMPARE modes: removed from the app
+
+The geometric `VisionRectanglePanelDetector` safety path used by
+`PanelDetectionService` is not a legacy model provider. It does not load or
+route to `PanelDetector` and remains a non-model reader-resilience fallback.
 
 ## Rollback triggers
 
@@ -18,16 +23,29 @@ A rollback may be initiated for:
 
 ## Rollback action
 
-Switch only the production provider default from V2B5 to OLD. Keep the V2B5 artifact and all provider/debug routing available so the change remains reversible.
+Rollback is a Git/Release operation, not an active runtime provider switch:
 
-## Explicitly unchanged
+1. Stop the affected release rollout.
+2. Check out the historical `v2b5-fallback-archive` tag or its corresponding
+   release commit `c8b5c04300aea0d53325c7f4e1794e52c1e87499`.
+3. Build and release that archived snapshot through the normal reviewed
+   release process.
 
-Rollback must not:
+The archive tag is the last mReader state containing V2B5 together with the
+legacy OLD `PanelDetector` fallback. New five-class development must not
+re-embed OLD into the active branch merely to implement rollback.
+
+## Explicitly unchanged during rollback preparation
+
+Rollback preparation must not:
 
 - delete user data;
 - modify calibration;
 - change the database;
 - modify or replace the V2B5 artifact;
-- delete OLD, `PanelDetector`, or the V2B5 provider.
+- reintroduce OLD into the active development branch;
+- rerun the sealed Manga109-s Final Test.
 
-After a rollback, verify that the OLD provider and `PanelDetector` resource are bundled and that the normal Reader path is functional. Any future V2B5 re-adoption requires a separate reviewed change.
+The archive documentation and annotated tag preserve the complete historical
+fallback implementation. Any future production rollback is a separate,
+reviewed Git/Release action.

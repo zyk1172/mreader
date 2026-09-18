@@ -33,20 +33,13 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         XCTAssertEqual(profile.calibration(for: .body).nmsIOUThreshold, 0.55)
     }
 
-    func testDetectionOutputContractAcceptsBothSupportedTensorOrders() {
-        let rowMajor = MangaVisionOutputContract.detectionTensorLayout(shape: [1, 300, 38])
-        XCTAssertEqual(rowMajor?.rowMajor, true)
-        XCTAssertEqual(rowMajor?.instanceCount, 300)
-        XCTAssertEqual(rowMajor?.featureCount, 38)
-
-        let featureMajor = MangaVisionOutputContract.detectionTensorLayout(shape: [1, 38, 300])
-        XCTAssertEqual(featureMajor?.rowMajor, false)
-        XCTAssertEqual(featureMajor?.instanceCount, 300)
-        XCTAssertEqual(featureMajor?.featureCount, 38)
-
-        XCTAssertNil(MangaVisionOutputContract.detectionTensorLayout(shape: [1, 5, 300]))
-        XCTAssertNil(MangaVisionOutputContract.detectionTensorLayout(shape: [300, 38]))
-        XCTAssertNil(MangaVisionOutputContract.detectionTensorLayout(shape: [2, 300, 38]))
+    func testV2B5RawOutputContractHasFiveClassChannels() {
+        XCTAssertEqual(MangaVisionV2B5ClassOrder.labels, ["frame", "text", "face", "body", "balloon"])
+        XCTAssertEqual(MangaVisionV2B5OutputContract.inputShape, [1, 3, 640, 640])
+        XCTAssertEqual(
+            MangaVisionV2B5OutputContract.specs.filter { $0.role == "classification" }.map(\.channels),
+            [5, 5, 5, 5]
+        )
     }
 
     func testBundledCompiledModelSatisfiesOutputContract() throws {
@@ -54,31 +47,16 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuOnly
         let model = try MLModel(contentsOf: modelURL, configuration: configuration)
-        let violations = MangaVisionOutputContract.validate(
-            modelDescription: model.modelDescription,
-            supportedRegionTypes: MangaVisionOutputContract.requiredSemanticClasses
-        )
+        let violations = MangaVisionV2B5OutputContract.validate(modelDescription: model.modelDescription)
         XCTAssertTrue(violations.isEmpty, "Bundled model contract violations: \(violations)")
-
-        if let creator = model.modelDescription.metadata[.creatorDefinedKey] {
-            let labels = YOLOMangaVisionProvider.parseClassLabelsForDiagnostics(
-                String(describing: creator)
-            )
-            if !labels.isEmpty {
-                let normalized = Set(labels.values.map { $0.lowercased() })
-                XCTAssertTrue(normalized.contains("frame") || normalized.contains("panel"))
-                XCTAssertTrue(normalized.contains("text"))
-                XCTAssertTrue(normalized.contains("balloon") || normalized.contains("bubble"))
-            }
-        }
     }
 
     func testManifestCacheIdentityUsesCurrentContractAndCalibrationRevisions() {
-        let manifest = MangaVisionModelManifest.bundledPanelDetector(bundle: Bundle.main)
-        XCTAssertEqual(manifest.outputContractRevision, MangaVisionOutputContract.revision)
-        XCTAssertEqual(manifest.calibrationRevision, MangaVisionCalibrationProfile.bundled.revision)
-        XCTAssertEqual(manifest.inputSize, MangaVisionOutputContract.expectedInputSize)
-        XCTAssertEqual(manifest.semanticClasses, MangaVisionOutputContract.requiredSemanticClasses)
+        let manifest = MangaVisionModelManifest.bundledV2B5(bundle: Bundle.main)
+        XCTAssertEqual(manifest.outputContractRevision, MangaVisionV2B5OutputContract.revision)
+        XCTAssertEqual(manifest.calibrationRevision, "v2b5-calibration-v1")
+        XCTAssertEqual(manifest.inputSize, MangaVisionV2B5Preprocessor.inputSize)
+        XCTAssertEqual(manifest.semanticClasses, Set(MangaVisionV2B5ClassOrder.regionTypes))
         XCTAssertFalse(manifest.cacheIdentity.isEmpty)
     }
 
@@ -116,7 +94,7 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         XCTAssertEqual(corpus.cases.count, 24)
         XCTAssertFalse(corpus.revision.isEmpty)
 
-        let provider = YOLOMangaVisionProvider()
+        let provider = MangaVisionV2B5Provider()
         var observations: [MangaVisionRegressionObservation] = []
         for imageName in Set(corpus.cases.map(\.image)).sorted() {
             let sourceURL = try XCTUnwrap(fixtureURL(for: imageName))
@@ -180,7 +158,7 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         XCTAssertEqual(analysis.schemaVersion, MangaPageAnalysis.schemaVersion, file: file, line: line)
         XCTAssertEqual(
             analysis.modelIdentifier,
-            "manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision",
+            MangaVisionV2B5Provider.modelIdentifier,
             file: file,
             line: line
         )
@@ -201,7 +179,7 @@ final class MangaVisionRegressionGateTests: XCTestCase {
             + Bundle.allBundles
             + Bundle.allFrameworks
         for bundle in bundles {
-            if let url = bundle.url(forResource: "PanelDetector", withExtension: "mlmodelc") {
+            if let url = bundle.url(forResource: MangaVisionV2B5Provider.modelResourceName, withExtension: "mlmodelc") {
                 return url
             }
         }
