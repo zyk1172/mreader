@@ -707,9 +707,9 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             pixelWidth: max(Int(sourceSize.width.rounded()), 0),
             pixelHeight: max(Int(sourceSize.height.rounded()), 0),
             orientation: imageData.map(MangaVisionHardCasePageDataLoader.orientation) ?? 1,
-            provider: "MangaVisionService",
-            modelName: manifest.modelID,
-            modelSHA256: manifest.modelFileHash,
+            provider: String(describing: MangaVisionV2B5Provider.self),
+            modelName: MangaVisionV2B5ProductionIdentity.modelName,
+            modelSHA256: MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256,
             calibrationRevision: manifest.calibrationRevision,
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
@@ -811,13 +811,13 @@ nonisolated enum MangaVisionHardCasePageDataLoader {
 }
 
 private extension String {
-    var prefixedUnavailableHash: String {
+    nonisolated var prefixedUnavailableHash: String {
         "unavailable:\(self)"
     }
 }
 
 private extension JSONEncoder {
-    static var hardCase: JSONEncoder {
+    nonisolated static var hardCase: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -826,7 +826,7 @@ private extension JSONEncoder {
 }
 
 private extension JSONDecoder {
-    static var hardCase: JSONDecoder {
+    nonisolated static var hardCase: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
@@ -834,7 +834,7 @@ private extension JSONDecoder {
 }
 
 private extension Array where Element == String {
-    func uniqued() -> [String] {
+    nonisolated func uniqued() -> [String] {
         var seen = Set<String>()
         return filter { seen.insert($0).inserted }
     }
