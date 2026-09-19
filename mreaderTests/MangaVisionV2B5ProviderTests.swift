@@ -112,7 +112,12 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         XCTAssertEqual(fixture.split, "val")
         XCTAssertEqual(fixture.classes, ["frame", "text", "face", "body", "balloon"])
 
-        let imageURL = try XCTUnwrap(bundledResourceURL(named: fixture.page.bundledResource))
+        guard let imageURL = bundledResourceURL(named: fixture.page.bundledResource) else {
+            throw XCTSkip(
+                "Real V2B5 val image \(fixture.page.bundledResource) is local-only; " +
+                "golden metadata remains validated without the ignored corpus."
+            )
+        }
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(imageURL as CFURL, nil))
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertEqual(image.width, fixture.page.width)
