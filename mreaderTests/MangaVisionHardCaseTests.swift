@@ -234,6 +234,25 @@ final class FiveClassIssueTypeTests: XCTestCase {
         XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .balloon), "balloon")
     }
 
+    func testDetectionJSONUsesPortableClassKey() throws {
+        let region = MangaVisionRegion(
+            type: .body,
+            normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+            confidence: 0.88
+        )
+        let detection = MangaVisionHardCaseDetection(
+            region: region,
+            sourceSize: CGSize(width: 1000, height: 2000)
+        )
+        let data = try JSONEncoder().encode(detection)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(object["class"] as? String, "body")
+        XCTAssertNil(object["detectionClass"])
+    }
+
     func testClassSpecificIssueTypesAreRepresentable() {
         let required: Set<MangaVisionHardCaseIssueType> = [
             .frameMerge,
