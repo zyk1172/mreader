@@ -571,6 +571,12 @@ nonisolated enum MangaVisionV2B5Decoder {
     }
 }
 
+nonisolated enum MangaVisionV2B5ProductionIdentity {
+    static let modelName = "MangaVisionDetectorV2B5"
+    static let coreMLTreeSHA256 = "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5"
+    static let calibrationRevision = "v2b5-calibration-v1"
+}
+
 actor MangaVisionV2B5Provider: MangaVisionProvider {
     static let shared = MangaVisionV2B5Provider()
     static let modelResourceName = "MangaVisionV2B5"
@@ -742,7 +748,7 @@ extension MangaVisionModelManifest {
             outputContractRevision: MangaVisionV2B5OutputContract.revision,
             analysisSchemaRevision: "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)",
             postProcessRevision: "manga-vision-v2b5-fcos-postprocess-v1",
-            calibrationRevision: "v2b5-calibration-v1"
+            calibrationRevision: MangaVisionV2B5ProductionIdentity.calibrationRevision
         )
     }
 }
