@@ -127,6 +127,40 @@ struct GuidedPanelFoundationTests {
         )
     }
 
+    @Test func panelLayoutSemanticFocusRoundTripsAndFallsBackToFrame() throws {
+        let frame = CGRect(x: 0.08, y: 0.10, width: 0.84, height: 0.70)
+        let focus = CGRect(x: 0.34, y: 0.16, width: 0.50, height: 0.44)
+        let layout = PanelPageLayout(
+            schemaVersion: PanelPageLayout.schemaVersion,
+            modelVersion: PanelPageLayout.modelVersion,
+            detectorIdentifier: "fixture",
+            direction: "rightToLeft",
+            sourceFingerprint: "fixture",
+            panels: [
+                PanelLayoutPanel(
+                    rect: NormalizedRect(frame),
+                    confidence: 0.9,
+                    source: .coreML,
+                    semanticFocusRect: NormalizedRect(focus)
+                ),
+                PanelLayoutPanel(
+                    rect: NormalizedRect(CGRect(x: 0.08, y: 0.82, width: 0.40, height: 0.14)),
+                    confidence: 0.9,
+                    source: .coreML
+                )
+            ],
+            contentBounds: NormalizedRect(CGRect(x: 0, y: 0, width: 1, height: 1)),
+            usedFallback: false
+        )
+
+        let data = try JSONEncoder().encode(layout)
+        let decoded = try JSONDecoder().decode(PanelPageLayout.self, from: data)
+
+        #expect(decoded.schemaVersion == PanelPageLayout.schemaVersion)
+        #expect(decoded.focusRect(at: 0) == focus)
+        #expect(decoded.focusRect(at: 1) == decoded.panelRects[1])
+    }
+
     @Test func guidedPanelDirectionDefaultsToNormalDirectionButCanBeIndependent() {
         let inherited = ComicBook(
             title: "Direction Test",
