@@ -383,7 +383,7 @@ actor MangaVisionService {
         } else {
             // Compatibility providers (primarily tests/alternate adapters) still work.
             // Their descriptor is consulted only when they do not implement the static
-            // manifest contract; the bundled YOLO provider never takes this path.
+            // manifest contract; the bundled V2B5 provider never takes this path.
             let descriptor = await provider.descriptor
             let compatibilityIdentity = "descriptor:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
             manifest = MangaVisionModelManifest(

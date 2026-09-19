@@ -341,7 +341,7 @@ struct MangaVisionRuntimeFoundationTests {
     @Test func modelArtifactHashChangesWhenModelBytesChange() throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let modelDirectory = directory.appendingPathComponent("PanelDetector.mlmodelc", isDirectory: true)
+        let modelDirectory = directory.appendingPathComponent("SyntheticModel.mlmodelc", isDirectory: true)
         try FileManager.default.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
         let weights = modelDirectory.appendingPathComponent("weights.bin")
         try Data([1, 2, 3, 4]).write(to: weights)
