@@ -886,11 +886,15 @@ struct ReaderView: View {
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
+    @AppStorage(MangaVisionHardCaseFeature.shortcutDefaultsKey) private var showMangaVisionFeedbackShortcut = false
+    @AppStorage(MangaVisionHardCaseImageRetentionPolicy.defaultsKey) private var mangaVisionHardCaseRetentionPolicyRaw = MangaVisionHardCaseImageRetentionPolicy.developmentDefault.rawValue
     @State private var currentPageIndex: Int
     @State private var progressScrubPageIndex: Int?
     @State private var isProgressScrubbing = false
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
+    @State private var showMangaVisionFeedbackSheet = false
+    @State private var mangaVisionHardCaseToast: String?
     @State private var showOfflineTranslationStart = false
     @State private var showOfflineTranslationManager = false
     @State private var translateRequestID = UUID()
@@ -957,6 +961,22 @@ struct ReaderView: View {
 
     private var isOCRMagnificationActive: Bool {
         comic.isOCREnabled && (isOCRMagnificationVisible || comic.isAutoOCRMagnificationEnabled)
+    }
+
+    private var isMangaVisionFeedbackShortcutVisible: Bool {
+#if DEBUG
+        MangaVisionHardCaseFeature.shortcutVisible(
+            debugBuild: true,
+            settingEnabled: showMangaVisionFeedbackShortcut
+        )
+#else
+        false
+#endif
+    }
+
+    private var mangaVisionHardCaseRetentionPolicy: MangaVisionHardCaseImageRetentionPolicy {
+        MangaVisionHardCaseImageRetentionPolicy(rawValue: mangaVisionHardCaseRetentionPolicyRaw)
+            ?? .developmentDefault
     }
 
     private var readingModeRaw: Binding<String> {
@@ -1192,6 +1212,26 @@ struct ReaderView: View {
                 .zIndex(22)
             }
 
+            if let mangaVisionHardCaseToast {
+                VStack {
+                    Spacer(minLength: 0)
+                    Text(mangaVisionHardCaseToast)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay {
+                            Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+                        }
+                        .padding(.bottom, areReaderControlsVisible ? 126 : 28)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .zIndex(60)
+            }
+
             if isBurnInProtectionLocked {
                 Color.black
                     .ignoresSafeArea()
@@ -1229,6 +1269,11 @@ struct ReaderView: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
+        }
+        .sheet(isPresented: $showMangaVisionFeedbackSheet) {
+            MangaVisionHardCaseFeedbackSheet { feedback in
+                captureMangaVisionHardCase(feedback)
+            }
         }
         .sheet(isPresented: $showOfflineTranslationStart) {
             OfflineTranslationStartView(
@@ -1469,6 +1514,18 @@ struct ReaderView: View {
 
             HStack(spacing: 10) {
                 Spacer()
+
+                if isMangaVisionFeedbackShortcutVisible {
+                    MangaVisionFeedbackShortcutButton(
+                        onTap: {
+                            HapticManager.shared.play(.light)
+                            showMangaVisionFeedbackSheet = true
+                        },
+                        onQuickMark: {
+                            quickMarkMangaVisionHardCase()
+                        }
+                    )
+                }
 
                 Button {
                     HapticManager.shared.play(.light)
@@ -1943,6 +2000,62 @@ struct ReaderView: View {
             }
         }
         .accessibilityIdentifier("mreader.reader.settings.sheet")
+    }
+
+    private func quickMarkMangaVisionHardCase() {
+        HapticManager.shared.play(.light)
+        captureMangaVisionHardCase(
+            .quickMark,
+            successMessage: "已加入模型训练候选",
+            successHaptic: nil
+        )
+    }
+
+    private func captureMangaVisionHardCase(
+        _ feedback: MangaVisionHardCaseFeedback,
+        successMessage: String = "已加入模型训练候选",
+        successHaptic: HapticType? = .success
+    ) {
+        guard manager.pages.indices.contains(currentPageIndex) else { return }
+        let pageURL = manager.pages[currentPageIndex].url
+        let comicSnapshot = comic
+        let pageIndex = currentPageIndex
+        let retentionPolicy = mangaVisionHardCaseRetentionPolicy
+
+        Task {
+            do {
+                _ = try await MangaVisionHardCaseCaptureService.capture(
+                    comic: comicSnapshot,
+                    pageIndex: pageIndex,
+                    pageURL: pageURL,
+                    feedback: feedback,
+                    retentionPolicy: retentionPolicy
+                )
+                if let successHaptic {
+                    HapticManager.shared.play(successHaptic)
+                }
+                showMangaVisionHardCaseToast(successMessage)
+            } catch {
+                HapticManager.shared.play(.error)
+                showMangaVisionHardCaseToast("模型反馈保存失败")
+                MReaderLog.reader.error(
+                    "MangaVision hard case capture failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func showMangaVisionHardCaseToast(_ message: String) {
+        withAnimation(.easeOut(duration: 0.16)) {
+            mangaVisionHardCaseToast = message
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            guard mangaVisionHardCaseToast == message else { return }
+            withAnimation(.easeIn(duration: 0.16)) {
+                mangaVisionHardCaseToast = nil
+            }
+        }
     }
 
     private func initializeReadingPresetIfNeeded() async {
