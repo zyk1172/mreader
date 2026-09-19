@@ -141,13 +141,13 @@ struct MangaVisionDeveloperSettingsSection: View {
 
     var body: some View {
         Section(
-            header: Text("Developer / MangaVision"),
-            footer: Text("Hard Case 数据默认仅保存在本机；导出必须由用户显式触发。")
+            header: Text("MangaVision / 模型反馈"),
+            footer: Text("默认关闭。开启后，阅读器底部会显示模型反馈按钮。Hard Case 数据仅保存在本机，导出必须手动触发。")
         ) {
-            Toggle("Show MangaVision Feedback Shortcut", isOn: $showFeedbackShortcut)
+            Toggle("显示模型反馈按钮", isOn: $showFeedbackShortcut)
                 .accessibilityIdentifier("mreader.settings.mangaVisionFeedbackShortcut")
 
-            Picker("Hard Case Image Retention", selection: $retentionPolicyRaw) {
+            Picker("Hard Case 图片保留方式", selection: $retentionPolicyRaw) {
                 Text("Reference only")
                     .tag(MangaVisionHardCaseImageRetentionPolicy.referenceOnly.rawValue)
                 Text("Copy on capture")
@@ -159,7 +159,7 @@ struct MangaVisionDeveloperSettingsSection: View {
             NavigationLink {
                 MangaVisionHardCaseManagerView()
             } label: {
-                Label("Hard Cases", systemImage: "exclamationmark.bubble")
+                Label("Hard Case 管理", systemImage: "exclamationmark.bubble")
             }
             .accessibilityIdentifier("mreader.settings.mangaVisionHardCases")
         }
