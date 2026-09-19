@@ -87,10 +87,17 @@ The five model classes export as:
 | body | body |
 | balloon | balloon |
 
-Model identity is obtained from the existing
-`MangaVisionModelManifest.bundledV2B5()` / `MangaVisionService` manifest path. The Hard
-Case feature does not duplicate a second model SHA or calibration constant in production
-code.
+Training/export identity is obtained from the single code-level
+`MangaVisionV2B5ProductionIdentity` source:
+
+- model: `MangaVisionDetectorV2B5`
+- Core ML source-tree SHA-256: `ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5`
+- calibration: `v2b5-calibration-v1`
+
+The existing `MangaVisionModelManifest` remains the runtime/cache identity source; its
+compiled-model hash is intentionally not substituted for the frozen source artifact hash
+in exported training metadata. Calibration revision is shared from the production
+identity source rather than hardcoded again in Hard Case code.
 
 ## Prediction Snapshot
 
