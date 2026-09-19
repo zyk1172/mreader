@@ -894,7 +894,9 @@ struct ReaderView: View {
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
     @State private var showMangaVisionFeedbackSheet = false
+    @State private var pendingMangaVisionHardCaseFeedback: MangaVisionHardCaseFeedback?
     @State private var mangaVisionHardCaseToast: String?
+    @State private var mangaVisionHardCaseToastToken = UUID()
     @State private var showOfflineTranslationStart = false
     @State private var showOfflineTranslationManager = false
     @State private var translateRequestID = UUID()
@@ -1271,9 +1273,16 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
-        .sheet(isPresented: $showMangaVisionFeedbackSheet) {
-            MangaVisionHardCaseFeedbackSheet { feedback in
+        .sheet(
+            isPresented: $showMangaVisionFeedbackSheet,
+            onDismiss: {
+                guard let feedback = pendingMangaVisionHardCaseFeedback else { return }
+                pendingMangaVisionHardCaseFeedback = nil
                 captureMangaVisionHardCase(feedback)
+            }
+        ) {
+            MangaVisionHardCaseFeedbackSheet { feedback in
+                pendingMangaVisionHardCaseFeedback = feedback
             }
         }
         .sheet(isPresented: $showOfflineTranslationStart) {
@@ -2047,12 +2056,14 @@ struct ReaderView: View {
     }
 
     private func showMangaVisionHardCaseToast(_ message: String) {
+        let token = UUID()
+        mangaVisionHardCaseToastToken = token
         withAnimation(.easeOut(duration: 0.16)) {
             mangaVisionHardCaseToast = message
         }
         Task {
-            try? await Task.sleep(for: .seconds(1.6))
-            guard mangaVisionHardCaseToast == message else { return }
+            try? await Task.sleep(for: .seconds(2.2))
+            guard mangaVisionHardCaseToastToken == token else { return }
             withAnimation(.easeIn(duration: 0.16)) {
                 mangaVisionHardCaseToast = nil
             }
