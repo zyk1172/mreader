@@ -2014,7 +2014,7 @@ struct ReaderView: View {
     private func captureMangaVisionHardCase(
         _ feedback: MangaVisionHardCaseFeedback,
         successMessage: String = "已加入模型训练候选",
-        successHaptic: HapticType? = .success
+        successHaptic: HapticLevel? = .success
     ) {
         guard manager.pages.indices.contains(currentPageIndex) else { return }
         let pageURL = manager.pages[currentPageIndex].url
