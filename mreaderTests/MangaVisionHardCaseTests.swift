@@ -16,6 +16,12 @@ final class HardCaseRecordTests: XCTestCase {
         XCTAssertEqual(MangaVisionHardCaseIssueType.unspecifiedVisualError.rawValue, "unspecified_visual_error")
         XCTAssertEqual(MangaVisionHardCaseAffectedArea.readingOrder.rawValue, "reading_order")
         XCTAssertEqual(MangaVisionHardCaseProductImpact.guidedPanel.rawValue, "guided_panel")
+        XCTAssertEqual(MangaVisionV2B5ProductionIdentity.modelName, "MangaVisionDetectorV2B5")
+        XCTAssertEqual(
+            MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256,
+            "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5"
+        )
+        XCTAssertEqual(MangaVisionV2B5ProductionIdentity.calibrationRevision, "v2b5-calibration-v1")
     }
 }
 
@@ -278,7 +284,7 @@ private enum HardCaseFixture {
             pixelHeight: 2000,
             orientation: 1,
             provider: "MangaVisionService",
-            modelName: MangaVisionV2B5Provider.modelIdentifier,
+            modelName: MangaVisionV2B5ProductionIdentity.modelName,
             modelSHA256: modelSHA256,
             calibrationRevision: "v2b5-calibration-v1",
             appVersion: "1.1",
