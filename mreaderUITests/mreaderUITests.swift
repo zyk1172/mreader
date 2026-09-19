@@ -28,6 +28,18 @@ final class mreaderUITests: XCTestCase {
         return app
     }
 
+    private func launchHardCaseReaderFixture() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-mreader-ui-testing",
+            "-mreader-v2b5-provider",
+            "-mangavision_hard_case_feedback_shortcut",
+            "YES"
+        ]
+        app.launch()
+        return app
+    }
+
     @MainActor
     func testColdStartShowsStableShelfSurface() throws {
         let app = launchApp()
@@ -119,6 +131,57 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(offlineMenu.waitForExistence(timeout: timeout))
         offlineMenu.tap()
         XCTAssertTrue(element("mreader.reader.offlineTranslationStart", in: app).waitForExistence(timeout: timeout))
+    }
+
+    @MainActor
+    func testMangaVisionHardCaseFeedbackAndQuickMark() throws {
+        let app = launchHardCaseReaderFixture()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        XCTAssertTrue(element("mreader.reader.root", in: app).waitForExistence(timeout: timeout))
+        let feedback = element("mreader.reader.mangaVisionFeedback", in: app)
+        XCTAssertTrue(feedback.waitForExistence(timeout: timeout))
+
+        feedback.tap()
+        XCTAssertTrue(element("mreader.hardCase.feedback.sheet", in: app).waitForExistence(timeout: timeout))
+
+        let body = app.buttons["Body"].firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: timeout))
+        body.tap()
+
+        let duplicate = app.buttons["重复"].firstMatch
+        for _ in 0..<5 {
+            if duplicate.exists, duplicate.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(duplicate.waitForExistence(timeout: timeout))
+        duplicate.tap()
+
+        let translation = app.buttons["翻译"].firstMatch
+        for _ in 0..<7 {
+            if translation.exists, translation.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(translation.waitForExistence(timeout: timeout))
+        translation.tap()
+
+        let save = element("mreader.hardCase.feedback.save", in: app)
+        XCTAssertTrue(save.waitForExistence(timeout: timeout))
+        save.tap()
+
+        let toast = element("mreader.hardCase.toast", in: app)
+        XCTAssertTrue(toast.waitForExistence(timeout: timeout))
+        XCTAssertEqual(toast.label, "已加入模型训练候选")
+        XCTAssertTrue(
+            toast.waitForNonExistence(timeout: 5),
+            "The first confirmation must dismiss before Quick Mark is exercised"
+        )
+
+        feedback.press(forDuration: 0.7)
+        XCTAssertTrue(toast.waitForExistence(timeout: timeout))
+        XCTAssertEqual(toast.label, "已加入模型训练候选")
     }
 
     @MainActor
