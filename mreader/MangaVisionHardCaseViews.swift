@@ -132,6 +132,40 @@ struct MangaVisionHardCaseFeedbackSheet: View {
     }
 }
 
+struct MangaVisionDeveloperSettingsSection: View {
+    @AppStorage(MangaVisionHardCaseFeature.shortcutDefaultsKey)
+    private var showFeedbackShortcut = false
+
+    @AppStorage(MangaVisionHardCaseImageRetentionPolicy.defaultsKey)
+    private var retentionPolicyRaw = MangaVisionHardCaseImageRetentionPolicy.developmentDefault.rawValue
+
+    var body: some View {
+        Section(
+            header: Text("Developer / MangaVision"),
+            footer: Text("Hard Case 数据默认仅保存在本机；导出必须由用户显式触发。")
+        ) {
+            Toggle("Show MangaVision Feedback Shortcut", isOn: $showFeedbackShortcut)
+                .accessibilityIdentifier("mreader.settings.mangaVisionFeedbackShortcut")
+
+            Picker("Hard Case Image Retention", selection: $retentionPolicyRaw) {
+                Text("Reference only")
+                    .tag(MangaVisionHardCaseImageRetentionPolicy.referenceOnly.rawValue)
+                Text("Copy on capture")
+                    .tag(MangaVisionHardCaseImageRetentionPolicy.copyOnCapture.rawValue)
+                Text("Copy on export")
+                    .tag(MangaVisionHardCaseImageRetentionPolicy.copyOnExport.rawValue)
+            }
+
+            NavigationLink {
+                MangaVisionHardCaseManagerView()
+            } label: {
+                Label("Hard Cases", systemImage: "exclamationmark.bubble")
+            }
+            .accessibilityIdentifier("mreader.settings.mangaVisionHardCases")
+        }
+    }
+}
+
 nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendable {
     case all
     case frame
@@ -545,7 +579,7 @@ struct MangaVisionHardCaseDetailView: View {
 
             Section("导出") {
                 Button {
-                    Task { await model.prepareExport(recordIDs: [record.id]) }
+                    Task { await model.prepareExport(recordIDs: Set([record.id])) }
                 } label: {
                     Label("Export candidate", systemImage: "square.and.arrow.up")
                 }
