@@ -3845,7 +3845,10 @@ struct GuidedPanelReader: View {
             return (1, .zero)
         }
         let normalized = entry.layout.focusRect(at: panelIndex)
-        let tuning = GuidedPanelMotionPlanner.viewportTuning(for: normalized)
+        let tuningRect = entry.layout.panelRects.indices.contains(panelIndex)
+            ? entry.layout.panelRects[panelIndex]
+            : normalized
+        let tuning = GuidedPanelMotionPlanner.viewportTuning(for: tuningRect)
         let transform = GuidedPanelViewport.transform(
             normalizedPanel: normalized,
             imageAspectRatio: entry.sourceSize.width / entry.sourceSize.height,
@@ -3869,7 +3872,15 @@ struct GuidedPanelReader: View {
         } else {
             return (1, .zero)
         }
-        let tuning = GuidedPanelMotionPlanner.viewportTuning(for: normalized)
+        let tuningRect: CGRect
+        if cameraFocusOverride != nil {
+            tuningRect = normalized
+        } else if let layout, layout.panelRects.indices.contains(panelIndex) {
+            tuningRect = layout.panelRects[panelIndex]
+        } else {
+            tuningRect = normalized
+        }
+        let tuning = GuidedPanelMotionPlanner.viewportTuning(for: tuningRect)
         let transform = GuidedPanelViewport.transform(
             normalizedPanel: normalized,
             imageAspectRatio: sourceSize.width / sourceSize.height,
