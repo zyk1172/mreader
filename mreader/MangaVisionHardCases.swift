@@ -175,6 +175,14 @@ nonisolated struct MangaVisionHardCaseDetection: Codable, Sendable, Hashable, Id
         sourceBBox = MangaVisionHardCaseBox(sourceRect: sourceRect)
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case detectionClass = "class"
+        case score
+        case normalizedBBox
+        case sourceBBox
+    }
+
     static func className(for type: MangaRegionType) -> String {
         switch type {
         case .panel: "frame"
@@ -685,6 +693,14 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             ?? imageData.flatMap(MangaVisionHardCasePageDataLoader.pixelSize)
             ?? .zero
         let now = Date()
+        let snapshotModelIdentifier = analysis?.modelIdentifier ?? manifest.modelID
+        let isV2B5 = snapshotModelIdentifier == MangaVisionV2B5Provider.modelIdentifier
+        let capturedModelName = isV2B5
+            ? MangaVisionV2B5ProductionIdentity.modelName
+            : snapshotModelIdentifier
+        let capturedModelSHA256 = isV2B5
+            ? MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256
+            : manifest.modelFileHash
 
         let record = MangaVisionHardCaseRecord(
             id: UUID(),
@@ -707,9 +723,9 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             pixelWidth: max(Int(sourceSize.width.rounded()), 0),
             pixelHeight: max(Int(sourceSize.height.rounded()), 0),
             orientation: imageData.map(MangaVisionHardCasePageDataLoader.orientation) ?? 1,
-            provider: String(describing: MangaVisionV2B5Provider.self),
-            modelName: MangaVisionV2B5ProductionIdentity.modelName,
-            modelSHA256: MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256,
+            provider: snapshotModelIdentifier,
+            modelName: capturedModelName,
+            modelSHA256: capturedModelSHA256,
             calibrationRevision: manifest.calibrationRevision,
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
