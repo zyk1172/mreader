@@ -522,9 +522,10 @@ actor MangaVisionHardCaseStore {
                 }
             }
 
-            if let sourceURL = URL(string: record.sourceReference), sourceURL.isFileURL {
-                exportRecord.sourceReference = sourceURL.lastPathComponent
-            }
+            exportRecord.sourceReference = Self.portableSourceReference(
+                record.sourceReference,
+                pageIndex: record.pageIndex
+            )
             exportRecord.storedCopyReference = relativeImageReference
             exportRecord.imageRetentionFailure = nil
 
@@ -597,6 +598,21 @@ actor MangaVisionHardCaseStore {
         let envelope = StoreEnvelope(schemaVersion: 1, records: records)
         let data = try JSONEncoder.hardCase.encode(envelope)
         try data.write(to: recordsURL, options: .atomic)
+    }
+
+    nonisolated static func portableSourceReference(
+        _ sourceReference: String,
+        pageIndex: Int
+    ) -> String {
+        guard let url = URL(string: sourceReference) else {
+            return "page-\(pageIndex)"
+        }
+        let scheme = url.scheme?.lowercased()
+        if scheme == "http" || scheme == "https" {
+            return url.absoluteString
+        }
+        let filename = url.lastPathComponent
+        return filename.isEmpty ? "page-\(pageIndex)" : filename
     }
 
     private static func safeImageExtension(_ candidate: String?) -> String {
