@@ -64,7 +64,8 @@ final class HardCaseDeduplicationTests: XCTestCase {
         _ = try await store.upsert(HardCaseFixture.record(inferenceMode: .full))
         _ = try await store.upsert(HardCaseFixture.record(inferenceMode: .halfRight))
 
-        XCTAssertEqual(await store.allRecords().count, 2)
+        let records = await store.allRecords()
+        XCTAssertEqual(records.count, 2)
     }
 }
 
@@ -89,7 +90,7 @@ final class HardCasePersistenceTests: XCTestCase {
 
 @MainActor
 final class HardCasePredictionSnapshotTests: XCTestCase {
-    func testSnapshotCopiesExistingFiveClassAnalysis() {
+    func testSnapshotCopiesExistingFiveClassAnalysis() throws {
         let types: [MangaRegionType] = [.panel, .text, .face, .body, .balloon]
         let regions = types.enumerated().map { index, type in
             MangaVisionRegion(
@@ -123,9 +124,9 @@ final class HardCasePredictionSnapshotTests: XCTestCase {
 
         XCTAssertEqual(snapshot.map(\.detectionClass), ["frame", "text", "balloon", "face", "body"])
         XCTAssertEqual(Set(snapshot.map(\.id)), Set(regions.map(\.id)))
-        let frame = try? XCTUnwrap(snapshot.first { $0.detectionClass == "frame" })
-        XCTAssertEqual(frame?.sourceBBox.yMin, 400, accuracy: 0.001)
-        XCTAssertEqual(frame?.sourceBBox.yMax, 600, accuracy: 0.001)
+        let frame = try XCTUnwrap(snapshot.first { $0.detectionClass == "frame" })
+        XCTAssertEqual(frame.sourceBBox.yMin, 400, accuracy: 0.001)
+        XCTAssertEqual(frame.sourceBBox.yMax, 600, accuracy: 0.001)
     }
 
     func testUnavailableAnalysisProducesEmptySnapshotWithoutInference() {
