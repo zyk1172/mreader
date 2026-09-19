@@ -33,7 +33,7 @@ final class mreaderUITests: XCTestCase {
         app.launchArguments += [
             "-mreader-ui-testing",
             "-mreader-v2b5-provider",
-            "-\(MangaVisionHardCaseFeature.shortcutDefaultsKey)",
+            "-mangavision_hard_case_feedback_shortcut",
             "YES"
         ]
         app.launch()
