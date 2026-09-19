@@ -200,12 +200,20 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
 
         if let assistant,
            let assistantRect = assistantRect(for: assistant, clippedTo: panel) {
-            let candidate = contextualized(focus.union(assistantRect), within: panel)
-            let growth = area(candidate) / max(area(focus), 0.000_001)
-            let coverage = area(candidate) / panelArea
-            if growth <= maximumAssistantAreaGrowth,
-               coverage <= maximumAssistantPanelCoverage {
-                focus = candidate
+            let nearbyBounds = focus.insetBy(
+                dx: -panel.width * 0.08,
+                dy: -panel.height * 0.08
+            ).intersection(panel)
+            // A person hint may protect content immediately beside the primary viewport,
+            // but a distant false-positive face must not recenter the camera.
+            if nearbyBounds.intersects(assistantRect) {
+                let candidate = contextualized(focus.union(assistantRect), within: panel)
+                let growth = area(candidate) / max(area(focus), 0.000_001)
+                let coverage = area(candidate) / panelArea
+                if growth <= maximumAssistantAreaGrowth,
+                   coverage <= maximumAssistantPanelCoverage {
+                    focus = candidate
+                }
             }
         }
 
