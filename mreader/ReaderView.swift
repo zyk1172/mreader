@@ -1225,6 +1225,7 @@ struct ReaderView: View {
                             Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
                         }
                         .padding(.bottom, areReaderControlsVisible ? 126 : 28)
+                        .accessibilityIdentifier("mreader.hardCase.toast")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
