@@ -478,7 +478,7 @@ actor MangaVisionHardCaseStore {
         return sourceURL.isFileURL && fileManager.fileExists(atPath: sourceURL.path) ? sourceURL : nil
     }
 
-    func export(recordIDs: Set<UUID>? = nil) throws -> URL {
+    func export(recordIDs: Set<UUID>? = nil) async throws -> URL {
         let selected = records.filter { recordIDs == nil || recordIDs?.contains($0.id) == true }
         let exportName = "mangavision-hardcases-\(Self.exportDateFormatter.string(from: Date()))"
         let stagingRoot = fileManager.temporaryDirectory
@@ -511,12 +511,11 @@ actor MangaVisionHardCaseStore {
                 }
             } else if record.imageRetentionPolicy == .copyOnExport,
                       let sourceURL = URL(string: record.sourceReference),
-                      sourceURL.isFileURL,
-                      fileManager.fileExists(atPath: sourceURL.path) {
-                let ext = sourceURL.pathExtension.isEmpty ? "img" : sourceURL.pathExtension
+                      let sourceData = await MangaVisionHardCasePageDataLoader.data(for: sourceURL) {
+                let ext = Self.safeImageExtension(sourceURL.pathExtension)
                 let destinationName = "\(baseName).\(ext)"
                 let destination = exportImagesDirectory.appendingPathComponent(destinationName)
-                try? fileManager.copyItem(at: sourceURL, to: destination)
+                try? sourceData.write(to: destination, options: .atomic)
                 if fileManager.fileExists(atPath: destination.path) {
                     relativeImageReference = "images/\(destinationName)"
                 }
