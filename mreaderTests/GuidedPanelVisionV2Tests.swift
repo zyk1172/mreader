@@ -264,6 +264,59 @@ struct GuidedPanelVisionV2Tests {
         #expect(withBodyOnly == baseline)
     }
 
+    @Test func nearbyFaceBackedBodyCanOnlyBoundedlyProtectCharacterContext() throws {
+        let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
+        let balloon = semanticRegion(
+            .balloon,
+            x: 0.60,
+            y: 0.16,
+            width: 0.22,
+            height: 0.18,
+            confidence: 0.94
+        )
+        let baseline = try #require(
+            GuidedPanelSemanticViewportPlanner.focusRects(
+                panels: [panel],
+                analysis: semanticAnalysis(balloons: [balloon])
+            ).first ?? nil
+        )
+        let assisted = try #require(
+            GuidedPanelSemanticViewportPlanner.focusRects(
+                panels: [panel],
+                analysis: semanticAnalysis(
+                    balloons: [balloon],
+                    faces: [
+                        semanticRegion(
+                            .face,
+                            x: 0.27,
+                            y: 0.20,
+                            width: 0.10,
+                            height: 0.11,
+                            confidence: 0.94
+                        )
+                    ],
+                    bodies: [
+                        semanticRegion(
+                            .body,
+                            x: 0.24,
+                            y: 0.27,
+                            width: 0.20,
+                            height: 0.45,
+                            confidence: 0.82
+                        )
+                    ]
+                )
+            ).first ?? nil
+        )
+
+        let baselineArea = baseline.width * baseline.height
+        let assistedArea = assisted.width * assisted.height
+        #expect(assisted.minX <= baseline.minX)
+        #expect(assistedArea <= baselineArea * 1.22 + 0.000_001)
+        #expect(panel.contains(assisted))
+        #expect(assisted.contains(balloon.normalizedRect))
+    }
+
     @Test func distantFaceCannotRecenterPrimarySemanticViewport() throws {
         let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
         let balloon = semanticRegion(
