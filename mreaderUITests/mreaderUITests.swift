@@ -174,9 +174,14 @@ final class mreaderUITests: XCTestCase {
         let toast = element("mreader.hardCase.toast", in: app)
         XCTAssertTrue(toast.waitForExistence(timeout: timeout))
         XCTAssertEqual(toast.label, "已加入模型训练候选")
+        XCTAssertTrue(
+            toast.waitForNonExistence(timeout: 5),
+            "The first confirmation must dismiss before Quick Mark is exercised"
+        )
 
         feedback.press(forDuration: 0.7)
         XCTAssertTrue(toast.waitForExistence(timeout: timeout))
+        XCTAssertEqual(toast.label, "已加入模型训练候选")
     }
 
     @MainActor
