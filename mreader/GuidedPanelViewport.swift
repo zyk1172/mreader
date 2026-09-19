@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 nonisolated struct GuidedPanelTransform: Sendable, Equatable {
     let scale: CGFloat
