@@ -39,8 +39,8 @@ nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable,
     case face
     case body
     case balloon
-    case readingOrder
-    case ocrTranslation
+    case readingOrder = "reading_order"
+    case ocrTranslation = "ocr_translation"
     case other
 
     var displayName: String {
@@ -58,24 +58,24 @@ nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable,
 }
 
 nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Sendable, Hashable {
-    case unspecifiedVisualError
-    case missedDetection
-    case falsePositive
+    case unspecifiedVisualError = "unspecified_visual_error"
+    case missedDetection = "missed_detection"
+    case falsePositive = "false_positive"
     case duplicate
-    case boxTooLarge
-    case boxTooSmall
-    case boundaryError
-    case frameMerge
-    case frameSplit
-    case readingOrderError
-    case wrongPerson
-    case multipleFacesConfused
-    case overlappingPersonDuplicate
-    case balloonTextAssociationError
-    case roiError
-    case ocrAffected
-    case translationContextAffected
-    case potentialSpeakerAssociationError
+    case boxTooLarge = "box_too_large"
+    case boxTooSmall = "box_too_small"
+    case boundaryError = "boundary_error"
+    case frameMerge = "frame_merge"
+    case frameSplit = "frame_split"
+    case readingOrderError = "reading_order_error"
+    case wrongPerson = "wrong_person"
+    case multipleFacesConfused = "multiple_faces_confused"
+    case overlappingPersonDuplicate = "overlapping_person_duplicate"
+    case balloonTextAssociationError = "balloon_text_association_error"
+    case roiError = "roi_error"
+    case ocrAffected = "ocr_affected"
+    case translationContextAffected = "translation_context_affected"
+    case potentialSpeakerAssociationError = "potential_speaker_association_error"
 
     var displayName: String {
         switch self {
@@ -102,11 +102,11 @@ nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Se
 }
 
 nonisolated enum MangaVisionHardCaseProductImpact: String, Codable, CaseIterable, Sendable, Hashable {
-    case normalReading
-    case guidedPanel
+    case normalReading = "normal_reading"
+    case guidedPanel = "guided_panel"
     case ocr
     case translation
-    case personAssociation
+    case personAssociation = "person_association"
     case none
 
     var displayName: String {
@@ -246,7 +246,7 @@ nonisolated struct MangaVisionHardCaseRecord: Codable, Sendable, Identifiable, H
     let pageIdentifier: String
     var pageSHA256: String
 
-    let sourceReference: String
+    var sourceReference: String
     var storedCopyReference: String?
     let pixelWidth: Int
     let pixelHeight: Int
@@ -522,6 +522,9 @@ actor MangaVisionHardCaseStore {
                 }
             }
 
+            if let sourceURL = URL(string: record.sourceReference), sourceURL.isFileURL {
+                exportRecord.sourceReference = sourceURL.lastPathComponent
+            }
             exportRecord.storedCopyReference = relativeImageReference
             exportRecord.imageRetentionFailure = nil
 
