@@ -207,7 +207,11 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
             // A person hint may protect content immediately beside the primary viewport,
             // but a distant false-positive face must not recenter the camera.
             if nearbyBounds.intersects(assistantRect) {
-                let candidate = contextualized(focus.union(assistantRect), within: panel)
+                let paddedAssistant = assistantRect.insetBy(
+                    dx: -panel.width * 0.02,
+                    dy: -panel.height * 0.02
+                ).intersection(panel)
+                let candidate = focus.union(paddedAssistant).intersection(panel)
                 let growth = area(candidate) / max(area(focus), 0.000_001)
                 let coverage = area(candidate) / panelArea
                 if growth <= maximumAssistantAreaGrowth,
