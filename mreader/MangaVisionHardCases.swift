@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import UIKit
 import ZIPFoundation
 
@@ -705,7 +706,7 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             storedCopyReference: nil,
             pixelWidth: max(Int(sourceSize.width.rounded()), 0),
             pixelHeight: max(Int(sourceSize.height.rounded()), 0),
-            orientation: 1,
+            orientation: imageData.map(MangaVisionHardCasePageDataLoader.orientation) ?? 1,
             provider: "MangaVisionService",
             modelName: manifest.modelID,
             modelSHA256: manifest.modelFileHash,
@@ -772,11 +773,40 @@ nonisolated enum MangaVisionHardCasePageDataLoader {
     }
 
     static func pixelSize(_ data: Data) -> CGSize? {
-        guard let image = UIImage(data: data) else { return nil }
-        if let cgImage = image.cgImage {
-            return CGSize(width: cgImage.width, height: cgImage.height)
+        guard let source = CGImageSourceCreateWithData(
+            data as CFData,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ),
+        let properties = CGImageSourceCopyPropertiesAtIndex(
+            source,
+            0,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ) as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+        let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+        width > 0,
+        height > 0 else {
+            return nil
         }
-        return CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        return CGSize(width: width, height: height)
+    }
+
+    static func orientation(_ data: Data) -> Int {
+        guard let source = CGImageSourceCreateWithData(
+            data as CFData,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ),
+        let properties = CGImageSourceCopyPropertiesAtIndex(
+            source,
+            0,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ) as? [CFString: Any] else {
+            return 1
+        }
+        if let value = properties[kCGImagePropertyOrientation] as? NSNumber {
+            return value.intValue
+        }
+        return 1
     }
 }
 
