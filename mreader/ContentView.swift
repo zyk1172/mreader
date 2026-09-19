@@ -1007,9 +1007,7 @@ struct ContentView: View {
             Form {
                 openAISettingsSection
                 aiDiagnosticsSection
-#if DEBUG
                 MangaVisionDeveloperSettingsSection()
-#endif
                 mediaSourceSettingsSection
                 importServiceSection
                 interactionSettingsSection

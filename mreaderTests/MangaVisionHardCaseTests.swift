@@ -209,10 +209,9 @@ final class HardCaseImageRetentionTests: XCTestCase {
 
 @MainActor
 final class ReaderFeedbackEntryTests: XCTestCase {
-    func testShortcutIsDebugAndSettingGated() {
-        XCTAssertFalse(MangaVisionHardCaseFeature.shortcutVisible(debugBuild: false, settingEnabled: true))
-        XCTAssertFalse(MangaVisionHardCaseFeature.shortcutVisible(debugBuild: true, settingEnabled: false))
-        XCTAssertTrue(MangaVisionHardCaseFeature.shortcutVisible(debugBuild: true, settingEnabled: true))
+    func testShortcutIsSettingGatedInAllBuildConfigurations() {
+        XCTAssertFalse(MangaVisionHardCaseFeature.shortcutVisible(settingEnabled: false))
+        XCTAssertTrue(MangaVisionHardCaseFeature.shortcutVisible(settingEnabled: true))
     }
 
     func testQuickMarkIsUnreviewedUnspecifiedVisualError() {

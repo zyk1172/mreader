@@ -31,19 +31,21 @@ into training labels.
 
 ## UX
 
-The entry point is developer-only.
+The collection entry point is available in both Debug and Release builds, but remains
+disabled by default.
 
-In Debug builds, Settings exposes:
+Settings exposes:
 
 ```text
-Developer / MangaVision
-  - Show MangaVision Feedback Shortcut
-  - Hard Case Image Retention
-  - Hard Cases
+MangaVision / 模型反馈
+  - 显示模型反馈按钮
+  - Hard Case 图片保留方式
+  - Hard Case 管理
 ```
 
-The shortcut is disabled by default. When enabled it appears in the Reader bottom action
-area, away from page-turn and Guided Panel next/previous controls.
+When the shortcut setting is enabled it appears in the Reader bottom action area, away
+from page-turn and Guided Panel next/previous controls. Keeping the feature in Release
+allows real reading sessions to collect hard cases without requiring a Debug build.
 
 - Tap: opens a compact feedback sheet.
 - Long press: Quick Mark. It immediately records

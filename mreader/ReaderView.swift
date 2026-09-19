@@ -966,14 +966,9 @@ struct ReaderView: View {
     }
 
     private var isMangaVisionFeedbackShortcutVisible: Bool {
-#if DEBUG
         MangaVisionHardCaseFeature.shortcutVisible(
-            debugBuild: true,
             settingEnabled: showMangaVisionFeedbackShortcut
         )
-#else
-        false
-#endif
     }
 
     private var mangaVisionHardCaseRetentionPolicy: MangaVisionHardCaseImageRetentionPolicy {

@@ -295,8 +295,8 @@ nonisolated struct MangaVisionHardCaseStatistics: Sendable, Equatable {
 nonisolated enum MangaVisionHardCaseFeature {
     static let shortcutDefaultsKey = "mangavision_hard_case_feedback_shortcut"
 
-    static func shortcutVisible(debugBuild: Bool, settingEnabled: Bool) -> Bool {
-        debugBuild && settingEnabled
+    static func shortcutVisible(settingEnabled: Bool) -> Bool {
+        settingEnabled
     }
 }
 
