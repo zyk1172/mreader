@@ -152,10 +152,18 @@ final class mreaderUITests: XCTestCase {
         body.tap()
 
         let duplicate = app.buttons["重复"].firstMatch
+        for _ in 0..<5 {
+            if duplicate.exists, duplicate.isHittable { break }
+            app.swipeUp()
+        }
         XCTAssertTrue(duplicate.waitForExistence(timeout: timeout))
         duplicate.tap()
 
         let translation = app.buttons["翻译"].firstMatch
+        for _ in 0..<7 {
+            if translation.exists, translation.isHittable { break }
+            app.swipeUp()
+        }
         XCTAssertTrue(translation.waitForExistence(timeout: timeout))
         translation.tap()
 
