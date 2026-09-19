@@ -51,6 +51,19 @@ jobs:
             SWIFT_STRICT_CONCURRENCY=complete \
             build-for-testing
 
+      - name: Build Release app
+        run: |
+          xcodebuild \
+            -project mreader.xcodeproj \
+            -scheme mreader \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/MReaderReleaseDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            build
+
       - name: Run Manga Vision regression gate
         run: |
           xcodebuild \
