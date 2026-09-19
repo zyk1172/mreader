@@ -3825,18 +3825,14 @@ struct GuidedPanelReader: View {
 
     private var currentFocusPanelRect: CGRect? {
         guard let layout else { return nil }
-        return layout.panelRects.indices.contains(panelIndex)
-            ? layout.panelRects[panelIndex]
-            : layout.contentBounds.cgRect
+        return layout.focusRect(at: panelIndex)
     }
 
     private func focusPanelRect(
         for entry: GuidedPanelLayoutStore.Entry,
         panelIndex: Int
     ) -> CGRect {
-        entry.layout.panelRects.indices.contains(panelIndex)
-            ? entry.layout.panelRects[panelIndex]
-            : entry.layout.contentBounds.cgRect
+        entry.layout.focusRect(at: panelIndex)
     }
 
     private func panelTransform(
@@ -3848,9 +3844,7 @@ struct GuidedPanelReader: View {
               entry.sourceSize.width > 0, entry.sourceSize.height > 0 else {
             return (1, .zero)
         }
-        let normalized = entry.layout.panelRects.indices.contains(panelIndex)
-            ? entry.layout.panelRects[panelIndex]
-            : entry.layout.contentBounds.cgRect
+        let normalized = entry.layout.focusRect(at: panelIndex)
         let tuning = GuidedPanelMotionPlanner.viewportTuning(for: normalized)
         let transform = GuidedPanelViewport.transform(
             normalizedPanel: normalized,
@@ -3871,9 +3865,7 @@ struct GuidedPanelReader: View {
         if let cameraFocusOverride {
             normalized = cameraFocusOverride
         } else if let layout {
-            normalized = layout.panelRects.indices.contains(panelIndex)
-                ? layout.panelRects[panelIndex]
-                : layout.contentBounds.cgRect
+            normalized = layout.focusRect(at: panelIndex)
         } else {
             return (1, .zero)
         }
