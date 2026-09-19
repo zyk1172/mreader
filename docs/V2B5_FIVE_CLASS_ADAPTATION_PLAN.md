@@ -75,6 +75,31 @@ The audit found no production capability inference based on `faces.isEmpty` or
 `bodies.isEmpty`. Empty detections must continue to mean “no region detected
 on this page”, not “the provider does not support this class”.
 
+## Batch 1: semantic Guided Panel viewport
+
+The first five-class product adaptation deliberately keeps navigation frame-led.
+
+- `frame` remains the only Guided Panel navigation target and continues to own panel count,
+  panel index, reading order, page-boundary transitions and fallback behavior.
+- `text + balloon` may tighten the camera viewport only after a large panel has already been
+  selected. They do not create additional reading stops.
+- `face + body` are weak auxiliary evidence only. They cannot create a focus rect, alter
+  reading order or create a navigation target.
+- A body detection is ignored for viewport assistance unless it is paired with a sufficiently
+  confident face. Even then only the upper-body region may protect nearby character context
+  from cropping.
+- A distant face is not allowed to recenter the camera. Person evidence can only make a bounded
+  expansion around an existing text/balloon-driven focus.
+- Small panels keep their original whole-panel framing; semantic tightening is reserved for
+  large panels where extra zoom can improve readability without fragmenting the page.
+- The semantic focus rect is generated while `PanelDetectionService` already owns the shared
+  `MangaPageAnalysis`, persisted with the panel layout cache, and consumed by Reader rendering.
+  No extra Core ML inference is introduced on tap, page turn or cache hit.
+
+This batch intentionally does not change OCR recognition policy, translation grouping,
+speaker assignment, model calibration, NMS, adaptive inference planning or the five-class
+model artifact.
+
 ## Current translation path
 
 The current path is:

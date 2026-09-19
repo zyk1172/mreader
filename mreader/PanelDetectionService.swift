@@ -33,22 +33,27 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
     let confidence: Float
     let source: PanelDetectionSource
     let contour: MangaVisionContour?
+    /// Optional content-aware viewport inside this panel. Navigation still targets the
+    /// panel itself; this rect only changes how an already-selected large panel is framed.
+    let semanticFocusRect: NormalizedRect?
 
     init(
         rect: NormalizedRect,
         confidence: Float,
         source: PanelDetectionSource,
-        contour: MangaVisionContour? = nil
+        contour: MangaVisionContour? = nil,
+        semanticFocusRect: NormalizedRect? = nil
     ) {
         self.rect = rect
         self.confidence = confidence
         self.source = source
         self.contour = contour
+        self.semanticFocusRect = semanticFocusRect
     }
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 3
+    static let schemaVersion = 4
     static let modelVersion = 4
 
     let schemaVersion: Int
@@ -84,6 +89,12 @@ nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     }
 
     var panelRects: [CGRect] { panels.map(\.rect.cgRect) }
+
+    func focusRect(at index: Int) -> CGRect {
+        guard panels.indices.contains(index) else { return contentBounds.cgRect }
+        return panels[index].semanticFocusRect?.cgRect ?? panels[index].rect.cgRect
+    }
+
     var orderingStrategy: PanelReadingOrderStrategy {
         PanelReadingOrderStrategy(rawValue: orderingStrategyRaw) ?? .strictXYCut
     }
@@ -523,18 +534,23 @@ actor PanelDetectionService {
                 isRightToLeft: isRightToLeft,
                 structure: structure
             )
+            let semanticFocusRects = GuidedPanelSemanticViewportPlanner.focusRects(
+                panels: readingPlan.panels.map(\.rect),
+                analysis: mangaAnalysis
+            )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
                 detectorIdentifier: detectorIdentifier,
                 direction: direction,
                 sourceFingerprint: sourceFingerprint,
-                panels: readingPlan.panels.map {
+                panels: readingPlan.panels.enumerated().map { index, panel in
                     PanelLayoutPanel(
-                        rect: NormalizedRect($0.rect),
-                        confidence: $0.confidence,
-                        source: $0.source,
-                        contour: $0.contour.map { MangaVisionContour(points: $0) }
+                        rect: NormalizedRect(panel.rect),
+                        confidence: panel.confidence,
+                        source: panel.source,
+                        contour: panel.contour.map { MangaVisionContour(points: $0) },
+                        semanticFocusRect: semanticFocusRects[index].map { NormalizedRect($0) }
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
