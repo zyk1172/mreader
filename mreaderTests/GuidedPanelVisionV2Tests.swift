@@ -311,7 +311,8 @@ struct GuidedPanelVisionV2Tests {
 
         let baselineArea = baseline.width * baseline.height
         let assistedArea = assisted.width * assisted.height
-        #expect(assisted.minX <= baseline.minX)
+        #expect(assisted.minX < baseline.minX)
+        #expect(assistedArea > baselineArea)
         #expect(assistedArea <= baselineArea * 1.22 + 0.000_001)
         #expect(panel.contains(assisted))
         #expect(assisted.contains(balloon.normalizedRect))
