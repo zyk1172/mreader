@@ -7,6 +7,7 @@ nonisolated enum MangaVisionOCRGeometry {
     private struct RegionCandidate {
         let rect: CGRect
         let score: CGFloat
+        let polygon: [CGPoint]
     }
 
     /// Enrich local OCR with two different kinds of model geometry:
@@ -46,9 +47,12 @@ nonisolated enum MangaVisionOCRGeometry {
 
             if enriched.layoutRole == .dialogue,
                let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
-                enriched.bubbleBox = balloon
+                enriched.bubbleBox = balloon.rect
+                if enriched.bubblePolygon.isEmpty {
+                    enriched.bubblePolygon = balloon.polygon
+                }
                 if enriched.layoutSafeRegion == nil {
-                    enriched.layoutSafeRegion = balloon
+                    enriched.layoutSafeRegion = balloon.rect
                 }
                 return enriched
             }
@@ -80,13 +84,13 @@ nonisolated enum MangaVisionOCRGeometry {
         textRect: CGRect,
         balloons: [MangaVisionRegion]
     ) -> CGRect? {
-        bestBalloon(for: textRect, balloons: balloons)
+        bestBalloon(for: textRect, balloons: balloons)?.rect
     }
 
     private static func bestBalloon(
         for rawTextRect: CGRect,
         balloons: [MangaVisionRegion]
-    ) -> CGRect? {
+    ) -> RegionCandidate? {
         let textRect = MangaPageCoordinateSpace.clampedNormalizedRect(rawTextRect.standardized)
         guard textRect.width > 0, textRect.height > 0 else { return nil }
         let textArea = max(MangaPageCoordinateSpace.area(textRect), 0.000_001)
@@ -120,7 +124,11 @@ nonisolated enum MangaVisionOCRGeometry {
                 - normalizedDistance * 0.9
                 - fittedArea * 0.8
                 + CGFloat(balloon.confidence) * 0.35
-            return RegionCandidate(rect: fitted, score: score)
+            return RegionCandidate(
+                rect: fitted,
+                score: score,
+                polygon: balloon.contour?.cgPoints ?? []
+            )
         }.sorted { lhs, rhs in
             if abs(lhs.score - rhs.score) > 0.000_1 { return lhs.score > rhs.score }
             return MangaPageCoordinateSpace.area(lhs.rect)
@@ -165,7 +173,7 @@ nonisolated enum MangaVisionOCRGeometry {
                 - distance / diagonal * 0.7
                 - area * 0.45
                 + CGFloat(region.confidence) * 0.25
-            return RegionCandidate(rect: fitted, score: score)
+            return RegionCandidate(rect: fitted, score: score, polygon: [])
         }
         return candidates.max(by: { $0.score < $1.score })?.rect
     }
@@ -188,6 +196,90 @@ nonisolated enum MangaVisionOCRGeometry {
             && rect.height >= 0.002
             && area >= 0.000_02
             && area <= 0.30
+    }
+}
+
+/// Single preparation boundary shared by every OCR-backed translation consumer.
+///
+/// The caller may replace the local OCR candidates with visually reviewed blocks, but
+/// geometry enrichment, filtering, segmentation and semantic reading order are always
+/// applied here afterwards. This prevents Apple Translation, cloud text translation,
+/// OCR magnification and offline translation from drifting into separate page models.
+nonisolated enum MangaVisionOCRTranslationPreparation {
+    static func prepare(
+        baseResult: OCRPipelineResult,
+        candidateBlocks: [TextBlock]? = nil,
+        analysis: MangaPageAnalysis?,
+        safeAreaInset: Double,
+        minimumTextHeight: Double,
+        isRightToLeft: Bool
+    ) -> OCRPipelineResult {
+        let candidates = candidateBlocks ?? baseResult.resolvedBlocks
+        let enrichedCandidates = analysis.map {
+            MangaVisionOCRGeometry.applyingDetectedGeometry(
+                to: candidates,
+                analysis: $0
+            )
+        } ?? candidates
+
+        let annotated = AITranslator.annotatedMangaTextBlocks(
+            enrichedCandidates,
+            safeAreaInset: safeAreaInset,
+            minimumTextHeight: minimumTextHeight,
+            isRightToLeft: isRightToLeft
+        )
+        let visible = annotated.filter { !$0.isFiltered }
+        let filteredOut = annotated.filter(\.isFiltered)
+        let segmentation = MangaTextSegmenter.segment(
+            visible,
+            isRightToLeft: isRightToLeft
+        )
+
+        let orderedResolved: [TextBlock]
+        let orderedLines: [TextBlock]
+        let orderedBubbles: [TextBlock]
+        let enrichedRaw: [TextBlock]
+        if let analysis {
+            orderedResolved = MangaVisionOCROrdering.orderedBlocks(
+                visible,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            orderedLines = MangaVisionOCROrdering.orderedBlocks(
+                segmentation.lines,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            orderedBubbles = MangaVisionOCROrdering.orderedBlocks(
+                segmentation.bubbles,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            enrichedRaw = MangaVisionOCRGeometry.applyingDetectedGeometry(
+                to: baseResult.rawBlocks,
+                analysis: analysis
+            )
+        } else {
+            orderedResolved = AITranslator.sortedTextBlocks(visible, isRightToLeft: isRightToLeft)
+            orderedLines = AITranslator.sortedTextBlocks(segmentation.lines, isRightToLeft: isRightToLeft)
+            orderedBubbles = AITranslator.sortedTextBlocks(segmentation.bubbles, isRightToLeft: isRightToLeft)
+            enrichedRaw = baseResult.rawBlocks
+        }
+
+        var rejectedByID: [UUID: TextBlock] = [:]
+        for block in baseResult.rejectedBlocks + filteredOut {
+            rejectedByID[block.id] = block
+        }
+
+        return OCRPipelineResult(
+            rawBlocks: enrichedRaw,
+            resolvedBlocks: orderedResolved,
+            lineBlocks: orderedLines,
+            bubbleBlocks: orderedBubbles,
+            rejectedBlocks: Array(rejectedByID.values),
+            detectedLanguage: baseResult.detectedLanguage,
+            quality: baseResult.quality
+        )
     }
 }
 
