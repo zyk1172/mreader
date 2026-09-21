@@ -49,6 +49,7 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
             estimatedFontScale: 0.035,
             textOrientation: .vertical,
             layoutRole: .dialogue,
+            contentRole: .dialogue,
             bubbleBox: CGRect(x: 0.50, y: 0.12, width: 0.22, height: 0.38)
         )
         let prompt = try AIPageTranslationPromptBuilder.prompt(
@@ -63,6 +64,7 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
         XCTAssertTrue(prompt.contains("视觉位置、人物候选、说话人候选等弱提示"))
         XCTAssertTrue(prompt.contains(#""orientation":"vertical""#))
         XCTAssertTrue(prompt.contains(#""role":"dialogue""#))
+        XCTAssertTrue(prompt.contains(#""contentRole":"dialogue""#))
         XCTAssertTrue(prompt.contains(#""bubbleBox":{"#))
         XCTAssertTrue(AITranslator.defaultTranslationStyleInstructions.contains("拟声词"))
         XCTAssertTrue(AITranslator.defaultTranslationStyleInstructions.contains("未确认的人物关系"))
