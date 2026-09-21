@@ -39,9 +39,27 @@ nonisolated enum MangaVisionOCRGeometry {
             var enriched = block
 
             // A real bubble supplied by another OCR/VLM path is authoritative.
-            // Do not attach a tighter model text safe-region that could silently
-            // override that bubble during Reader layout resolution.
-            if enriched.bubbleBox != nil {
+            // Keep its box, but allow the local segmentation model to fill in a
+            // missing contour when both geometries clearly describe the same bubble.
+            if let existingBubble = enriched.bubbleBox {
+                if enriched.bubblePolygon.isEmpty,
+                   let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons),
+                   !matched.polygon.isEmpty {
+                    let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
+                        existingBubble,
+                        matched.rect
+                    )
+                    let containment = max(
+                        MangaPageCoordinateSpace.containment(of: existingBubble, in: matched.rect),
+                        MangaPageCoordinateSpace.containment(of: matched.rect, in: existingBubble)
+                    )
+                    if overlap >= 0.35 || containment >= 0.70 {
+                        enriched.bubblePolygon = matched.polygon
+                    }
+                }
+                if enriched.layoutSafeRegion == nil {
+                    enriched.layoutSafeRegion = existingBubble
+                }
                 return enriched
             }
 
