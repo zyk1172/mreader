@@ -6300,25 +6300,16 @@ struct LocalImageView: View {
     }
 
     private func preparedOCRResult(from result: OCRPipelineResult) -> OCRPipelineResult {
-        let annotated = AITranslator.annotatedMangaTextBlocks(
-            result.resolvedBlocks,
-            safeAreaInset: ocrSafeAreaInset,
-            minimumTextHeight: ocrMinimumTextHeight,
-            isRightToLeft: isRightToLeftReading
-        )
-        let filtered = annotated.filter { !$0.isFiltered }
-        let segmentation = MangaTextSegmenter.segment(
-            filtered,
-            isRightToLeft: isRightToLeftReading
-        )
-        let filteredOut = annotated.filter(\.isFiltered)
+        // Recognition now returns the canonical translation-ready result. This method
+        // only mirrors that shared result into the debug overlay; it must not regroup
+        // or filter blocks a second time.
         if ocrShowDebugBoxes {
             debugRawBlocks = result.rawBlocks
             debugCandidateBlocks = result.resolvedBlocks
-            debugFilteredBlocks = filtered
-            debugFilteredOutBlocks = filteredOut
-            debugLineBlocks = segmentation.lines
-            debugBubbleBlocks = segmentation.bubbles
+            debugFilteredBlocks = result.resolvedBlocks
+            debugFilteredOutBlocks = result.rejectedBlocks.filter(\.isFiltered)
+            debugLineBlocks = result.lineBlocks
+            debugBubbleBlocks = result.bubbleBlocks
             debugRejectedBlocks = result.rejectedBlocks
         } else {
             debugRawBlocks.removeAll()
@@ -6329,15 +6320,7 @@ struct LocalImageView: View {
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
         }
-        return OCRPipelineResult(
-            rawBlocks: result.rawBlocks,
-            resolvedBlocks: filtered,
-            lineBlocks: segmentation.lines,
-            bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: result.rejectedBlocks + filteredOut,
-            detectedLanguage: result.detectedLanguage,
-            quality: result.quality
-        )
+        return result
     }
 
     private var preferredDecodeMaxPixelSize: CGFloat {
@@ -6656,7 +6639,7 @@ struct LocalImageView: View {
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
         let activeConfiguration = AIProviderStore.shared.activeConfiguration()
         let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|text-protocol=\(activeConfiguration?.textModelDescriptor.apiProtocol.rawValue ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")|vision-protocol=\(activeConfiguration?.visionModelDescriptor.apiProtocol.rawValue ?? "none")"
-        let key = "\(url.absoluteString)#ocr-revision=\(JapaneseVerticalOCRService.revision)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
+        let key = "\(url.absoluteString)#ocr-revision=\(JapaneseVerticalOCRService.revision)#geometry=\(AITranslationPageRequest.ocrGeometryRevision)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
         if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
             return recognizedPipelineCache
         }
@@ -6674,31 +6657,25 @@ struct LocalImageView: View {
             pageIndex: pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: comicID,
+            pageIndex: pageIndex,
+            pageURL: url,
+            image: image
+        )
 #if DEBUG
-        if ocrShowDebugBoxes,
-           let analysis = try? await MangaVisionService.shared.analysis(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                pageURL: url,
-                image: image
-           ) {
+        if ocrShowDebugBoxes, let analysis {
             await MainActor.run {
                 self.mangaVisionDebugAnalysis = analysis
             }
         }
 #endif
-        if let comicID, let pageIndex {
-            await OCRRuntimeService.index(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                blocks: localResult.bubbleBlocks
-            )
-        }
-        let result: OCRPipelineResult
+
+        let candidateBlocks: [TextBlock]
         if ocrVisualVerificationEnabled, let activeConfiguration {
             let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
-            let corrected = try await TranslationRuntimeService.visualVerifyOCRRegions(
+            candidateBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: reviewBlocks,
                 apiKey: activeConfiguration.apiKey,
@@ -6712,22 +6689,24 @@ struct LocalImageView: View {
                 coverageRecoveryRequested: localResult.quality?.isSuspicious == true
                     || !localResult.rejectedBlocks.isEmpty
             )
-            let usableCorrected = corrected.filter { !$0.isFiltered }
-            let segmentation = MangaTextSegmenter.segment(
-                usableCorrected,
-                isRightToLeft: isRightToLeftReading
-            )
-            result = OCRPipelineResult(
-                rawBlocks: localResult.rawBlocks,
-                resolvedBlocks: usableCorrected,
-                lineBlocks: segmentation.lines,
-                bubbleBlocks: segmentation.bubbles,
-                rejectedBlocks: corrected.filter(\.isFiltered),
-                detectedLanguage: localResult.detectedLanguage,
-                quality: localResult.quality
-            )
         } else {
-            result = localResult
+            candidateBlocks = localResult.resolvedBlocks
+        }
+
+        let result = MangaVisionOCRTranslationPreparation.prepare(
+            baseResult: localResult,
+            candidateBlocks: candidateBlocks,
+            analysis: analysis,
+            safeAreaInset: ocrSafeAreaInset,
+            minimumTextHeight: ocrMinimumTextHeight,
+            isRightToLeft: isRightToLeftReading
+        )
+        if let comicID, let pageIndex {
+            await OCRRuntimeService.index(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                blocks: result.bubbleBlocks
+            )
         }
         await MainActor.run {
             self.recognizedPipelineCacheKey = key
