@@ -6703,11 +6703,15 @@ struct LocalImageView: View {
             pageIndex: pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
+        let analysisImage = await OCRPreprocessor.highResolutionImage(
+            from: url,
+            fallback: image
+        ) ?? image
         let analysis = try? await MangaVisionService.shared.analysis(
             comicID: comicID,
             pageIndex: pageIndex,
             pageURL: url,
-            image: image
+            image: analysisImage
         )
 #if DEBUG
         if ocrShowDebugBoxes, let analysis {
@@ -6719,10 +6723,9 @@ struct LocalImageView: View {
 
         let candidateBlocks: [TextBlock]
         if ocrVisualVerificationEnabled, let activeConfiguration {
-            let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
             candidateBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
-                image: ocrImage,
+                image: analysisImage,
                 blocks: reviewBlocks,
                 apiKey: activeConfiguration.apiKey,
                 baseURL: activeConfiguration.baseURL,
