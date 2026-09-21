@@ -1003,13 +1003,19 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 var localOCR: OCRPipelineResult?
                 var localOCRError: Error?
                 do {
-                    localOCR = try await MangaOCRPipeline.recognize(
-                        in: image,
-                        options: OCRPreprocessor.Options(
-                            isRightToLeft: work.isRightToLeft,
-                            minimumTextHeight: 0.002,
-                            recognitionMode: work.ocrRecognitionMode,
-                            sourceLanguagePreference: work.sourceLanguage
+                    let localOCROptions = OCRPreprocessor.Options(
+                        isRightToLeft: work.isRightToLeft,
+                        minimumTextHeight: 0.002,
+                        recognitionMode: work.ocrRecognitionMode,
+                        sourceLanguagePreference: work.sourceLanguage
+                    )
+                    localOCR = try await OCRRuntimeService.recognize(
+                        for: OCRRecognitionCacheRequest(
+                            pageURL: work.page.url,
+                            fallbackImage: image,
+                            options: localOCROptions,
+                            comicID: work.comic.id,
+                            pageIndex: work.page.index
                         )
                     )
                 } catch is CancellationError {
