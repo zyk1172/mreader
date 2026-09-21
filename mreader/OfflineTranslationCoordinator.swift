@@ -992,7 +992,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 viewportAspect: max(image.size.height / max(image.size.width, 1), 1.25),
                 processingMode: work.processingMode,
                 ocrRecognitionMode: work.ocrRecognitionMode,
-                usesVisualOCRVerification: work.usesVisualOCRVerification
+                usesVisualOCRVerification: work.usesVisualOCRVerification,
+                comicID: work.comic.id,
+                pageIndex: work.page.index
             )
             var translationResult = initialTranslationResult
             var retryCount = initialRetryCount
@@ -1001,13 +1003,19 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 var localOCR: OCRPipelineResult?
                 var localOCRError: Error?
                 do {
-                    localOCR = try await MangaOCRPipeline.recognize(
-                        in: image,
-                        options: OCRPreprocessor.Options(
-                            isRightToLeft: work.isRightToLeft,
-                            minimumTextHeight: 0.002,
-                            recognitionMode: work.ocrRecognitionMode,
-                            sourceLanguagePreference: work.sourceLanguage
+                    let localOCROptions = OCRPreprocessor.Options(
+                        isRightToLeft: work.isRightToLeft,
+                        minimumTextHeight: 0.002,
+                        recognitionMode: work.ocrRecognitionMode,
+                        sourceLanguagePreference: work.sourceLanguage
+                    )
+                    localOCR = try await OCRRuntimeService.recognize(
+                        for: OCRRecognitionCacheRequest(
+                            pageURL: work.page.url,
+                            fallbackImage: image,
+                            options: localOCROptions,
+                            comicID: work.comic.id,
+                            pageIndex: work.page.index
                         )
                     )
                 } catch is CancellationError {
@@ -1204,7 +1212,9 @@ final class OfflineTranslationCoordinator: ObservableObject {
         viewportAspect: CGFloat,
         processingMode: OfflineTranslationProcessingMode,
         ocrRecognitionMode: OCRRecognitionMode,
-        usesVisualOCRVerification: Bool
+        usesVisualOCRVerification: Bool,
+        comicID: UUID,
+        pageIndex: Int
     ) async throws -> (OfflineVisionPageResult, retryCount: Int) {
         var attempt = 0
         while true {
@@ -1227,7 +1237,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
                         usesVisualOCRVerification: usesVisualOCRVerification,
                         viewportAspect: viewportAspect,
                         sourceLanguagePreference: sourceLanguage,
-                        previousContext: previousContext
+                        previousContext: previousContext,
+                        comicID: comicID,
+                        contextScopeID: TranslationContextBuilder.scopeID(
+                            comicID: comicID,
+                            target: targetLanguage
+                        ),
+                        pageIndex: pageIndex
                     )
                     let ocrResult = try await AITranslationPagePipeline.translateOCRPageWithStatus(request)
                     if ocrResult.blocks.isEmpty {
@@ -1300,7 +1316,13 @@ final class OfflineTranslationCoordinator: ObservableObject {
             usesVisualOCRVerification: false,
             viewportAspect: max(image.size.height / max(image.size.width, 1), 1.25),
             sourceLanguagePreference: work.sourceLanguage,
-            previousContext: work.previousContext
+            previousContext: work.previousContext,
+            comicID: work.comic.id,
+            contextScopeID: TranslationContextBuilder.scopeID(
+                comicID: work.comic.id,
+                target: work.targetLanguage
+            ),
+            pageIndex: work.page.index
         )
         while true {
             do {

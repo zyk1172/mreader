@@ -62,6 +62,127 @@ struct MangaVisionLayerTests {
         #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
     }
 
+    @Test func mangaBalloonContourFlowsIntoTranslationUnitAndSafeRegion() {
+        let contourPoints = [
+            CGPoint(x: 0.50, y: 0.18),
+            CGPoint(x: 0.70, y: 0.18),
+            CGPoint(x: 0.76, y: 0.34),
+            CGPoint(x: 0.70, y: 0.54),
+            CGPoint(x: 0.50, y: 0.54),
+            CGPoint(x: 0.46, y: 0.34)
+        ]
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.46, y: 0.18, width: 0.30, height: 0.36),
+            confidence: 0.94,
+            contour: MangaVisionContour(points: contourPoints)
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "contour-test",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let block = TextBlock(
+            text: "輪郭を使う",
+            boundingBox: CGRect(x: 0.57, y: 0.24, width: 0.06, height: 0.20),
+            confidence: 0.96,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.04,
+            textOrientation: .vertical
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+        #expect(enriched[0].bubbleBox == balloon.normalizedRect)
+        #expect(enriched[0].bubblePolygon == balloon.contour?.cgPoints)
+        #expect((enriched[0].layoutSafeRegion?.width ?? 1) < balloon.normalizedRect.width)
+        #expect((enriched[0].layoutSafeRegion?.height ?? 1) < balloon.normalizedRect.height)
+
+        let segmentation = MangaTextSegmenter.segment(enriched, isRightToLeft: true)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubblePolygon == balloon.contour?.cgPoints)
+    }
+
+    @Test func sharedTranslationPreparationReappliesVisionGeometryAfterReview() {
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.42, y: 0.12, width: 0.34, height: 0.40),
+            confidence: 0.91,
+            contour: MangaVisionContour(points: [
+                CGPoint(x: 0.44, y: 0.18),
+                CGPoint(x: 0.72, y: 0.18),
+                CGPoint(x: 0.74, y: 0.46),
+                CGPoint(x: 0.44, y: 0.46)
+            ])
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "shared-preparation",
+                pageIndex: 2,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1000, height: 1600),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let local = TextBlock(
+            text: "元のOCR",
+            boundingBox: CGRect(x: 0.56, y: 0.22, width: 0.05, height: 0.18),
+            confidence: 0.94,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.04,
+            textOrientation: .vertical
+        )
+        let visuallyReviewed = TextBlock(
+            id: local.id,
+            text: "視覚復核後",
+            boundingBox: local.boundingBox,
+            confidence: 0.97,
+            ocrSource: "visual-review",
+            estimatedFontScale: local.estimatedFontScale,
+            textOrientation: .vertical
+        )
+        let base = OCRPipelineResult(
+            rawBlocks: [local],
+            resolvedBlocks: [local],
+            lineBlocks: [local],
+            bubbleBlocks: [local],
+            rejectedBlocks: [],
+            detectedLanguage: "ja",
+            quality: nil
+        )
+
+        let prepared = MangaVisionOCRTranslationPreparation.prepare(
+            baseResult: base,
+            candidateBlocks: [visuallyReviewed],
+            analysis: analysis,
+            safeAreaInset: 0,
+            minimumTextHeight: 0.002,
+            isRightToLeft: true
+        )
+        #expect(prepared.bubbleBlocks.count == 1)
+        #expect(prepared.bubbleBlocks[0].text == "視覚復核後")
+        #expect(prepared.bubbleBlocks[0].bubbleBox == balloon.normalizedRect)
+        #expect(prepared.bubbleBlocks[0].bubblePolygon == balloon.contour?.cgPoints)
+    }
+
     @Test func mangaTextRegionProvidesLayoutSafeRegionWithoutInventingBubble() {
         let textRegion = region(
             .text,

@@ -7,6 +7,7 @@ nonisolated enum MangaVisionOCRGeometry {
     private struct RegionCandidate {
         let rect: CGRect
         let score: CGFloat
+        let polygon: [CGPoint]
     }
 
     /// Enrich local OCR with two different kinds of model geometry:
@@ -38,17 +39,54 @@ nonisolated enum MangaVisionOCRGeometry {
             var enriched = block
 
             // A real bubble supplied by another OCR/VLM path is authoritative.
-            // Do not attach a tighter model text safe-region that could silently
-            // override that bubble during Reader layout resolution.
-            if enriched.bubbleBox != nil {
+            // Keep its box, but allow the local segmentation model to fill in a
+            // missing contour when both geometries clearly describe the same bubble.
+            if let existingBubble = enriched.bubbleBox {
+                var matchedPhysicalBalloon: RegionCandidate?
+                if let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
+                    let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
+                        existingBubble,
+                        matched.rect
+                    )
+                    let containment = max(
+                        MangaPageCoordinateSpace.containment(of: existingBubble, in: matched.rect),
+                        MangaPageCoordinateSpace.containment(of: matched.rect, in: existingBubble)
+                    )
+                    if overlap >= 0.35 || containment >= 0.70 {
+                        matchedPhysicalBalloon = RegionCandidate(
+                            rect: existingBubble,
+                            score: matched.score,
+                            polygon: matched.polygon
+                        )
+                        if enriched.bubblePolygon.isEmpty, !matched.polygon.isEmpty {
+                            enriched.bubblePolygon = matched.polygon
+                        }
+                    }
+                }
+                if enriched.layoutSafeRegion == nil {
+                    if let matchedPhysicalBalloon, !matchedPhysicalBalloon.polygon.isEmpty {
+                        enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                            matchedPhysicalBalloon,
+                            textRect: enriched.boundingBox
+                        )
+                    } else {
+                        enriched.layoutSafeRegion = existingBubble
+                    }
+                }
                 return enriched
             }
 
             if enriched.layoutRole == .dialogue,
                let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
-                enriched.bubbleBox = balloon
+                enriched.bubbleBox = balloon.rect
+                if enriched.bubblePolygon.isEmpty {
+                    enriched.bubblePolygon = balloon.polygon
+                }
                 if enriched.layoutSafeRegion == nil {
-                    enriched.layoutSafeRegion = balloon
+                    enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                        balloon,
+                        textRect: enriched.boundingBox
+                    )
                 }
                 return enriched
             }
@@ -80,13 +118,13 @@ nonisolated enum MangaVisionOCRGeometry {
         textRect: CGRect,
         balloons: [MangaVisionRegion]
     ) -> CGRect? {
-        bestBalloon(for: textRect, balloons: balloons)
+        bestBalloon(for: textRect, balloons: balloons)?.rect
     }
 
     private static func bestBalloon(
         for rawTextRect: CGRect,
         balloons: [MangaVisionRegion]
-    ) -> CGRect? {
+    ) -> RegionCandidate? {
         let textRect = MangaPageCoordinateSpace.clampedNormalizedRect(rawTextRect.standardized)
         guard textRect.width > 0, textRect.height > 0 else { return nil }
         let textArea = max(MangaPageCoordinateSpace.area(textRect), 0.000_001)
@@ -120,7 +158,11 @@ nonisolated enum MangaVisionOCRGeometry {
                 - normalizedDistance * 0.9
                 - fittedArea * 0.8
                 + CGFloat(balloon.confidence) * 0.35
-            return RegionCandidate(rect: fitted, score: score)
+            return RegionCandidate(
+                rect: fitted,
+                score: score,
+                polygon: balloon.contour?.cgPoints ?? []
+            )
         }.sorted { lhs, rhs in
             if abs(lhs.score - rhs.score) > 0.000_1 { return lhs.score > rhs.score }
             return MangaPageCoordinateSpace.area(lhs.rect)
@@ -137,7 +179,27 @@ nonisolated enum MangaVisionOCRGeometry {
                 return nil
             }
         }
-        return best.rect
+        return best
+    }
+
+    private static func balloonLayoutSafeRegion(
+        _ balloon: RegionCandidate,
+        textRect: CGRect
+    ) -> CGRect {
+        guard balloon.polygon.count >= 3 else { return balloon.rect }
+
+        // Bounding boxes include the empty corners around oval/irregular balloons.
+        // Reserve a small contour-aware margin for typography while never excluding
+        // the actual OCR text that must remain visible in the translated surface.
+        let inset = balloon.rect.insetBy(
+            dx: balloon.rect.width * 0.06,
+            dy: balloon.rect.height * 0.06
+        )
+        guard inset.width > 0, inset.height > 0 else { return balloon.rect }
+        let safe = inset.union(textRect).intersection(balloon.rect)
+        return safe.isNull || safe.width <= 0 || safe.height <= 0
+            ? balloon.rect
+            : safe
     }
 
     private static func bestTextSafeRegion(
@@ -165,7 +227,7 @@ nonisolated enum MangaVisionOCRGeometry {
                 - distance / diagonal * 0.7
                 - area * 0.45
                 + CGFloat(region.confidence) * 0.25
-            return RegionCandidate(rect: fitted, score: score)
+            return RegionCandidate(rect: fitted, score: score, polygon: [])
         }
         return candidates.max(by: { $0.score < $1.score })?.rect
     }
@@ -188,6 +250,94 @@ nonisolated enum MangaVisionOCRGeometry {
             && rect.height >= 0.002
             && area >= 0.000_02
             && area <= 0.30
+    }
+}
+
+/// Single preparation boundary shared by every OCR-backed translation consumer.
+///
+/// The caller may replace the local OCR candidates with visually reviewed blocks, but
+/// geometry enrichment, filtering, segmentation and semantic reading order are always
+/// applied here afterwards. This prevents Apple Translation, cloud text translation,
+/// OCR magnification and offline translation from drifting into separate page models.
+nonisolated enum MangaVisionOCRTranslationPreparation {
+    static func prepare(
+        baseResult: OCRPipelineResult,
+        candidateBlocks: [TextBlock]? = nil,
+        analysis: MangaPageAnalysis?,
+        safeAreaInset: Double,
+        minimumTextHeight: Double,
+        isRightToLeft: Bool
+    ) -> OCRPipelineResult {
+        let candidates = candidateBlocks ?? baseResult.resolvedBlocks
+        let enrichedCandidates = analysis.map {
+            MangaVisionOCRGeometry.applyingDetectedGeometry(
+                to: candidates,
+                analysis: $0
+            )
+        } ?? candidates
+
+        let annotated = AITranslator.annotatedMangaTextBlocks(
+            enrichedCandidates,
+            safeAreaInset: safeAreaInset,
+            minimumTextHeight: minimumTextHeight,
+            isRightToLeft: isRightToLeft
+        )
+        let visible = annotated.filter { !$0.isFiltered }
+        let filteredOut = annotated.filter(\.isFiltered)
+        let segmentation = MangaTextSegmenter.segment(
+            visible,
+            isRightToLeft: isRightToLeft
+        )
+
+        let orderedResolved: [TextBlock]
+        let orderedLines: [TextBlock]
+        let orderedBubbles: [TextBlock]
+        let enrichedRaw: [TextBlock]
+        if let analysis {
+            orderedResolved = MangaVisionOCROrdering.orderedBlocks(
+                visible,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            orderedLines = MangaVisionOCROrdering.orderedBlocks(
+                segmentation.lines,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            orderedBubbles = MangaVisionOCROrdering.orderedBlocks(
+                segmentation.bubbles,
+                analysis: analysis,
+                isRightToLeft: isRightToLeft
+            )
+            enrichedRaw = MangaVisionOCRGeometry.applyingDetectedGeometry(
+                to: baseResult.rawBlocks,
+                analysis: analysis
+            )
+        } else {
+            orderedResolved = AITranslator.sortedTextBlocks(visible, isRightToLeft: isRightToLeft)
+            orderedLines = AITranslator.sortedTextBlocks(segmentation.lines, isRightToLeft: isRightToLeft)
+            orderedBubbles = AITranslator.sortedTextBlocks(segmentation.bubbles, isRightToLeft: isRightToLeft)
+            enrichedRaw = baseResult.rawBlocks
+        }
+
+        let visibleIDs = Set(visible.map(\.id))
+        var rejectedByID: [UUID: TextBlock] = [:]
+        for block in baseResult.rejectedBlocks + filteredOut where !visibleIDs.contains(block.id) {
+            rejectedByID[block.id] = block
+        }
+
+        return OCRPipelineResult(
+            rawBlocks: enrichedRaw,
+            resolvedBlocks: orderedResolved,
+            lineBlocks: orderedLines,
+            bubbleBlocks: orderedBubbles,
+            rejectedBlocks: AITranslator.sortedTextBlocks(
+                Array(rejectedByID.values),
+                isRightToLeft: isRightToLeft
+            ),
+            detectedLanguage: baseResult.detectedLanguage,
+            quality: baseResult.quality
+        )
     }
 }
 

@@ -75,6 +75,17 @@ enum OCRCoordinateMapper {
         )
     }
 
+    nonisolated static func displayPoint(
+        forNormalizedPagePoint point: CGPoint,
+        using transform: OCRDisplayTransform
+    ) -> CGPoint {
+        let imageRect = transform.imageRect
+        return CGPoint(
+            x: imageRect.minX + point.x * imageRect.width,
+            y: imageRect.minY + point.y * imageRect.height
+        )
+    }
+
     nonisolated static func normalizedPageRect(
         forSliceRect rect: CGRect,
         sourceRect: CGRect

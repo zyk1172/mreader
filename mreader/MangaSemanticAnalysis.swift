@@ -253,7 +253,9 @@ nonisolated enum MangaSemanticAnalyzer {
         blocks: [TextBlock]
     ) -> String {
         guard !semanticPage.panels.isEmpty else { return "" }
-        var lines: [String] = ["漫画页面结构（仅作翻译消歧提示，不代表确定人物身份或说话人）："]
+        var lines: [String] = [
+            "漫画页面视觉上下文（只用于翻译消歧；人物位置/说话人均为弱提示，不得据此虚构身份）："
+        ]
         for (panelIndex, panel) in semanticPage.panels.enumerated() {
             let panelRect = panel.panel.normalizedRect
             lines.append(String(
@@ -269,10 +271,35 @@ nonisolated enum MangaSemanticAnalyzer {
                     .replacingOccurrences(of: "\n", with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !source.isEmpty else { continue }
-                let hints = semanticText.speakerCandidates.prefix(3)
-                    .map { String(format: "personHint=%.2f", $0.score) }
-                    .joined(separator: ",")
-                lines.append("  text=\(source)\(hints.isEmpty ? "" : " [\(hints)]")")
+
+                let order = (blocks.firstIndex(where: { $0.id == block.id }) ?? 0) + 1
+                let textRect = block.boundingBox
+                var metadata = "order=\(order) role=\(block.layoutRole.rawValue) orientation=\(block.textOrientation.rawValue)"
+                metadata += String(
+                    format: " textRect=(%.3f,%.3f,%.3f,%.3f)",
+                    Double(textRect.minX), Double(textRect.minY),
+                    Double(textRect.width), Double(textRect.height)
+                )
+                if let bubble = block.bubbleBox {
+                    metadata += String(
+                        format: " bubbleRect=(%.3f,%.3f,%.3f,%.3f)",
+                        Double(bubble.minX), Double(bubble.minY),
+                        Double(bubble.width), Double(bubble.height)
+                    )
+                }
+
+                let hints = semanticText.speakerCandidates.prefix(3).compactMap { hint -> String? in
+                    guard let anchor = hint.person.face?.normalizedRect ?? hint.person.body?.normalizedRect else {
+                        return nil
+                    }
+                    return String(
+                        format: "person(x=%.3f,y=%.3f,score=%.2f)",
+                        Double(anchor.midX), Double(anchor.midY), Double(hint.score)
+                    )
+                }.joined(separator: ",")
+                lines.append(
+                    "  [\(metadata)] source=\(source)\(hints.isEmpty ? "" : " speakerHints=[\(hints)]")"
+                )
             }
         }
         return lines.joined(separator: "\n")

@@ -5369,12 +5369,13 @@ struct LocalImageView: View {
                 // F07: all surfaces are one real layer below every glyph layer.
                 ForEach(items) { item in
                     TranslationSurfaceRenderer(
-                        layoutSize: item.rect.size,
+                        layoutSize: item.surfaceRect.size,
+                        contour: item.surfacePolygon,
                         surfaceStyle: item.surfaceStyle,
                         displayMode: item.displayMode,
                         layoutStatus: item.layoutStatus
                     )
-                    .position(x: item.rect.midX, y: item.rect.midY)
+                    .position(x: item.surfaceRect.midX, y: item.surfaceRect.midY)
                     .zIndex(TranslationSurfaceLayering.surfaceZIndex)
                     .allowsHitTesting(false)
                 }
@@ -5635,6 +5636,8 @@ struct LocalImageView: View {
         return TranslationLayoutItem(
             blocks: [block],
             rect: geometry.choice.layout.rect,
+            surfaceRect: geometry.surfaceRect,
+            surfacePolygon: geometry.surfacePolygon,
             allowedBounds: geometry.allowedBounds,
             fontSize: geometry.choice.layout.fontSize,
             contentPadding: geometry.choice.layout.contentPadding,
@@ -5658,6 +5661,8 @@ struct LocalImageView: View {
         translationOrientation: TextOrientation,
         displayMode: TranslationDisplayMode,
         surfaceStyle: TranslationSurfaceStyle,
+        surfaceRect: CGRect,
+        surfacePolygon: [CGPoint],
         choice: OCRBubbleLayoutEngine.TranslationLayoutChoice
     ) {
         let transform = ocrDisplayTransform(in: size)
@@ -5751,6 +5756,14 @@ struct LocalImageView: View {
             geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText,
             minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
         )
+        let bubbleSurface = mappedTranslationBubbleSurface(
+            for: block,
+            usableBubbleBounds: usableBubbleBounds,
+            using: transform
+        )
+        let surfaceRect = bubbleSurface?.rect ?? choice.layout.rect
+        let surfacePolygon = bubbleSurface?.polygon ?? []
+
         #if DEBUG
         MReaderLog.aiTranslation.debug(
             "translation layout sourceOrientation=\(block.textOrientation.rawValue, privacy: .public) translationOrientation=\(translationOrientation.rawValue, privacy: .public) role=\(block.layoutRole.rawValue, privacy: .public) sourceFont=\(String(format: "%.1f", requestedFontSize), privacy: .public) chosenFont=\(String(format: "%.1f", choice.layout.fontSize), privacy: .public) contentPadding=\(String(format: "%.1f", choice.layout.contentPadding), privacy: .public) sourceRect=\(String(describing: textRect), privacy: .public) allowedBounds=\(String(describing: allowedBounds), privacy: .public) layoutBounds=\(String(describing: layoutBounds), privacy: .public) bubble=\(hasReliableBubble, privacy: .public) surface=\(surfaceStyle.rawValue, privacy: .public) layoutRect=\(String(describing: choice.layout.rect), privacy: .public)"
@@ -5763,6 +5776,8 @@ struct LocalImageView: View {
             translationOrientation: translationOrientation,
             displayMode: displayMode,
             surfaceStyle: surfaceStyle,
+            surfaceRect: surfaceRect,
+            surfacePolygon: surfacePolygon,
             choice: choice
         )
     }
@@ -5777,6 +5792,32 @@ struct LocalImageView: View {
             textRect: textRect,
             using: transform
         )
+    }
+
+    private func mappedTranslationBubbleSurface(
+        for block: TextBlock,
+        usableBubbleBounds: CGRect?,
+        using transform: OCRDisplayTransform
+    ) -> (rect: CGRect, polygon: [CGPoint])? {
+        guard let surfaceRect = usableBubbleBounds,
+              block.bubblePolygon.count >= 3 else {
+            return nil
+        }
+        let mapped = block.bubblePolygon.map {
+            OCRCoordinateMapper.displayPoint(
+                forNormalizedPagePoint: $0,
+                using: transform
+            )
+        }.filter { $0.x.isFinite && $0.y.isFinite }
+        guard mapped.count >= 3 else { return nil }
+
+        let local = mapped.map {
+            CGPoint(
+                x: $0.x - surfaceRect.minX,
+                y: $0.y - surfaceRect.minY
+            )
+        }
+        return (surfaceRect, local)
     }
 
     private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
@@ -5846,6 +5887,7 @@ struct LocalImageView: View {
             hasher.combine(block.translationContentRole)
             hasher.combine(block.boundingBox)
             hasher.combine(block.bubbleBox)
+            hasher.combine(block.bubblePolygon)
             hasher.combine(block.layoutSafeRegion)
             hasher.combine(block.estimatedFontScale)
             hasher.combine(block.confidence)
@@ -5924,6 +5966,8 @@ struct LocalImageView: View {
             items.append(TranslationLayoutItem(
                 blocks: item.blocks,
                 rect: presentationRect,
+                surfaceRect: item.surfaceRect,
+                surfacePolygon: item.surfacePolygon,
                 allowedBounds: item.allowedBounds,
                 fontSize: item.fontSize,
                 contentPadding: item.contentPadding,
@@ -5991,6 +6035,8 @@ struct LocalImageView: View {
             items.append(TranslationLayoutItem(
                 blocks: [block],
                 rect: rect,
+                surfaceRect: rect,
+                surfacePolygon: [],
                 allowedBounds: transform.imageRect,
                 fontSize: uniformOCRFontSize,
                 contentPadding: TranslationLayoutMetrics.contentPadding,
@@ -6300,25 +6346,16 @@ struct LocalImageView: View {
     }
 
     private func preparedOCRResult(from result: OCRPipelineResult) -> OCRPipelineResult {
-        let annotated = AITranslator.annotatedMangaTextBlocks(
-            result.resolvedBlocks,
-            safeAreaInset: ocrSafeAreaInset,
-            minimumTextHeight: ocrMinimumTextHeight,
-            isRightToLeft: isRightToLeftReading
-        )
-        let filtered = annotated.filter { !$0.isFiltered }
-        let segmentation = MangaTextSegmenter.segment(
-            filtered,
-            isRightToLeft: isRightToLeftReading
-        )
-        let filteredOut = annotated.filter(\.isFiltered)
+        // Recognition now returns the canonical translation-ready result. This method
+        // only mirrors that shared result into the debug overlay; it must not regroup
+        // or filter blocks a second time.
         if ocrShowDebugBoxes {
             debugRawBlocks = result.rawBlocks
             debugCandidateBlocks = result.resolvedBlocks
-            debugFilteredBlocks = filtered
-            debugFilteredOutBlocks = filteredOut
-            debugLineBlocks = segmentation.lines
-            debugBubbleBlocks = segmentation.bubbles
+            debugFilteredBlocks = result.resolvedBlocks
+            debugFilteredOutBlocks = result.rejectedBlocks.filter(\.isFiltered)
+            debugLineBlocks = result.lineBlocks
+            debugBubbleBlocks = result.bubbleBlocks
             debugRejectedBlocks = result.rejectedBlocks
         } else {
             debugRawBlocks.removeAll()
@@ -6329,15 +6366,7 @@ struct LocalImageView: View {
             debugBubbleBlocks.removeAll()
             debugRejectedBlocks.removeAll()
         }
-        return OCRPipelineResult(
-            rawBlocks: result.rawBlocks,
-            resolvedBlocks: filtered,
-            lineBlocks: segmentation.lines,
-            bubbleBlocks: segmentation.bubbles,
-            rejectedBlocks: result.rejectedBlocks + filteredOut,
-            detectedLanguage: result.detectedLanguage,
-            quality: result.quality
-        )
+        return result
     }
 
     private var preferredDecodeMaxPixelSize: CGFloat {
@@ -6656,7 +6685,7 @@ struct LocalImageView: View {
     private func recognizedPipelineResult(for image: UIImage) async throws -> OCRPipelineResult {
         let activeConfiguration = AIProviderStore.shared.activeConfiguration()
         let modelIdentity = "text=\(activeConfiguration?.textModel ?? "none")|text-protocol=\(activeConfiguration?.textModelDescriptor.apiProtocol.rawValue ?? "none")|vision=\(activeConfiguration?.visionModel ?? "none")|vision-protocol=\(activeConfiguration?.visionModelDescriptor.apiProtocol.rawValue ?? "none")"
-        let key = "\(url.absoluteString)#ocr-revision=\(JapaneseVerticalOCRService.revision)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
+        let key = "\(url.absoluteString)#ocr-revision=\(JapaneseVerticalOCRService.revision)#geometry=\(AITranslationPageRequest.ocrGeometryRevision)#rtl=\(isRightToLeftReading)#min=\(ocrMinimumTextHeight)#localMode=\(ocrRecognitionModeRaw)#visual=\(ocrVisualVerificationEnabled)#source=\(translationSourceLanguageRaw)#model=\(modelIdentity)"
         if recognizedPipelineCacheKey == key, let recognizedPipelineCache {
             return recognizedPipelineCache
         }
@@ -6674,32 +6703,29 @@ struct LocalImageView: View {
             pageIndex: pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
+        let analysisImage = await OCRPreprocessor.highResolutionImage(
+            from: url,
+            fallback: image
+        ) ?? image
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: comicID,
+            pageIndex: pageIndex,
+            pageURL: url,
+            image: analysisImage
+        )
 #if DEBUG
-        if ocrShowDebugBoxes,
-           let analysis = try? await MangaVisionService.shared.analysis(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                pageURL: url,
-                image: image
-           ) {
+        if ocrShowDebugBoxes, let analysis {
             await MainActor.run {
                 self.mangaVisionDebugAnalysis = analysis
             }
         }
 #endif
-        if let comicID, let pageIndex {
-            await OCRRuntimeService.index(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                blocks: localResult.bubbleBlocks
-            )
-        }
-        let result: OCRPipelineResult
+
+        let candidateBlocks: [TextBlock]
         if ocrVisualVerificationEnabled, let activeConfiguration {
-            let ocrImage = await OCRPreprocessor.highResolutionImage(from: url, fallback: image) ?? image
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
-            let corrected = try await TranslationRuntimeService.visualVerifyOCRRegions(
-                image: ocrImage,
+            candidateBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
+                image: analysisImage,
                 blocks: reviewBlocks,
                 apiKey: activeConfiguration.apiKey,
                 baseURL: activeConfiguration.baseURL,
@@ -6712,22 +6738,24 @@ struct LocalImageView: View {
                 coverageRecoveryRequested: localResult.quality?.isSuspicious == true
                     || !localResult.rejectedBlocks.isEmpty
             )
-            let usableCorrected = corrected.filter { !$0.isFiltered }
-            let segmentation = MangaTextSegmenter.segment(
-                usableCorrected,
-                isRightToLeft: isRightToLeftReading
-            )
-            result = OCRPipelineResult(
-                rawBlocks: localResult.rawBlocks,
-                resolvedBlocks: usableCorrected,
-                lineBlocks: segmentation.lines,
-                bubbleBlocks: segmentation.bubbles,
-                rejectedBlocks: corrected.filter(\.isFiltered),
-                detectedLanguage: localResult.detectedLanguage,
-                quality: localResult.quality
-            )
         } else {
-            result = localResult
+            candidateBlocks = localResult.resolvedBlocks
+        }
+
+        let result = MangaVisionOCRTranslationPreparation.prepare(
+            baseResult: localResult,
+            candidateBlocks: candidateBlocks,
+            analysis: analysis,
+            safeAreaInset: ocrSafeAreaInset,
+            minimumTextHeight: ocrMinimumTextHeight,
+            isRightToLeft: isRightToLeftReading
+        )
+        if let comicID, let pageIndex {
+            await OCRRuntimeService.index(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                blocks: result.bubbleBlocks
+            )
         }
         await MainActor.run {
             self.recognizedPipelineCacheKey = key
@@ -6740,6 +6768,10 @@ struct LocalImageView: View {
 private struct TranslationLayoutItem: Identifiable {
     let blocks: [TextBlock]
     let rect: CGRect
+    /// Background surface. For Manga Vision balloon contours this remains
+    /// anchored to the physical balloon while the text can move within it.
+    let surfaceRect: CGRect
+    let surfacePolygon: [CGPoint]
     /// Region inside which collision avoidance is allowed to move this item.
     let allowedBounds: CGRect
     let fontSize: CGFloat
@@ -6751,8 +6783,8 @@ private struct TranslationLayoutItem: Identifiable {
     let layoutRole: TranslationLayoutRole
     let contentRole: TranslationContentRole
     let displayMode: TranslationDisplayMode
-    /// 有可靠漫画气泡时为 detectedBubble；否则为 measuredText。两种表面都绘制
-    /// RoundedRectangle 背景，只采用不同的卡片尺寸算法。
+    /// 有可靠漫画气泡时为 detectedBubble；否则为 measuredText。可靠 contour
+    /// 会直接绘制物理气泡形状，其余路径继续使用圆角表面。
     let surfaceStyle: TranslationSurfaceStyle
     let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
 
@@ -6772,7 +6804,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 2
+    static let layoutRevision = 3
 
     struct Key: Equatable {
         let scope: String
@@ -6873,42 +6905,86 @@ private enum TranslationColorStyle: String, CaseIterable {
     }
 }
 
+private struct TranslationBubbleContourShape: Shape {
+    let points: [CGPoint]
+
+    func path(in rect: CGRect) -> Path {
+        guard let first = points.first else { return Path() }
+        var path = Path()
+        path.move(to: first)
+        for point in points.dropFirst() {
+            path.addLine(to: point)
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
 private struct TranslationSurfaceRenderer: View {
     let layoutSize: CGSize
+    let contour: [CGPoint]
     let surfaceStyle: TranslationSurfaceStyle
     let displayMode: TranslationDisplayMode
     let layoutStatus: OCRBubbleLayoutEngine.TranslationLayoutStatus
+
+    private var usesPhysicalContour: Bool {
+        contour.count >= 3 && surfaceStyle == .detectedBubble && displayMode != .annotation
+    }
 
     @ViewBuilder
     var body: some View {
         // There is no expansion interaction anymore, so every translation uses
         // its normal inline surface. Never draw the legacy grey preview card.
-        switch displayMode {
-        case .inPlace:
-            RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
-                .fill(Color.white.opacity(0.94))
-                .frame(width: layoutSize.width, height: layoutSize.height)
-        case .assistOverlay:
-            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                        .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                        .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                        .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-                }
-                .frame(width: layoutSize.width, height: layoutSize.height)
-        case .annotation:
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(.thinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.white.opacity(0.30))
-                }
-                .frame(width: layoutSize.width, height: layoutSize.height)
+        if usesPhysicalContour {
+            switch displayMode {
+            case .inPlace:
+                TranslationBubbleContourShape(points: contour)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .assistOverlay:
+                TranslationBubbleContourShape(points: contour)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        TranslationBubbleContourShape(points: contour)
+                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                    }
+                    .overlay {
+                        TranslationBubbleContourShape(points: contour)
+                            .stroke(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                    }
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .annotation:
+                EmptyView()
+            }
+        } else {
+            switch displayMode {
+            case .inPlace:
+                RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .assistOverlay:
+                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                    }
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            case .annotation:
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(.thinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.30))
+                    }
+                    .frame(width: layoutSize.width, height: layoutSize.height)
+            }
         }
     }
 }
