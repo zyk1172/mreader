@@ -52,7 +52,10 @@ nonisolated enum MangaVisionOCRGeometry {
                     enriched.bubblePolygon = balloon.polygon
                 }
                 if enriched.layoutSafeRegion == nil {
-                    enriched.layoutSafeRegion = balloon.rect
+                    enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                        balloon,
+                        textRect: enriched.boundingBox
+                    )
                 }
                 return enriched
             }
@@ -146,6 +149,26 @@ nonisolated enum MangaVisionOCRGeometry {
             }
         }
         return best
+    }
+
+    private static func balloonLayoutSafeRegion(
+        _ balloon: RegionCandidate,
+        textRect: CGRect
+    ) -> CGRect {
+        guard balloon.polygon.count >= 3 else { return balloon.rect }
+
+        // Bounding boxes include the empty corners around oval/irregular balloons.
+        // Reserve a small contour-aware margin for typography while never excluding
+        // the actual OCR text that must remain visible in the translated surface.
+        let inset = balloon.rect.insetBy(
+            dx: balloon.rect.width * 0.06,
+            dy: balloon.rect.height * 0.06
+        )
+        guard inset.width > 0, inset.height > 0 else { return balloon.rect }
+        let safe = inset.union(textRect).intersection(balloon.rect)
+        return safe.isNull || safe.width <= 0 || safe.height <= 0
+            ? balloon.rect
+            : safe
     }
 
     private static func bestTextSafeRegion(
