@@ -320,8 +320,9 @@ nonisolated enum MangaVisionOCRTranslationPreparation {
             enrichedRaw = baseResult.rawBlocks
         }
 
+        let visibleIDs = Set(visible.map(\.id))
         var rejectedByID: [UUID: TextBlock] = [:]
-        for block in baseResult.rejectedBlocks + filteredOut {
+        for block in baseResult.rejectedBlocks + filteredOut where !visibleIDs.contains(block.id) {
             rejectedByID[block.id] = block
         }
 
