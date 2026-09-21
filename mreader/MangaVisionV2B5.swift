@@ -627,7 +627,7 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
             MangaVisionV2B5OutputContract.inputFeatureName: MLFeatureValue(multiArray: prepared.array)
         ])
         let modelStart = ContinuousClock.now
-        let prediction = try await runtime.model.prediction(from: input)
+        // Keep the non-Sendable MLModel actor-isolated. The provider already serializes\n        // access to its runtime, so synchronous prediction avoids sending the model across\n        // an isolation boundary while preserving a single authoritative Core ML runtime.\n        let prediction = try runtime.model.prediction(from: input)
         let modelMilliseconds = Self.milliseconds(modelStart.duration(to: .now))
         let postprocessStart = ContinuousClock.now
         let rawOutputs = try MangaVisionV2B5OutputContract.rawOutputs(from: prediction)
