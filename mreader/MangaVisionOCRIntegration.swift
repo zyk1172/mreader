@@ -145,7 +145,7 @@ nonisolated enum MangaVisionOCRGeometry {
                 return nil
             }
         }
-        return best.rect
+        return best
     }
 
     private static func bestTextSafeRegion(
