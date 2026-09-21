@@ -102,6 +102,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
     let textColorHex: String?
     let textOrientation: TextOrientation
     let layoutRole: TranslationLayoutRole
+    let contentRole: TranslationContentRole
     let bubbleBox: CGRect?
 
     init(
@@ -113,6 +114,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
         textColorHex: String? = nil,
         textOrientation: TextOrientation = .horizontal,
         layoutRole: TranslationLayoutRole = .dialogue,
+        contentRole: TranslationContentRole = .other,
         bubbleBox: CGRect? = nil
     ) {
         self.id = id
@@ -123,6 +125,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
         self.textColorHex = textColorHex
         self.textOrientation = textOrientation
         self.layoutRole = layoutRole
+        self.contentRole = contentRole
         self.bubbleBox = bubbleBox
     }
 
@@ -137,6 +140,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
             textColorHex: block.textColorHex,
             textOrientation: block.textOrientation,
             layoutRole: block.layoutRole,
+            contentRole: block.translationContentRole,
             bubbleBox: block.bubbleBox
         )
     }
@@ -167,6 +171,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
             "textColor": textColorHex ?? "unknown",
             "orientation": textOrientation.rawValue,
             "role": layoutRole.rawValue,
+            "contentRole": contentRole.rawValue,
             "bubbleBox": bubbleJSON
         ]
     }
@@ -228,7 +233,7 @@ nonisolated enum AIPageTranslationPromptBuilder {
 
         翻译证据优先级（高优先级不得被低优先级覆盖）：
         1. 当前 item 的 sourceText 原义与明确语法关系。
-        2. 同页 items 的 order、相邻 sourceText、textBox、bubbleBox、role、orientation 和 fontScale。
+        2. 同页 items 的 order、相邻 sourceText、textBox、bubbleBox、role、contentRole、orientation 和 fontScale。
         3. 上下文中已经确认的原文→译文对照，用于统一称呼、术语、专名和语气。
         4. 视觉位置、人物候选、说话人候选等弱提示，只能用于消歧，不能据此创造姓名、性别、关系或剧情事实。
 
