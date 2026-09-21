@@ -100,6 +100,10 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
     let boundingBox: CGRect
     let estimatedFontScale: Double
     let textColorHex: String?
+    let textOrientation: TextOrientation
+    let layoutRole: TranslationLayoutRole
+    let contentRole: TranslationContentRole
+    let bubbleBox: CGRect?
 
     init(
         id: String,
@@ -107,7 +111,11 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
         order: Int,
         boundingBox: CGRect = .zero,
         estimatedFontScale: Double = 0,
-        textColorHex: String? = nil
+        textColorHex: String? = nil,
+        textOrientation: TextOrientation = .horizontal,
+        layoutRole: TranslationLayoutRole = .dialogue,
+        contentRole: TranslationContentRole = .other,
+        bubbleBox: CGRect? = nil
     ) {
         self.id = id
         self.sourceText = sourceText
@@ -115,6 +123,10 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
         self.boundingBox = boundingBox
         self.estimatedFontScale = estimatedFontScale
         self.textColorHex = textColorHex
+        self.textOrientation = textOrientation
+        self.layoutRole = layoutRole
+        self.contentRole = contentRole
+        self.bubbleBox = bubbleBox
     }
 
     init(block: TextBlock, order: Int) {
@@ -125,12 +137,27 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
             order: order,
             boundingBox: block.boundingBox,
             estimatedFontScale: block.estimatedFontScale,
-            textColorHex: block.textColorHex
+            textColorHex: block.textColorHex,
+            textOrientation: block.textOrientation,
+            layoutRole: block.layoutRole,
+            contentRole: block.translationContentRole,
+            bubbleBox: block.bubbleBox
         )
     }
 
     var jsonObject: [String: Any] {
-        [
+        let bubbleJSON: Any
+        if let bubbleBox {
+            bubbleJSON = [
+                "x": bubbleBox.minX,
+                "y": bubbleBox.minY,
+                "width": bubbleBox.width,
+                "height": bubbleBox.height
+            ]
+        } else {
+            bubbleJSON = NSNull()
+        }
+        return [
             "id": id,
             "order": order,
             "sourceText": sourceText,
@@ -141,7 +168,11 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
                 "height": boundingBox.height
             ],
             "fontScale": estimatedFontScale,
-            "textColor": textColorHex ?? "unknown"
+            "textColor": textColorHex ?? "unknown",
+            "orientation": textOrientation.rawValue,
+            "role": layoutRole.rawValue,
+            "contentRole": contentRole.rawValue,
+            "bubbleBox": bubbleJSON
         ]
     }
 }
@@ -163,9 +194,10 @@ nonisolated struct AIPageTranslationResult: Sendable, Equatable {
 
 nonisolated enum AIPageTranslationPromptBuilder {
     static let strictSystemPrompt = """
-    你是无对话能力的 JSON 翻译函数。只翻译输入 items 的 sourceText。
+    你是无对话能力的漫画翻译 JSON 函数。你的任务只有：忠实翻译输入 items 的 sourceText，并严格保持一一对应。
     不得输出分析、推理、解释、前言、Markdown 或代码围栏。整个响应必须是且仅是一个 JSON 对象，
-    第一个字符必须是 {，最后一个字符必须是 }。每个输入 id 必须原样返回一次；无法翻译时 translation=""、translationLines=[]。
+    第一个字符必须是 {，最后一个字符必须是 }。每个输入 id 必须原样返回一次；无法可靠翻译时 translation=""、translationLines=[]。
+    不得为了“更自然”而改变事实、否定关系、数量、人物关系或原文未明确的信息。
     """
 
     /// V2 固定协议：协议部分不可被用户提示词覆盖；用户只能编辑“翻译风格要求”。
@@ -195,13 +227,21 @@ nonisolated enum AIPageTranslationPromptBuilder {
         return """
         原文语言：\(source)
         目标语言：\(target.modelInstruction)
-        输入 items 已完成 OCR；不要识别图片，不要讨论 OCR 是否正确，不要合并、拆分、新增或遗漏 id。
+        输入 items 已完成 OCR；不要重新识别图片，不要讨论 OCR 是否正确，不要合并、拆分、新增或遗漏 id。
         每个 id 必须返回一次。translation 只放译文；不确定时使用空字符串。translationLines 不确定时使用空数组。
-        可以利用 items 的 order、textBox、fontScale 和同页相邻原文来判断断句、称呼、代词和语气，但不得改变、合并或拆分 id。
-        无法从原文或上下文确定代词指向时，保留自然的代词表达，不得凭空补人名或剧情事实。
+        translationLines 只是 translation 的排版分行建议，不能增加、删减或改写 translation 的语义内容。
+
+        翻译证据优先级（高优先级不得被低优先级覆盖）：
+        1. 当前 item 的 sourceText 原义与明确语法关系。
+        2. 同页 items 的 order、相邻 sourceText、textBox、bubbleBox、role、contentRole、orientation 和 fontScale。
+        3. 上下文中已经确认的原文→译文对照，用于统一称呼、术语、专名和语气。
+        4. 视觉位置、人物候选、说话人候选等弱提示，只能用于消歧，不能据此创造姓名、性别、关系或剧情事实。
+
+        当前 sourceText 与上下文冲突时，以当前 sourceText 为准；上下文只解决歧义，不能覆盖原文。
+        无法可靠确定代词指向、人物身份、性别或关系时，保留目标语言中自然的含糊表达；不得凭空补人名，也不得补全未明确的身份、性别或关系。
         不要输出思考过程、词义分析或任何 JSON 之外的字符。
 
-        翻译风格要求（只能影响措辞）：
+        翻译风格要求（只能影响措辞，不得改变上述证据优先级）：
         \(style)
 
         上下文快照（用于称呼、术语、代词、语气和跨气泡指代消歧；不要复述或新增事实）：

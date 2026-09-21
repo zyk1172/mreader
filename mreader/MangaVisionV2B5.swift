@@ -627,7 +627,18 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
             MangaVisionV2B5OutputContract.inputFeatureName: MLFeatureValue(multiArray: prepared.array)
         ])
         let modelStart = ContinuousClock.now
-        let prediction = try await runtime.model.prediction(from: input)
+        // Keep the non-Sendable MLModel actor-isolated. Core ML's batch API is
+        // synchronous, so a one-item batch performs the same inference without sending
+        // the model across an async isolation boundary or weakening Sendable checking.
+        let predictionBatch = try runtime.model.predictions(
+            fromBatch: MLArrayBatchProvider(array: [input])
+        )
+        guard predictionBatch.count == 1 else {
+            throw MangaVisionV2B5Error.invalidInput(
+                "unexpected Core ML batch output count=\(predictionBatch.count)"
+            )
+        }
+        let prediction = predictionBatch.features(at: 0)
         let modelMilliseconds = Self.milliseconds(modelStart.duration(to: .now))
         let postprocessStart = ContinuousClock.now
         let rawOutputs = try MangaVisionV2B5OutputContract.rawOutputs(from: prediction)

@@ -6905,7 +6905,7 @@ private enum TranslationColorStyle: String, CaseIterable {
     }
 }
 
-private struct TranslationBubbleContourShape: Shape {
+nonisolated private struct TranslationBubbleContourShape: Shape {
     let points: [CGPoint]
 
     func path(in rect: CGRect) -> Path {
