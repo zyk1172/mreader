@@ -40,6 +40,34 @@ final class TranslationContextRecoveryRegressionTests: XCTestCase {
         XCTAssertTrue(prompt.contains("不得凭空补人名"))
     }
 
+    func testPagePromptRanksSourceAboveContextAndCarriesVisualMetadata() throws {
+        let item = AIPageTranslationItem(
+            id: "b0",
+            sourceText: "彼は来ない",
+            order: 0,
+            boundingBox: CGRect(x: 0.55, y: 0.18, width: 0.10, height: 0.24),
+            estimatedFontScale: 0.035,
+            textOrientation: .vertical,
+            layoutRole: .dialogue,
+            bubbleBox: CGRect(x: 0.50, y: 0.12, width: 0.22, height: 0.38)
+        )
+        let prompt = try AIPageTranslationPromptBuilder.prompt(
+            items: [item],
+            sourceLanguage: .japanese,
+            target: .simplifiedChinese,
+            styleInstructions: AITranslator.defaultTranslationStyleInstructions,
+            previousContext: "speakerHints=[person(x=0.7,y=0.3,score=0.4)]"
+        )
+
+        XCTAssertTrue(prompt.contains("当前 sourceText 与上下文冲突时，以当前 sourceText 为准"))
+        XCTAssertTrue(prompt.contains("视觉位置、人物候选、说话人候选等弱提示"))
+        XCTAssertTrue(prompt.contains(#""orientation":"vertical""#))
+        XCTAssertTrue(prompt.contains(#""role":"dialogue""#))
+        XCTAssertTrue(prompt.contains(#""bubbleBox":{"#))
+        XCTAssertTrue(AITranslator.defaultTranslationStyleInstructions.contains("拟声词"))
+        XCTAssertTrue(AITranslator.defaultTranslationStyleInstructions.contains("未确认的人物关系"))
+    }
+
     func testSubsetRetryContextContainsAlreadyTranslatedNeighbours() {
         let blocks = [
             block("兄さん", translation: "哥哥", x: 0.1),
