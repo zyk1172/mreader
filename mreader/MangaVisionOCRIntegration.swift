@@ -42,9 +42,8 @@ nonisolated enum MangaVisionOCRGeometry {
             // Keep its box, but allow the local segmentation model to fill in a
             // missing contour when both geometries clearly describe the same bubble.
             if let existingBubble = enriched.bubbleBox {
-                if enriched.bubblePolygon.isEmpty,
-                   let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons),
-                   !matched.polygon.isEmpty {
+                var matchedPhysicalBalloon: RegionCandidate?
+                if let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
                     let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
                         existingBubble,
                         matched.rect
@@ -54,11 +53,25 @@ nonisolated enum MangaVisionOCRGeometry {
                         MangaPageCoordinateSpace.containment(of: matched.rect, in: existingBubble)
                     )
                     if overlap >= 0.35 || containment >= 0.70 {
-                        enriched.bubblePolygon = matched.polygon
+                        matchedPhysicalBalloon = RegionCandidate(
+                            rect: existingBubble,
+                            score: matched.score,
+                            polygon: matched.polygon
+                        )
+                        if enriched.bubblePolygon.isEmpty, !matched.polygon.isEmpty {
+                            enriched.bubblePolygon = matched.polygon
+                        }
                     }
                 }
                 if enriched.layoutSafeRegion == nil {
-                    enriched.layoutSafeRegion = existingBubble
+                    if let matchedPhysicalBalloon, !matchedPhysicalBalloon.polygon.isEmpty {
+                        enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                            matchedPhysicalBalloon,
+                            textRect: enriched.boundingBox
+                        )
+                    } else {
+                        enriched.layoutSafeRegion = existingBubble
+                    }
                 }
                 return enriched
             }
@@ -317,7 +330,10 @@ nonisolated enum MangaVisionOCRTranslationPreparation {
             resolvedBlocks: orderedResolved,
             lineBlocks: orderedLines,
             bubbleBlocks: orderedBubbles,
-            rejectedBlocks: Array(rejectedByID.values),
+            rejectedBlocks: AITranslator.sortedTextBlocks(
+                Array(rejectedByID.values),
+                isRightToLeft: isRightToLeft
+            ),
             detectedLanguage: baseResult.detectedLanguage,
             quality: baseResult.quality
         )
