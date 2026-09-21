@@ -142,7 +142,18 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
     }
 
     var jsonObject: [String: Any] {
-        [
+        let bubbleJSON: Any
+        if let bubbleBox {
+            bubbleJSON = [
+                "x": bubbleBox.minX,
+                "y": bubbleBox.minY,
+                "width": bubbleBox.width,
+                "height": bubbleBox.height
+            ]
+        } else {
+            bubbleJSON = NSNull()
+        }
+        return [
             "id": id,
             "order": order,
             "sourceText": sourceText,
@@ -156,14 +167,7 @@ nonisolated struct AIPageTranslationItem: Sendable, Equatable {
             "textColor": textColorHex ?? "unknown",
             "orientation": textOrientation.rawValue,
             "role": layoutRole.rawValue,
-            "bubbleBox": bubbleBox.map {
-                [
-                    "x": $0.minX,
-                    "y": $0.minY,
-                    "width": $0.width,
-                    "height": $0.height
-                ]
-            } ?? NSNull()
+            "bubbleBox": bubbleJSON
         ]
     }
 }
