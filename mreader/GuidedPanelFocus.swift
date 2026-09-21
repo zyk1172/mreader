@@ -144,7 +144,7 @@ final class GuidedPanelFocusPreviewStore {
     }
 }
 
-private struct GuidedPanelInverseFocusMask: Shape {
+nonisolated private struct GuidedPanelInverseFocusMask: Shape {
     var focusRect: CGRect
 
     var animatableData: AnimatablePair<
