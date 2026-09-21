@@ -274,11 +274,9 @@ nonisolated enum MangaSemanticAnalyzer {
 
                 let order = (blocks.firstIndex(where: { $0.id == block.id }) ?? 0) + 1
                 let textRect = block.boundingBox
-                var metadata = String(
-                    format: "order=%d role=%@ orientation=%@ textRect=(%.3f,%.3f,%.3f,%.3f)",
-                    order,
-                    block.layoutRole.rawValue,
-                    block.textOrientation.rawValue,
+                var metadata = "order=\(order) role=\(block.layoutRole.rawValue) orientation=\(block.textOrientation.rawValue)"
+                metadata += String(
+                    format: " textRect=(%.3f,%.3f,%.3f,%.3f)",
                     Double(textRect.minX), Double(textRect.minY),
                     Double(textRect.width), Double(textRect.height)
                 )
