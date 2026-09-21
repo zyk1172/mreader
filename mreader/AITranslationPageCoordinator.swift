@@ -26,8 +26,10 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// v22：Vision 增加跨切片原文拼接与可疑 block 的 text-first 原文复核。
     /// v23：Manga Vision balloon 成为 OCR translation-unit 边界，text region
     /// 成为 measured-text 的安全布局提示；旧缓存缺少这些几何，必须失效。
-    static let translationCacheRevision = "translation-v23-manga-vision-balloon-geometry"
-    static let ocrGeometryRevision = "physical-axis-v12-manga-balloon-layout-region"
+    /// v24：翻译缓存持久化 Manga Vision contour / layoutSafeRegion，并让所有 OCR
+    /// 翻译入口共享同一准备契约。
+    static let translationCacheRevision = "translation-v24-manga-vision-contour-context"
+    static let ocrGeometryRevision = "physical-axis-v13-shared-vision-preparation"
 
     let pageURL: URL
     let image: UIImage
@@ -118,6 +120,10 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let bubbleY: Double?
     let bubbleWidth: Double?
     let bubbleHeight: Double?
+    let safeX: Double?
+    let safeY: Double?
+    let safeWidth: Double?
+    let safeHeight: Double?
     let confidence: Double
     let ocrSource: String
     let estimatedFontScale: Double
@@ -126,6 +132,7 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
     let layoutRole: TranslationLayoutRole?
     let sourceLineCount: Int?
     let polygon: [CachedPoint]
+    let bubblePolygon: [CachedPoint]
     let translationLines: [String]
 
     init(_ block: TextBlock) {
@@ -140,6 +147,10 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
         bubbleY = block.bubbleBox.map { Double($0.minY) }
         bubbleWidth = block.bubbleBox.map { Double($0.width) }
         bubbleHeight = block.bubbleBox.map { Double($0.height) }
+        safeX = block.layoutSafeRegion.map { Double($0.minX) }
+        safeY = block.layoutSafeRegion.map { Double($0.minY) }
+        safeWidth = block.layoutSafeRegion.map { Double($0.width) }
+        safeHeight = block.layoutSafeRegion.map { Double($0.height) }
         confidence = block.confidence
         ocrSource = block.ocrSource
         estimatedFontScale = block.estimatedFontScale
@@ -148,6 +159,7 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
         layoutRole = block.layoutRole
         sourceLineCount = block.sourceLineCount
         polygon = block.polygon.map(CachedPoint.init)
+        bubblePolygon = block.bubblePolygon.map(CachedPoint.init)
         translationLines = block.translationLines
     }
 
@@ -157,6 +169,12 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
             bubbleBox = CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight)
         } else {
             bubbleBox = nil
+        }
+        let layoutSafeRegion: CGRect?
+        if let safeX, let safeY, let safeWidth, let safeHeight {
+            layoutSafeRegion = CGRect(x: safeX, y: safeY, width: safeWidth, height: safeHeight)
+        } else {
+            layoutSafeRegion = nil
         }
         return TextBlock(
             id: id,
@@ -168,7 +186,9 @@ nonisolated private struct CachedTranslationBlock: Codable, Sendable {
             estimatedFontScale: estimatedFontScale,
             textColorHex: textColorHex,
             bubbleBox: bubbleBox,
+            layoutSafeRegion: layoutSafeRegion,
             polygon: polygon.map(\.point),
+            bubblePolygon: bubblePolygon.map(\.point),
             translationLines: translationLines,
             textOrientation: textOrientation,
             layoutRole: layoutRole,
@@ -449,17 +469,19 @@ nonisolated enum AITranslationPagePipeline {
             pageIndex: request.pageIndex
         )
         let localResult = try await OCRRuntimeService.recognize(for: cacheRequest)
-        let resolvedBlocks: [TextBlock]
+        let candidateBlocks: [TextBlock]
+        let analysisImage: UIImage
         if request.usesVisualOCRVerification {
             let ocrImage = await OCRPreprocessor.highResolutionImage(
                 from: request.pageURL,
                 fallback: request.image
             ) ?? request.image
+            analysisImage = ocrImage
             // Rejected candidates retain geometry/reason and must remain visible
             // to visual review; otherwise weak but real text can never re-enter the
             // translation pipeline.
             let reviewBlocks = localResult.resolvedBlocks + localResult.rejectedBlocks
-            let verified = try await TranslationRuntimeService.visualVerifyOCRRegions(
+            candidateBlocks = try await TranslationRuntimeService.visualVerifyOCRRegions(
                 image: ocrImage,
                 blocks: reviewBlocks,
                 apiKey: request.configuration.apiKey,
@@ -473,37 +495,28 @@ nonisolated enum AITranslationPagePipeline {
                 coverageRecoveryRequested: localResult.quality?.isSuspicious == true
                     || !localResult.rejectedBlocks.isEmpty
             )
-            // Visual review may correct/recreate TextBlock values. Reattach the
-            // shared Manga Vision geometry afterwards so recovered vertical
-            // columns still join the same physical balloon. Existing VLM bubble
-            // geometry is preserved by the enrichment layer.
-            if let analysis = try? await MangaVisionService.shared.analysis(
-                comicID: request.comicID,
-                pageIndex: request.pageIndex,
-                pageURL: request.pageURL,
-                image: ocrImage
-            ) {
-                resolvedBlocks = MangaVisionOCRGeometry.applyingDetectedGeometry(
-                    to: verified,
-                    analysis: analysis
-                )
-            } else {
-                resolvedBlocks = verified
-            }
         } else {
-            resolvedBlocks = localResult.resolvedBlocks
+            analysisImage = request.image
+            candidateBlocks = localResult.resolvedBlocks
         }
-        let annotated = AITranslator.annotatedMangaTextBlocks(
-            resolvedBlocks,
+
+        // Visual review can recreate TextBlock values and strip local model geometry.
+        // Always re-enter through the same Manga Vision preparation boundary afterwards.
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: request.comicID,
+            pageIndex: request.pageIndex,
+            pageURL: request.pageURL,
+            image: analysisImage
+        )
+        let prepared = MangaVisionOCRTranslationPreparation.prepare(
+            baseResult: localResult,
+            candidateBlocks: candidateBlocks,
+            analysis: analysis,
             safeAreaInset: request.safeAreaInset,
             minimumTextHeight: request.minimumTextHeight,
             isRightToLeft: request.isRightToLeft
         )
-        let visibleBlocks = annotated.filter { !$0.isFiltered }
-        var translated = MangaTextSegmenter.segment(
-            visibleBlocks,
-            isRightToLeft: request.isRightToLeft
-        ).bubbles
+        var translated = prepared.bubbleBlocks
         guard !translated.isEmpty else {
             return AITranslationOCRResult(blocks: [], missingBlockIDs: [])
         }
@@ -522,7 +535,7 @@ nonisolated enum AITranslationPagePipeline {
             (translated[$0].translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if !missing.isEmpty {
-            try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: request)
+            try await applyBatchTranslationSafely(to: &translated, indexes: missing, request: contextualRequest)
         }
         let missingBlockIDs = translated.compactMap { block in
             let translation = (block.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
