@@ -53,7 +53,7 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 4
+    static let schemaVersion = 5
     static let modelVersion = 4
 
     let schemaVersion: Int
@@ -64,6 +64,7 @@ nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     let panels: [PanelLayoutPanel]
     let contentBounds: NormalizedRect
     let usedFallback: Bool
+    var isTransient: Bool = false
     let orderingStrategyRaw: String
 
     init(
@@ -171,7 +172,7 @@ nonisolated enum PanelPostProcessor {
             }
             let area = rect.width * rect.height
             guard area >= 0.012,
-                  area <= 0.94,
+                  area <= (panel.source == .coreML ? 1.0 : 0.94),
                   panel.confidence >= 0.24 else {
                 return nil
             }
@@ -337,6 +338,9 @@ nonisolated enum PanelPostProcessor {
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
         let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
+        if panels.count == 1, let panel = panels.first, panel.source == .coreML {
+            return panel.confidence >= 0.5 && panel.rect.width * panel.rect.height >= 0.22
+        }
         guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= 0.34 else { return false }
@@ -378,6 +382,10 @@ actor PanelDetectionService {
     private let visionService: MangaVisionService
     private let fallbackDetector: any PanelDetecting
     private var memoryCache: [String: PanelPageLayout] = [:]
+    private var memoryOrder: [String] = []
+    private var generation = UUID()
+    private var diskWritesSincePrune = 0
+    private var lastDiskPruneAt = Date.distantPast
 
     init(
         visionService: MangaVisionService = .shared,
@@ -431,7 +439,11 @@ actor PanelDetectionService {
     }
 
     func clearCache() {
+        generation = UUID()
+        memoryOrder.removeAll()
         memoryCache.removeAll()
+        diskWritesSincePrune = 0
+        lastDiskPruneAt = .distantPast
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
@@ -461,26 +473,30 @@ actor PanelDetectionService {
         image: UIImage,
         isRightToLeft: Bool
     ) async -> PanelPageLayout {
-        let descriptor = await visionService.providerDescriptor()
-        let primaryIdentifier = "manga-vision:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
+        let epoch = generation
         let direction = isRightToLeft ? "rightToLeft" : "leftToRight"
         let sourceFingerprint = Self.sourceFingerprint(pageURL: pageURL, image: image)
-        let memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
+
+        // Panel-layout cache hits must remain cheaper than Manga Vision inference.
+        // Derive the dependency that an analysis started now would request without
+        // touching the model, then only run analysis after both layout caches miss.
+        let expectedDependency = await visionService.expectedDependencyIdentity(image: image)
+        var primaryIdentifier = "manga-vision:\(expectedDependency)"
+        var memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
             return cached
         }
 
         let diskURL = cacheURL(for: cacheIdentity)
-        let validDetectorIdentifiers = Set([primaryIdentifier, fallbackDetector.identifier])
         if let data = try? Data(contentsOf: diskURL),
            let cached = try? JSONDecoder().decode(PanelPageLayout.self, from: data),
            Self.isCacheValid(
                 cached,
                 direction: direction,
-                validDetectorIdentifiers: validDetectorIdentifiers,
+                validDetectorIdentifiers: Set([primaryIdentifier]),
                 sourceFingerprint: sourceFingerprint
            ) {
-            memoryCache[memoryKey] = cached
+            remember(cached, key: memoryKey)
             return cached
         }
 
@@ -491,17 +507,49 @@ actor PanelDetectionService {
                 sourceFingerprint: sourceFingerprint,
                 detectorIdentifier: primaryIdentifier
             )
-            store(fallback, memoryKey: memoryKey, diskURL: diskURL)
-            return fallback
+            var temporary = fallback
+            temporary.isTransient = true
+            return temporary
+        }
+
+        let mangaAnalysis = try? await visionService.analysis(
+            comicID: comicID, pageIndex: pageIndex, pageURL: pageURL, image: image
+        )
+        guard epoch == generation, !Task.isCancelled else {
+            var temporary = Self.fullPageLayout(
+                bounds: Self.detectedContentBounds(analysisImage),
+                direction: direction,
+                sourceFingerprint: sourceFingerprint,
+                detectorIdentifier: primaryIdentifier
+            )
+            temporary.isTransient = true
+            return temporary
+        }
+
+        // Resource state may have changed after the model-free lookup. If the
+        // actual analysis used a different demand, switch identities and honor
+        // a layout cached under that exact dependency before recomputing it.
+        let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
+        if actualDependency != expectedDependency {
+            primaryIdentifier = "manga-vision:\(actualDependency)"
+            memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
+            if let cached = memoryCache[memoryKey] {
+                return cached
+            }
+            if let data = try? Data(contentsOf: diskURL),
+               let cached = try? JSONDecoder().decode(PanelPageLayout.self, from: data),
+               Self.isCacheValid(
+                    cached,
+                    direction: direction,
+                    validDetectorIdentifiers: Set([primaryIdentifier]),
+                    sourceFingerprint: sourceFingerprint
+               ) {
+                remember(cached, key: memoryKey)
+                return cached
+            }
         }
 
         let contentBounds = Self.detectedContentBounds(analysisImage)
-        let mangaAnalysis = try? await visionService.analysis(
-            comicID: comicID,
-            pageIndex: pageIndex,
-            pageURL: pageURL,
-            image: image
-        )
         let primaryPanels = (mangaAnalysis?.panels ?? []).map {
             DetectedPanel(
                 rect: $0.normalizedRect,
@@ -522,7 +570,7 @@ actor PanelDetectionService {
             }
         }
 
-        let result: PanelPageLayout
+        var result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
             let structure = MangaPageStructureGraph(
                 panels: processed,
@@ -566,7 +614,10 @@ actor PanelDetectionService {
             )
         }
 
-        store(result, memoryKey: memoryKey, diskURL: diskURL)
+        result.isTransient = mangaAnalysis == nil || detectorIdentifier != primaryIdentifier || result.usedFallback
+        if !result.isTransient, !Task.isCancelled, generation == epoch {
+            store(result, memoryKey: memoryKey, diskURL: diskURL)
+        }
         return result
     }
 
@@ -579,9 +630,43 @@ actor PanelDetectionService {
     }
 
     private func store(_ layout: PanelPageLayout, memoryKey: String, diskURL: URL) {
-        memoryCache[memoryKey] = layout
+        remember(layout, key: memoryKey)
         guard let data = try? JSONEncoder().encode(layout) else { return }
-        try? data.write(to: diskURL, options: .atomic)
+        do {
+            try data.write(to: diskURL, options: .atomic)
+        } catch {
+            return
+        }
+
+        // Directory enumeration is O(number of cached pages). Do not put that
+        // scan on every sequential Guided Panel write; reconcile periodically.
+        diskWritesSincePrune += 1
+        let now = Date()
+        if diskWritesSincePrune >= 32 || now.timeIntervalSince(lastDiskPruneAt) >= 15 * 60 {
+            pruneDiskCache()
+            diskWritesSincePrune = 0
+            lastDiskPruneAt = now
+        }
+    }
+
+    private func remember(_ layout: PanelPageLayout, key: String) {
+        memoryCache[key] = layout
+        memoryOrder.removeAll { $0 == key }
+        memoryOrder.append(key)
+        while memoryOrder.count > 96 { memoryCache[memoryOrder.removeFirst()] = nil }
+    }
+
+    private func pruneDiskCache() {
+        guard let urls = fileManager.enumerator(at: cacheDirectory,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else { return }
+        let files = urls.compactMap { $0 as? URL }.filter { $0.pathExtension == "json" }.map { url in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return (url, values?.fileSize ?? 0, values?.contentModificationDate ?? .distantPast)
+        }.sorted { $0.2 < $1.2 }
+        var total = files.reduce(0) { $0 + $1.1 }
+        for (url, bytes, _) in files where total > 24 * 1024 * 1024 {
+            if (try? fileManager.removeItem(at: url)) != nil { total -= bytes }
+        }
     }
 
     nonisolated private static func isCacheValid(
@@ -590,7 +675,8 @@ actor PanelDetectionService {
         validDetectorIdentifiers: Set<String>,
         sourceFingerprint: String
     ) -> Bool {
-        layout.schemaVersion == PanelPageLayout.schemaVersion
+        !layout.isTransient
+            && layout.schemaVersion == PanelPageLayout.schemaVersion
             && layout.modelVersion == PanelPageLayout.modelVersion
             && layout.direction == direction
             && validDetectorIdentifiers.contains(layout.detectorIdentifier)
@@ -724,21 +810,7 @@ actor PanelDetectionService {
     }
 
     nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {
-        // Cache identity belongs to the source page, not to a particular 640/4096/6144
-        // decode. Including the decoded dimensions made the layout cache depend on
-        // whichever decode tier happened to be requested first, so the same page could
-        // be re-detected after any change to the reader's decode policy.
-        _ = image
-        let identity: String
-        if pageURL.isFileURL {
-            let values = try? pageURL.resourceValues(
-                forKeys: [.contentModificationDateKey, .fileSizeKey]
-            )
-            identity = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-        } else {
-            identity = pageURL.absoluteString
-        }
-        return sha256(identity)
+        PageContentIdentityResolver.identity(for: pageURL).fingerprint
     }
 
     nonisolated private static func sha256(_ value: String) -> String {
@@ -747,3 +819,4 @@ actor PanelDetectionService {
             .joined()
     }
 }
+

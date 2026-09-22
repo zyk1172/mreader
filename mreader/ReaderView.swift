@@ -3460,7 +3460,15 @@ private final class GuidedPanelLayoutStore {
         let sourceSize: CGSize
     }
 
-    var entries: [String: Entry] = [:]
+    var entries: [String: Entry] = [:] {
+        didSet {
+            // Keep a bounded window; transient fallbacks are never promoted to reader cache.
+            entries = entries.filter { !$0.value.layout.isTransient }
+            if entries.count > 16, let victim = entries.keys.sorted().first {
+                entries.removeValue(forKey: victim)
+            }
+        }
+    }
     /// 正在排队或正在预取的页，避免重复提交。
     var scheduled: Set<String> = []
     var pending: [Int] = []
@@ -3757,10 +3765,16 @@ struct GuidedPanelReader: View {
         // N+1 is always first, followed by N+2 and the previous page. The matching model
         // preanalysis runs from ReaderView on small thumbnails, so this queue mostly turns
         // already-warm model output into a final layout plus a decoded display buffer.
-        for index in GuidedPanelPrefetchPolicy.layoutIndices(
-            currentPageIndex: pageIndex,
-            pageCount: pages.count
-        ) {
+        let desired = GuidedPanelPrefetchPolicy.layoutIndices(
+            currentPageIndex: pageIndex, pageCount: pages.count
+        )
+        for stale in layoutStore.pending where !desired.contains(stale) {
+            layoutStore.scheduled.remove(pages[stale].url.absoluteString)
+        }
+        layoutStore.pending.removeAll { !desired.contains($0) }
+        let retained = Set(pages.indices.filter { abs($0 - pageIndex) <= 6 }.map { pages[$0].url.absoluteString })
+        layoutStore.entries = layoutStore.entries.filter { retained.contains($0.key) }
+        for index in desired {
             let identifier = pages[index].url.absoluteString
             guard layoutStore.entries[identifier] == nil,
                   !layoutStore.scheduled.contains(identifier),
@@ -4999,6 +5013,7 @@ struct LocalImageView: View {
     @State private var recognizedPipelineCacheKey: String?
     @State private var isTranslating = false
     @State private var isRecognizingOCR = false
+    @State private var showsPageTranslation = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
     @State private var offlineTranslationTask: Task<OfflineTranslationOverlayResult, Never>?
@@ -5081,6 +5096,26 @@ struct LocalImageView: View {
             } else if loadFailed {
                 ContentUnavailableView("reader.imageLoadFailed".localized, systemImage: "exclamationmark.triangle", description: Text(url.lastPathComponent))
                     .foregroundStyle(.white)
+            }
+        }
+        .sheet(isPresented: $showsPageTranslation) {
+            NavigationStack {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 20) {
+                        ForEach(visibleTranslationBlocks) { block in
+                            Text(block.translation ?? "").textSelection(.enabled)
+                        }
+                    }.padding()
+                }
+                .navigationTitle("本页译文")
+                .toolbar { Button("完成") { showsPageTranslation = false } }
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !visibleTranslationBlocks.isEmpty {
+                Button("查看全文", systemImage: "text.alignleft") { showsPageTranslation = true }
+                    .font(.caption).padding(8)
+                    .background(.ultraThinMaterial, in: Capsule()).padding(8)
             }
         }
         .overlay(alignment: .bottom) {
@@ -5404,7 +5439,10 @@ struct LocalImageView: View {
         let candidates = textBlocks.filter {
             ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
-        return AITranslator.sortedTextBlocks(candidates, isRightToLeft: isRightToLeftReading)
+        return AITranslator.sortedTextBlocks(
+            candidates,
+            isRightToLeft: isRightToLeftReading
+        )
     }
 
     private func displayTranslation(for block: TextBlock) -> String {
@@ -5958,9 +5996,7 @@ struct LocalImageView: View {
             // never collapse a fitted translation into the old compact preview:
             // that preview becomes an opaque material card with clipped/no text.
             let presentationRect = rect
-            let layoutStatus = item.layoutStatus == .needsExpansion
-                ? OCRBubbleLayoutEngine.TranslationLayoutStatus.fitted
-                : item.layoutStatus
+            let layoutStatus = item.layoutStatus
 
             occupiedRects.append(presentationRect.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(
@@ -6437,11 +6473,14 @@ struct LocalImageView: View {
                     try await startAppleLowLatencyTranslation(image: image, pageURL: pageURL, generation: generation)
                 } else {
                     let request = try makeTranslationPageRequest(image: image)
-                    let blocks = try await AITranslationPageCoordinator.shared.translatedBlocks(for: request)
+                    let result = try await AITranslationPageCoordinator.shared.translationResult(for: request)
                     try Task.checkCancellation()
                     await MainActor.run {
                         guard self.translationGeneration == generation, self.url == pageURL else { return }
-                        self.textBlocks = blocks
+                        self.textBlocks = result.blocks
+                        if !result.isComplete {
+                            self.translationErrorMessage = "部分内容翻译失败，请重试（缺失 \(result.missingBlockIDs.count) 项，失败 \(result.failedSliceCount) 个切片）"
+                        }
                     }
                 }
                 // Debug 只负责“数据采集 / 渲染”：在真实 pipeline 之外独立抓取中间 blocks，
@@ -7260,3 +7299,4 @@ private struct AppleIntelligenceGlowBorder: View {
         "iPad16,2": 22
     ]
 }
+

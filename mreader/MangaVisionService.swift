@@ -26,7 +26,7 @@ actor MangaVisionService {
     static let shared = MangaVisionService(
         provider: AdaptiveMangaVisionProvider(base: MangaVisionProviderRouter.shared)
     )
-    nonisolated static let analysisRevision = "manga-vision-page-v3-runtime-foundation"
+    nonisolated static let analysisRevision = "manga-vision-page-v4-demand-identity"
 
     private struct CacheEnvelope: Codable {
         let manifestIdentity: String
@@ -98,7 +98,7 @@ actor MangaVisionService {
         pageURL: URL,
         image: UIImage,
         contentIdentity: PageContentIdentity? = nil,
-        requestClass: MangaVisionRequestClass = .interactive
+        requestClass: MangaVisionRequestClass = .currentTask
     ) async throws -> MangaPageAnalysis {
         let analysisStart = ContinuousClock.now
         let manifest = await modelManifest()
@@ -110,7 +110,8 @@ actor MangaVisionService {
             pageIndex: max(pageIndex ?? 0, 0),
             sourceFingerprint: sourceFingerprint
         )
-        let modelKey = manifest.cacheIdentity
+        let demand = analysisDemandIdentity(image: image, manifest: manifest, requestClass: requestClass)
+        let modelKey = manifest.cacheIdentity + "|" + demand
         let key = "\(modelKey)|\(identity.scope)|\(identity.pageIndex)|\(sourceFingerprint)"
 
         if let cached = memoryCache[key] {
@@ -134,7 +135,8 @@ actor MangaVisionService {
 
         if let existing = inFlight[key], existing.generation == requestGeneration {
             do {
-                let value = try await existing.task.value
+                var value = try await existing.task.value
+                value.cacheRevision = value.cacheRevision ?? modelKey
                 guard existing.generation == requestGeneration else {
                     throw MangaVisionServiceError.staleResult
                 }
@@ -219,7 +221,8 @@ actor MangaVisionService {
         inFlight[key] = request
 
         do {
-            let result = try await task.value
+            var result = try await task.value
+            result.cacheRevision = result.cacheRevision ?? modelKey
             return try finalize(
                 result,
                 request: request,
@@ -249,7 +252,6 @@ actor MangaVisionService {
         image: UIImage,
         contentIdentity: PageContentIdentity? = nil
     ) async -> MangaPageAnalysis? {
-        _ = image
         let manifest = await modelManifest()
         let resolvedContentIdentity = contentIdentity ?? PageContentIdentityResolver.identity(for: pageURL)
         let sourceFingerprint = resolvedContentIdentity.fingerprint
@@ -259,7 +261,9 @@ actor MangaVisionService {
             pageIndex: max(pageIndex ?? 0, 0),
             sourceFingerprint: sourceFingerprint
         )
-        let modelKey = manifest.cacheIdentity
+        let modelKey = manifest.cacheIdentity + "|" + analysisDemandIdentity(
+            image: image, manifest: manifest, requestClass: .interactive
+        )
         let key = "\(modelKey)|\(identity.scope)|\(identity.pageIndex)|\(sourceFingerprint)"
         if let value = memoryCache[key] { return value }
         return readValidCache(
@@ -311,6 +315,39 @@ actor MangaVisionService {
                 requestClass: .prefetch
             )
         }
+    }
+
+    func dependencyIdentity(for analysis: MangaPageAnalysis?) async -> String {
+        let manifest = await modelManifest()
+        return analysis?.cacheRevision ?? (manifest.cacheIdentity + "|unavailable")
+    }
+
+    /// Returns the cache dependency that an analysis started now would request,
+    /// without loading or running the model. Downstream caches can therefore
+    /// perform their own memory/disk lookup before paying for Manga Vision.
+    func expectedDependencyIdentity(
+        image: UIImage,
+        requestClass: MangaVisionRequestClass = .currentTask
+    ) async -> String {
+        let manifest = await modelManifest()
+        return manifest.cacheIdentity + "|" + analysisDemandIdentity(
+            image: image,
+            manifest: manifest,
+            requestClass: requestClass
+        )
+    }
+
+    private func analysisDemandIdentity(
+        image: UIImage, manifest: MangaVisionModelManifest,
+        requestClass: MangaVisionRequestClass
+    ) -> String {
+        guard provider is any MangaVisionSourceImageAnalyzing else { return "single-pass" }
+        let size = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        return MangaVisionInferencePlanner.cacheDemandIdentity(
+            sourceSize: size, inputSize: manifest.inputSize,
+            requestClass: requestClass, resourceState: .current
+        )
     }
 
     func providerDescriptor() async -> MangaVisionProviderDescriptor {
@@ -436,6 +473,14 @@ actor MangaVisionService {
         }
 
         guard let current = inFlight[key], current.id == request.id else {
+            // A sibling waiter may already have finalized the same successful
+            // inference. When the provider reports a different demand revision,
+            // that result is intentionally not cached under this key; every
+            // coalesced waiter should still receive the valid result.
+            if let revision = result.cacheRevision,
+               !key.hasPrefix(revision + "|") {
+                return result
+            }
             throw MangaVisionServiceError.staleResult
         }
 
@@ -444,8 +489,12 @@ actor MangaVisionService {
         inferenceCount += 1
         totalInferenceMilliseconds += inferenceMS
         lastInferenceMilliseconds = inferenceMS
-        insertIntoMemory(result, forKey: key)
-        write(result, manifest: manifest, to: diskURL)
+        // The resource state can change while awaiting the provider. Never store
+        // a reduced plan under the stronger demand requested before that await.
+        if let revision = result.cacheRevision, key.hasPrefix(revision + "|") {
+            insertIntoMemory(result, forKey: key)
+            write(result, manifest: manifest, to: diskURL)
+        }
         let totalMS = Self.milliseconds(analysisStart.duration(to: .now))
         lastAnalysisMilliseconds = totalMS
         lastDiagnostic = MangaVisionDiagnosticRecord(
@@ -721,3 +770,4 @@ actor MangaVisionService {
             + Double(components.attoseconds) / 1_000_000_000_000_000
     }
 }
+

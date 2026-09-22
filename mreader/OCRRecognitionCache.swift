@@ -10,20 +10,17 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     var comicID: UUID? = nil
     var pageIndex: Int? = nil
 
+    var analysisIdentity: String = "unprepared"
+
     var cacheKey: String {
-        let sourceIdentity: String
-        if pageURL.isFileURL {
-            let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            sourceIdentity = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-        } else {
-            sourceIdentity = pageURL.absoluteString
-        }
+        let sourceIdentity = PageContentIdentityResolver.identity(for: pageURL).fingerprint
         let rawValue = [
             // v11 keeps Manga Vision text ROI discovery and adds first-class
             // balloon/layout geometry. Do not reuse pages written before that
             // translation-unit contract existed.
-            "local-ocr-v11-manga-vision-balloon-layout-geometry",
+            "local-ocr-v12-lossless-quality-snapshot",
             MangaVisionService.analysisRevision,
+            analysisIdentity,
             JapaneseVerticalOCRService.revision,
             sourceIdentity,
             options.isRightToLeft ? "rtl" : "ltr",
@@ -38,53 +35,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     }
 }
 
-nonisolated private struct CachedOCRBlock: Codable, Sendable {
-    let id: UUID
-    let text: String
-    let x: Double
-    let y: Double
-    let width: Double
-    let height: Double
-    let confidence: Double
-    let source: String
-    let estimatedFontScale: Double
-    let textColorHex: String?
-    let textOrientation: TextOrientation?
-    let layoutRole: TranslationLayoutRole?
-
-    init(_ block: TextBlock) {
-        id = block.id
-        text = block.text
-        x = block.boundingBox.minX
-        y = block.boundingBox.minY
-        width = block.boundingBox.width
-        height = block.boundingBox.height
-        confidence = block.confidence
-        source = block.ocrSource
-        estimatedFontScale = block.estimatedFontScale
-        textColorHex = block.textColorHex
-        textOrientation = block.textOrientation
-        layoutRole = block.layoutRole
-    }
-
-    var textBlock: TextBlock {
-        TextBlock(
-            id: id,
-            text: text,
-            boundingBox: CGRect(x: x, y: y, width: width, height: height),
-            confidence: confidence,
-            ocrSource: source,
-            estimatedFontScale: estimatedFontScale,
-            textColorHex: textColorHex,
-            textOrientation: textOrientation,
-            layoutRole: layoutRole
-        )
-    }
-}
-
-nonisolated private struct CachedOCRPage: Codable, Sendable {
+/// Complete immutable recognition decisions survive cold cache restores unchanged.
+nonisolated struct CachedOCRPage: Codable, Sendable {
     let createdAt: Date
-    let rawBlocks: [CachedOCRBlock]
+    let result: OCRPipelineResult
 }
 
 actor OCRRecognitionCache {
@@ -96,78 +50,68 @@ actor OCRRecognitionCache {
     private let diskByteLimit: Int64 = 30 * 1024 * 1024
     private var memoryCache: [String: OCRPipelineResult] = [:]
     private var memoryOrder: [String] = []
-    private var inFlight: [String: Task<OCRPipelineResult, Error>] = [:]
+    private let workPool = SharedPageTaskPool<OCRPipelineResult>()
+    private var generation = UUID()
 
-    init() {
+    init(cacheDirectory: URL? = nil) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        cacheDirectory = root.appendingPathComponent("LocalOCR", isDirectory: true)
-        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        self.cacheDirectory = cacheDirectory ?? root.appendingPathComponent("LocalOCR", isDirectory: true)
+        try? fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
     }
 
     func result(for request: OCRRecognitionCacheRequest) async throws -> OCRPipelineResult {
-        let key = request.cacheKey
-        if let cached = cachedResult(forKey: key, isRightToLeft: request.options.isRightToLeft) {
-            MReaderLog.aiVision.debug(
-                "local OCR cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.resolvedBlocks.count, privacy: .public)"
-            )
-            if let analysis = try? await MangaVisionService.shared.analysis(
-                comicID: request.comicID,
-                pageIndex: request.pageIndex,
-                pageURL: request.pageURL,
-                image: request.fallbackImage
-            ) {
-                return MangaVisionOCROrdering.applyingReadingOrder(
-                    to: cached,
-                    analysis: analysis,
-                    isRightToLeft: request.options.isRightToLeft
-                )
-            }
-            return cached
-        }
-        if let existing = inFlight[key] {
-            MReaderLog.aiVision.debug("local OCR joined in-flight key=\(key.prefix(10), privacy: .public)")
-            return try await existing.value
+        let epoch = generation
+        let image = await OCRPreprocessor.highResolutionImage(
+            from: request.pageURL, fallback: request.fallbackImage
+        ) ?? request.fallbackImage
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        // Loading the already-decoded/high-resolution source is cheap compared with
+        // Manga Vision + OCR. Use its dimensions to derive the expected visual
+        // dependency and check the OCR cache before starting model work.
+        var preparedRequest = request
+        preparedRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: image
+        )
+        var key = preparedRequest.cacheKey
+        if let cached = cachedResult(forKey: key) { return cached }
+
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: request.comicID, pageIndex: request.pageIndex,
+            pageURL: request.pageURL, image: image
+        )
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        let actualIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
+        if actualIdentity != preparedRequest.analysisIdentity {
+            preparedRequest.analysisIdentity = actualIdentity
+            key = preparedRequest.cacheKey
+            if let cached = cachedResult(forKey: key) { return cached }
         }
 
-        let task = Task(priority: .userInitiated) {
-            let image = await OCRPreprocessor.highResolutionImage(
-                from: request.pageURL,
-                fallback: request.fallbackImage
-            ) ?? request.fallbackImage
-            let analysis = try? await MangaVisionService.shared.analysis(
-                comicID: request.comicID,
-                pageIndex: request.pageIndex,
-                pageURL: request.pageURL,
-                image: image
-            )
-            return try await MangaOCRPipeline.recognize(
-                in: image,
-                options: request.options,
-                mangaAnalysis: analysis
-            )
+        let options = request.options
+        let result = try await workPool.value(forKey: key) {
+            try await MangaOCRPipeline.recognize(in: image, options: options, mangaAnalysis: analysis)
         }
-        inFlight[key] = task
-        do {
-            let result = try await task.value
-            inFlight[key] = nil
-            store(result, forKey: key)
-            return result
-        } catch {
-            inFlight[key] = nil
-            throw error
-        }
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        // A temporary model failure must not become a persistent OCR decision.
+        if analysis != nil { store(result, forKey: key) }
+        return result
     }
 
-    func clearCache() {
-        for task in inFlight.values { task.cancel() }
-        inFlight.removeAll()
+    func clearCache() async {
+        generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        await workPool.cancelAll()
     }
 
-    private func cachedResult(forKey key: String, isRightToLeft: Bool) -> OCRPipelineResult? {
+    private func cachedResult(forKey key: String) -> OCRPipelineResult? {
         if let result = memoryCache[key] {
             touchMemoryKey(key)
             return result
@@ -177,10 +121,7 @@ actor OCRRecognitionCache {
               let page = try? JSONDecoder().decode(CachedOCRPage.self, from: data) else {
             return nil
         }
-        let result = MangaOCRPipeline.resolveForDiagnostics(
-            page.rawBlocks.map(\.textBlock),
-            isRightToLeft: isRightToLeft
-        )
+        let result = page.result
         insertIntoMemory(result, forKey: key)
         return result
     }
@@ -188,12 +129,7 @@ actor OCRRecognitionCache {
     private func store(_ result: OCRPipelineResult, forKey key: String) {
         guard !result.rawBlocks.isEmpty else { return }
         insertIntoMemory(result, forKey: key)
-        // Persist raw OCR observations only. Manga Vision balloon/text geometry
-        // is intentionally reattached from the versioned page analysis on cache hit.
-        let page = CachedOCRPage(
-            createdAt: Date(),
-            rawBlocks: result.rawBlocks.map(CachedOCRBlock.init)
-        )
+        let page = CachedOCRPage(createdAt: Date(), result: result)
         guard let data = try? JSONEncoder().encode(page) else { return }
         try? data.write(to: fileURL(forKey: key), options: .atomic)
         pruneDiskCacheIfNeeded()
@@ -239,3 +175,4 @@ actor OCRRecognitionCache {
         }
     }
 }
+

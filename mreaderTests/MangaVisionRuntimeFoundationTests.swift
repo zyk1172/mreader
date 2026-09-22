@@ -43,6 +43,20 @@ struct MangaVisionRuntimeFoundationTests {
         #expect((await reader.performanceSnapshot()).diskCacheHitCount == 1)
     }
 
+    @Test func expectedDependencyIdentityDoesNotStartInference() async {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifest = makeManifest(build: "dependency-identity")
+        let provider = RuntimeFoundationFakeProvider(manifest: manifest)
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+
+        let identity = await service.expectedDependencyIdentity(image: makeImage())
+
+        #expect(identity == manifest.cacheIdentity + "|single-pass")
+        #expect(await provider.descriptorCalls() == 0)
+        #expect(await provider.inferenceCalls() == 0)
+    }
+
     @Test func cacheMissPerformsExactlyOneInferenceWithoutDescriptorColdLoad() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

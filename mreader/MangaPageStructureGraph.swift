@@ -156,16 +156,13 @@ nonisolated struct MangaPageStructureGraph: Sendable {
         _ regions: [CGRect],
         isRightToLeft: Bool
     ) -> [CGRect] {
-        regions.sorted { lhs, rhs in
-            let rowTolerance = max(min(lhs.height, rhs.height) * 0.45, 0.035)
-            if abs(lhs.midY - rhs.midY) > rowTolerance {
-                return lhs.midY < rhs.midY
-            }
-            if abs(lhs.midX - rhs.midX) > 0.015 {
-                return isRightToLeft ? lhs.midX > rhs.midX : lhs.midX < rhs.midX
-            }
-            return lhs.minY < rhs.minY
-        }
+        MangaReadingGeometry.ordered(
+            regions,
+            isRightToLeft: isRightToLeft,
+            minimumRowTolerance: 0.035,
+            rect: { $0 },
+            identity: { "\($0.minX)|\($0.minY)|\($0.width)|\($0.height)" }
+        )
     }
 
     private static func pointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
@@ -194,3 +191,4 @@ nonisolated struct MangaPageStructureGraph: Sendable {
             && abs(lhs.height - rhs.height) < 0.0005
     }
 }
+

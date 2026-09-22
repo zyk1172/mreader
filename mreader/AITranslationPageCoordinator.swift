@@ -28,8 +28,8 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// 成为 measured-text 的安全布局提示；旧缓存缺少这些几何，必须失效。
     /// v24：翻译缓存持久化 Manga Vision contour / layoutSafeRegion，并让所有 OCR
     /// 翻译入口共享同一准备契约。
-    static let translationCacheRevision = "translation-v24-manga-vision-contour-context"
-    static let ocrGeometryRevision = "physical-axis-v13-shared-vision-preparation"
+    static let translationCacheRevision = "translation-v25-analysis-outcome"
+    static let ocrGeometryRevision = "physical-axis-v14-stable-order-quality"
 
     let pageURL: URL
     let image: UIImage
@@ -52,15 +52,10 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// remain source-compatible because both additions have defaults.
     var contextScopeID: String? = nil
     var pageIndex: Int? = nil
+    var analysisIdentity: String = "unprepared"
 
     var cacheKey: String {
-        let sourceIdentity: String
-        if pageURL.isFileURL {
-            let values = try? pageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            sourceIdentity = "\(pageURL.path)#\(values?.fileSize ?? 0)#\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-        } else {
-            sourceIdentity = pageURL.absoluteString
-        }
+        let sourceIdentity = PageContentIdentityResolver.identity(for: pageURL).fingerprint
         // 模型按角色（text/vision）进入缓存 key：纯 OCR 翻译只依赖 textModel，
         // 开启视觉复核后依赖 text+vision，Vision 模式依赖 vision+text。
         let modelIdentity: String
@@ -76,6 +71,7 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             Self.translationCacheRevision,
             "ocr-geometry=\(Self.ocrGeometryRevision)",
             sourceIdentity,
+            analysisIdentity,
             mode.rawValue,
             configuration.profileID.uuidString,
             configuration.baseURL,
@@ -86,13 +82,13 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
             ocrRecognitionMode.rawValue,
             String(format: "%.4f", safeAreaInset),
             usesVisualOCRVerification ? "visual-review" : "local-only",
-            String(format: "%.3f", Double(viewportAspect)),
+            "content-based-slicing-v1",
             sourceLanguagePreference?.rawValue ?? "auto",
             contextScopeID ?? "unscoped",
             pageIndex.map(String.init) ?? "no-page",
             previousContext,
             translationPromptTemplate,
-            visionPromptTemplate
+            AITranslator.VisionPromptContract.effectiveTemplate(visionPromptTemplate)
         ].joined(separator: "|")
         return SHA256.hash(data: Data(rawValue.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -106,6 +102,8 @@ nonisolated struct AITranslationOCRResult: Sendable {
 nonisolated struct AITranslationPipelineResult: Sendable {
     let blocks: [TextBlock]
     let isComplete: Bool
+    var missingBlockIDs: [UUID] = []
+    var failedSliceCount: Int = 0
 }
 
 nonisolated private struct CachedTranslationBlock: Codable, Sendable {
@@ -221,7 +219,8 @@ actor AITranslationPageCoordinator {
     private let cacheDirectory: URL
     private var memoryCache: [String: [TextBlock]] = [:]
     private var memoryOrder: [String] = []
-    private var inFlight: [String: Task<AITranslationPipelineResult, Error>] = [:]
+    private let workPool = SharedPageTaskPool<AITranslationPipelineResult>()
+    private var generation = UUID()
     private let memoryPageLimit = 80
     private let diskByteLimit: Int64 = 50 * 1024 * 1024
 
@@ -232,65 +231,93 @@ actor AITranslationPageCoordinator {
     }
 
     func translatedBlocks(for request: AITranslationPageRequest) async throws -> [TextBlock] {
+        try await translationResult(for: request).blocks
+    }
+
+    func translationResult(for request: AITranslationPageRequest) async throws -> AITranslationPipelineResult {
+        let epoch = generation
         var contextualRequest = request
         contextualRequest.previousContext = await TranslationContextRegistry.shared.context(
             scopeID: request.contextScopeID,
             pageIndex: request.pageIndex,
             seed: request.previousContext
         )
-        let key = contextualRequest.cacheKey
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        // Check the translation cache against the dependency an analysis started now
+        // would request. Computing this identity is model-free; a cache hit must not
+        // trigger Manga Vision inference.
+        contextualRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: request.image
+        )
+        var key = contextualRequest.cacheKey
         if let cached = cachedBlocks(forKey: key) {
-            MReaderLog.aiTranslation.debug("translation cache hit key=\(key.prefix(10), privacy: .public) blocks=\(cached.count, privacy: .public)")
             await TranslationContextRegistry.shared.record(
                 scopeID: contextualRequest.contextScopeID,
-                pageIndex: contextualRequest.pageIndex,
-                blocks: cached
+                pageIndex: contextualRequest.pageIndex, blocks: cached
             )
-            return cached
+            return AITranslationPipelineResult(blocks: cached, isComplete: true)
         }
-        if let existing = inFlight[key] {
-            MReaderLog.aiTranslation.debug("translation joined in-flight key=\(key.prefix(10), privacy: .public)")
-            return try await existing.value.blocks
+
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: request.comicID, pageIndex: request.pageIndex,
+            pageURL: request.pageURL, image: request.image
+        )
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        // Resource state can change between the model-free lookup and inference.
+        // If it did, switch to the actual analysis dependency and give that cache
+        // identity one chance before running translation.
+        let actualIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
+        if actualIdentity != contextualRequest.analysisIdentity {
+            contextualRequest.analysisIdentity = actualIdentity
+            key = contextualRequest.cacheKey
+            if let cached = cachedBlocks(forKey: key) {
+                await TranslationContextRegistry.shared.record(
+                    scopeID: contextualRequest.contextScopeID,
+                    pageIndex: contextualRequest.pageIndex, blocks: cached
+                )
+                return AITranslationPipelineResult(blocks: cached, isComplete: true)
+            }
         }
 
         let pipelineRequest = contextualRequest
-        let task = Task(priority: .userInitiated) {
+        let result = try await workPool.value(forKey: key) {
             try await AITranslationPagePipeline.translate(pipelineRequest)
         }
-        inFlight[key] = task
-        do {
-            let result = try await task.value
-            inFlight[key] = nil
-            if result.isComplete {
-                store(result.blocks, forKey: key)
-                await TranslationContextRegistry.shared.record(
-                    scopeID: contextualRequest.contextScopeID,
-                    pageIndex: contextualRequest.pageIndex,
-                    blocks: result.blocks
-                )
-            } else {
-                MReaderLog.aiTranslation.notice("translation cache skipped explicit partial key=\(key.prefix(10), privacy: .public) blocks=\(result.blocks.count, privacy: .public)")
-            }
-            return result.blocks
-        } catch {
-            inFlight[key] = nil
-            throw error
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        if result.isComplete {
+            // Do not freeze a temporary model-unavailable geometry into the final cache.
+            if analysis != nil { store(result.blocks, forKey: key) }
+            await TranslationContextRegistry.shared.record(
+                scopeID: contextualRequest.contextScopeID,
+                pageIndex: contextualRequest.pageIndex, blocks: result.blocks
+            )
         }
+        return result
     }
 
-    func isCached(_ request: AITranslationPageRequest) -> Bool {
-        let key = request.cacheKey
-        if memoryCache[key] != nil { return true }
-        return fileManager.fileExists(atPath: fileURL(forKey: key).path)
+    func isCached(_ request: AITranslationPageRequest) async -> Bool {
+        var prepared = request
+        prepared.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: request.image
+        )
+        prepared.previousContext = await TranslationContextRegistry.shared.context(
+            scopeID: request.contextScopeID, pageIndex: request.pageIndex, seed: request.previousContext
+        )
+        return cachedBlocks(forKey: prepared.cacheKey) != nil
     }
 
-    func clearCache() {
-        for task in inFlight.values { task.cancel() }
-        inFlight.removeAll()
+    func clearCache() async {
+        generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        await workPool.cancelAll()
     }
 
     private func cachedBlocks(forKey key: String) -> [TextBlock]? {
@@ -374,7 +401,8 @@ nonisolated enum AITranslationPagePipeline {
             let result = try await translateOCRPageWithStatus(request)
             return AITranslationPipelineResult(
                 blocks: result.blocks,
-                isComplete: result.missingBlockIDs.isEmpty
+                isComplete: result.missingBlockIDs.isEmpty,
+                missingBlockIDs: result.missingBlockIDs
             )
         case .vision:
             // 跨切片拼接、疑似 block 的原文复核、以及对拼接 / 被修正 block 的定向重译
@@ -401,7 +429,9 @@ nonisolated enum AITranslationPagePipeline {
             )
             return AITranslationPipelineResult(
                 blocks: result.blocks,
-                isComplete: result.isComplete
+                isComplete: result.isComplete,
+                missingBlockIDs: Array(Set(result.missingBlockIDs + result.retranslationFailedBlockIDs)),
+                failedSliceCount: result.failedSlices
             )
         }
     }
@@ -691,3 +721,4 @@ nonisolated enum AITranslationPagePipeline {
         }
     }
 }
+

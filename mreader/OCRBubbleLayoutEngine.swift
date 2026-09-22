@@ -637,7 +637,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 rect: safeBounds,
                 contentRect: safeBounds.insetBy(dx: p, dy: p),
                 fontSize: 0.1,
-                contentPadding: p
+                contentPadding: p,
+                status: .needsExpansion
             )
         }
 
@@ -663,7 +664,8 @@ nonisolated enum OCRBubbleLayoutEngine {
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
             fontSize: inlineMinimumFontSize,
-            contentPadding: p
+            contentPadding: p,
+            status: .needsExpansion
         )
     }
 
@@ -968,6 +970,7 @@ nonisolated enum OCRBubbleLayoutEngine {
         func makeLayout(
             fontSize: CGFloat,
             forceFullBounds: Bool,
+            growth: CGFloat = 1,
             requireMeasurement: Bool = true
         ) -> TranslationLayout? {
             let p = effectivePadding(fontSize)
@@ -985,10 +988,17 @@ nonisolated enum OCRBubbleLayoutEngine {
                 let usedRows = min(rows, Int(ceil(Double(glyphCount) / Double(columns))))
                 let proposedWidth = CGFloat(columns) * columnWidth + p * 2
                 let proposedHeight = CGFloat(usedRows) * advance + p * 2
+                let safeGrowth = max(growth, 1)
+                // Vertical CoreText most often needs additional cross-axis room
+                // for glyph metrics / columns. Growing height together with width
+                // turned a five-glyph measured card into a ~220pt tall surface.
+                // Preserve the content-derived vertical extent and expand width only.
+                let grownWidth = max(proposedWidth - p * 2, 1) * safeGrowth + p * 2
+                let grownHeight = proposedHeight
                 let minimumWidth = useSourceRectAsMinimumExtent ? sourceRect.width + p * 2 : 0
                 let minimumHeight = useSourceRectAsMinimumExtent ? sourceRect.height + p * 2 : 0
-                let width = min(max(proposedWidth, minimumWidth, 1), safeBounds.width)
-                let height = min(max(proposedHeight, minimumHeight, 1), safeBounds.height)
+                let width = min(max(grownWidth, minimumWidth, 1), safeBounds.width)
+                let height = min(max(grownHeight, minimumHeight, 1), safeBounds.height)
                 cardRect = clamped(
                     CGRect(
                         x: anchor.x - width / 2,
@@ -1027,9 +1037,52 @@ nonisolated enum OCRBubbleLayoutEngine {
             if let compact = makeLayout(
                 fontSize: targetFontSize,
                 forceFullBounds: false,
-                requireMeasurement: false
+                requireMeasurement: true
             ) {
                 return compact
+            }
+
+            // CoreText may need slightly more cross-axis room than the glyph-grid
+            // proposal, especially for vertical punctuation and bold font metrics.
+            // Grow the compact card around the source anchor and find the smallest
+            // measured card that exposes the complete string. Do not jump directly
+            // to the whole page: measured-text surfaces must remain content-sized.
+            var lowerGrowth: CGFloat = 1
+            var upperGrowth: CGFloat?
+            for candidate: CGFloat in [1.15, 1.3, 1.5, 1.8, 2.2, 3, 4, 6, 8, 12, 16, 24, 32] {
+                if makeLayout(
+                    fontSize: targetFontSize,
+                    forceFullBounds: false,
+                    growth: candidate,
+                    requireMeasurement: true
+                ) != nil {
+                    upperGrowth = candidate
+                    break
+                }
+                lowerGrowth = candidate
+            }
+            if var upperGrowth {
+                for _ in 0..<12 {
+                    let candidate = (lowerGrowth + upperGrowth) / 2
+                    if makeLayout(
+                        fontSize: targetFontSize,
+                        forceFullBounds: false,
+                        growth: candidate,
+                        requireMeasurement: true
+                    ) != nil {
+                        upperGrowth = candidate
+                    } else {
+                        lowerGrowth = candidate
+                    }
+                }
+                if let fitted = makeLayout(
+                    fontSize: targetFontSize,
+                    forceFullBounds: false,
+                    growth: upperGrowth,
+                    requireMeasurement: true
+                ) {
+                    return fitted
+                }
             }
 
             let p = effectivePadding(0.1)
@@ -1037,7 +1090,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 rect: safeBounds,
                 contentRect: safeBounds.insetBy(dx: p, dy: p),
                 fontSize: 0.1,
-                contentPadding: p
+                contentPadding: p,
+                status: .needsExpansion
             )
         }
 
@@ -1079,7 +1133,8 @@ nonisolated enum OCRBubbleLayoutEngine {
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
             fontSize: inlineMinimumFontSize,
-            contentPadding: p
+            contentPadding: p,
+            status: .needsExpansion
         )
     }
 
@@ -1172,3 +1227,4 @@ nonisolated enum OCRBubbleLayoutEngine {
         return hypot(rect.midX - anchor.x, rect.midY - anchor.y) + overlapPenalty
     }
 }
+
