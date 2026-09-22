@@ -31,6 +31,9 @@ actor AppleTranslationPageCache {
     }
 
     func store(_ blocks: [TextBlock], key: String) {
+        guard !blocks.isEmpty, blocks.allSatisfy({
+            !($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) else { return }
         if memoryCache[key] == nil {
             memoryOrder.append(key)
         }
@@ -60,7 +63,7 @@ actor AppleTranslationPageCache {
         safeAreaInset: Double
     ) -> String {
         let raw = [
-            pageURL.absoluteString,
+            PageContentIdentityResolver.identity(for: pageURL).fingerprint,
             sourceLanguage,
             targetLanguage,
             "segmentation=\(segmentationRevision)",
@@ -130,3 +133,4 @@ struct AppleTranslationBridge: View {
             }
     }
 }
+

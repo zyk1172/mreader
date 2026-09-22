@@ -155,7 +155,7 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
 nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     /// v3 adds optional mask-derived region contours. Old v2 entries are invalidated
     /// so Guided Panel does not keep stale box-only structure when masks are available.
-    static let schemaVersion = 3
+    static let schemaVersion = 4
 
     let schemaVersion: Int
     let pageIdentifier: MangaPageIdentifier
@@ -167,6 +167,8 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     let bodies: [MangaVisionRegion]
     let modelIdentifier: String?
     let modelVersion: Int
+    /// Full model/postprocess and analysis-demand identity used by downstream caches.
+    var cacheRevision: String? = nil
 
     init(
         pageIdentifier: MangaPageIdentifier,
@@ -208,7 +210,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, pageIdentifier, imageWidth, imageHeight
-        case panels, texts, balloons, faces, bodies, modelIdentifier, modelVersion
+        case panels, texts, balloons, faces, bodies, modelIdentifier, modelVersion, cacheRevision
     }
 
     init(from decoder: Decoder) throws {
@@ -226,6 +228,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         bodies = try container.decode([MangaVisionRegion].self, forKey: .bodies)
         modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)
         modelVersion = try container.decode(Int.self, forKey: .modelVersion)
+        cacheRevision = try container.decodeIfPresent(String.self, forKey: .cacheRevision)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -241,6 +244,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         try container.encode(bodies, forKey: .bodies)
         try container.encodeIfPresent(modelIdentifier, forKey: .modelIdentifier)
         try container.encode(modelVersion, forKey: .modelVersion)
+        try container.encodeIfPresent(cacheRevision, forKey: .cacheRevision)
     }
 }
 
@@ -289,3 +293,4 @@ nonisolated struct MangaSemanticPage: Sendable {
     let unassignedTexts: [MangaSemanticText]
     let unassignedPersons: [MangaPersonCandidate]
 }
+

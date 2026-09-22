@@ -148,7 +148,7 @@ nonisolated enum TranslationLayoutRole: String, Codable, Sendable {
 }
 
 // 定义识别出的文本块模型
-struct TextBlock: Identifiable, Sendable {
+nonisolated struct TextBlock: Identifiable, Codable, Sendable {
     let id: UUID
     let text: String
     let boundingBox: CGRect // 原图中的相对坐标 (0.0 ~ 1.0)
@@ -4094,3 +4094,4 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         }
     }
 }
+

@@ -637,7 +637,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 rect: safeBounds,
                 contentRect: safeBounds.insetBy(dx: p, dy: p),
                 fontSize: 0.1,
-                contentPadding: p
+                contentPadding: p,
+                status: .needsExpansion
             )
         }
 
@@ -663,7 +664,8 @@ nonisolated enum OCRBubbleLayoutEngine {
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
             fontSize: inlineMinimumFontSize,
-            contentPadding: p
+            contentPadding: p,
+            status: .needsExpansion
         )
     }
 
@@ -1027,7 +1029,7 @@ nonisolated enum OCRBubbleLayoutEngine {
             if let compact = makeLayout(
                 fontSize: targetFontSize,
                 forceFullBounds: false,
-                requireMeasurement: false
+                requireMeasurement: true
             ) {
                 return compact
             }
@@ -1037,7 +1039,8 @@ nonisolated enum OCRBubbleLayoutEngine {
                 rect: safeBounds,
                 contentRect: safeBounds.insetBy(dx: p, dy: p),
                 fontSize: 0.1,
-                contentPadding: p
+                contentPadding: p,
+                status: .needsExpansion
             )
         }
 
@@ -1079,7 +1082,8 @@ nonisolated enum OCRBubbleLayoutEngine {
             rect: safeBounds,
             contentRect: safeBounds.insetBy(dx: p, dy: p),
             fontSize: inlineMinimumFontSize,
-            contentPadding: p
+            contentPadding: p,
+            status: .needsExpansion
         )
     }
 
@@ -1172,3 +1176,4 @@ nonisolated enum OCRBubbleLayoutEngine {
         return hypot(rect.midX - anchor.x, rect.midY - anchor.y) + overlapPenalty
     }
 }
+

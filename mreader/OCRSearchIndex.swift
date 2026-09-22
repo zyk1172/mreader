@@ -160,11 +160,14 @@ final class OCRLibraryIndexer: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var lastError: String?
     private var task: Task<Void, Never>?
+    private var runID = UUID()
 
     private init() {}
 
     func start(_ comic: ComicBook) {
         task?.cancel()
+        let generation = UUID()
+        runID = generation
         activeComicID = comic.id
         progress = 0
         lastError = nil
@@ -173,6 +176,7 @@ final class OCRLibraryIndexer: ObservableObject {
                 guard let result = await Self.loadPages(for: comic), !result.pages.isEmpty else {
                     throw MediaSourceError.notFound
                 }
+                try Task.checkCancellation()
                 let pageCount = max(result.pages.count, 1)
                 for page in result.pages {
                     try Task.checkCancellation()
@@ -183,28 +187,38 @@ final class OCRLibraryIndexer: ObservableObject {
                         options: OCRPreprocessor.Options(
                             isRightToLeft: comic.readingDirectionRaw == ReadingDirection.rightToLeft.rawValue,
                             minimumTextHeight: comic.ocrMinimumTextHeight,
-                            recognitionMode: .adaptive
-                        )
+                            recognitionMode: .adaptive,
+                            sourceLanguagePreference: comic.translationSourceLanguage
+                        ),
+                        comicID: comic.id,
+                        pageIndex: page.index
                     )
                     let ocrResult = try await OCRRuntimeService.recognize(for: request)
+                    try Task.checkCancellation()
+                    guard self.runID == generation else { return }
                     await OCRRuntimeService.index(comicID: comic.id, pageIndex: page.index, blocks: ocrResult.bubbleBlocks)
+                    guard self.runID == generation else { return }
                     progress = Double(page.index + 1) / Double(pageCount)
                 }
                 await OCRRuntimeService.flush()
+                guard self.runID == generation, !Task.isCancelled else { return }
                 HapticManager.shared.play(.success)
             } catch is CancellationError {
                 await OCRRuntimeService.flush()
             } catch {
                 await OCRRuntimeService.flush()
+                guard self.runID == generation, !Task.isCancelled else { return }
                 lastError = error.localizedDescription
                 HapticManager.shared.play(.error)
             }
+            guard self.runID == generation else { return }
             activeComicID = nil
             task = nil
         }
     }
 
     func cancel() {
+        runID = UUID()
         task?.cancel()
         task = nil
         activeComicID = nil
@@ -259,3 +273,4 @@ struct OCRSearchView: View {
         .accessibilityIdentifier("mreader.ocr.search")
     }
 }
+

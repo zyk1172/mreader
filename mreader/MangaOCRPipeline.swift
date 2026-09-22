@@ -27,7 +27,7 @@ nonisolated enum OCRDebugStage: String, CaseIterable, Codable, Sendable {
     }
 }
 
-nonisolated struct OCRPageQuality: Sendable, Equatable {
+nonisolated struct OCRPageQuality: Codable, Sendable, Equatable {
     let averageConfidence: Double
     let usefulCharacterRatio: Double
     let expectedScriptRatio: Double
@@ -303,7 +303,7 @@ nonisolated struct OCRPageQuality: Sendable, Equatable {
     }
 }
 
-nonisolated struct OCRPipelineResult: Sendable {
+nonisolated struct OCRPipelineResult: Codable, Sendable {
     let rawBlocks: [TextBlock]
     let resolvedBlocks: [TextBlock]
     let lineBlocks: [TextBlock]
@@ -445,3 +445,4 @@ nonisolated enum MangaOCRPipeline {
         return nil
     }
 }
+

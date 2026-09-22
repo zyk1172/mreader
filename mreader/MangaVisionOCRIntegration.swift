@@ -372,21 +372,13 @@ nonisolated enum MangaVisionOCROrdering {
                 panelIndex: panel.flatMap { panelRank[$0.id] } ?? Int.max
             )
         }
-        return ranked.sorted { lhs, rhs in
-            if lhs.panelIndex != rhs.panelIndex {
-                return lhs.panelIndex < rhs.panelIndex
-            }
-            let a = lhs.block.boundingBox
-            let b = rhs.block.boundingBox
-            let rowTolerance = max(min(a.height, b.height) * 0.45, 0.012)
-            if abs(a.midY - b.midY) > rowTolerance {
-                return a.midY < b.midY
-            }
-            if abs(a.midX - b.midX) > 0.004 {
-                return isRightToLeft ? a.midX > b.midX : a.midX < b.midX
-            }
-            return a.minY < b.minY
-        }.map(\.block)
+        let groups = Dictionary(grouping: ranked, by: \.panelIndex)
+        return groups.keys.sorted().flatMap { rank in
+            AITranslator.sortedTextBlocks(
+                (groups[rank] ?? []).map(\.block),
+                isRightToLeft: isRightToLeft
+            )
+        }
     }
 
     static func applyingReadingOrder(
@@ -431,3 +423,4 @@ nonisolated enum MangaVisionOCROrdering {
         )
     }
 }
+

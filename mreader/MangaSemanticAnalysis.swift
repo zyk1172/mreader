@@ -21,7 +21,8 @@ nonisolated enum MangaVisionTextROIPlanner {
             containmentThreshold: 0.88
         )
         var padded: [CGRect] = []
-        for region in deduplicated.sorted(by: { readingGeometryPrecedes($0.normalizedRect, $1.normalizedRect) }) {
+        for region in MangaReadingGeometry.ordered(deduplicated, isRightToLeft: false,
+            rect: { $0.normalizedRect }, identity: { $0.id.uuidString }) {
             let rect = MangaPageCoordinateSpace.paddedNormalizedRect(
                 region.normalizedRect,
                 fraction: paddingFraction
@@ -149,18 +150,12 @@ nonisolated enum MangaSemanticAnalyzer {
         _ regions: [MangaVisionRegion],
         isRightToLeft: Bool
     ) -> [MangaVisionRegion] {
-        regions.sorted { lhs, rhs in
-            let a = lhs.normalizedRect
-            let b = rhs.normalizedRect
-            let rowTolerance = max(min(a.height, b.height) * 0.45, 0.018)
-            if abs(a.midY - b.midY) > rowTolerance {
-                return a.midY < b.midY
-            }
-            if abs(a.midX - b.midX) > 0.006 {
-                return isRightToLeft ? a.midX > b.midX : a.midX < b.midX
-            }
-            return a.minY < b.minY
-        }
+        MangaReadingGeometry.ordered(
+            regions,
+            isRightToLeft: isRightToLeft,
+            rect: { $0.normalizedRect },
+            identity: { $0.id.uuidString }
+        )
     }
 
     static func personCandidates(
@@ -240,9 +235,13 @@ nonisolated enum MangaSemanticAnalyzer {
             guard let anchorRect else { return nil }
             let anchor = CGPoint(x: anchorRect.midX, y: anchorRect.midY)
             let distance = hypot(textCenter.x - anchor.x, textCenter.y - anchor.y)
+            // Spatial proximity is association evidence, not detection confidence.
+            // A body alone or a weak face must not become an authoritative speaker hint.
+            guard let face = person.face, face.confidence >= 0.45,
+                  person.confidence >= 0.45 else { return nil }
             let proximity = max(0, 1 - Float(distance / 0.75))
-            let faceBonus: Float = person.face == nil ? 0 : 0.12
-            let score = min(1, proximity * 0.82 + person.confidence * 0.18 + faceBonus)
+            let evidenceConfidence = min(face.confidence, person.confidence)
+            let score = evidenceConfidence * proximity
             guard score >= 0.18 else { return nil }
             return MangaSpeakerCandidate(person: person, score: score)
         }.sorted { $0.score > $1.score }
@@ -293,8 +292,9 @@ nonisolated enum MangaSemanticAnalyzer {
                         return nil
                     }
                     return String(
-                        format: "person(x=%.3f,y=%.3f,score=%.2f)",
-                        Double(anchor.midX), Double(anchor.midY), Double(hint.score)
+                        format: "person(x=%.3f,y=%.3f,weakAssociation=%.2f,detectionConfidence=%.2f)",
+                        Double(anchor.midX), Double(anchor.midY), Double(hint.score),
+                        Double(hint.person.confidence)
                     )
                 }.joined(separator: ",")
                 lines.append(
@@ -372,3 +372,4 @@ nonisolated enum MangaSemanticAnalyzer {
         }
     }
 }
+

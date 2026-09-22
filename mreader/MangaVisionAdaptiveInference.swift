@@ -154,6 +154,22 @@ nonisolated enum MangaVisionInferencePlanner {
         )
     }
 
+    static func cacheDemandIdentity(
+        sourceSize: CGSize,
+        inputSize: CGSize,
+        requestClass: MangaVisionRequestClass,
+        resourceState: MangaVisionResourceState
+    ) -> String {
+        let plan = plan(sourceSize: sourceSize, inputSize: inputSize,
+                        requestClass: requestClass, resourceState: resourceState)
+        let inputMaximum = max(inputSize.width, inputSize.height, 1)
+        let maximumUseful = inputMaximum * CGFloat(max(plan.refinementTiles.count, 1))
+        let available = min(max(sourceSize.width, sourceSize.height), maximumUseful)
+        // Only a few bounded resolution tiers, never one cache entry per display pixel.
+        let tier = max(1, Int(ceil(available / inputMaximum)))
+        return "tiles=\(plan.refinementTiles.count)|sourceTier=\(tier)|allowed=\(plan.allowsInference)"
+    }
+
     static func shouldRefine(
         baseline: MangaPageAnalysis,
         plan: MangaVisionInferencePlan
@@ -352,7 +368,7 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
             semanticClasses: manifest.semanticClasses,
             outputContractRevision: manifest.outputContractRevision,
             analysisSchemaRevision: manifest.analysisSchemaRevision,
-            postProcessRevision: "\(manifest.postProcessRevision)|\(MangaVisionInferencePlanner.revision)",
+            postProcessRevision: "\(manifest.postProcessRevision)|\(MangaVisionInferencePlanner.revision)|\(MangaVisionCalibrationProfile.bundled.revision)",
             calibrationRevision: manifest.calibrationRevision
         )
     }
@@ -400,8 +416,14 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
             requestClass: requestClass
         )
 
+        let demand = MangaVisionInferencePlanner.cacheDemandIdentity(
+            sourceSize: imageSize, inputSize: manifest.inputSize,
+            requestClass: requestClass, resourceState: resourceState
+        )
         guard MangaVisionInferencePlanner.shouldRefine(baseline: baseline, plan: plan) else {
-            return baseline
+            var result = baseline
+            result.cacheRevision = manifest.cacheIdentity + "|" + demand
+            return result
         }
 
         var refinements: [MangaPageAnalysis] = []
@@ -426,10 +448,9 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
                 )
             )
         }
-        return MangaVisionAnalysisComposer.merge(
-            baseline: baseline,
-            refinements: refinements
-        )
+        var result = MangaVisionAnalysisComposer.merge(baseline: baseline, refinements: refinements)
+        result.cacheRevision = manifest.cacheIdentity + "|" + demand
+        return result
     }
 
     func schedulerSnapshotForDiagnostics() async -> MangaVisionInferenceScheduler.Snapshot {
@@ -594,3 +615,4 @@ nonisolated enum MangaVisionAnalysisComposer {
         )
     }
 }
+
