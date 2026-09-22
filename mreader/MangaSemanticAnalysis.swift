@@ -246,7 +246,10 @@ nonisolated enum MangaSemanticAnalyzer {
             let evidenceConfidence = min(face.confidence, person.confidence)
             let association = 0.20 + proximity * 0.80
             let score = evidenceConfidence * association
-            guard score >= 0.18 else { return nil }
+            // The intended boundary includes a 0.90-confidence distant face:
+            // 0.90 × 0.20 = 0.18. Float rounding can represent that product
+            // infinitesimally below 0.18, so compare with a tiny tolerance.
+            guard score + 0.000_1 >= 0.18 else { return nil }
             return MangaSpeakerCandidate(person: person, score: score)
         }.sorted { $0.score > $1.score }
     }
