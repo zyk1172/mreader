@@ -235,13 +235,17 @@ nonisolated enum MangaSemanticAnalyzer {
             guard let anchorRect else { return nil }
             let anchor = CGPoint(x: anchorRect.midX, y: anchorRect.midY)
             let distance = hypot(textCenter.x - anchor.x, textCenter.y - anchor.y)
-            // Spatial proximity is association evidence, not detection confidence.
-            // A body alone or a weak face must not become an authoritative speaker hint.
+            // Spatial proximity ranks association, while face confidence only
+            // controls whether a person is credible enough to remain a weak candidate.
+            // Keep a small prior for a strong but distant face: manga balloons do not
+            // always sit near their speaker. Body-only / weak-face candidates still do
+            // not become speaker hints.
             guard let face = person.face, face.confidence >= 0.45,
                   person.confidence >= 0.45 else { return nil }
             let proximity = max(0, 1 - Float(distance / 0.75))
             let evidenceConfidence = min(face.confidence, person.confidence)
-            let score = evidenceConfidence * proximity
+            let association = 0.20 + proximity * 0.80
+            let score = evidenceConfidence * association
             guard score >= 0.18 else { return nil }
             return MangaSpeakerCandidate(person: person, score: score)
         }.sorted { $0.score > $1.score }
