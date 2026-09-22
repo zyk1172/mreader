@@ -15,3 +15,6 @@ build/
 .local-bench/
 mreaderTests/BenchModels/
 mreaderTests/V2B5ValSamples/
+
+# Private Manga Vision weight: materialized locally from manga-vision-training.
+mreader/MangaVisionV2B5.mlpackage/Data/com.apple.CoreML/weights/weight.bin
