@@ -5439,7 +5439,10 @@ struct LocalImageView: View {
         let candidates = textBlocks.filter {
             ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
-        return candidates
+        return AITranslator.sortedTextBlocks(
+            candidates,
+            isRightToLeft: isRightToLeftReading
+        )
     }
 
     private func displayTranslation(for block: TextBlock) -> String {
