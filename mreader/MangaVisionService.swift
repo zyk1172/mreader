@@ -250,7 +250,8 @@ actor MangaVisionService {
         pageIndex: Int?,
         pageURL: URL,
         image: UIImage,
-        contentIdentity: PageContentIdentity? = nil
+        contentIdentity: PageContentIdentity? = nil,
+        requestClass: MangaVisionRequestClass = .interactive
     ) async -> MangaPageAnalysis? {
         let manifest = await modelManifest()
         let resolvedContentIdentity = contentIdentity ?? PageContentIdentityResolver.identity(for: pageURL)
@@ -262,7 +263,7 @@ actor MangaVisionService {
             sourceFingerprint: sourceFingerprint
         )
         let modelKey = manifest.cacheIdentity + "|" + analysisDemandIdentity(
-            image: image, manifest: manifest, requestClass: .interactive
+            image: image, manifest: manifest, requestClass: requestClass
         )
         let key = "\(modelKey)|\(identity.scope)|\(identity.pageIndex)|\(sourceFingerprint)"
         if let value = memoryCache[key] { return value }
