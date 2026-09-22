@@ -3519,7 +3519,6 @@ struct GuidedPanelReader: View {
     @State private var focusStore = GuidedPanelFocusPreviewStore()
     @State private var pageTransitionTarget: GuidedPanelPageTransitionTarget?
     @State private var pageTransitionProgress: Double = 0
-    @State private var hasPageTranslationAction = false
 
     /// 跨页不做整页过渡：新页直接出现在目标分镜上，由相机在同一个 transaction 里
     /// 从上一页的取景平滑移动到目标分镜取景（见 `moveToPage`）。
@@ -3558,7 +3557,6 @@ struct GuidedPanelReader: View {
                         isPageTapGestureEnabled: false,
                         isLongPressTranslationEnabled: areControlsVisible,
                         onTranslationStateChange: onTranslationStateChange,
-                        onTranslationAvailabilityChange: { hasPageTranslationAction = $0 },
                         onPreviousPage: previousPanel,
                         onNextPage: nextPanel,
                         areControlsVisible: areControlsVisible,
@@ -3635,22 +3633,6 @@ struct GuidedPanelReader: View {
                 SpatialTapGesture()
                     .onEnded { value in
                         guard !areControlsVisible, !isPanelTransitioning else { return }
-
-                        // Do not place an invisible navigation layer over LocalImageView:
-                        // it steals taps from interactive overlays such as "查看全文".
-                        // Edge navigation is handled here instead, while the visible
-                        // translation control keeps an exclusive bottom-right hit region.
-                        if hasPageTranslationAction {
-                            let reservedWidth = min(max(proxy.size.width * 0.34, 132), 190)
-                            let reservedHeight: CGFloat = 76
-                            let reservedRect = CGRect(
-                                x: max(proxy.size.width - reservedWidth, 0),
-                                y: max(proxy.size.height - reservedHeight, 0),
-                                width: reservedWidth,
-                                height: reservedHeight
-                            )
-                            if reservedRect.contains(value.location) { return }
-                        }
 
                         if value.location.x < proxy.size.width * 0.35 {
                             previousPanel()
@@ -4988,7 +4970,6 @@ struct LocalImageView: View {
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
     var onTranslationStateChange: (Bool) -> Void = { _ in }
-    var onTranslationAvailabilityChange: (Bool) -> Void = { _ in }
     /// 缩放态回传：外层翻页容器据此在 scale > 1 时屏蔽翻页拖拽。
     var onZoomChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
@@ -5037,7 +5018,6 @@ struct LocalImageView: View {
     @State private var recognizedPipelineCacheKey: String?
     @State private var isTranslating = false
     @State private var isRecognizingOCR = false
-    @State private var showsPageTranslation = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
     @State private var offlineTranslationTask: Task<OfflineTranslationOverlayResult, Never>?
@@ -5120,31 +5100,6 @@ struct LocalImageView: View {
             } else if loadFailed {
                 ContentUnavailableView("reader.imageLoadFailed".localized, systemImage: "exclamationmark.triangle", description: Text(url.lastPathComponent))
                     .foregroundStyle(.white)
-            }
-        }
-        .sheet(isPresented: $showsPageTranslation) {
-            NavigationStack {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 20) {
-                        ForEach(visibleTranslationBlocks) { block in
-                            Text(block.translation ?? "").textSelection(.enabled)
-                        }
-                    }.padding()
-                }
-                .navigationTitle("本页译文")
-                .toolbar { Button("完成") { showsPageTranslation = false } }
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if !visibleTranslationBlocks.isEmpty {
-                Button("查看全文", systemImage: "text.alignleft") { showsPageTranslation = true }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .padding(8)
-                    .contentShape(Capsule())
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(8)
-                    .accessibilityIdentifier("mreader.translation.fullText")
             }
         }
         .overlay(alignment: .bottom) {
@@ -5256,7 +5211,6 @@ struct LocalImageView: View {
             await loadImage()
         }
         .onDisappear {
-            onTranslationAvailabilityChange(false)
             translationTask?.cancel()
             translationTask = nil
             offlineTranslationTask?.cancel()
@@ -5323,9 +5277,6 @@ struct LocalImageView: View {
             if !newValue, !isOfflineTranslationDisplayed {
                 textBlocks.removeAll()
             }
-        }
-        .onChange(of: visibleTranslationBlocks.isEmpty) { _, isEmpty in
-            onTranslationAvailabilityChange(!isEmpty)
         }
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()
