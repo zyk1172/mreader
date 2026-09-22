@@ -3454,7 +3454,7 @@ struct ContinuousScrollReader: View {
 /// 副本里连同页面像素尺寸一起存：翻页路径不能再依赖 `PageGeometryStore` 是否已经
 /// 登记过该页，否则尺寸未知时会退回整页入场的兜底路径（读者看到的就是加载圈）。
 /// 用普通引用类型而非 `@State` 字典：预取落地不应该让分镜视图的 body 失效。
-private final class GuidedPanelLayoutStore {
+final class GuidedPanelLayoutStore {
     struct Entry {
         let layout: PanelPageLayout
         let sourceSize: CGSize
@@ -3462,8 +3462,10 @@ private final class GuidedPanelLayoutStore {
 
     var entries: [String: Entry] = [:] {
         didSet {
-            // Keep a bounded window; transient fallbacks are never promoted to reader cache.
-            entries = entries.filter { !$0.value.layout.isTransient }
+            // A transient fallback must not be written to PanelDetectionService's disk cache,
+            // but it still has to survive in this short-lived reader window. Dropping it here
+            // made prefetch compute the same fallback repeatedly and could leave page-boundary
+            // preparation with no entry at all.
             if entries.count > 16, let victim = entries.keys.sorted().first {
                 entries.removeValue(forKey: victim)
             }
@@ -3517,6 +3519,7 @@ struct GuidedPanelReader: View {
     @State private var focusStore = GuidedPanelFocusPreviewStore()
     @State private var pageTransitionTarget: GuidedPanelPageTransitionTarget?
     @State private var pageTransitionProgress: Double = 0
+    @State private var hasPageTranslationAction = false
 
     /// 跨页不做整页过渡：新页直接出现在目标分镜上，由相机在同一个 transaction 里
     /// 从上一页的取景平滑移动到目标分镜取景（见 `moveToPage`）。
@@ -3555,6 +3558,7 @@ struct GuidedPanelReader: View {
                         isPageTapGestureEnabled: false,
                         isLongPressTranslationEnabled: areControlsVisible,
                         onTranslationStateChange: onTranslationStateChange,
+                        onTranslationAvailabilityChange: { hasPageTranslationAction = $0 },
                         onPreviousPage: previousPanel,
                         onNextPage: nextPanel,
                         areControlsVisible: areControlsVisible,
@@ -3625,19 +3629,36 @@ struct GuidedPanelReader: View {
                     ProgressView().tint(.white).allowsHitTesting(false)
                 }
 
-                if !areControlsVisible {
-                    HStack(spacing: 0) {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { previousPanel() }
-                        Color.clear.frame(width: proxy.size.width * 0.30).allowsHitTesting(false)
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { nextPanel() }
-                    }
-                }
             }
             .clipped()
+            .simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        guard !areControlsVisible, !isPanelTransitioning else { return }
+
+                        // Do not place an invisible navigation layer over LocalImageView:
+                        // it steals taps from interactive overlays such as "查看全文".
+                        // Edge navigation is handled here instead, while the visible
+                        // translation control keeps an exclusive bottom-right hit region.
+                        if hasPageTranslationAction {
+                            let reservedWidth = min(max(proxy.size.width * 0.34, 132), 190)
+                            let reservedHeight: CGFloat = 76
+                            let reservedRect = CGRect(
+                                x: max(proxy.size.width - reservedWidth, 0),
+                                y: max(proxy.size.height - reservedHeight, 0),
+                                width: reservedWidth,
+                                height: reservedHeight
+                            )
+                            if reservedRect.contains(value.location) { return }
+                        }
+
+                        if value.location.x < proxy.size.width * 0.35 {
+                            previousPanel()
+                        } else if value.location.x > proxy.size.width * 0.65 {
+                            nextPanel()
+                        }
+                    }
+            )
         }
         .onDisappear {
             panelMotionTask?.cancel()
@@ -3708,7 +3729,8 @@ struct GuidedPanelReader: View {
             pageIndex: page.index,
             pageURL: pageURL,
             image: image,
-            isRightToLeft: readingDirection == .rightToLeft
+            isRightToLeft: readingDirection == .rightToLeft,
+            requestClass: .interactive
         )
         layoutStore.entries[pageURL.absoluteString] = GuidedPanelLayoutStore.Entry(
             layout: detectedLayout,
@@ -3820,7 +3842,8 @@ struct GuidedPanelReader: View {
             pageIndex: page.index,
             pageURL: page.url,
             image: image,
-            isRightToLeft: readingDirection == .rightToLeft
+            isRightToLeft: readingDirection == .rightToLeft,
+            requestClass: .prefetch
         )
         guard !Task.isCancelled else { return }
         layoutStore.entries[identifier] = GuidedPanelLayoutStore.Entry(
@@ -4292,7 +4315,7 @@ struct AnimatedPageReader: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
                         guard ReaderGestureGate.allowsSinglePageTurn(isZoomed: isPageZoomed) else { return }
@@ -4499,7 +4522,7 @@ struct DoublePageReader: View {
             .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? dragOffset * 0.16 : 0)
             .animation(pageChangeAnimation, value: leftPageIndex)
             .contentShape(Rectangle())
-            .gesture(
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
                         guard ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPageIndexes) else { return }
@@ -4965,6 +4988,7 @@ struct LocalImageView: View {
     var isPageTapGestureEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
     var onTranslationStateChange: (Bool) -> Void = { _ in }
+    var onTranslationAvailabilityChange: (Bool) -> Void = { _ in }
     /// 缩放态回传：外层翻页容器据此在 scale > 1 时屏蔽翻页拖拽。
     var onZoomChange: (Bool) -> Void = { _ in }
     let onPreviousPage: () -> Void
@@ -5114,8 +5138,13 @@ struct LocalImageView: View {
         .overlay(alignment: .bottomTrailing) {
             if !visibleTranslationBlocks.isEmpty {
                 Button("查看全文", systemImage: "text.alignleft") { showsPageTranslation = true }
-                    .font(.caption).padding(8)
-                    .background(.ultraThinMaterial, in: Capsule()).padding(8)
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .padding(8)
+                    .contentShape(Capsule())
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(8)
+                    .accessibilityIdentifier("mreader.translation.fullText")
             }
         }
         .overlay(alignment: .bottom) {
@@ -5227,6 +5256,7 @@ struct LocalImageView: View {
             await loadImage()
         }
         .onDisappear {
+            onTranslationAvailabilityChange(false)
             translationTask?.cancel()
             translationTask = nil
             offlineTranslationTask?.cancel()
@@ -5293,6 +5323,9 @@ struct LocalImageView: View {
             if !newValue, !isOfflineTranslationDisplayed {
                 textBlocks.removeAll()
             }
+        }
+        .onChange(of: visibleTranslationBlocks.isEmpty) { _, isEmpty in
+            onTranslationAvailabilityChange(!isEmpty)
         }
         .onChange(of: targetLanguage) { _, _ in
             textBlocks.removeAll()

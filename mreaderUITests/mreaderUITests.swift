@@ -147,33 +147,45 @@ final class mreaderUITests: XCTestCase {
         feedback.tap()
         XCTAssertTrue(element("mreader.hardCase.feedback.sheet", in: app).waitForExistence(timeout: timeout))
 
-        let body = app.buttons["Body"].firstMatch
-        XCTAssertTrue(body.waitForExistence(timeout: timeout))
+        let body = hardCaseFeedbackRow(
+            "mreader.hardCase.feedback.area.body",
+            in: app
+        )
+        XCTAssertTrue(body.exists && body.isHittable)
         body.tap()
 
-        let duplicate = app.buttons["重复"].firstMatch
-        for _ in 0..<5 {
-            if duplicate.exists, duplicate.isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(duplicate.waitForExistence(timeout: timeout))
+        let duplicate = hardCaseFeedbackRow(
+            "mreader.hardCase.feedback.issue.duplicate",
+            in: app
+        )
+        XCTAssertTrue(duplicate.exists && duplicate.isHittable)
         duplicate.tap()
 
-        let translation = app.buttons["翻译"].firstMatch
-        for _ in 0..<7 {
-            if translation.exists, translation.isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(translation.waitForExistence(timeout: timeout))
+        let translation = hardCaseFeedbackRow(
+            "mreader.hardCase.feedback.impact.translation",
+            in: app
+        )
+        XCTAssertTrue(translation.exists && translation.isHittable)
         translation.tap()
 
         let save = element("mreader.hardCase.feedback.save", in: app)
         XCTAssertTrue(save.waitForExistence(timeout: timeout))
+        XCTAssertTrue(save.isHittable)
         save.tap()
 
+        // The parent starts Hard Case capture from SwiftUI's sheet onDismiss callback.
+        // On CI the callback can publish the short-lived confirmation toast while the
+        // sheet is still being removed from the accessibility hierarchy. Observe the
+        // confirmation first, then verify the sheet completed dismissal; waiting for
+        // non-existence first can consume the toast's entire 2.2-second lifetime.
+        let feedbackSheet = element("mreader.hardCase.feedback.sheet", in: app)
         let toast = element("mreader.hardCase.toast", in: app)
-        XCTAssertTrue(toast.waitForExistence(timeout: timeout))
+        XCTAssertTrue(toast.waitForExistence(timeout: 20))
         XCTAssertEqual(toast.label, "已加入模型训练候选")
+        XCTAssertTrue(
+            feedbackSheet.waitForNonExistence(timeout: timeout),
+            "Saving feedback must dismiss the feedback sheet"
+        )
         XCTAssertTrue(
             toast.waitForNonExistence(timeout: 5),
             "The first confirmation must dismiss before Quick Mark is exercised"
@@ -254,6 +266,24 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(reader.waitForExistence(timeout: timeout))
 
         print("MREADER_V2B5_PHYSICAL_UI_JSON={\"status\":\"PASS\",\"reader_pages\":5,\"reader_swipes\":6,\"guided_panel_transitions\":2,\"ocr_entry\":true,\"crashes\":0}")
+    }
+
+    private func hardCaseFeedbackRow(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        let row = app.buttons[identifier].firstMatch
+        let form = app.collectionViews.firstMatch
+
+        for _ in 0..<8 {
+            if row.waitForExistence(timeout: semanticFallbackTimeout), row.isHittable {
+                return row
+            }
+            if form.exists {
+                form.swipeUp()
+            } else {
+                app.swipeUp()
+            }
+        }
+
+        return row
     }
 
     private func settingsMenuItem(in app: XCUIApplication) -> XCUIElement {

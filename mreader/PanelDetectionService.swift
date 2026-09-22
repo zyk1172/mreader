@@ -400,7 +400,12 @@ actor PanelDetectionService {
 
     /// Compatibility entry point used by the existing GuidedPanelReader.
     /// New call sites should prefer the comicID/pageIndex overload so the cache is easy to inspect.
-    func layout(for pageURL: URL, image: UIImage, isRightToLeft: Bool) async -> PanelPageLayout {
+    func layout(
+        for pageURL: URL,
+        image: UIImage,
+        isRightToLeft: Bool,
+        requestClass: MangaVisionRequestClass = .currentTask
+    ) async -> PanelPageLayout {
         let scopeSource = pageURL.deletingLastPathComponent().absoluteString
         let identity = CacheIdentity(
             scope: "legacy-\(Self.sha256(scopeSource))",
@@ -412,7 +417,8 @@ actor PanelDetectionService {
             pageIndex: nil,
             pageURL: pageURL,
             image: image,
-            isRightToLeft: isRightToLeft
+            isRightToLeft: isRightToLeft,
+            requestClass: requestClass
         )
     }
 
@@ -422,7 +428,8 @@ actor PanelDetectionService {
         pageIndex: Int,
         pageURL: URL,
         image: UIImage,
-        isRightToLeft: Bool
+        isRightToLeft: Bool,
+        requestClass: MangaVisionRequestClass = .currentTask
     ) async -> PanelPageLayout {
         let identity = CacheIdentity(
             scope: comicID.uuidString.lowercased(),
@@ -434,7 +441,8 @@ actor PanelDetectionService {
             pageIndex: pageIndex,
             pageURL: pageURL,
             image: image,
-            isRightToLeft: isRightToLeft
+            isRightToLeft: isRightToLeft,
+            requestClass: requestClass
         )
     }
 
@@ -471,7 +479,8 @@ actor PanelDetectionService {
         pageIndex: Int?,
         pageURL: URL,
         image: UIImage,
-        isRightToLeft: Bool
+        isRightToLeft: Bool,
+        requestClass: MangaVisionRequestClass
     ) async -> PanelPageLayout {
         let epoch = generation
         let direction = isRightToLeft ? "rightToLeft" : "leftToRight"
@@ -480,7 +489,10 @@ actor PanelDetectionService {
         // Panel-layout cache hits must remain cheaper than Manga Vision inference.
         // Derive the dependency that an analysis started now would request without
         // touching the model, then only run analysis after both layout caches miss.
-        let expectedDependency = await visionService.expectedDependencyIdentity(image: image)
+        let expectedDependency = await visionService.expectedDependencyIdentity(
+            image: image,
+            requestClass: requestClass
+        )
         var primaryIdentifier = "manga-vision:\(expectedDependency)"
         var memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
@@ -512,9 +524,35 @@ actor PanelDetectionService {
             return temporary
         }
 
-        let mangaAnalysis = try? await visionService.analysis(
-            comicID: comicID, pageIndex: pageIndex, pageURL: pageURL, image: image
+        // Reuse analysis already warmed for the same demand before starting
+        // new Core ML work. Interactive navigation may also consume a completed
+        // prefetch analysis: Guided Panel needs stable panel geometry immediately,
+        // and a later interactive analysis can still refresh richer semantic caches.
+        var mangaAnalysis = await visionService.cachedAnalysis(
+            comicID: comicID,
+            pageIndex: pageIndex,
+            pageURL: pageURL,
+            image: image,
+            requestClass: requestClass
         )
+        if mangaAnalysis == nil, requestClass == .interactive {
+            mangaAnalysis = await visionService.cachedAnalysis(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                pageURL: pageURL,
+                image: image,
+                requestClass: .prefetch
+            )
+        }
+        if mangaAnalysis == nil {
+            mangaAnalysis = try? await visionService.analysis(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                pageURL: pageURL,
+                image: image,
+                requestClass: requestClass
+            )
+        }
         guard epoch == generation, !Task.isCancelled else {
             var temporary = Self.fullPageLayout(
                 bounds: Self.detectedContentBounds(analysisImage),

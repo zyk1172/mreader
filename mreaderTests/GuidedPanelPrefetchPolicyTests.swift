@@ -23,6 +23,28 @@ struct GuidedPanelPrefetchPolicyTests {
         #expect(GuidedPanelPrefetchPolicy.shouldPromoteNextPage(panelIndex: 1, panelCount: 2))
     }
 
+    @Test func transientFallbackRemainsAvailableForSessionHandoff() {
+        var layout = PanelPageLayout(
+            schemaVersion: PanelPageLayout.schemaVersion,
+            modelVersion: PanelPageLayout.modelVersion,
+            detectorIdentifier: "fallback",
+            direction: "rightToLeft",
+            sourceFingerprint: "fixture",
+            panels: [],
+            contentBounds: NormalizedRect(CGRect(x: 0, y: 0, width: 1, height: 1)),
+            usedFallback: true
+        )
+        layout.isTransient = true
+
+        let store = GuidedPanelLayoutStore()
+        store.entries["page"] = GuidedPanelLayoutStore.Entry(
+            layout: layout,
+            sourceSize: CGSize(width: 1_200, height: 1_800)
+        )
+
+        #expect(store.entries["page"]?.layout.isTransient == true)
+    }
+
     @Test func inPageCameraProfilesAreSingleStageAndBounded() {
         let sameRow = GuidedPanelMotionPlanner.profile(
             from: CGRect(x: 0.56, y: 0.05, width: 0.38, height: 0.30),
