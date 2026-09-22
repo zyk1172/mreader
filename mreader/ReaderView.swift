@@ -3454,7 +3454,7 @@ struct ContinuousScrollReader: View {
 /// 副本里连同页面像素尺寸一起存：翻页路径不能再依赖 `PageGeometryStore` 是否已经
 /// 登记过该页，否则尺寸未知时会退回整页入场的兜底路径（读者看到的就是加载圈）。
 /// 用普通引用类型而非 `@State` 字典：预取落地不应该让分镜视图的 body 失效。
-private final class GuidedPanelLayoutStore {
+final class GuidedPanelLayoutStore {
     struct Entry {
         let layout: PanelPageLayout
         let sourceSize: CGSize
