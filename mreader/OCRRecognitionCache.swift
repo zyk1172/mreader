@@ -65,18 +65,32 @@ actor OCRRecognitionCache {
             from: request.pageURL, fallback: request.fallbackImage
         ) ?? request.fallbackImage
         try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        // Loading the already-decoded/high-resolution source is cheap compared with
+        // Manga Vision + OCR. Use its dimensions to derive the expected visual
+        // dependency and check the OCR cache before starting model work.
+        var preparedRequest = request
+        preparedRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: image
+        )
+        var key = preparedRequest.cacheKey
+        if let cached = cachedResult(forKey: key) { return cached }
+
         let analysis = try? await MangaVisionService.shared.analysis(
             comicID: request.comicID, pageIndex: request.pageIndex,
             pageURL: request.pageURL, image: image
         )
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
-        var preparedRequest = request
-        preparedRequest.analysisIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
-        try Task.checkCancellation()
-        guard epoch == generation else { throw CancellationError() }
-        let key = preparedRequest.cacheKey
-        if let cached = cachedResult(forKey: key) { return cached }
+
+        let actualIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
+        if actualIdentity != preparedRequest.analysisIdentity {
+            preparedRequest.analysisIdentity = actualIdentity
+            key = preparedRequest.cacheKey
+            if let cached = cachedResult(forKey: key) { return cached }
+        }
+
         let options = request.options
         let result = try await workPool.value(forKey: key) {
             try await MangaOCRPipeline.recognize(in: image, options: options, mangaAnalysis: analysis)
