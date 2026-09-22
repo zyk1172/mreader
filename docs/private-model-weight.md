@@ -24,7 +24,7 @@ The bootstrap script:
 1. pushes the current V2B5 weight into the private training repository using Git LFS;
 2. generates a dedicated ED25519 deploy key;
 3. registers only the public key on `zyk1172/manga-vision-training` as **read-only**;
-4. stores the private key in the public repository Actions secret `MREADER_MODEL_DEPLOY_KEY`.
+4. stores the private key in the public repository Actions secret `MREADER_MODEL_DEPLOY_KEY`;\n5. seeds the local model cache so the first build after cutover does not need a network fetch.
 
 It uses the existing authenticated `gh` login only during bootstrap and does **not** store the personal GitHub token in CI.
 
