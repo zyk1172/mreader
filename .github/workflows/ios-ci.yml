@@ -35,6 +35,16 @@ jobs:
           xcodebuild -version
           xcrun simctl list runtimes
 
+      - name: Materialize private Manga Vision weight
+        env:
+          MREADER_MODEL_TOKEN: ${{ secrets.MREADER_MODEL_READ_TOKEN }}
+        run: bash scripts/materialize_private_model_weight.sh
+
+      - name: Materialize private Manga Vision weight
+        env:
+          MREADER_MODEL_TOKEN: ${{ secrets.MREADER_MODEL_READ_TOKEN }}
+        run: bash scripts/materialize_private_model_weight.sh
+
       - name: Resolve Swift packages
         run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
 
