@@ -4315,7 +4315,7 @@ struct AnimatedPageReader: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
                         guard ReaderGestureGate.allowsSinglePageTurn(isZoomed: isPageZoomed) else { return }
@@ -4522,7 +4522,7 @@ struct DoublePageReader: View {
             .offset(x: (pageTurnAnimation == .slide || pageTurnAnimation == .curl) ? dragOffset * 0.16 : 0)
             .animation(pageChangeAnimation, value: leftPageIndex)
             .contentShape(Rectangle())
-            .gesture(
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 28)
                     .updating($dragOffset) { value, state, _ in
                         guard ReaderGestureGate.allowsDoublePageTurn(zoomedPageIndexes: zoomedPageIndexes) else { return }
