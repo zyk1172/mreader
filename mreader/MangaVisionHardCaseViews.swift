@@ -53,7 +53,11 @@ struct MangaVisionHardCaseFeedbackSheet: View {
             Form {
                 Section("问题涉及") {
                     ForEach(MangaVisionHardCaseAffectedArea.allCases, id: \.self) { item in
-                        selectionRow(item.displayName, selected: affectedAreas.contains(item)) {
+                        selectionRow(
+                            item.displayName,
+                            identifier: "mreader.hardCase.feedback.area.\(item.rawValue)",
+                            selected: affectedAreas.contains(item)
+                        ) {
                             toggle(item, in: &affectedAreas)
                         }
                     }
@@ -61,7 +65,11 @@ struct MangaVisionHardCaseFeedbackSheet: View {
 
                 Section("问题类型") {
                     ForEach(MangaVisionHardCaseIssueType.allCases.filter { $0 != .unspecifiedVisualError }, id: \.self) { item in
-                        selectionRow(item.displayName, selected: issueTypes.contains(item)) {
+                        selectionRow(
+                            item.displayName,
+                            identifier: "mreader.hardCase.feedback.issue.\(item.rawValue)",
+                            selected: issueTypes.contains(item)
+                        ) {
                             toggle(item, in: &issueTypes)
                         }
                     }
@@ -69,7 +77,11 @@ struct MangaVisionHardCaseFeedbackSheet: View {
 
                 Section("产品影响") {
                     ForEach(MangaVisionHardCaseProductImpact.allCases, id: \.self) { item in
-                        selectionRow(item.displayName, selected: productImpacts.contains(item)) {
+                        selectionRow(
+                            item.displayName,
+                            identifier: "mreader.hardCase.feedback.impact.\(item.rawValue)",
+                            selected: productImpacts.contains(item)
+                        ) {
                             toggle(item, in: &productImpacts)
                         }
                     }
@@ -109,7 +121,12 @@ struct MangaVisionHardCaseFeedbackSheet: View {
     }
 
     @ViewBuilder
-    private func selectionRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func selectionRow(
+        _ title: String,
+        identifier: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             HStack {
                 Text(title)
@@ -121,6 +138,7 @@ struct MangaVisionHardCaseFeedbackSheet: View {
                 }
             }
         }
+        .accessibilityIdentifier(identifier)
     }
 
     private func toggle<T: Hashable>(_ value: T, in set: inout Set<T>) {
