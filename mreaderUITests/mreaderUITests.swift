@@ -173,15 +173,19 @@ final class mreaderUITests: XCTestCase {
         XCTAssertTrue(save.isHittable)
         save.tap()
 
+        // The parent starts Hard Case capture from SwiftUI's sheet onDismiss callback.
+        // On CI the callback can publish the short-lived confirmation toast while the
+        // sheet is still being removed from the accessibility hierarchy. Observe the
+        // confirmation first, then verify the sheet completed dismissal; waiting for
+        // non-existence first can consume the toast's entire 2.2-second lifetime.
         let feedbackSheet = element("mreader.hardCase.feedback.sheet", in: app)
-        XCTAssertTrue(
-            feedbackSheet.waitForNonExistence(timeout: timeout),
-            "Saving feedback must dismiss the feedback sheet before capture confirmation"
-        )
-
         let toast = element("mreader.hardCase.toast", in: app)
         XCTAssertTrue(toast.waitForExistence(timeout: 20))
         XCTAssertEqual(toast.label, "已加入模型训练候选")
+        XCTAssertTrue(
+            feedbackSheet.waitForNonExistence(timeout: timeout),
+            "Saving feedback must dismiss the feedback sheet"
+        )
         XCTAssertTrue(
             toast.waitForNonExistence(timeout: 5),
             "The first confirmation must dismiss before Quick Mark is exercised"
