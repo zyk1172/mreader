@@ -384,6 +384,8 @@ actor PanelDetectionService {
     private var memoryCache: [String: PanelPageLayout] = [:]
     private var memoryOrder: [String] = []
     private var generation = UUID()
+    private var diskWritesSincePrune = 0
+    private var lastDiskPruneAt = Date.distantPast
 
     init(
         visionService: MangaVisionService = .shared,
@@ -440,6 +442,8 @@ actor PanelDetectionService {
         generation = UUID()
         memoryOrder.removeAll()
         memoryCache.removeAll()
+        diskWritesSincePrune = 0
+        lastDiskPruneAt = .distantPast
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
@@ -628,8 +632,21 @@ actor PanelDetectionService {
     private func store(_ layout: PanelPageLayout, memoryKey: String, diskURL: URL) {
         remember(layout, key: memoryKey)
         guard let data = try? JSONEncoder().encode(layout) else { return }
-        try? data.write(to: diskURL, options: .atomic)
-        pruneDiskCache()
+        do {
+            try data.write(to: diskURL, options: .atomic)
+        } catch {
+            return
+        }
+
+        // Directory enumeration is O(number of cached pages). Do not put that
+        // scan on every sequential Guided Panel write; reconcile periodically.
+        diskWritesSincePrune += 1
+        let now = Date()
+        if diskWritesSincePrune >= 32 || now.timeIntervalSince(lastDiskPruneAt) >= 15 * 60 {
+            pruneDiskCache()
+            diskWritesSincePrune = 0
+            lastDiskPruneAt = now
+        }
     }
 
     private func remember(_ layout: PanelPageLayout, key: String) {
