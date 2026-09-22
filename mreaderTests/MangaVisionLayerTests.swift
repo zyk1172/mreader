@@ -406,6 +406,7 @@ struct MangaVisionLayerTests {
             persons: [farPerson, nearPerson]
         )
         #expect(hints.count == 2)
+        guard hints.count == 2 else { return }
         #expect(hints.first?.person.id == nearPerson.id)
         #expect(hints[0].score > hints[1].score)
     }
