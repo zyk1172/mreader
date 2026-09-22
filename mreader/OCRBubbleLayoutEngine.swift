@@ -989,8 +989,12 @@ nonisolated enum OCRBubbleLayoutEngine {
                 let proposedWidth = CGFloat(columns) * columnWidth + p * 2
                 let proposedHeight = CGFloat(usedRows) * advance + p * 2
                 let safeGrowth = max(growth, 1)
+                // Vertical CoreText most often needs additional cross-axis room
+                // for glyph metrics / columns. Growing height together with width
+                // turned a five-glyph measured card into a ~220pt tall surface.
+                // Preserve the content-derived vertical extent and expand width only.
                 let grownWidth = max(proposedWidth - p * 2, 1) * safeGrowth + p * 2
-                let grownHeight = max(proposedHeight - p * 2, 1) * safeGrowth + p * 2
+                let grownHeight = proposedHeight
                 let minimumWidth = useSourceRectAsMinimumExtent ? sourceRect.width + p * 2 : 0
                 let minimumHeight = useSourceRectAsMinimumExtent ? sourceRect.height + p * 2 : 0
                 let width = min(max(grownWidth, minimumWidth, 1), safeBounds.width)
