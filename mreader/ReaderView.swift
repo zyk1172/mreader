@@ -3462,8 +3462,10 @@ private final class GuidedPanelLayoutStore {
 
     var entries: [String: Entry] = [:] {
         didSet {
-            // Keep a bounded window; transient fallbacks are never promoted to reader cache.
-            entries = entries.filter { !$0.value.layout.isTransient }
+            // A transient fallback must not be written to PanelDetectionService's disk cache,
+            // but it still has to survive in this short-lived reader window. Dropping it here
+            // made prefetch compute the same fallback repeatedly and could leave page-boundary
+            // preparation with no entry at all.
             if entries.count > 16, let victim = entries.keys.sorted().first {
                 entries.removeValue(forKey: victim)
             }
