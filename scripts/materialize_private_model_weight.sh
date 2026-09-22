@@ -81,7 +81,7 @@ if [[ ! -d "$CACHE_REPO/.git" ]]; then
 fi
 
 git "${AUTH_ARGS[@]}" -C "$CACHE_REPO" fetch --depth 1 origin "$PRIVATE_MODEL_REF"
-git -C "$CACHE_REPO" checkout --detach --force FETCH_HEAD
+GIT_LFS_SKIP_SMUDGE=1 git -C "$CACHE_REPO" checkout --detach --force FETCH_HEAD
 git "${AUTH_ARGS[@]}" -C "$CACHE_REPO" lfs pull --include="$PRIVATE_MODEL_PATH" --exclude=""
 
 if copy_weight "$CACHE_REPO/$PRIVATE_MODEL_PATH"; then
