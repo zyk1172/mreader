@@ -322,6 +322,21 @@ actor MangaVisionService {
         return analysis?.cacheRevision ?? (manifest.cacheIdentity + "|unavailable")
     }
 
+    /// Returns the cache dependency that an analysis started now would request,
+    /// without loading or running the model. Downstream caches can therefore
+    /// perform their own memory/disk lookup before paying for Manga Vision.
+    func expectedDependencyIdentity(
+        image: UIImage,
+        requestClass: MangaVisionRequestClass = .currentTask
+    ) async -> String {
+        let manifest = await modelManifest()
+        return manifest.cacheIdentity + "|" + analysisDemandIdentity(
+            image: image,
+            manifest: manifest,
+            requestClass: requestClass
+        )
+    }
+
     private func analysisDemandIdentity(
         image: UIImage, manifest: MangaVisionModelManifest,
         requestClass: MangaVisionRequestClass
