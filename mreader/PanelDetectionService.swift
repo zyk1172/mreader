@@ -470,26 +470,26 @@ actor PanelDetectionService {
         isRightToLeft: Bool
     ) async -> PanelPageLayout {
         let epoch = generation
-        let mangaAnalysis = try? await visionService.analysis(
-            comicID: comicID, pageIndex: pageIndex, pageURL: pageURL, image: image
-        )
-        let dependency = await visionService.dependencyIdentity(for: mangaAnalysis)
-        let primaryIdentifier = "manga-vision:\(dependency)"
         let direction = isRightToLeft ? "rightToLeft" : "leftToRight"
         let sourceFingerprint = Self.sourceFingerprint(pageURL: pageURL, image: image)
-        let memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
+
+        // Panel-layout cache hits must remain cheaper than Manga Vision inference.
+        // Derive the dependency that an analysis started now would request without
+        // touching the model, then only run analysis after both layout caches miss.
+        let expectedDependency = await visionService.expectedDependencyIdentity(image: image)
+        var primaryIdentifier = "manga-vision:\(expectedDependency)"
+        var memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
             return cached
         }
 
         let diskURL = cacheURL(for: cacheIdentity)
-        let validDetectorIdentifiers = Set([primaryIdentifier])
         if let data = try? Data(contentsOf: diskURL),
            let cached = try? JSONDecoder().decode(PanelPageLayout.self, from: data),
            Self.isCacheValid(
                 cached,
                 direction: direction,
-                validDetectorIdentifiers: validDetectorIdentifiers,
+                validDetectorIdentifiers: Set([primaryIdentifier]),
                 sourceFingerprint: sourceFingerprint
            ) {
             remember(cached, key: memoryKey)
@@ -506,6 +506,43 @@ actor PanelDetectionService {
             var temporary = fallback
             temporary.isTransient = true
             return temporary
+        }
+
+        let mangaAnalysis = try? await visionService.analysis(
+            comicID: comicID, pageIndex: pageIndex, pageURL: pageURL, image: image
+        )
+        guard epoch == generation, !Task.isCancelled else {
+            var temporary = Self.fullPageLayout(
+                bounds: Self.detectedContentBounds(analysisImage),
+                direction: direction,
+                sourceFingerprint: sourceFingerprint,
+                detectorIdentifier: primaryIdentifier
+            )
+            temporary.isTransient = true
+            return temporary
+        }
+
+        // Resource state may have changed after the model-free lookup. If the
+        // actual analysis used a different demand, switch identities and honor
+        // a layout cached under that exact dependency before recomputing it.
+        let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
+        if actualDependency != expectedDependency {
+            primaryIdentifier = "manga-vision:\(actualDependency)"
+            memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
+            if let cached = memoryCache[memoryKey] {
+                return cached
+            }
+            if let data = try? Data(contentsOf: diskURL),
+               let cached = try? JSONDecoder().decode(PanelPageLayout.self, from: data),
+               Self.isCacheValid(
+                    cached,
+                    direction: direction,
+                    validDetectorIdentifiers: Set([primaryIdentifier]),
+                    sourceFingerprint: sourceFingerprint
+               ) {
+                remember(cached, key: memoryKey)
+                return cached
+            }
         }
 
         let contentBounds = Self.detectedContentBounds(analysisImage)
