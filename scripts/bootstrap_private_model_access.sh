@@ -89,6 +89,13 @@ fi
 
 gh secret set MREADER_MODEL_DEPLOY_KEY --repo "$PUBLIC_REPO_SLUG" < "$KEY_PATH"
 
+# Preserve a local materialized copy so the later public-file deletion does not
+# force the first post-cutover build to hit the network.
+LOCAL_MODEL_CACHE_ROOT="${MREADER_MODEL_CACHE_DIR:-$HOME/Library/Caches/mreader/private-models}"
+LOCAL_MODEL_CACHE="$LOCAL_MODEL_CACHE_ROOT/manga-vision-training/$PRIVATE_MODEL_PATH"
+mkdir -p "$(dirname "$LOCAL_MODEL_CACHE")"
+cp "$WEIGHT" "$LOCAL_MODEL_CACHE"
+
 SHA256="$(shasum -a 256 "$WEIGHT" | awk '{print $1}')"
 echo
 echo "Private Manga Vision bootstrap complete."
