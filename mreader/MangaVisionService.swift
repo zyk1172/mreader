@@ -473,6 +473,14 @@ actor MangaVisionService {
         }
 
         guard let current = inFlight[key], current.id == request.id else {
+            // A sibling waiter may already have finalized the same successful
+            // inference. When the provider reports a different demand revision,
+            // that result is intentionally not cached under this key; every
+            // coalesced waiter should still receive the valid result.
+            if let revision = result.cacheRevision,
+               !key.hasPrefix(revision + "|") {
+                return result
+            }
             throw MangaVisionServiceError.staleResult
         }
 
