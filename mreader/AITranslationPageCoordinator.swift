@@ -237,19 +237,21 @@ actor AITranslationPageCoordinator {
     func translationResult(for request: AITranslationPageRequest) async throws -> AITranslationPipelineResult {
         let epoch = generation
         var contextualRequest = request
-        let analysis = try? await MangaVisionService.shared.analysis(
-            comicID: request.comicID, pageIndex: request.pageIndex,
-            pageURL: request.pageURL, image: request.image
-        )
-        try Task.checkCancellation()
-        contextualRequest.analysisIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
         contextualRequest.previousContext = await TranslationContextRegistry.shared.context(
             scopeID: request.contextScopeID,
             pageIndex: request.pageIndex,
             seed: request.previousContext
         )
+        try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
-        let key = contextualRequest.cacheKey
+
+        // Check the translation cache against the dependency an analysis started now
+        // would request. Computing this identity is model-free; a cache hit must not
+        // trigger Manga Vision inference.
+        contextualRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: request.image
+        )
+        var key = contextualRequest.cacheKey
         if let cached = cachedBlocks(forKey: key) {
             await TranslationContextRegistry.shared.record(
                 scopeID: contextualRequest.contextScopeID,
@@ -257,6 +259,30 @@ actor AITranslationPageCoordinator {
             )
             return AITranslationPipelineResult(blocks: cached, isComplete: true)
         }
+
+        let analysis = try? await MangaVisionService.shared.analysis(
+            comicID: request.comicID, pageIndex: request.pageIndex,
+            pageURL: request.pageURL, image: request.image
+        )
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+
+        // Resource state can change between the model-free lookup and inference.
+        // If it did, switch to the actual analysis dependency and give that cache
+        // identity one chance before running translation.
+        let actualIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
+        if actualIdentity != contextualRequest.analysisIdentity {
+            contextualRequest.analysisIdentity = actualIdentity
+            key = contextualRequest.cacheKey
+            if let cached = cachedBlocks(forKey: key) {
+                await TranslationContextRegistry.shared.record(
+                    scopeID: contextualRequest.contextScopeID,
+                    pageIndex: contextualRequest.pageIndex, blocks: cached
+                )
+                return AITranslationPipelineResult(blocks: cached, isComplete: true)
+            }
+        }
+
         let pipelineRequest = contextualRequest
         let result = try await workPool.value(forKey: key) {
             try await AITranslationPagePipeline.translate(pipelineRequest)
@@ -276,11 +302,9 @@ actor AITranslationPageCoordinator {
 
     func isCached(_ request: AITranslationPageRequest) async -> Bool {
         var prepared = request
-        let analysis = await MangaVisionService.shared.cachedAnalysis(
-            comicID: request.comicID, pageIndex: request.pageIndex,
-            pageURL: request.pageURL, image: request.image
+        prepared.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
+            image: request.image
         )
-        prepared.analysisIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
         prepared.previousContext = await TranslationContextRegistry.shared.context(
             scopeID: request.contextScopeID, pageIndex: request.pageIndex, seed: request.previousContext
         )
