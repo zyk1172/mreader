@@ -214,50 +214,38 @@ nonisolated enum ReaderFitWidthDecodePolicy {
 }
 
 nonisolated enum ReaderContinuousScrollPolicy {
-    static let maximumAutomaticPageJump = 12
-    static let maximumStabilizingPageJump = 2
-
-    static func shouldAcceptVisiblePage(
-        current: Int,
-        observed: Int,
-        pageCount: Int,
-        isStabilizing: Bool,
-        isUserInteracting: Bool
-    ) -> Bool {
-        guard pageCount > 0,
-              observed >= 0,
-              observed < pageCount else { return false }
-        let distance = abs(observed - current)
-        if isStabilizing && distance > maximumStabilizingPageJump {
-            return false
-        }
-        if !isUserInteracting && distance > maximumAutomaticPageJump {
-            return false
-        }
-        return true
+    static func pageProgress(
+        contentOffsetY: CGFloat,
+        pageStartOffsetY: CGFloat,
+        pageHeight: CGFloat
+    ) -> CGFloat {
+        guard pageHeight > 1 else { return 0 }
+        return min(max((contentOffsetY - pageStartOffsetY) / pageHeight, 0), 1)
     }
 
-    /// targetFrame 是目标页在 scroll coordinate-space 中的实时 frame。
-    /// 只基于当前 contentOffset + 目标页实时 frame 做页内恢复，不再累计 0..<N 的估算页高。
-    static func alignedContentOffsetY(
-        currentOffsetY: CGFloat,
-        targetFrame: CGRect,
+    static func restoredContentOffsetY(
+        pageTopOffsetY: CGFloat,
+        pageHeight: CGFloat,
         pageProgress: CGFloat,
         minimumOffsetY: CGFloat,
         maximumOffsetY: CGFloat
     ) -> CGFloat {
-        guard targetFrame.height > 1 else {
-            return min(max(currentOffsetY, minimumOffsetY), maximumOffsetY)
-        }
         let normalizedProgress = min(max(pageProgress, 0), 1)
-        let pageOffset = min(
-            max(targetFrame.height * normalizedProgress, 0),
-            max(targetFrame.height - 1, 0)
-        )
+        let pageOffset = max(pageHeight, 1) * normalizedProgress
         return min(
-            max(currentOffsetY + targetFrame.minY + pageOffset, minimumOffsetY),
+            max(pageTopOffsetY + pageOffset, minimumOffsetY),
             maximumOffsetY
         )
+    }
+
+    static func estimatedPageStartOffsetY(
+        currentOffsetY: CGFloat,
+        newPageHeight: CGFloat,
+        movingBackward: Bool
+    ) -> CGFloat {
+        movingBackward
+            ? currentOffsetY - max(newPageHeight, 1)
+            : currentOffsetY
     }
 }
 
