@@ -44,10 +44,7 @@ Get a device ID with:
 xcrun xctrace list devices
 ```
 
-The script temporarily stages the candidate at the existing
-`MangaVisionV2B5.mlpackage` resource path so the exact existing Swift output
-contract is exercised. It always restores the original package with a shell
-trap and does not commit model bytes.
+With a physical device ID, the script first benchmarks the currently bundled production model, then stages the candidate at the existing `MangaVisionV2B5.mlpackage` resource path and runs the identical benchmark again. Baseline and candidate use separate DerivedData/result bundles. The script always restores the original package with a shell trap and does not commit model bytes.
 
 Before device execution it runs `MangaVisionRegressionGateTests` in the
 simulator. This catches input/output tensor incompatibility and the existing
@@ -66,7 +63,7 @@ separately true:
    non-test pages (box IoU and score tolerance), rather than reusing the old
    V2B5 golden as if it were candidate ground truth.
 3. Simulator regression/contract tests pass with the candidate staged.
-4. Physical-device end-to-end timing, memory and thermal drift are acceptable.
+4. Physical-device end-to-end timing, memory and thermal drift are acceptable against the same-device production baseline. Compare preprocess/model/postprocess separately, not only total latency.
 5. Guided Panel and OCR ROI smoke tests run against representative real pages.
 
 ## Why the old golden cannot be reused as candidate truth
