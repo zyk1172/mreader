@@ -3605,11 +3605,16 @@ struct ContinuousScrollReader: View {
         }
         let url = pages[pageIndex].url
         let store = PageGeometryStore.shared
+        if let ratio = store.aspectRatio(for: url)
+            ?? store.neighbouringAspectRatio(forPageIndex: pageIndex, among: pages) {
+            // 已知几何时占位高度必须和 LocalImageView.fitWidth 的最终高度一致，
+            // 否则图片落地时 cell 会从“至少一屏高”突然收缩，推动后续 LazyVStack 全体重排。
+            return max(1, viewport.width * max(ratio, 0.2))
+        }
+
+        // 完全未知时才保守使用一屏占位；一旦压缩图 header 登记几何就不再走这里。
         let fallbackRatio: CGFloat = 1.35
-        let ratio = store.aspectRatio(for: url)
-            ?? store.neighbouringAspectRatio(forPageIndex: pageIndex, among: pages)
-            ?? fallbackRatio
-        return max(viewport.height, viewport.width * max(ratio, 0.2))
+        return max(viewport.height, viewport.width * fallbackRatio)
     }
 }
 
