@@ -3041,14 +3041,6 @@ private enum ReaderGestureTouchFilter {
     }
 }
 
-private struct PageHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
-    }
-}
-
 nonisolated enum ReaderVisiblePageDetector {
     static func visiblePageIndex(frames: [Int: CGRect], viewport: CGRect) -> Int? {
         guard !frames.isEmpty, viewport.width > 0, viewport.height > 0 else { return nil }
@@ -3241,7 +3233,6 @@ private extension UIView {
 /// 页（每页都是包含大量覆盖层与手势的 `LocalImageView`）。放进普通的引用类型容器后，
 /// 更新只影响读取它们的回调，不再触发 SwiftUI 的视图失效。
 private final class ReaderScrollPageMetricsStore {
-    var heights: [Int: CGFloat] = [:]
     var frames: [Int: CGRect] = [:]
 }
 
@@ -3365,7 +3356,6 @@ struct ContinuousScrollReader: View {
                             .background(
                                 GeometryReader { geo in
                                     Color.clear
-                                        .preference(key: PageHeightPreferenceKey.self, value: [page.index: max(geo.size.height, 1)])
                                         .preference(
                                             key: PageFramePreferenceKey.self,
                                             value: [page.index: geo.frame(in: .named(Self.coordinateSpaceName))]
@@ -3408,10 +3398,6 @@ struct ContinuousScrollReader: View {
                     guard size != .zero else { return }
                     viewportSize = size
                     scheduleVisiblePageUpdate(delay: 0.02)
-                }
-                .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
-                    guard pageMetrics.heights != heights else { return }
-                    pageMetrics.heights = heights
                 }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     let now = Date()
