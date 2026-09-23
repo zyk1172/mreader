@@ -123,8 +123,8 @@ final class ReaderStateMutationTests: XCTestCase {
             format: format
         )
         let image = renderer.image { context in
-            UIColor.black.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 10, height: 20))
+            context.cgContext.setFillColor(UIColor.black.cgColor)
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: 10, height: 20))
         }
         let data = try XCTUnwrap(image.pngData())
         let size = try XCTUnwrap(RemotePageGeometry.pixelSize(from: data))
