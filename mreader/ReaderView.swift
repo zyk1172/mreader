@@ -3426,15 +3426,16 @@ struct ContinuousScrollReader: View {
         didRestorePosition = false
         runtimeState.cancelScheduledWork()
 
-        let scroll = {
-            scrollPosition.scrollTo(id: targetIndex, anchor: .top)
-        }
         if animated {
-            withAnimation(.easeInOut(duration: 0.3), scroll)
+            withAnimation(.easeInOut(duration: 0.3)) {
+                scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+            }
         } else {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
-            withTransaction(transaction, scroll)
+            withTransaction(transaction) {
+                scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+            }
         }
         scheduleRestoreFinalization(
             generation: generation,
@@ -5109,20 +5110,6 @@ private struct ReaderProgressThumbnail: View {
     }
 }
 
-private struct ReaderOptionalPanGestureModifier: ViewModifier {
-    let isEnabled: Bool
-    let gesture: AnyGesture<Void>
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if isEnabled {
-            content.highPriorityGesture(gesture)
-        } else {
-            content
-        }
-    }
-}
-
 struct LocalImageView: View {
     let url: URL
     var comic: ComicBook? = nil
@@ -5266,16 +5253,20 @@ struct LocalImageView: View {
                     // 放大后把图片裁剪在自身布局框内，避免溢出到相邻页面与翻页过渡叠加。
                     .clipped()
                     .gesture(zoomGesture)
-                    // 只有分页阅读器才安装高优先级单指 pan。连续滚动完全不安装该 recognizer，
-                    // 让 UIScrollView 的 panGesture 独占单指拖动。
-                    .modifier(
-                        ReaderOptionalPanGestureModifier(
-                            isEnabled: isSingleFingerPanEnabled,
-                            gesture: gatedPanGesture
-                        )
+                    // iOS 26 原生 isEnabled 版本不会为禁用路径安装手势处理器。
+                    // 连续滚动因此没有高优先级单指 pan；未启用翻译时也没有长按 recognizer。
+                    .highPriorityGesture(
+                        gatedPanGesture,
+                        isEnabled: isSingleFingerPanEnabled
                     )
-                    .simultaneousGesture(tapPageGesture)
-                    .simultaneousGesture(longPressTranslationGesture)
+                    .simultaneousGesture(
+                        tapPageGesture,
+                        isEnabled: isPageTapGestureEnabled
+                    )
+                    .simultaneousGesture(
+                        longPressTranslationGesture,
+                        isEnabled: isLongPressTranslationEnabled && canTranslate
+                    )
                     .frame(height: displayHeight(for: uiImage))
 
             } else if isLoadingImage {
