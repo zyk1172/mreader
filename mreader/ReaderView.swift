@@ -488,11 +488,11 @@ final class PageGeometryStore {
     /// 就近页比例：同一本长条漫画的相邻页几乎总是同比例，用于在自身几何尚未登记时
     /// 避免退回 1.35 这种会把长条低估 6-11 倍的兜底值。
     func neighbouringAspectRatio(
-        for url: URL,
+        forPageIndex index: Int,
         among pages: [ComicPage],
         maximumDistance: Int = 3
     ) -> CGFloat? {
-        guard let index = pages.firstIndex(where: { $0.url == url }) else { return nil }
+        guard pages.indices.contains(index) else { return nil }
         for distance in 1...max(1, maximumDistance) {
             for candidate in [index - distance, index + distance] {
                 guard pages.indices.contains(candidate),
@@ -3339,7 +3339,11 @@ struct ContinuousScrollReader: View {
                                 targetLanguage: targetLanguage,
                                 imageFitMode: .fitWidth,
                                 visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
-                                placeholderHeight: placeholderHeight(for: page.url, viewport: viewportProxy.size),
+                                placeholderHeight: placeholderHeight(
+                                    for: page.url,
+                                    pageIndex: page.index,
+                                    viewport: viewportProxy.size
+                                ),
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
@@ -3647,11 +3651,11 @@ struct ContinuousScrollReader: View {
     }
 
     /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
-    private func placeholderHeight(for url: URL, viewport: CGSize) -> CGFloat {
+    private func placeholderHeight(for url: URL, pageIndex: Int, viewport: CGSize) -> CGFloat {
         let store = PageGeometryStore.shared
         let fallbackRatio: CGFloat = 1.35
         let ratio = store.aspectRatio(for: url)
-            ?? store.neighbouringAspectRatio(for: url, among: pages)
+            ?? store.neighbouringAspectRatio(forPageIndex: pageIndex, among: pages)
             ?? fallbackRatio
         return max(viewport.height, viewport.width * max(ratio, 0.2))
     }
