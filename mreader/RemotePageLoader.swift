@@ -701,9 +701,19 @@ final class RemotePagePrefetcher {
         MReaderLog.reader.debug(
             "remote prefetch current=\(currentPageIndex, privacy: .public) candidatePages=\(String(describing: candidateIndices), privacy: .public) budgetedPages=\(String(describing: budgetedIndices), privacy: .public) budgetBytes=\(self.prefetchBudgetBytes, privacy: .public) mode=\(readingMode.rawValue, privacy: .public) direction=\(readingDirection.rawValue, privacy: .public)"
         )
+        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
         for url in urls where RemotePageLoader.pageIndex(forRemotePageURL: url) != currentPageIndex {
             guard tasks[url] == nil else { continue }
             tasks[url] = Task(priority: .utility) { [url] in
+                // 首屏先让当前页的 userInitiated 读取/解码起跑，邻页稍后再占磁盘与 ImageIO。
+                if isContinuous {
+                    do {
+                        try await Task.sleep(for: .milliseconds(300))
+                    } catch {
+                        return
+                    }
+                }
+                guard !Task.isCancelled else { return }
                 await RemotePageLoader.prefetchImageData(forRemotePageURL: url)
                 await MainActor.run {
                     self.tasks[url] = nil
