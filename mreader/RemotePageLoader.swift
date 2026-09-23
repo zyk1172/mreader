@@ -464,11 +464,17 @@ actor RemotePageCache {
         candidates: [URL],
         priority: RemotePagePriority
     ) async -> (data: Data, url: URL)? {
-        let taskPriority: TaskPriority = priority == .current ? .userInitiated : .utility
+        let taskPriority: TaskPriority
+        switch priority {
+        case .current:
+            taskPriority = .userInitiated
+        case .prefetch:
+            taskPriority = .utility
+        }
         return await Task.detached(priority: taskPriority) {
             for candidate in candidates {
                 guard !Task.isCancelled else { return nil }
-                if let data = try? Data(contentsOf: candidate, options: [.mappedIfSafe]),
+                if let data = try? Data(contentsOf: candidate, options: .mappedIfSafe),
                    !data.isEmpty {
                     try? FileManager.default.setAttributes(
                         [.modificationDate: Date()],
