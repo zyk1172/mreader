@@ -616,6 +616,8 @@ private final class ReaderImageCache {
     /// subsequent preload-window refresh cancelling the shared decode.
     private var foregroundLoadKeys: Set<String> = []
     private let preloadBudgetBytes: Int
+    private var lastKnownViewportWidthPoints: CGFloat = 430
+    private var lastKnownDisplayScale: CGFloat = 3
 
     private init() {
         let budget = ReaderMemoryBudgetPlanner.budget()
@@ -657,17 +659,21 @@ private final class ReaderImageCache {
     /// fitWidth renders long strips at screen width, so it needs more headroom than fitScreen.
     static let fitWidthMaxPixelSize: CGFloat = ReaderFitWidthDecodePolicy.maximumPixelSize
 
-    func fitWidthDecodeMaxPixelSize(for url: URL, viewportWidthPoints: CGFloat? = nil) -> CGFloat {
-        let width: CGFloat
+    func fitWidthDecodeMaxPixelSize(
+        for url: URL,
+        viewportWidthPoints: CGFloat? = nil,
+        displayScale: CGFloat? = nil
+    ) -> CGFloat {
         if let viewportWidthPoints, viewportWidthPoints > 1 {
-            width = viewportWidthPoints
-        } else {
-            width = UIScreen.main.bounds.width
+            lastKnownViewportWidthPoints = viewportWidthPoints
+        }
+        if let displayScale, displayScale > 0 {
+            lastKnownDisplayScale = displayScale
         }
         return ReaderFitWidthDecodePolicy.maxPixelSize(
             sourceSize: PageGeometryStore.shared.size(for: url),
-            viewportWidthPoints: width,
-            displayScale: UIScreen.main.scale
+            viewportWidthPoints: lastKnownViewportWidthPoints,
+            displayScale: lastKnownDisplayScale
         )
     }
 
@@ -1020,6 +1026,7 @@ struct ReaderView: View {
     @State private var didRecordReaderOpen = false
     @State private var lastSavedScrollProgress: Double
     @State private var lastSavedScrollPageProgress: Double
+    @State private var liveScrollPosition: ReaderLiveScrollPositionStore
     @State private var lastProgressPersistDate = Date.distantPast
     @State private var lastPrefetchPageIndex: Int
     @State private var activeTranslationCount = 0
@@ -1146,6 +1153,13 @@ struct ReaderView: View {
         _progressScrubPageIndex = State(initialValue: nil)
         _lastSavedScrollProgress = State(initialValue: initialComic.scrollProgress)
         _lastSavedScrollPageProgress = State(initialValue: initialComic.scrollPageProgress)
+        _liveScrollPosition = State(
+            initialValue: ReaderLiveScrollPositionStore(
+                pageIndex: min(max(initialComic.currentPageIndex, 0), maxIndex),
+                progress: initialComic.scrollProgress,
+                pageProgress: initialComic.scrollPageProgress
+            )
+        )
         _lastPrefetchPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
         _activityLastPageIndex = State(initialValue: min(max(initialComic.currentPageIndex, 0), maxIndex))
         _readingModeBeforeGuidedPanelRaw = State(
@@ -1233,6 +1247,7 @@ struct ReaderView: View {
                     scrollJumpRequestID: scrollJumpRequestID,
                     scrollProgress: comic.scrollProgress,
                     scrollPageProgress: comic.scrollPageProgress,
+                    livePosition: liveScrollPosition,
                     onScrollPositionChange: saveScrollPosition,
                     onTranslationStateChange: updateAITranslationProgress,
                     areControlsVisible: areReaderControlsVisible,
@@ -1452,7 +1467,7 @@ struct ReaderView: View {
             mangaVisionPreanalysisTask?.cancel()
             mangaVisionPreanalysisTask = nil
             recordReadingActivity()
-            persistReadingProgress(pageIndex: currentPageIndex, reason: "readerDisappear", force: true)
+            persistCurrentReaderPosition(reason: "readerDisappear", force: true)
         }
         .task {
             while !Task.isCancelled {
@@ -1475,7 +1490,9 @@ struct ReaderView: View {
                 recordReaderInteraction()
             }
             let isScrollingMode = readingMode == .continuousScroll || readingMode == .infiniteScroll
-            persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: !isScrollingMode)
+            if !isScrollingMode {
+                persistReadingProgress(pageIndex: clampedValue, reason: "currentPageIndexChanged", force: true)
+            }
             preloadPages(around: clampedValue)
             scheduleTranslationPrefetch(around: clampedValue)
         }
@@ -1493,7 +1510,7 @@ struct ReaderView: View {
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .background || newPhase == .inactive else { return }
             recordReadingActivity()
-            persistReadingProgress(pageIndex: currentPageIndex, reason: "scenePhase-\(newPhase)", force: true)
+            persistCurrentReaderPosition(reason: "scenePhase-\(newPhase)", force: true)
         }
     }
 
@@ -2426,12 +2443,34 @@ struct ReaderView: View {
     }
 
     private func saveScrollPosition(pageIndex: Int, progress: Double, pageProgress: Double) {
+        liveScrollPosition.update(
+            pageIndex: pageIndex,
+            progress: progress,
+            pageProgress: pageProgress
+        )
         if pageIndex != currentPageIndex ||
             abs(progress - lastSavedScrollProgress) > 0.001 ||
             abs(pageProgress - lastSavedScrollPageProgress) > 0.004 {
             recordReaderInteraction()
         }
-        persistReadingProgress(pageIndex: pageIndex, scrollProgress: progress, scrollPageProgress: pageProgress, reason: "scrollVisiblePage", force: false)
+        persistReadingProgress(
+            pageIndex: pageIndex,
+            scrollProgress: progress,
+            scrollPageProgress: pageProgress,
+            reason: "scrollIdle",
+            force: false
+        )
+    }
+
+    private func persistCurrentReaderPosition(reason: String, force: Bool) {
+        let isScrollingMode = readingMode == .continuousScroll || readingMode == .infiniteScroll
+        persistReadingProgress(
+            pageIndex: isScrollingMode ? liveScrollPosition.pageIndex : currentPageIndex,
+            scrollProgress: isScrollingMode ? liveScrollPosition.progress : nil,
+            scrollPageProgress: isScrollingMode ? liveScrollPosition.pageProgress : nil,
+            reason: reason,
+            force: force
+        )
     }
 
     private func updateAITranslationProgress(_ isInProgress: Bool) {
@@ -2725,7 +2764,7 @@ struct ReaderView: View {
               !isBurnInProtectionLocked,
               now.timeIntervalSince(lastReaderInteractionAt) >= BurnInProtectionPolicy.timeout else { return }
         recordReadingActivity()
-        persistReadingProgress(pageIndex: currentPageIndex, reason: "burnInProtection", force: true)
+        persistCurrentReaderPosition(reason: "burnInProtection", force: true)
         UIApplication.shared.isIdleTimerDisabled = false
         HapticManager.shared.play(.warning)
         isBurnInProtectionLocked = true
@@ -2736,7 +2775,7 @@ struct ReaderView: View {
         isDismissAnimating = true
         HapticManager.shared.play(.medium)
         recordReadingActivity()
-        persistReadingProgress(pageIndex: currentPageIndex, reason: "twoFingerDismiss", force: true)
+        persistCurrentReaderPosition(reason: "twoFingerDismiss", force: true)
         withAnimation(.easeIn(duration: 0.24)) {
             dismissGestureProgress = 1
         }
@@ -2755,6 +2794,25 @@ nonisolated enum ReaderProgressPolicy {
     static func clampedPageIndex(_ pageIndex: Int, loadedPageCount: Int, declaredPageCount: Int) -> Int {
         let pageCount = max(loadedPageCount, declaredPageCount)
         return min(max(pageIndex, 0), max(0, pageCount - 1))
+    }
+}
+
+@MainActor
+private final class ReaderLiveScrollPositionStore {
+    var pageIndex: Int
+    var progress: Double
+    var pageProgress: Double
+
+    init(pageIndex: Int, progress: Double, pageProgress: Double) {
+        self.pageIndex = pageIndex
+        self.progress = progress
+        self.pageProgress = pageProgress
+    }
+
+    func update(pageIndex: Int, progress: Double, pageProgress: Double) {
+        self.pageIndex = pageIndex
+        self.progress = min(max(progress, 0), 1)
+        self.pageProgress = min(max(pageProgress, 0), 1)
     }
 }
 
@@ -3293,6 +3351,7 @@ struct ContinuousScrollReader: View {
     let scrollJumpRequestID: UUID
     let scrollProgress: Double
     let scrollPageProgress: Double
+    let livePosition: ReaderLiveScrollPositionStore
     let onScrollPositionChange: (Int, Double, Double) -> Void
     let onTranslationStateChange: (Bool) -> Void
     let areControlsVisible: Bool
@@ -3307,8 +3366,8 @@ struct ContinuousScrollReader: View {
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
-    @State private var lastScrollPositionNotifyDate = Date.distantPast
     @State private var visiblePageUpdateWorkItem: DispatchWorkItem?
+    @State private var scrollIdleWorkItem: DispatchWorkItem?
     @State private var lastStableContentOffsetY: CGFloat = 0
     @State private var lastPageFrameCommitDate = Date.distantPast
 
@@ -3385,6 +3444,7 @@ struct ContinuousScrollReader: View {
                     },
                     onScroll: {
                         scheduleVisiblePageUpdate(delay: 0.04)
+                        scheduleScrollIdleProgressCommit()
                     }
                 ))
                 .onAppear {
@@ -3415,8 +3475,10 @@ struct ContinuousScrollReader: View {
                 .onDisappear {
                     visiblePageUpdateWorkItem?.cancel()
                     visiblePageUpdateWorkItem = nil
+                    scrollIdleWorkItem?.cancel()
+                    scrollIdleWorkItem = nil
                     restoreState.cancel()
-                    updateCurrentPageFromVisibleFrames()
+                    updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
                 }
             }
         }
@@ -3562,11 +3624,29 @@ struct ContinuousScrollReader: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func updateCurrentPageFromVisibleFrames() {
-        updateCurrentPageFromViewport(frames: pageMetrics.frames, viewportSize: viewportSize)
+    private func updateCurrentPageFromVisibleFrames(forceNotifyProgress: Bool = false) {
+        updateCurrentPageFromViewport(
+            frames: pageMetrics.frames,
+            viewportSize: viewportSize,
+            forceNotifyProgress: forceNotifyProgress
+        )
     }
 
-    private func updateCurrentPageFromViewport(frames: [Int: CGRect], viewportSize: CGSize) {
+    private func scheduleScrollIdleProgressCommit(delay: TimeInterval = 0.45) {
+        scrollIdleWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            scrollIdleWorkItem = nil
+            updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
+        }
+        scrollIdleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func updateCurrentPageFromViewport(
+        frames: [Int: CGRect],
+        viewportSize: CGSize,
+        forceNotifyProgress: Bool = false
+    ) {
         guard didRestorePosition, !frames.isEmpty else { return }
         let visibleSize: CGSize
         if viewportSize != .zero {
@@ -3642,9 +3722,12 @@ struct ContinuousScrollReader: View {
         } else {
             pageProgress = 0
         }
-        let shouldNotifyProgress = didChangePage || Date().timeIntervalSince(lastScrollPositionNotifyDate) > 1.0
-        if shouldNotifyProgress {
-            lastScrollPositionNotifyDate = Date()
+        livePosition.update(
+            pageIndex: visiblePageIndex,
+            progress: Double(progress),
+            pageProgress: Double(pageProgress)
+        )
+        if forceNotifyProgress {
             onScrollPositionChange(visiblePageIndex, Double(progress), Double(pageProgress))
         }
     }
@@ -5249,6 +5332,7 @@ struct LocalImageView: View {
     @State private var lastDoubleTapTime = Date.distantPast
     @State private var viewportWidth: CGFloat = 0
     @State private var viewportSize: CGSize = .zero
+    @Environment(\.displayScale) private var displayScale
     
     // AI 相关的状态
     @State private var textBlocks: [TextBlock] = []
@@ -6645,7 +6729,8 @@ struct LocalImageView: View {
         imageFitMode == .fitWidth
             ? ReaderImageCache.shared.fitWidthDecodeMaxPixelSize(
                 for: url,
-                viewportWidthPoints: viewportWidth
+                viewportWidthPoints: viewportWidth,
+                displayScale: displayScale
             )
             : ReaderImageCache.fitScreenMaxPixelSize
     }
