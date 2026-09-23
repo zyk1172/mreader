@@ -3087,107 +3087,50 @@ private enum ReaderGestureTouchFilter {
     }
 }
 
-nonisolated enum ReaderVisiblePageDetector {
-    static func visiblePageIndex(frames: [Int: CGRect], viewport: CGRect) -> Int? {
-        guard !frames.isEmpty, viewport.width > 0, viewport.height > 0 else { return nil }
-        let viewportCenterY = viewport.midY
-        let candidates = frames.compactMap { index, frame -> (index: Int, visibleArea: CGFloat, centerDistance: CGFloat)? in
-            let intersection = frame.intersection(viewport)
-            guard !intersection.isNull, intersection.width > 1, intersection.height > 1 else { return nil }
-            return (
-                index: index,
-                visibleArea: intersection.width * intersection.height,
-                centerDistance: abs(frame.midY - viewportCenterY)
-            )
-        }
-        return candidates.max { lhs, rhs in
-            if abs(lhs.visibleArea - rhs.visibleArea) > 1 {
-                return lhs.visibleArea < rhs.visibleArea
-            }
-            if abs(lhs.centerDistance - rhs.centerDistance) > 0.5 {
-                return lhs.centerDistance > rhs.centerDistance
-            }
-            return lhs.index > rhs.index
-        }?.index
-    }
-}
+nonisolated struct ReaderScrollGeometrySnapshot: Equatable, Sendable {
+    let contentOffsetY: CGFloat
+    let contentHeight: CGFloat
+    let containerHeight: CGFloat
+    let insetTop: CGFloat
+    let insetBottom: CGFloat
 
-private struct PageFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
-
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
-    }
-}
-
-private struct ScrollViewportSizePreferenceKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-        let next = nextValue()
-        if next != .zero {
-            value = next
-        }
-    }
-}
-
-private struct ScrollViewAccessor: UIViewRepresentable {
-    let onResolve: (UIScrollView) -> Void
-    let onScroll: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onScroll: onScroll)
+    init(
+        contentOffsetY: CGFloat,
+        contentHeight: CGFloat,
+        containerHeight: CGFloat,
+        insetTop: CGFloat,
+        insetBottom: CGFloat
+    ) {
+        self.contentOffsetY = contentOffsetY
+        self.contentHeight = contentHeight
+        self.containerHeight = containerHeight
+        self.insetTop = insetTop
+        self.insetBottom = insetBottom
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        DispatchQueue.main.async {
-                if let scrollView = view.enclosingScrollView {
-                    context.coordinator.attach(to: scrollView)
-                    onResolve(scrollView)
-            }
-        }
-        return view
+    init(_ geometry: ScrollGeometry, offsetQuantum: CGFloat = 1) {
+        let quantum = max(offsetQuantum, 1)
+        contentOffsetY = (geometry.contentOffset.y / quantum).rounded() * quantum
+        contentHeight = geometry.contentSize.height
+        containerHeight = geometry.containerSize.height
+        insetTop = geometry.contentInsets.top
+        insetBottom = geometry.contentInsets.bottom
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            if let scrollView = uiView.enclosingScrollView {
-                context.coordinator.onScroll = onScroll
-                context.coordinator.attach(to: scrollView)
-                onResolve(scrollView)
-            }
-        }
+    var minimumOffsetY: CGFloat {
+        -insetTop
     }
 
-    final class Coordinator {
-        var onScroll: () -> Void
-        weak var scrollView: UIScrollView?
-        private var contentOffsetObservation: NSKeyValueObservation?
+    var maximumOffsetY: CGFloat {
+        max(
+            minimumOffsetY,
+            contentHeight - containerHeight + insetBottom
+        )
+    }
 
-        init(onScroll: @escaping () -> Void) {
-            self.onScroll = onScroll
-        }
-
-        func attach(to scrollView: UIScrollView) {
-            scrollView.scrollsToTop = false
-            guard self.scrollView !== scrollView else { return }
-            self.scrollView = scrollView
-            contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
-                guard let self else { return }
-                // UIScrollView 的 contentOffset 变化只发生在主线程；
-                // assumeIsolated 让编译器认可这条路径并保留运行时校验。
-                if Thread.isMainThread {
-                    MainActor.assumeIsolated {
-                        self.onScroll()
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.onScroll()
-                    }
-                }
-            }
-        }
+    var normalizedProgress: CGFloat {
+        let denominator = max(maximumOffsetY - minimumOffsetY, 1)
+        return min(max((contentOffsetY - minimumOffsetY) / denominator, 0), 1)
     }
 }
 
@@ -3272,29 +3215,27 @@ private extension UIView {
     }
 }
 
-/// 连续滚动的页框缓存。
+/// 连续滚动运行时状态。
 ///
-/// 页框由滚动位置派生，并且会频繁更新。把字典直接放进 `@State` 会让
-/// `ContinuousScrollReader` 的 body 在滚动时反复失效并重建可见页；使用普通引用类型
-/// 容器后，更新只影响读取它的回调，不触发 SwiftUI 视图树重建。
-private final class ReaderScrollPageMetricsStore {
-    var frames: [Int: CGRect] = [:]
-}
-
-/// 滚动热路径的纯运行时状态。这里的值可以每帧变化，但不能使用 @State，
-/// 否则每次 KVO/contentOffset 更新都会让 SwiftUI 重新计算整个 reader body。
+/// 不参与 SwiftUI observation。滚动中的 offset、页起点与恢复任务都只写这里；
+/// 真正会触发 body 更新的只有 ScrollPosition 的“顶部页 ID”跨页变化。
 private final class ReaderScrollRuntimeState {
-    var lastStepTime = Date.distantPast
-    var visiblePageUpdateWorkItem: DispatchWorkItem?
-    var scrollIdleWorkItem: DispatchWorkItem?
+    var geometry: ReaderScrollGeometrySnapshot?
+    var pageStartOffsets: [Int: CGFloat] = [:]
     var lastStableContentOffsetY: CGFloat = 0
-    var lastPageFrameCommitDate = Date.distantPast
+    var lastStepTime = Date.distantPast
+    var restoreWorkItem: DispatchWorkItem?
+
+    func updateGeometry(_ snapshot: ReaderScrollGeometrySnapshot) {
+        geometry = snapshot
+        if snapshot.contentOffsetY > snapshot.minimumOffsetY + 8 {
+            lastStableContentOffsetY = snapshot.contentOffsetY
+        }
+    }
 
     func cancelScheduledWork() {
-        visiblePageUpdateWorkItem?.cancel()
-        visiblePageUpdateWorkItem = nil
-        scrollIdleWorkItem?.cancel()
-        scrollIdleWorkItem = nil
+        restoreWorkItem?.cancel()
+        restoreWorkItem = nil
     }
 }
 
@@ -3303,19 +3244,15 @@ private final class ReaderScrollRestoreState {
     var targetPageProgress: CGFloat = 0
     var attemptsRemaining = 0
     var generation = UUID()
-    var workItem: DispatchWorkItem?
-    var stabilizationUntil = Date.distantPast
 
     var isRestoring: Bool { targetIndex != nil }
 
     @discardableResult
     func begin(targetIndex: Int, pageProgress: CGFloat) -> UUID {
-        workItem?.cancel()
         generation = UUID()
         self.targetIndex = targetIndex
         targetPageProgress = min(max(pageProgress, 0), 1)
-        attemptsRemaining = 20
-        stabilizationUntil = .distantPast
+        attemptsRemaining = 24
         return generation
     }
 
@@ -3324,26 +3261,19 @@ private final class ReaderScrollRestoreState {
         return attemptsRemaining > 0
     }
 
-    func complete(stabilizationDuration: TimeInterval = 1.2) {
-        workItem?.cancel()
-        workItem = nil
+    func complete() {
         targetIndex = nil
         attemptsRemaining = 0
-        stabilizationUntil = Date().addingTimeInterval(stabilizationDuration)
     }
 
     func cancel() {
-        workItem?.cancel()
-        workItem = nil
         targetIndex = nil
         attemptsRemaining = 0
-        stabilizationUntil = .distantPast
+        generation = UUID()
     }
 }
 
 struct ContinuousScrollReader: View {
-    private static let coordinateSpaceName = "mreader.readerScroll"
-
     let pages: [ComicPage]
     @Binding var currentPageIndex: Int
     let readingMode: ReadingMode
@@ -3363,399 +3293,322 @@ struct ContinuousScrollReader: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @State private var scrollView: UIScrollView?
-    /// 非观察状态容器：滚动位置派生的页框不能直接写进值类型 `@State`，否则会让
-    /// reader 的 body 在滚动时失效并重建可见页。
-    @State private var pageMetrics = ReaderScrollPageMetricsStore()
-    @State private var restoreState = ReaderScrollRestoreState()
+    @State private var scrollPosition = ScrollPosition(idType: Int.self)
     @State private var runtimeState = ReaderScrollRuntimeState()
+    @State private var restoreState = ReaderScrollRestoreState()
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
 
     var body: some View {
         GeometryReader { viewportProxy in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(pages) { page in
-                            LocalImageView(
-                                url: page.url,
-                                comic: comic,
-                                comicID: comic.id,
-                                pageIndex: page.index,
-                                isOCREnabled: comic.isOCREnabled,
-                                isAITranslationEnabled: comic.isAITranslationEnabled,
-                                isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
-                                aiTranslationModeRaw: comic.aiTranslationModeRaw,
-                                translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
-                                translateRequestID: translateRequestID,
-                                ocrMagnifyRequestID: ocrMagnifyRequestID,
-                                isOCRMagnificationVisible: isOCRMagnificationVisible && page.index == currentPageIndex,
-                                ocrTextScale: comic.ocrTextScale,
-                                ocrSafeAreaInset: comic.ocrSafeAreaInset,
-                                ocrMinimumTextHeight: comic.ocrMinimumTextHeight,
-                                isRightToLeftReading: comic.readingDirectionRaw == ReadingDirection.rightToLeft.rawValue,
-                                targetLanguage: targetLanguage,
-                                imageFitMode: .fitWidth,
-                                visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
-                                placeholderHeight: placeholderHeight(
-                                    for: page.url,
-                                    pageIndex: page.index,
-                                    viewport: viewportProxy.size
-                                ),
-                                imageLoadDelay: 0,
-                                showsLoadingIndicator: page.index == currentPageIndex,
-                                isPageTapGestureEnabled: !areControlsVisible,
-                                isSingleFingerPanEnabled: ReaderGestureGate.allowsSingleFingerPan(readingMode: readingMode),
-                                onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
-                                onPreviousPage: { stepScroll(-1) },
-                                onNextPage: { stepScroll(1) },
-                                areControlsVisible: areControlsVisible,
-                                onShowControls: onShowControls,
-                                onHideControls: onHideControls
-                            )
-                            .frame(maxWidth: .infinity)
-                            .id(page.index)
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear
-                                        .preference(
-                                            key: PageFramePreferenceKey.self,
-                                            value: [page.index: geo.frame(in: .named(Self.coordinateSpaceName))]
-                                        )
-                                }
-                            )
-                        }
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(pages) { page in
+                        LocalImageView(
+                            url: page.url,
+                            comic: comic,
+                            comicID: comic.id,
+                            pageIndex: page.index,
+                            isOCREnabled: comic.isOCREnabled,
+                            isAITranslationEnabled: comic.isAITranslationEnabled,
+                            isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
+                            aiTranslationModeRaw: comic.aiTranslationModeRaw,
+                            translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
+                            translateRequestID: translateRequestID,
+                            ocrMagnifyRequestID: ocrMagnifyRequestID,
+                            isOCRMagnificationVisible: isOCRMagnificationVisible && page.index == currentPageIndex,
+                            ocrTextScale: comic.ocrTextScale,
+                            ocrSafeAreaInset: comic.ocrSafeAreaInset,
+                            ocrMinimumTextHeight: comic.ocrMinimumTextHeight,
+                            isRightToLeftReading: comic.readingDirectionRaw == ReadingDirection.rightToLeft.rawValue,
+                            targetLanguage: targetLanguage,
+                            imageFitMode: .fitWidth,
+                            visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
+                            placeholderHeight: pageDisplayHeight(
+                                for: page.index,
+                                viewport: viewportProxy.size
+                            ),
+                            imageLoadDelay: 0,
+                            showsLoadingIndicator: page.index == currentPageIndex,
+                            isPageTapGestureEnabled: !areControlsVisible,
+                            isSingleFingerPanEnabled: false,
+                            onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
+                            onPreviousPage: { stepScroll(-1) },
+                            onNextPage: { stepScroll(1) },
+                            areControlsVisible: areControlsVisible,
+                            onShowControls: onShowControls,
+                            onHideControls: onHideControls
+                        )
+                        .frame(maxWidth: .infinity)
+                        .id(page.index)
                     }
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: ScrollViewportSizePreferenceKey.self,
-                                value: viewportProxy.size == .zero ? geo.size : viewportProxy.size
-                            )
-                        }
-                    )
                 }
-                .coordinateSpace(name: Self.coordinateSpaceName)
-                .background(ScrollViewAccessor(
-                    onResolve: { resolvedScrollView in
-                        if scrollView !== resolvedScrollView {
-                            scrollView = resolvedScrollView
-                        }
-                    },
-                    onScroll: {
-                        scheduleVisiblePageUpdate(delay: 0.04)
-                        scheduleScrollIdleProgressCommit()
+                .scrollTargetLayout()
+            }
+            .scrollPosition($scrollPosition, anchor: .top)
+            // 只采样一个 8pt 量化后的 ScrollGeometry；不再为每一页创建 GeometryReader，
+            // 也不把每帧 offset 写入 @State。这个闭包只更新普通引用对象。
+            .onScrollGeometryChange(for: ReaderScrollGeometrySnapshot.self) { geometry in
+                ReaderScrollGeometrySnapshot(geometry, offsetQuantum: 8)
+            } action: { _, snapshot in
+                runtimeState.updateGeometry(snapshot)
+            }
+            // 进度写入只发生在 phase 变化，尤其是 idle；滚动每帧完全没有持久化工作。
+            .onScrollPhaseChange { _, newPhase, context in
+                let exact = ReaderScrollGeometrySnapshot(context.geometry)
+                runtimeState.updateGeometry(exact)
+                if newPhase == .idle {
+                    if restoreState.isRestoring {
+                        finishRestore(using: exact)
+                    } else {
+                        commitCurrentScrollPosition(using: exact, notifyParent: true)
                     }
-                ))
-                .onAppear {
-                    viewportSize = viewportProxy.size
-                    restoreScrollPosition(proxy, animated: false)
                 }
-                .onChange(of: readingMode) { _, _ in
-                    restoreScrollPosition(proxy, animated: false)
-                }
-                .onChange(of: scrollJumpRequestID) { _, _ in
-                    restoreScrollPosition(proxy, animated: true)
-                }
-                .onPreferenceChange(ScrollViewportSizePreferenceKey.self) { size in
-                    guard size != .zero else { return }
-                    viewportSize = size
-                    scheduleVisiblePageUpdate(delay: 0.02)
-                }
-                .onPreferenceChange(PageFramePreferenceKey.self) { frames in
-                    let now = Date()
-                    guard pageMetrics.frames != frames else { return }
-                    guard !didRestorePosition || now.timeIntervalSince(runtimeState.lastPageFrameCommitDate) >= 0.08 else {
-                        return
-                    }
-                    runtimeState.lastPageFrameCommitDate = now
-                    pageMetrics.frames = frames
-                    scheduleVisiblePageUpdate(delay: 0.04)
-                }
-                .onDisappear {
-                    runtimeState.cancelScheduledWork()
-                    restoreState.cancel()
-                    updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
+            }
+            .onChange(of: scrollPosition.viewID(type: Int.self)) { oldID, newID in
+                handleNativePageIDChange(oldID: oldID, newID: newID)
+            }
+            .onAppear {
+                viewportSize = viewportProxy.size
+                restoreScrollPosition(animated: false)
+            }
+            .onChange(of: viewportProxy.size) { _, newSize in
+                guard newSize != .zero else { return }
+                viewportSize = newSize
+            }
+            .onChange(of: readingMode) { _, _ in
+                restoreScrollPosition(animated: false)
+            }
+            .onChange(of: scrollJumpRequestID) { _, _ in
+                restoreScrollPosition(animated: true)
+            }
+            .onDisappear {
+                runtimeState.cancelScheduledWork()
+                restoreState.cancel()
+                if let geometry = runtimeState.geometry {
+                    commitCurrentScrollPosition(using: geometry, notifyParent: true)
                 }
             }
         }
     }
 
     private func stepScroll(_ direction: Int) {
-        guard let scrollView else { return }
+        guard let geometry = runtimeState.geometry else { return }
         let now = Date()
         guard now.timeIntervalSince(runtimeState.lastStepTime) > 0.24 else { return }
         runtimeState.lastStepTime = now
 
         HapticManager.shared.play(.light)
-        let visibleHeight = max(scrollView.bounds.height - scrollView.adjustedContentInset.top - scrollView.adjustedContentInset.bottom, 1)
-        let distance = min(visibleHeight * scrollSpeed.screenStepRatio, visibleHeight * 0.8)
-        let maxOffsetY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-        let minOffsetY = -scrollView.adjustedContentInset.top
-        let targetY = min(max(scrollView.contentOffset.y + CGFloat(direction) * distance, minOffsetY), maxOffsetY)
-
-        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
-            scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: false)
-        } completion: { _ in
-            updateCurrentPageFromVisibleFrames()
+        let visibleHeight = max(geometry.containerHeight, viewportSize.height, 1)
+        let distance = min(
+            visibleHeight * scrollSpeed.screenStepRatio,
+            visibleHeight * 0.8
+        )
+        let targetY = min(
+            max(
+                geometry.contentOffsetY + CGFloat(direction) * distance,
+                geometry.minimumOffsetY
+            ),
+            geometry.maximumOffsetY
+        )
+        withAnimation(.easeInOut(duration: 0.3)) {
+            scrollPosition.scrollTo(x: 0, y: targetY)
         }
     }
 
-    private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
+    private func restoreScrollPosition(animated: Bool) {
         guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
         let targetIndex = min(max(currentPageIndex, 0), max(0, pages.count - 1))
-        let savedPageProgress = min(max(scrollPageProgress, 0), 1)
         let generation = restoreState.begin(
             targetIndex: targetIndex,
-            pageProgress: CGFloat(savedPageProgress)
+            pageProgress: CGFloat(min(max(scrollPageProgress, 0), 1))
         )
         didRestorePosition = false
-        runtimeState.visiblePageUpdateWorkItem?.cancel()
-        runtimeState.visiblePageUpdateWorkItem = nil
+        runtimeState.cancelScheduledWork()
 
-        DispatchQueue.main.async {
-            guard restoreState.generation == generation else { return }
-            let animation = animated ? Animation.easeInOut(duration: 0.3) : nil
-            withAnimation(animation) {
-                proxy.scrollTo(targetIndex, anchor: .top)
-            }
-            scheduleRestoreAlignment(
-                proxy,
-                generation: generation,
-                delay: animated ? 0.34 : 0.06
-            )
+        let scroll = {
+            scrollPosition.scrollTo(id: targetIndex, anchor: .top)
         }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.3), scroll)
+        } else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction, scroll)
+        }
+        scheduleRestoreFinalization(
+            generation: generation,
+            delay: animated ? 0.36 : 0.12
+        )
     }
 
-    private func scheduleRestoreAlignment(
-        _ proxy: ScrollViewProxy,
+    private func scheduleRestoreFinalization(
         generation: UUID,
         delay: TimeInterval
     ) {
-        guard restoreState.generation == generation, restoreState.isRestoring else { return }
-        restoreState.workItem?.cancel()
+        runtimeState.restoreWorkItem?.cancel()
         let workItem = DispatchWorkItem {
-            guard restoreState.generation == generation, restoreState.isRestoring else { return }
-            attemptRestoreAlignment(proxy, generation: generation)
+            runtimeState.restoreWorkItem = nil
+            guard restoreState.generation == generation,
+                  restoreState.isRestoring else { return }
+            guard let geometry = runtimeState.geometry else {
+                retryRestore(generation: generation)
+                return
+            }
+            finishRestore(using: geometry)
         }
-        restoreState.workItem = workItem
+        runtimeState.restoreWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func attemptRestoreAlignment(_ proxy: ScrollViewProxy, generation: UUID) {
-        guard restoreState.generation == generation,
-              let targetIndex = restoreState.targetIndex,
-              let scrollView else {
-            retryRestoreAlignment(proxy, generation: generation)
-            return
-        }
-
-        let visibleHeight = max(scrollView.bounds.height, viewportSize.height, 1)
-        guard let targetFrame = pageMetrics.frames[targetIndex],
-              targetFrame.height > 1,
-              targetFrame.maxY > -visibleHeight * 1.5,
-              targetFrame.minY < visibleHeight * 2.5 else {
-            retryRestoreAlignment(proxy, generation: generation)
-            return
-        }
-
-        let minimumOffsetY = -scrollView.adjustedContentInset.top
-        let maximumOffsetY = max(
-            minimumOffsetY,
-            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
-        )
-        let targetY = ReaderContinuousScrollPolicy.alignedContentOffsetY(
-            currentOffsetY: scrollView.contentOffset.y,
-            targetFrame: targetFrame,
-            pageProgress: restoreState.targetPageProgress,
-            minimumOffsetY: minimumOffsetY,
-            maximumOffsetY: maximumOffsetY
-        )
-        scrollView.setContentOffset(
-            CGPoint(x: scrollView.contentOffset.x, y: targetY),
-            animated: false
-        )
-        runtimeState.lastStableContentOffsetY = targetY
-        didRestorePosition = true
-        restoreState.complete()
-        MReaderLog.reader.debug(
-            "scroll restore aligned page=\(targetIndex, privacy: .public) offsetY=\(Int(targetY), privacy: .public) frameY=\(Int(targetFrame.minY), privacy: .public)"
-        )
-        scheduleVisiblePageUpdate(delay: 0.08)
-    }
-
-    private func retryRestoreAlignment(_ proxy: ScrollViewProxy, generation: UUID) {
+    private func retryRestore(generation: UUID) {
         guard restoreState.generation == generation,
               let targetIndex = restoreState.targetIndex else { return }
         guard restoreState.consumeRetry() else {
-            // 最坏情况下保留 ScrollViewReader 已完成的 targetIndex 顶部定位；
-            // 绝不再退回基于数千个估算页高的绝对 offset。
-            proxy.scrollTo(targetIndex, anchor: .top)
-            if let scrollView {
-                runtimeState.lastStableContentOffsetY = scrollView.contentOffset.y
-            }
             didRestorePosition = true
-            restoreState.complete(stabilizationDuration: 1.8)
+            restoreState.complete()
             MReaderLog.reader.notice(
-                "scroll restore frame timeout page=\(targetIndex, privacy: .public); kept ScrollViewReader position"
+                "native scroll restore timeout page=\(targetIndex, privacy: .public); kept ScrollPosition target"
             )
-            scheduleVisiblePageUpdate(delay: 0.12)
             return
         }
 
-        // LazyVStack 在超长书籍的大跨度跳转时可能需要数个 layout pass 才实例化目标页。
-        // 周期性重申 scrollTo，但不再人工计算 0..<target 的累计高度。
-        if restoreState.attemptsRemaining.isMultiple(of: 5) {
-            proxy.scrollTo(targetIndex, anchor: .top)
-        }
-        scheduleRestoreAlignment(proxy, generation: generation, delay: 0.06)
+        scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+        scheduleRestoreFinalization(generation: generation, delay: 0.06)
     }
 
-    private func scheduleVisiblePageUpdate(delay: TimeInterval = 0.12) {
-        guard runtimeState.visiblePageUpdateWorkItem == nil else { return }
-        let workItem = DispatchWorkItem {
-            runtimeState.visiblePageUpdateWorkItem = nil
-            updateCurrentPageFromVisibleFrames()
+    private func finishRestore(using geometry: ReaderScrollGeometrySnapshot) {
+        guard let targetIndex = restoreState.targetIndex,
+              pages.indices.contains(targetIndex) else {
+            restoreState.complete()
+            didRestorePosition = true
+            return
         }
-        runtimeState.visiblePageUpdateWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-    }
 
-    private func updateCurrentPageFromVisibleFrames(forceNotifyProgress: Bool = false) {
-        updateCurrentPageFromViewport(
-            frames: pageMetrics.frames,
-            viewportSize: viewportSize,
-            forceNotifyProgress: forceNotifyProgress
+        // 远距离恢复到 4000+ 页时，ScrollPosition 可能还在 LazyVStack 估算阶段；
+        // 非零目标仍停在内容顶部就继续等，不再依赖每页 frame preference。
+        if targetIndex > 0,
+           geometry.contentOffsetY <= geometry.minimumOffsetY + 2,
+           restoreState.consumeRetry() {
+            scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+            scheduleRestoreFinalization(
+                generation: restoreState.generation,
+                delay: 0.06
+            )
+            return
+        }
+
+        let pageTopOffsetY = geometry.contentOffsetY
+        runtimeState.pageStartOffsets[targetIndex] = pageTopOffsetY
+
+        let restoredY = ReaderContinuousScrollPolicy.restoredContentOffsetY(
+            pageTopOffsetY: pageTopOffsetY,
+            pageHeight: pageDisplayHeight(for: targetIndex, viewport: viewportSize),
+            pageProgress: restoreState.targetPageProgress,
+            minimumOffsetY: geometry.minimumOffsetY,
+            maximumOffsetY: geometry.maximumOffsetY
+        )
+        if abs(restoredY - pageTopOffsetY) > 1 {
+            scrollPosition.scrollTo(x: 0, y: restoredY)
+        }
+
+        let globalProgress: CGFloat
+        let denominator = max(geometry.maximumOffsetY - geometry.minimumOffsetY, 1)
+        globalProgress = min(
+            max((restoredY - geometry.minimumOffsetY) / denominator, 0),
+            1
+        )
+        livePosition.update(
+            pageIndex: targetIndex,
+            progress: Double(globalProgress),
+            pageProgress: Double(restoreState.targetPageProgress)
+        )
+        didRestorePosition = true
+        restoreState.complete()
+        MReaderLog.reader.debug(
+            "native scroll restore page=\(targetIndex, privacy: .public) topY=\(Int(pageTopOffsetY), privacy: .public) restoredY=\(Int(restoredY), privacy: .public)"
         )
     }
 
-    private func scheduleScrollIdleProgressCommit(delay: TimeInterval = 0.45) {
-        runtimeState.scrollIdleWorkItem?.cancel()
-        let workItem = DispatchWorkItem {
-            runtimeState.scrollIdleWorkItem = nil
-            updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
+    private func handleNativePageIDChange(oldID: Int?, newID: Int?) {
+        guard didRestorePosition,
+              let newID,
+              pages.indices.contains(newID) else { return }
+        let previous = oldID ?? currentPageIndex
+        if runtimeState.pageStartOffsets[newID] == nil,
+           let geometry = runtimeState.geometry {
+            let movingBackward = newID < previous
+            runtimeState.pageStartOffsets[newID] =
+                ReaderContinuousScrollPolicy.estimatedPageStartOffsetY(
+                    currentOffsetY: geometry.contentOffsetY,
+                    newPageHeight: pageDisplayHeight(for: newID, viewport: viewportSize),
+                    movingBackward: movingBackward
+                )
         }
-        runtimeState.scrollIdleWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+
+        guard currentPageIndex != newID else { return }
+        MReaderLog.reader.debug(
+            "native scroll currentPageIndex old=\(currentPageIndex, privacy: .public) new=\(newID, privacy: .public)"
+        )
+        currentPageIndex = newID
     }
 
-    private func updateCurrentPageFromViewport(
-        frames: [Int: CGRect],
-        viewportSize: CGSize,
-        forceNotifyProgress: Bool = false
+    private func commitCurrentScrollPosition(
+        using geometry: ReaderScrollGeometrySnapshot,
+        notifyParent: Bool
     ) {
-        guard didRestorePosition, !frames.isEmpty else { return }
-        let visibleSize: CGSize
-        if viewportSize != .zero {
-            visibleSize = viewportSize
-        } else if let scrollView {
-            visibleSize = scrollView.bounds.size
-        } else {
+        guard didRestorePosition else { return }
+        let pageIndex = scrollPosition.viewID(type: Int.self) ?? currentPageIndex
+        guard pages.indices.contains(pageIndex) else { return }
+
+        // 原生 ScrollPosition 不应再出现旧 PreferenceKey 导致的 4894 -> 0；
+        // 仍保留一个无布局副作用的最后防线。
+        if pageIndex > 0,
+           geometry.contentOffsetY <= geometry.minimumOffsetY + 2,
+           runtimeState.lastStableContentOffsetY > geometry.minimumOffsetY + max(geometry.containerHeight * 0.45, 160) {
+            scrollPosition.scrollTo(x: 0, y: runtimeState.lastStableContentOffsetY)
             return
         }
 
-        if restoreUnexpectedScrollToTopIfNeeded(visibleHeight: visibleSize.height) {
-            return
+        if runtimeState.pageStartOffsets[pageIndex] == nil {
+            runtimeState.pageStartOffsets[pageIndex] = geometry.contentOffsetY
         }
+        let pageStart = runtimeState.pageStartOffsets[pageIndex] ?? geometry.contentOffsetY
+        let pageProgress = ReaderContinuousScrollPolicy.pageProgress(
+            contentOffsetY: geometry.contentOffsetY,
+            pageStartOffsetY: pageStart,
+            pageHeight: pageDisplayHeight(for: pageIndex, viewport: viewportSize)
+        )
 
-        let viewport = CGRect(origin: .zero, size: visibleSize)
-        guard let visiblePageIndex = ReaderVisiblePageDetector.visiblePageIndex(frames: frames, viewport: viewport) else { return }
-
-        let isUserInteracting = scrollView?.isTracking == true
-            || scrollView?.isDragging == true
-            || scrollView?.isDecelerating == true
-        let isStabilizing = Date() < restoreState.stabilizationUntil
-        guard ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
-            current: currentPageIndex,
-            observed: visiblePageIndex,
-            pageCount: pages.count,
-            isStabilizing: isStabilizing,
-            isUserInteracting: isUserInteracting
-        ) else {
-            MReaderLog.reader.notice(
-                "scroll rejected implausible page jump current=\(currentPageIndex, privacy: .public) observed=\(visiblePageIndex, privacy: .public) stabilizing=\(isStabilizing, privacy: .public) interacting=\(isUserInteracting, privacy: .public)"
-            )
-            scheduleVisiblePageUpdate(delay: 0.08)
-            return
-        }
-
-        if visiblePageIndex == 0,
-           currentPageIndex > 0,
-           let scrollView {
-            let minOffsetY = -scrollView.adjustedContentInset.top
-            let isStillBelowTop = scrollView.contentOffset.y > minOffsetY + max(visibleSize.height * 0.42, 140)
-            if isStillBelowTop {
-                MReaderLog.reader.debug(
-                    "scroll ignored stale page-zero frame current=\(currentPageIndex, privacy: .public) offsetY=\(Int(scrollView.contentOffset.y), privacy: .public) frames=\(frames.count, privacy: .public)"
-                )
-                scheduleVisiblePageUpdate(delay: 0.06)
-                return
-            }
-        }
-        let didChangePage = currentPageIndex != visiblePageIndex
-        if didChangePage {
-            MReaderLog.reader.debug(
-                "scroll currentPageIndex update old=\(currentPageIndex, privacy: .public) new=\(visiblePageIndex, privacy: .public) frames=\(frames.count, privacy: .public)"
-            )
-            currentPageIndex = visiblePageIndex
-        }
-
-        let progress: CGFloat
-        if let scrollView {
-            let maxOffsetY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-            let minOffsetY = -scrollView.adjustedContentInset.top
-            let denominator = max(maxOffsetY - minOffsetY, 1)
-            progress = min(max((scrollView.contentOffset.y - minOffsetY) / denominator, 0), 1)
-            if scrollView.contentOffset.y > minOffsetY + 8 {
-                runtimeState.lastStableContentOffsetY = scrollView.contentOffset.y
-            }
-        } else {
-            progress = CGFloat(visiblePageIndex) / CGFloat(max(pages.count - 1, 1))
-        }
-        let activeFrame = frames[visiblePageIndex]
-        let pageProgress: CGFloat
-        if let activeFrame, activeFrame.height > 1 {
-            pageProgress = min(max(-activeFrame.minY / max(activeFrame.height, 1), 0), 1)
-        } else {
-            pageProgress = 0
-        }
         livePosition.update(
-            pageIndex: visiblePageIndex,
-            progress: Double(progress),
+            pageIndex: pageIndex,
+            progress: Double(geometry.normalizedProgress),
             pageProgress: Double(pageProgress)
         )
-        if forceNotifyProgress {
-            onScrollPositionChange(visiblePageIndex, Double(progress), Double(pageProgress))
+        if currentPageIndex != pageIndex {
+            currentPageIndex = pageIndex
+        }
+        if notifyParent {
+            onScrollPositionChange(
+                pageIndex,
+                Double(geometry.normalizedProgress),
+                Double(pageProgress)
+            )
         }
     }
 
-    /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
-    private func placeholderHeight(for url: URL, pageIndex: Int, viewport: CGSize) -> CGFloat {
+    /// 连续滚动只需要静态页面高度；不再读取滚动坐标系里的实时 frame。
+    private func pageDisplayHeight(for pageIndex: Int, viewport: CGSize) -> CGFloat {
+        guard pages.indices.contains(pageIndex) else {
+            return max(viewport.height, 1)
+        }
+        let url = pages[pageIndex].url
         let store = PageGeometryStore.shared
         let fallbackRatio: CGFloat = 1.35
         let ratio = store.aspectRatio(for: url)
             ?? store.neighbouringAspectRatio(forPageIndex: pageIndex, among: pages)
             ?? fallbackRatio
         return max(viewport.height, viewport.width * max(ratio, 0.2))
-    }
-
-    private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
-        guard let scrollView, currentPageIndex > 0 else { return false }
-        let minOffsetY = -scrollView.adjustedContentInset.top
-        let currentY = scrollView.contentOffset.y
-        let hadMeaningfulPosition = runtimeState.lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
-        let jumpedToTop = currentY <= minOffsetY + 2
-        guard hadMeaningfulPosition, jumpedToTop else { return false }
-
-        let maxOffsetY = max(minOffsetY, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-        let restoreY = min(max(runtimeState.lastStableContentOffsetY, minOffsetY), maxOffsetY)
-        MReaderLog.reader.notice(
-            "scroll prevented unexpected top jump page=\(currentPageIndex, privacy: .public) restoreY=\(Int(restoreY), privacy: .public)"
-        )
-        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: restoreY), animated: false)
-        scheduleVisiblePageUpdate(delay: 0.04)
-        return true
     }
 }
 
