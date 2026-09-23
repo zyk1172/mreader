@@ -6,6 +6,7 @@ import Foundation
 import UIKit
 import XCTest
 import os
+@testable import mreader
 
 /// DEBUG/test-only physical-device benchmark. Raw tests measure Core ML directly;
 /// the end-to-end case additionally exercises the production preprocessor,
