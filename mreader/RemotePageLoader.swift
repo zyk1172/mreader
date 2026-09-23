@@ -398,17 +398,18 @@ actor RemotePageCache {
 
         let diskURL = RemotePageLoader.pageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
         let legacyDiskURL = RemotePageLoader.legacyPageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
-        for candidate in [diskURL, legacyDiskURL] {
-            if let data = try? Data(contentsOf: candidate), !data.isEmpty {
-                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: candidate.path)
-                memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
-                cachedKeys.insert(cacheKey)
-                await registerGeometryIfNeeded(data, for: key)
-                MReaderLog.reader.debug(
-                    "remote cache disk hit page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
-                )
-                return data
-            }
+        if let diskHit = await Self.readDiskCache(
+            candidates: [diskURL, legacyDiskURL],
+            priority: priority
+        ) {
+            let data = diskHit.data
+            memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+            cachedKeys.insert(cacheKey)
+            await registerGeometryIfNeeded(data, for: key)
+            MReaderLog.reader.debug(
+                "remote cache disk hit page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
+            )
+            return data
         }
 
         if let task = activeDownloads[key] {
@@ -444,7 +445,10 @@ actor RemotePageCache {
 
     private func registerGeometryIfNeeded(_ data: Data, for key: PageCacheKey) async {
         guard !geometryRegisteredKeys.contains(key) else { return }
-        guard let size = RemotePageGeometry.pixelSize(from: data) else { return }
+        let size = await Task.detached(priority: .utility) {
+            RemotePageGeometry.pixelSize(from: data)
+        }.value
+        guard let size else { return }
         geometryRegisteredKeys.insert(key)
         let url = RemotePageLoader.pageURL(
             sourceID: key.sourceID,
@@ -454,6 +458,33 @@ actor RemotePageCache {
         await MainActor.run {
             PageGeometryStore.shared.setSize(size, for: url)
         }
+    }
+
+    nonisolated private static func readDiskCache(
+        candidates: [URL],
+        priority: RemotePagePriority
+    ) async -> (data: Data, url: URL)? {
+        let taskPriority: TaskPriority
+        switch priority {
+        case .current:
+            taskPriority = .userInitiated
+        case .prefetch:
+            taskPriority = .utility
+        }
+        return await Task.detached(priority: taskPriority) {
+            for candidate in candidates {
+                guard !Task.isCancelled else { return nil }
+                if let data = try? Data(contentsOf: candidate, options: .mappedIfSafe),
+                   !data.isEmpty {
+                    try? FileManager.default.setAttributes(
+                        [.modificationDate: Date()],
+                        ofItemAtPath: candidate.path
+                    )
+                    return (data, candidate)
+                }
+            }
+            return nil
+        }.value
     }
 
     func clearMemoryCache() {
@@ -670,29 +701,22 @@ final class RemotePagePrefetcher {
         MReaderLog.reader.debug(
             "remote prefetch current=\(currentPageIndex, privacy: .public) candidatePages=\(String(describing: candidateIndices), privacy: .public) budgetedPages=\(String(describing: budgetedIndices), privacy: .public) budgetBytes=\(self.prefetchBudgetBytes, privacy: .public) mode=\(readingMode.rawValue, privacy: .public) direction=\(readingDirection.rawValue, privacy: .public)"
         )
+        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
         for url in urls where RemotePageLoader.pageIndex(forRemotePageURL: url) != currentPageIndex {
             guard tasks[url] == nil else { continue }
             tasks[url] = Task(priority: .utility) { [url] in
+                // 首屏先让当前页的 userInitiated 读取/解码起跑，邻页稍后再占磁盘与 ImageIO。
+                if isContinuous {
+                    do {
+                        try await Task.sleep(for: .milliseconds(300))
+                    } catch {
+                        return
+                    }
+                }
+                guard !Task.isCancelled else { return }
                 await RemotePageLoader.prefetchImageData(forRemotePageURL: url)
                 await MainActor.run {
                     self.tasks[url] = nil
-                }
-            }
-        }
-        if Date().timeIntervalSince(lastDiskPruneDate) > 60 {
-            lastDiskPruneDate = Date()
-            diskPruneTask?.cancel()
-            diskPruneTask = Task(priority: .background) { [weak self] in
-                // 首开/恢复位置阶段最需要磁盘 I/O；把 2GB+ 缓存目录扫描推迟到阅读稳定后。
-                do {
-                    try await Task.sleep(for: .seconds(20))
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                await RemotePageLoader.pruneDiskCache()
-                await MainActor.run {
-                    self?.diskPruneTask = nil
                 }
             }
         }
@@ -700,15 +724,35 @@ final class RemotePagePrefetcher {
 
     func cancelAll() {
         cancelAllPreview()
-        guard !tasks.isEmpty else { return }
         let pages = tasks.keys.compactMap { RemotePageLoader.pageIndex(forRemotePageURL: $0) }.sorted()
         for task in tasks.values {
             task.cancel()
         }
         tasks.removeAll()
-        MReaderLog.reader.debug(
-            "remote prefetch cancelAll pages=\(String(describing: pages), privacy: .public)"
-        )
+        if !pages.isEmpty {
+            MReaderLog.reader.debug(
+                "remote prefetch cancelAll pages=\(String(describing: pages), privacy: .public)"
+            )
+        }
+        scheduleDiskPruneAfterReaderExit()
+    }
+
+    private func scheduleDiskPruneAfterReaderExit() {
+        guard Date().timeIntervalSince(lastDiskPruneDate) > 60 else { return }
+        lastDiskPruneDate = Date()
+        diskPruneTask?.cancel()
+        diskPruneTask = Task(priority: .background) { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await RemotePageLoader.pruneDiskCache()
+            await MainActor.run {
+                self?.diskPruneTask = nil
+            }
+        }
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
@@ -719,7 +763,7 @@ final class RemotePagePrefetcher {
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 10 : 7,
+            forwardCount: isContinuous ? 3 : 7,
             backwardCount: isContinuous ? 1 : 2,
             includesCurrentPage: true
         )
