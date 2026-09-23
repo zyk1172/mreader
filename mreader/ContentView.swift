@@ -1874,7 +1874,9 @@ struct ContentView: View {
     }
 
     private func openAuthorizedReader(_ comic: ComicBook) {
-        RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
+        // 进入阅读器后由当前页窗口接管预取；书架预览任务（包括可能仍停在 page 0 的旧状态）
+        // 必须全部取消，避免和当前页 4000+ 的磁盘读取/解码竞争。
+        RemotePagePrefetcher.shared.cancelAllPreview()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -1883,7 +1885,7 @@ struct ContentView: View {
     }
 
     private func openAuthorizedSeriesReader(_ comic: ComicBook) {
-        RemotePagePrefetcher.shared.cancelPreviewForNonOpened(comicID: comic.id)
+        RemotePagePrefetcher.shared.cancelAllPreview()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
