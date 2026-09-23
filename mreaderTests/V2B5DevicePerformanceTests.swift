@@ -52,7 +52,7 @@ final class V2B5DevicePerformanceTests: XCTestCase {
                     ?? bundle.url(forResource: name, withExtension: ext)
             )
             let image = try XCTUnwrap(UIImage(contentsOfFile: url.path)?.cgImage)
-            return ("\\(name).\\(ext)", image)
+            return ("\(name).\(ext)", image)
         }
 
         let deviceBefore = DeviceSnapshot.current
@@ -93,7 +93,7 @@ final class V2B5DevicePerformanceTests: XCTestCase {
                     pageIdentifier: MangaPageIdentifier(
                         scope: "v4-device-measured",
                         pageIndex: pageIndex,
-                        sourceFingerprint: "\\(source.0)-\\(iteration)"
+                        sourceFingerprint: "\(source.0)-\(iteration)"
                     )
                 )
                 try validateEndToEndAnalysis(result.analysis)
