@@ -3134,6 +3134,31 @@ nonisolated struct ReaderScrollGeometrySnapshot: Equatable, Sendable {
     }
 }
 
+private struct ReaderScrollViewResolver: UIViewRepresentable {
+    let onResolve: (UIScrollView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async {
+            if let scrollView = view.enclosingScrollView {
+                scrollView.scrollsToTop = false
+                onResolve(scrollView)
+            }
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            if let scrollView = uiView.enclosingScrollView {
+                scrollView.scrollsToTop = false
+                onResolve(scrollView)
+            }
+        }
+    }
+}
+
 private struct ScrollsToTopDisabledView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -3293,7 +3318,8 @@ struct ContinuousScrollReader: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
 
-    @State private var scrollPosition = ScrollPosition(idType: Int.self)
+    @State private var scrolledPageID: Int?
+    @State private var scrollView: UIScrollView?
     @State private var runtimeState = ReaderScrollRuntimeState()
     @State private var restoreState = ReaderScrollRestoreState()
     @State private var viewportSize: CGSize = .zero
@@ -3345,15 +3371,16 @@ struct ContinuousScrollReader: View {
                 }
                 .scrollTargetLayout()
             }
-            .scrollPosition($scrollPosition, anchor: .top)
-            // 只采样一个 8pt 量化后的 ScrollGeometry；不再为每一页创建 GeometryReader，
-            // 也不把每帧 offset 写入 @State。这个闭包只更新普通引用对象。
-            .onScrollGeometryChange(for: ReaderScrollGeometrySnapshot.self) { geometry in
-                ReaderScrollGeometrySnapshot(geometry, offsetQuantum: 8)
-            } action: { _, snapshot in
-                runtimeState.updateGeometry(snapshot)
-            }
-            // 进度写入只发生在 phase 变化，尤其是 idle；滚动每帧完全没有持久化工作。
+            .scrollPosition(id: $scrolledPageID, anchor: .top)
+            .background(
+                ReaderScrollViewResolver { resolvedScrollView in
+                    if scrollView !== resolvedScrollView {
+                        scrollView = resolvedScrollView
+                    }
+                }
+            )
+            // 只在滚动阶段变化时读取几何。滚动每一帧不执行 SwiftUI 状态写入、
+            // Preference 汇总、KVO 或进度持久化。
             .onScrollPhaseChange { _, newPhase, context in
                 let exact = ReaderScrollGeometrySnapshot(context.geometry)
                 runtimeState.updateGeometry(exact)
@@ -3365,7 +3392,7 @@ struct ContinuousScrollReader: View {
                     }
                 }
             }
-            .onChange(of: scrollPosition.viewID(type: Int.self)) { oldID, newID in
+            .onChange(of: scrolledPageID) { oldID, newID in
                 handleNativePageIDChange(oldID: oldID, newID: newID)
             }
             .onAppear {
@@ -3393,26 +3420,39 @@ struct ContinuousScrollReader: View {
     }
 
     private func stepScroll(_ direction: Int) {
-        guard let geometry = runtimeState.geometry else { return }
+        guard let scrollView else { return }
         let now = Date()
         guard now.timeIntervalSince(runtimeState.lastStepTime) > 0.24 else { return }
         runtimeState.lastStepTime = now
 
         HapticManager.shared.play(.light)
-        let visibleHeight = max(geometry.containerHeight, viewportSize.height, 1)
+        let visibleHeight = max(
+            scrollView.bounds.height - scrollView.adjustedContentInset.top - scrollView.adjustedContentInset.bottom,
+            viewportSize.height,
+            1
+        )
         let distance = min(
             visibleHeight * scrollSpeed.screenStepRatio,
             visibleHeight * 0.8
         )
-        let targetY = min(
-            max(
-                geometry.contentOffsetY + CGFloat(direction) * distance,
-                geometry.minimumOffsetY
-            ),
-            geometry.maximumOffsetY
+        let minimumOffsetY = -scrollView.adjustedContentInset.top
+        let maximumOffsetY = max(
+            minimumOffsetY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
         )
-        withAnimation(.easeInOut(duration: 0.3)) {
-            scrollPosition.scrollTo(x: 0, y: targetY)
+        let targetY = min(
+            max(scrollView.contentOffset.y + CGFloat(direction) * distance, minimumOffsetY),
+            maximumOffsetY
+        )
+        UIView.animate(
+            withDuration: 0.3,
+            delay: 0,
+            options: [.curveEaseInOut, .allowUserInteraction]
+        ) {
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: targetY),
+                animated: false
+            )
         }
     }
 
@@ -3428,13 +3468,13 @@ struct ContinuousScrollReader: View {
 
         if animated {
             withAnimation(.easeInOut(duration: 0.3)) {
-                scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+                scrolledPageID = targetIndex
             }
         } else {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+                scrolledPageID = targetIndex
             }
         }
         scheduleRestoreFinalization(
@@ -3452,11 +3492,12 @@ struct ContinuousScrollReader: View {
             runtimeState.restoreWorkItem = nil
             guard restoreState.generation == generation,
                   restoreState.isRestoring else { return }
-            guard let geometry = runtimeState.geometry else {
+            if let geometry = currentGeometrySnapshot() {
+                runtimeState.updateGeometry(geometry)
+                finishRestore(using: geometry)
+            } else {
                 retryRestore(generation: generation)
-                return
             }
-            finishRestore(using: geometry)
         }
         runtimeState.restoreWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -3474,7 +3515,7 @@ struct ContinuousScrollReader: View {
             return
         }
 
-        scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+        scrolledPageID = targetIndex
         scheduleRestoreFinalization(generation: generation, delay: 0.06)
     }
 
@@ -3491,7 +3532,7 @@ struct ContinuousScrollReader: View {
         if targetIndex > 0,
            geometry.contentOffsetY <= geometry.minimumOffsetY + 2,
            restoreState.consumeRetry() {
-            scrollPosition.scrollTo(id: targetIndex, anchor: .top)
+            scrolledPageID = targetIndex
             scheduleRestoreFinalization(
                 generation: restoreState.generation,
                 delay: 0.06
@@ -3510,7 +3551,10 @@ struct ContinuousScrollReader: View {
             maximumOffsetY: geometry.maximumOffsetY
         )
         if abs(restoredY - pageTopOffsetY) > 1 {
-            scrollPosition.scrollTo(x: 0, y: restoredY)
+            scrollView?.setContentOffset(
+                CGPoint(x: scrollView?.contentOffset.x ?? 0, y: restoredY),
+                animated: false
+            )
         }
 
         let globalProgress: CGFloat
@@ -3559,7 +3603,7 @@ struct ContinuousScrollReader: View {
         notifyParent: Bool
     ) {
         guard didRestorePosition else { return }
-        let pageIndex = scrollPosition.viewID(type: Int.self) ?? currentPageIndex
+        let pageIndex = scrolledPageID ?? currentPageIndex
         guard pages.indices.contains(pageIndex) else { return }
 
         // 原生 ScrollPosition 不应再出现旧 PreferenceKey 导致的 4894 -> 0；
@@ -3567,7 +3611,13 @@ struct ContinuousScrollReader: View {
         if pageIndex > 0,
            geometry.contentOffsetY <= geometry.minimumOffsetY + 2,
            runtimeState.lastStableContentOffsetY > geometry.minimumOffsetY + max(geometry.containerHeight * 0.45, 160) {
-            scrollPosition.scrollTo(x: 0, y: runtimeState.lastStableContentOffsetY)
+            scrollView?.setContentOffset(
+                CGPoint(
+                    x: scrollView?.contentOffset.x ?? 0,
+                    y: runtimeState.lastStableContentOffsetY
+                ),
+                animated: false
+            )
             return
         }
 
@@ -3596,6 +3646,17 @@ struct ContinuousScrollReader: View {
                 Double(pageProgress)
             )
         }
+    }
+
+    private func currentGeometrySnapshot() -> ReaderScrollGeometrySnapshot? {
+        guard let scrollView else { return nil }
+        return ReaderScrollGeometrySnapshot(
+            contentOffsetY: scrollView.contentOffset.y,
+            contentHeight: scrollView.contentSize.height,
+            containerHeight: scrollView.bounds.height,
+            insetTop: scrollView.adjustedContentInset.top,
+            insetBottom: scrollView.adjustedContentInset.bottom
+        )
     }
 
     /// 连续滚动只需要静态页面高度；不再读取滚动坐标系里的实时 frame。
