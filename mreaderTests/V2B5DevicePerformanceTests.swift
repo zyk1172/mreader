@@ -7,8 +7,9 @@ import UIKit
 import XCTest
 import os
 
-/// DEBUG/test-only model benchmark. This deliberately does not call any mReader
-/// provider or decoder; it measures the frozen V2B5 Core ML artifacts directly.
+/// DEBUG/test-only physical-device benchmark. Raw tests measure Core ML directly;
+/// the end-to-end case additionally exercises the production preprocessor,
+/// provider, decoder/NMS and business-level MangaPageAnalysis contract.
 @MainActor
 final class V2B5DevicePerformanceTests: XCTestCase {
     func testFullFP32All() throws {
@@ -35,10 +36,139 @@ final class V2B5DevicePerformanceTests: XCTestCase {
         try run(.fp16, computeUnits: .all)
     }
 
-    private func run(
-        _ modelKind: BenchModelKind,
-        computeUnits: BenchComputeUnits
-    ) throws {
+
+    func testEndToEndProviderPipelineAll() async throws {
+        try requireDeviceBenchmark()
+
+        let bundle = Bundle(for: Self.self)
+        let fixtureNames = [
+            ("sample_shirohage_manga", "jpg"),
+            ("manga_page_publicdomainq", "png")
+        ]
+        let sources: [(String, CGImage)] = try fixtureNames.map { name, ext in
+            let url = try XCTUnwrap(
+                bundle.url(forResource: name, withExtension: ext, subdirectory: "Fixtures")
+                    ?? bundle.url(forResource: name, withExtension: ext)
+            )
+            let image = try XCTUnwrap(UIImage(contentsOfFile: url.path)?.cgImage)
+            return ("\\(name).\\(ext)", image)
+        }
+
+        let deviceBefore = DeviceSnapshot.current
+        guard !deviceBefore.isThermallyBlocked else {
+            throw BenchError.thermalTooHigh(deviceBefore.thermal)
+        }
+        let provider = MangaVisionV2B5Provider()
+        let memoryBefore = physicalFootprint()
+
+        // Two real-page warmups exercise the exact production preprocessing,
+        // model invocation and decoder/NMS path before timing begins.
+        for (index, source) in sources.enumerated() {
+            _ = try await provider.analyzePageWithTiming(
+                image: source.1,
+                sourceImageSize: CGSize(width: source.1.width, height: source.1.height),
+                pageIdentifier: MangaPageIdentifier(
+                    scope: "v4-device-warmup",
+                    pageIndex: index,
+                    sourceFingerprint: source.0
+                )
+            )
+        }
+
+        var preprocess: [Double] = []
+        var model: [Double] = []
+        var postprocess: [Double] = []
+        var total: [Double] = []
+        var maximumFootprint = physicalFootprint()
+        var detectionCounts: [String: [String: Int]] = [:]
+        var referenceCounts: [String: [String: Int]] = [:]
+        var stableCounts = true
+
+        for iteration in 0..<10 {
+            for (pageIndex, source) in sources.enumerated() {
+                let result = try await provider.analyzePageWithTiming(
+                    image: source.1,
+                    sourceImageSize: CGSize(width: source.1.width, height: source.1.height),
+                    pageIdentifier: MangaPageIdentifier(
+                        scope: "v4-device-measured",
+                        pageIndex: pageIndex,
+                        sourceFingerprint: "\\(source.0)-\\(iteration)"
+                    )
+                )
+                try validateEndToEndAnalysis(result.analysis)
+                preprocess.append(result.timing.preprocessMilliseconds)
+                model.append(result.timing.modelMilliseconds)
+                postprocess.append(result.timing.postprocessMilliseconds)
+                total.append(result.timing.totalMilliseconds)
+                maximumFootprint = max(maximumFootprint, physicalFootprint())
+
+                let counts = [
+                    "frame": result.analysis.panels.count,
+                    "text": result.analysis.texts.count,
+                    "balloon": result.analysis.balloons.count,
+                    "face": result.analysis.faces.count,
+                    "body": result.analysis.bodies.count
+                ]
+                detectionCounts[source.0] = counts
+                if let reference = referenceCounts[source.0] {
+                    stableCounts = stableCounts && reference == counts
+                } else {
+                    referenceCounts[source.0] = counts
+                }
+            }
+        }
+
+        let memoryAfter = physicalFootprint()
+        let deviceAfter = DeviceSnapshot.current
+        let payload: [String: Any] = [
+            "status": "PASS",
+            "benchmark_kind": "END_TO_END_PROVIDER",
+            "device": deviceAfter.json,
+            "model": "BUNDLED_MANGA_VISION_V2B5_CONTRACT",
+            "pages": sources.map { $0.0 },
+            "measured_page_inferences": total.count,
+            "timing_ms": [
+                "preprocess": statistics(preprocess),
+                "model": statistics(model),
+                "postprocess": statistics(postprocess),
+                "total": statistics(total)
+            ],
+            "detection_counts": detectionCounts,
+            "repeated_detection_counts_stable": stableCounts,
+            "runtime_load_count": await provider.runtimeLoadCountForDiagnostics(),
+            "cold_load_ms": await provider.coldLoadMillisecondsForDiagnostics() ?? -1,
+            "main_thread_execution_observed": await provider.mainThreadExecutionObservedForDiagnostics(),
+            "memory_mb": [
+                "before": megabytes(memoryBefore),
+                "after": megabytes(memoryAfter),
+                "sampled_max": megabytes(maximumFootprint),
+                "delta": megabytesDelta(memoryBefore, memoryAfter)
+            ],
+            "thermal": [
+                "before": deviceBefore.thermal,
+                "after": deviceAfter.thermal
+            ]
+        ]
+        XCTAssertTrue(stableCounts, "Repeated end-to-end inference changed per-class detection counts")
+        emit(payload)
+    }
+
+    private func validateEndToEndAnalysis(_ analysis: MangaPageAnalysis) throws {
+        for region in analysis.allRegions {
+            let rect = region.normalizedRect
+            guard region.confidence.isFinite,
+                  rect.minX >= 0,
+                  rect.minY >= 0,
+                  rect.maxX <= 1,
+                  rect.maxY <= 1,
+                  rect.width > 0,
+                  rect.height > 0 else {
+                throw BenchError.outputContract("invalid business-level region")
+            }
+        }
+    }
+
+    private func requireDeviceBenchmark() throws {
         #if V2B5_DEVICE_BENCHMARK
         let enabledByCompileFlag = true
         #else
@@ -47,8 +177,15 @@ final class V2B5DevicePerformanceTests: XCTestCase {
         let enabledByEnvironment = ProcessInfo.processInfo.environment["MREADER_V2B5_DEVICE_BENCHMARK"] == "1"
         let enabledBySchemeArgument = ProcessInfo.processInfo.arguments.contains("-MREADER_V2B5_DEVICE_BENCHMARK")
         guard enabledByCompileFlag || enabledByEnvironment || enabledBySchemeArgument else {
-            throw XCTSkip("Use mreaderDeviceBench with -D V2B5_DEVICE_BENCHMARK for the physical-device benchmark")
+            throw XCTSkip("Use mreaderDeviceBench or MREADER_V2B5_DEVICE_BENCHMARK=1 for the physical-device benchmark")
         }
+    }
+
+    private func run(
+        _ modelKind: BenchModelKind,
+        computeUnits: BenchComputeUnits
+    ) throws {
+        try requireDeviceBenchmark()
 
         let bundle = Bundle(for: Self.self)
         let runner = BenchRunner(modelKind: modelKind, computeUnits: computeUnits, bundle: bundle)
