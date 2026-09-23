@@ -3412,7 +3412,8 @@ struct ContinuousScrollReader: View {
             .onDisappear {
                 runtimeState.cancelScheduledWork()
                 restoreState.cancel()
-                if let geometry = runtimeState.geometry {
+                if let geometry = currentGeometrySnapshot() ?? runtimeState.geometry {
+                    runtimeState.updateGeometry(geometry)
                     commitCurrentScrollPosition(using: geometry, notifyParent: true)
                 }
             }
@@ -3453,6 +3454,11 @@ struct ContinuousScrollReader: View {
                 CGPoint(x: scrollView.contentOffset.x, y: targetY),
                 animated: false
             )
+        } completion: { _ in
+            if let geometry = currentGeometrySnapshot() {
+                runtimeState.updateGeometry(geometry)
+                commitCurrentScrollPosition(using: geometry, notifyParent: true)
+            }
         }
     }
 
@@ -3556,6 +3562,15 @@ struct ContinuousScrollReader: View {
                 animated: false
             )
         }
+        runtimeState.updateGeometry(
+            ReaderScrollGeometrySnapshot(
+                contentOffsetY: restoredY,
+                contentHeight: geometry.contentHeight,
+                containerHeight: geometry.containerHeight,
+                insetTop: geometry.insetTop,
+                insetBottom: geometry.insetBottom
+            )
+        )
 
         let globalProgress: CGFloat
         let denominator = max(geometry.maximumOffsetY - geometry.minimumOffsetY, 1)
@@ -3581,7 +3596,8 @@ struct ContinuousScrollReader: View {
               pages.indices.contains(newID) else { return }
         let previous = oldID ?? currentPageIndex
         if runtimeState.pageStartOffsets[newID] == nil,
-           let geometry = runtimeState.geometry {
+           let geometry = currentGeometrySnapshot() ?? runtimeState.geometry {
+            runtimeState.updateGeometry(geometry)
             let movingBackward = newID < previous
             runtimeState.pageStartOffsets[newID] =
                 ReaderContinuousScrollPolicy.estimatedPageStartOffsetY(
