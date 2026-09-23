@@ -181,6 +181,84 @@ nonisolated enum ReaderGestureGate {
     static func allowsDoublePageTurn(zoomedPageIndexes: Set<Int>) -> Bool {
         zoomedPageIndexes.isEmpty
     }
+
+    /// 连续滚动必须把单指拖拽完整交给外层 UIScrollView。即便使用一个永不识别的
+    /// DragGesture，highPriorityGesture 仍会参与手势仲裁并让滚动出现“划不动/偶尔动一下”。
+    static func allowsSingleFingerPan(readingMode: ReadingMode) -> Bool {
+        readingMode != .continuousScroll && readingMode != .infiniteScroll
+    }
+}
+
+/// fit-width 解码只需要保证“显示宽度”达到屏幕需要的像素数；固定 8192 最长边会让
+/// 普通长页做无谓大解码。返回离散档位，保证 ReaderImageCache 可以跨请求稳定复用。
+nonisolated enum ReaderFitWidthDecodePolicy {
+    static let tiers: [CGFloat] = [4096, 6144, 8192]
+    static let maximumPixelSize: CGFloat = 8192
+
+    static func maxPixelSize(
+        sourceSize: CGSize?,
+        viewportWidthPoints: CGFloat,
+        displayScale: CGFloat
+    ) -> CGFloat {
+        guard let sourceSize,
+              sourceSize.width > 1,
+              sourceSize.height > 1,
+              viewportWidthPoints > 1,
+              displayScale > 0 else {
+            return maximumPixelSize
+        }
+        let aspect = sourceSize.height / sourceSize.width
+        let requiredLongSide = max(4096, viewportWidthPoints * displayScale * max(aspect, 1))
+        return tiers.first(where: { $0 >= requiredLongSide }) ?? maximumPixelSize
+    }
+}
+
+nonisolated enum ReaderContinuousScrollPolicy {
+    static let maximumAutomaticPageJump = 12
+    static let maximumStabilizingPageJump = 2
+
+    static func shouldAcceptVisiblePage(
+        current: Int,
+        observed: Int,
+        pageCount: Int,
+        isStabilizing: Bool,
+        isUserInteracting: Bool
+    ) -> Bool {
+        guard pageCount > 0,
+              observed >= 0,
+              observed < pageCount else { return false }
+        let distance = abs(observed - current)
+        if isStabilizing && distance > maximumStabilizingPageJump {
+            return false
+        }
+        if !isUserInteracting && distance > maximumAutomaticPageJump {
+            return false
+        }
+        return true
+    }
+
+    /// targetFrame 是目标页在 scroll coordinate-space 中的实时 frame。
+    /// 只基于当前 contentOffset + 目标页实时 frame 做页内恢复，不再累计 0..<N 的估算页高。
+    static func alignedContentOffsetY(
+        currentOffsetY: CGFloat,
+        targetFrame: CGRect,
+        pageProgress: CGFloat,
+        minimumOffsetY: CGFloat,
+        maximumOffsetY: CGFloat
+    ) -> CGFloat {
+        guard targetFrame.height > 1 else {
+            return min(max(currentOffsetY, minimumOffsetY), maximumOffsetY)
+        }
+        let normalizedProgress = min(max(pageProgress, 0), 1)
+        let pageOffset = min(
+            max(targetFrame.height * normalizedProgress, 0),
+            max(targetFrame.height - 1, 0)
+        )
+        return min(
+            max(currentOffsetY + targetFrame.minY + pageOffset, minimumOffsetY),
+            maximumOffsetY
+        )
+    }
 }
 
 /// Downward reader dismissal is deliberately a two-finger-only gesture. The
@@ -410,11 +488,11 @@ final class PageGeometryStore {
     /// 就近页比例：同一本长条漫画的相邻页几乎总是同比例，用于在自身几何尚未登记时
     /// 避免退回 1.35 这种会把长条低估 6-11 倍的兜底值。
     func neighbouringAspectRatio(
-        for url: URL,
+        forPageIndex index: Int,
         among pages: [ComicPage],
         maximumDistance: Int = 3
     ) -> CGFloat? {
-        guard let index = pages.firstIndex(where: { $0.url == url }) else { return nil }
+        guard pages.indices.contains(index) else { return nil }
         for distance in 1...max(1, maximumDistance) {
             for candidate in [index - distance, index + distance] {
                 guard pages.indices.contains(candidate),
@@ -569,7 +647,7 @@ private final class ReaderImageCache {
     }
 
     // 升序：选择“最小但 >= 请求”的缓存（项12），避免无谓持有更大 UIImage。
-    private let resolutionTiers: [CGFloat] = [4096, 6144, 8192]
+    private let resolutionTiers = ReaderFitWidthDecodePolicy.tiers
 
     /// Guided Panel renders pages with `.fitScreen`, and panel detection only needs a
     /// 640px analysis image. Detection therefore shares this decode tier with the
@@ -577,7 +655,21 @@ private final class ReaderImageCache {
     /// 4096 cache entry and decodes the same page a second time.
     static let fitScreenMaxPixelSize: CGFloat = 4096
     /// fitWidth renders long strips at screen width, so it needs more headroom than fitScreen.
-    static let fitWidthMaxPixelSize: CGFloat = 8192
+    static let fitWidthMaxPixelSize: CGFloat = ReaderFitWidthDecodePolicy.maximumPixelSize
+
+    func fitWidthDecodeMaxPixelSize(for url: URL, viewportWidthPoints: CGFloat? = nil) -> CGFloat {
+        let width: CGFloat
+        if let viewportWidthPoints, viewportWidthPoints > 1 {
+            width = viewportWidthPoints
+        } else {
+            width = UIScreen.main.bounds.width
+        }
+        return ReaderFitWidthDecodePolicy.maxPixelSize(
+            sourceSize: PageGeometryStore.shared.size(for: url),
+            viewportWidthPoints: width,
+            displayScale: UIScreen.main.scale
+        )
+    }
 
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
         for tier in resolutionTiers where tier >= maxPixelSize {
@@ -640,7 +732,8 @@ private final class ReaderImageCache {
         _ urls: [URL],
         maxPixelSize: CGFloat = 4096,
         maximumConcurrent: Int = 2,
-        delay: TimeInterval = 0.25
+        delay: TimeInterval = 0.25,
+        adaptiveFitWidthSizing: Bool = false
     ) {
         scheduledPreload?.cancel()
         var seenURLs = Set<URL>()
@@ -653,13 +746,22 @@ private final class ReaderImageCache {
             self.startPreloading(
                 uniqueURLs,
                 maxPixelSize: maxPixelSize,
-                maximumConcurrent: maximumConcurrent
+                maximumConcurrent: maximumConcurrent,
+                adaptiveFitWidthSizing: adaptiveFitWidthSizing
             )
         }
     }
 
-    private func startPreloading(_ urls: [URL], maxPixelSize: CGFloat, maximumConcurrent: Int) {
-        let desiredKeys = Set(urls.map { cacheKey(for: $0, maxPixelSize: maxPixelSize) })
+    private func startPreloading(
+        _ urls: [URL],
+        maxPixelSize: CGFloat,
+        maximumConcurrent: Int,
+        adaptiveFitWidthSizing: Bool
+    ) {
+        func requestedSize(for url: URL) -> CGFloat {
+            adaptiveFitWidthSizing ? fitWidthDecodeMaxPixelSize(for: url) : maxPixelSize
+        }
+        let desiredKeys = Set(urls.map { cacheKey(for: $0, maxPixelSize: requestedSize(for: $0)) })
         for staleKey in preloadKeys.subtracting(desiredKeys) {
             guard !foregroundLoadKeys.contains(staleKey) else { continue }
             inFlightLoads[staleKey]?.cancel()
@@ -667,16 +769,17 @@ private final class ReaderImageCache {
 
         let candidates = urls
             .map { url in
-                PreloadCandidate(
+                let requestedMaxPixelSize = requestedSize(for: url)
+                return PreloadCandidate(
                     url: url,
-                    key: cacheKey(for: url, maxPixelSize: maxPixelSize),
-                    cost: estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize),
-                    maxPixelSize: maxPixelSize
+                    key: cacheKey(for: url, maxPixelSize: requestedMaxPixelSize),
+                    cost: estimatedDecodedCost(for: url, maxPixelSize: requestedMaxPixelSize),
+                    maxPixelSize: requestedMaxPixelSize
                 )
             }
             .filter {
-                cachedImage(for: $0.url, maxPixelSize: maxPixelSize) == nil
-                    && inFlightKeySatisfying(url: $0.url, maxPixelSize: maxPixelSize) == nil
+                cachedImage(for: $0.url, maxPixelSize: $0.maxPixelSize) == nil
+                    && inFlightKeySatisfying(url: $0.url, maxPixelSize: $0.maxPixelSize) == nil
             }
 
         preloadQueue = candidates
@@ -689,6 +792,9 @@ private final class ReaderImageCache {
     }
 
     private func drainPreloadQueue() {
+        // 当前页是用户可见工作的最高优先级；不要让邻页预解码和 foreground ImageIO
+        // 同时争夺内存带宽。foreground 完成时 loadImage() 会再次 drain。
+        guard foregroundLoadKeys.isEmpty else { return }
         while activePreloadCount < maximumConcurrentPreloads, !preloadQueue.isEmpty {
             let candidate = preloadQueue[0]
             guard cache.object(forKey: candidate.key as NSString) == nil,
@@ -761,6 +867,12 @@ private final class ReaderImageCache {
     }
 
     private func estimatedDecodedCost(for url: URL, maxPixelSize: CGFloat) -> Int {
+        if let pixelSize = PageGeometryStore.shared.size(for: url),
+           pixelSize.width > 0,
+           pixelSize.height > 0 {
+            let scale = min(1, maxPixelSize / max(pixelSize.width, pixelSize.height))
+            return max(1, Int(pixelSize.width * scale * pixelSize.height * scale * 4))
+        }
         if ComicManager.isArchivePageURL(url) {
             // 估算阶段不能再次解压 CBZ；优先使用已经登记的几何信息，未知时采用保守预算。
             if let pixelSize = PageGeometryStore.shared.size(for: url),
@@ -2400,7 +2512,7 @@ struct ReaderView: View {
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 2 : 4,
+            forwardCount: isContinuous ? 1 : 4,
             backwardCount: isContinuous ? 1 : 2,
             includesCurrentPage: false
         )
@@ -2415,7 +2527,8 @@ struct ReaderView: View {
                 ? ReaderImageCache.fitWidthMaxPixelSize
                 : ReaderImageCache.fitScreenMaxPixelSize,
             maximumConcurrent: isContinuous ? 1 : 2,
-            delay: isContinuous ? 0.45 : 0.15
+            delay: isContinuous ? 0.60 : 0.15,
+            adaptiveFitWidthSizing: isContinuous
         )
 
         mangaVisionPreanalysisTask?.cancel()
@@ -2928,14 +3041,6 @@ private enum ReaderGestureTouchFilter {
     }
 }
 
-private struct PageHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
-    }
-}
-
 nonisolated enum ReaderVisiblePageDetector {
     static func visiblePageIndex(frames: [Int: CGRect], viewport: CGRect) -> Int? {
         guard !frames.isEmpty, viewport.width > 0, viewport.height > 0 else { return nil }
@@ -3121,15 +3226,56 @@ private extension UIView {
     }
 }
 
-/// 连续滚动的页高/页框缓存。
+/// 连续滚动的页框缓存。
 ///
-/// 这两个字典的值由滚动位置派生，并且每个滚动 tick 都会更新。把它们放进 `@State`
-/// 会让 `ContinuousScrollReader` 的 body 在每个滚动 tick 失效一次，从而重建所有可见
-/// 页（每页都是包含大量覆盖层与手势的 `LocalImageView`）。放进普通的引用类型容器后，
-/// 更新只影响读取它们的回调，不再触发 SwiftUI 的视图失效。
+/// 页框由滚动位置派生，并且会频繁更新。把字典直接放进 `@State` 会让
+/// `ContinuousScrollReader` 的 body 在滚动时反复失效并重建可见页；使用普通引用类型
+/// 容器后，更新只影响读取它的回调，不触发 SwiftUI 视图树重建。
 private final class ReaderScrollPageMetricsStore {
-    var heights: [Int: CGFloat] = [:]
     var frames: [Int: CGRect] = [:]
+}
+
+private final class ReaderScrollRestoreState {
+    var targetIndex: Int?
+    var targetPageProgress: CGFloat = 0
+    var attemptsRemaining = 0
+    var generation = UUID()
+    var workItem: DispatchWorkItem?
+    var stabilizationUntil = Date.distantPast
+
+    var isRestoring: Bool { targetIndex != nil }
+
+    @discardableResult
+    func begin(targetIndex: Int, pageProgress: CGFloat) -> UUID {
+        workItem?.cancel()
+        generation = UUID()
+        self.targetIndex = targetIndex
+        targetPageProgress = min(max(pageProgress, 0), 1)
+        attemptsRemaining = 20
+        stabilizationUntil = .distantPast
+        return generation
+    }
+
+    func consumeRetry() -> Bool {
+        attemptsRemaining = max(0, attemptsRemaining - 1)
+        return attemptsRemaining > 0
+    }
+
+    func complete(stabilizationDuration: TimeInterval = 1.2) {
+        workItem?.cancel()
+        workItem = nil
+        targetIndex = nil
+        attemptsRemaining = 0
+        stabilizationUntil = Date().addingTimeInterval(stabilizationDuration)
+    }
+
+    func cancel() {
+        workItem?.cancel()
+        workItem = nil
+        targetIndex = nil
+        attemptsRemaining = 0
+        stabilizationUntil = .distantPast
+    }
 }
 
 struct ContinuousScrollReader: View {
@@ -3154,16 +3300,16 @@ struct ContinuousScrollReader: View {
     let onHideControls: () -> Void
 
     @State private var scrollView: UIScrollView?
-    /// 非观察状态容器：滚动位置派生的页高/页框不能写进 `@State`，否则每次滚动
-    /// 都会让整个 reader 的 body 失效并重建所有可见页（审查：滚动掉帧、首开重排）。
+    /// 非观察状态容器：滚动位置派生的页框不能直接写进值类型 `@State`，否则会让
+    /// reader 的 body 在滚动时失效并重建可见页。
     @State private var pageMetrics = ReaderScrollPageMetricsStore()
+    @State private var restoreState = ReaderScrollRestoreState()
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
     @State private var lastStepTime = Date.distantPast
     @State private var lastScrollPositionNotifyDate = Date.distantPast
     @State private var visiblePageUpdateWorkItem: DispatchWorkItem?
     @State private var lastStableContentOffsetY: CGFloat = 0
-    @State private var allowTopOffsetUntil = Date.distantPast
     @State private var lastPageFrameCommitDate = Date.distantPast
 
     var body: some View {
@@ -3192,10 +3338,15 @@ struct ContinuousScrollReader: View {
                                 targetLanguage: targetLanguage,
                                 imageFitMode: .fitWidth,
                                 visionViewportAspect: max(viewportProxy.size.height / max(viewportProxy.size.width, 1), 1.25),
-                                placeholderHeight: placeholderHeight(for: page.url, viewport: viewportProxy.size),
+                                placeholderHeight: placeholderHeight(
+                                    for: page.url,
+                                    pageIndex: page.index,
+                                    viewport: viewportProxy.size
+                                ),
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
+                                isSingleFingerPanEnabled: ReaderGestureGate.allowsSingleFingerPan(readingMode: readingMode),
                                 onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                                 onPreviousPage: { stepScroll(-1) },
                                 onNextPage: { stepScroll(1) },
@@ -3208,7 +3359,6 @@ struct ContinuousScrollReader: View {
                             .background(
                                 GeometryReader { geo in
                                     Color.clear
-                                        .preference(key: PageHeightPreferenceKey.self, value: [page.index: max(geo.size.height, 1)])
                                         .preference(
                                             key: PageFramePreferenceKey.self,
                                             value: [page.index: geo.frame(in: .named(Self.coordinateSpaceName))]
@@ -3252,10 +3402,6 @@ struct ContinuousScrollReader: View {
                     viewportSize = size
                     scheduleVisiblePageUpdate(delay: 0.02)
                 }
-                .onPreferenceChange(PageHeightPreferenceKey.self) { heights in
-                    guard pageMetrics.heights != heights else { return }
-                    pageMetrics.heights = heights
-                }
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     let now = Date()
                     guard pageMetrics.frames != frames else { return }
@@ -3269,6 +3415,7 @@ struct ContinuousScrollReader: View {
                 .onDisappear {
                     visiblePageUpdateWorkItem?.cancel()
                     visiblePageUpdateWorkItem = nil
+                    restoreState.cancel()
                     updateCurrentPageFromVisibleFrames()
                 }
             }
@@ -3298,34 +3445,111 @@ struct ContinuousScrollReader: View {
     private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
         guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
         let targetIndex = min(max(currentPageIndex, 0), max(0, pages.count - 1))
-        didRestorePosition = false
-        allowTopOffsetUntil = Date().addingTimeInterval(0.8)
-        let savedProgress = min(max(scrollProgress, 0), 1)
         let savedPageProgress = min(max(scrollPageProgress, 0), 1)
+        let generation = restoreState.begin(
+            targetIndex: targetIndex,
+            pageProgress: CGFloat(savedPageProgress)
+        )
+        didRestorePosition = false
+        visiblePageUpdateWorkItem?.cancel()
+        visiblePageUpdateWorkItem = nil
+
         DispatchQueue.main.async {
+            guard restoreState.generation == generation else { return }
             let animation = animated ? Animation.easeInOut(duration: 0.3) : nil
             withAnimation(animation) {
                 proxy.scrollTo(targetIndex, anchor: .top)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                if let scrollView {
-                    let maxOffsetY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-                    let minOffsetY = -scrollView.adjustedContentInset.top
-                    let targetPageHeight = estimatedPageHeight(for: targetIndex)
-                    if targetPageHeight > 1 {
-                        let pageOffset = min(max(targetPageHeight * savedPageProgress, 0), max(targetPageHeight - 1, 0))
-                        let targetY = min(max(minOffsetY + pageTop(for: targetIndex) + pageOffset, minOffsetY), maxOffsetY)
-                        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: animated)
-                    } else if savedProgress > 0.001 {
-                        let targetY = minOffsetY + (maxOffsetY - minOffsetY) * savedProgress
-                        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: false)
-                    }
-                    lastStableContentOffsetY = scrollView.contentOffset.y
-                }
-                didRestorePosition = true
-                scheduleVisiblePageUpdate(delay: 0.05)
-            }
+            scheduleRestoreAlignment(
+                proxy,
+                generation: generation,
+                delay: animated ? 0.34 : 0.06
+            )
         }
+    }
+
+    private func scheduleRestoreAlignment(
+        _ proxy: ScrollViewProxy,
+        generation: UUID,
+        delay: TimeInterval
+    ) {
+        guard restoreState.generation == generation, restoreState.isRestoring else { return }
+        restoreState.workItem?.cancel()
+        let workItem = DispatchWorkItem {
+            guard restoreState.generation == generation, restoreState.isRestoring else { return }
+            attemptRestoreAlignment(proxy, generation: generation)
+        }
+        restoreState.workItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func attemptRestoreAlignment(_ proxy: ScrollViewProxy, generation: UUID) {
+        guard restoreState.generation == generation,
+              let targetIndex = restoreState.targetIndex,
+              let scrollView else {
+            retryRestoreAlignment(proxy, generation: generation)
+            return
+        }
+
+        let visibleHeight = max(scrollView.bounds.height, viewportSize.height, 1)
+        guard let targetFrame = pageMetrics.frames[targetIndex],
+              targetFrame.height > 1,
+              targetFrame.maxY > -visibleHeight * 1.5,
+              targetFrame.minY < visibleHeight * 2.5 else {
+            retryRestoreAlignment(proxy, generation: generation)
+            return
+        }
+
+        let minimumOffsetY = -scrollView.adjustedContentInset.top
+        let maximumOffsetY = max(
+            minimumOffsetY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+        )
+        let targetY = ReaderContinuousScrollPolicy.alignedContentOffsetY(
+            currentOffsetY: scrollView.contentOffset.y,
+            targetFrame: targetFrame,
+            pageProgress: restoreState.targetPageProgress,
+            minimumOffsetY: minimumOffsetY,
+            maximumOffsetY: maximumOffsetY
+        )
+        scrollView.setContentOffset(
+            CGPoint(x: scrollView.contentOffset.x, y: targetY),
+            animated: false
+        )
+        lastStableContentOffsetY = targetY
+        didRestorePosition = true
+        restoreState.complete()
+        MReaderLog.reader.debug(
+            "scroll restore aligned page=\(targetIndex, privacy: .public) offsetY=\(Int(targetY), privacy: .public) frameY=\(Int(targetFrame.minY), privacy: .public)"
+        )
+        scheduleVisiblePageUpdate(delay: 0.08)
+    }
+
+    private func retryRestoreAlignment(_ proxy: ScrollViewProxy, generation: UUID) {
+        guard restoreState.generation == generation,
+              let targetIndex = restoreState.targetIndex else { return }
+        guard restoreState.consumeRetry() else {
+            // 最坏情况下保留 ScrollViewReader 已完成的 targetIndex 顶部定位；
+            // 绝不再退回基于数千个估算页高的绝对 offset。
+            proxy.scrollTo(targetIndex, anchor: .top)
+            if let scrollView {
+                lastStableContentOffsetY = scrollView.contentOffset.y
+            }
+            didRestorePosition = true
+            restoreState.complete(stabilizationDuration: 1.8)
+            MReaderLog.reader.notice(
+                "scroll restore frame timeout page=\(targetIndex, privacy: .public); kept ScrollViewReader position"
+            )
+            scheduleVisiblePageUpdate(delay: 0.12)
+            return
+        }
+
+        // LazyVStack 在超长书籍的大跨度跳转时可能需要数个 layout pass 才实例化目标页。
+        // 周期性重申 scrollTo，但不再人工计算 0..<target 的累计高度。
+        if restoreState.attemptsRemaining.isMultiple(of: 5) {
+            proxy.scrollTo(targetIndex, anchor: .top)
+        }
+        scheduleRestoreAlignment(proxy, generation: generation, delay: 0.06)
     }
 
     private func scheduleVisiblePageUpdate(delay: TimeInterval = 0.12) {
@@ -3340,17 +3564,6 @@ struct ContinuousScrollReader: View {
 
     private func updateCurrentPageFromVisibleFrames() {
         updateCurrentPageFromViewport(frames: pageMetrics.frames, viewportSize: viewportSize)
-    }
-
-    private func estimatedPageHeight(for index: Int) -> CGFloat {
-        pageMetrics.heights[index] ?? max(viewportSize.height, scrollView?.bounds.height ?? 1, 1)
-    }
-
-    private func pageTop(for index: Int) -> CGFloat {
-        guard index > 0 else { return 0 }
-        return (0..<index).reduce(CGFloat.zero) { partial, pageIndex in
-            partial + estimatedPageHeight(for: pageIndex)
-        }
     }
 
     private func updateCurrentPageFromViewport(frames: [Int: CGRect], viewportSize: CGSize) {
@@ -3370,6 +3583,25 @@ struct ContinuousScrollReader: View {
 
         let viewport = CGRect(origin: .zero, size: visibleSize)
         guard let visiblePageIndex = ReaderVisiblePageDetector.visiblePageIndex(frames: frames, viewport: viewport) else { return }
+
+        let isUserInteracting = scrollView?.isTracking == true
+            || scrollView?.isDragging == true
+            || scrollView?.isDecelerating == true
+        let isStabilizing = Date() < restoreState.stabilizationUntil
+        guard ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
+            current: currentPageIndex,
+            observed: visiblePageIndex,
+            pageCount: pages.count,
+            isStabilizing: isStabilizing,
+            isUserInteracting: isUserInteracting
+        ) else {
+            MReaderLog.reader.notice(
+                "scroll rejected implausible page jump current=\(currentPageIndex, privacy: .public) observed=\(visiblePageIndex, privacy: .public) stabilizing=\(isStabilizing, privacy: .public) interacting=\(isUserInteracting, privacy: .public)"
+            )
+            scheduleVisiblePageUpdate(delay: 0.08)
+            return
+        }
+
         if visiblePageIndex == 0,
            currentPageIndex > 0,
            let scrollView {
@@ -3418,18 +3650,17 @@ struct ContinuousScrollReader: View {
     }
 
     /// 已知道真实宽高比时用真实比例预留高度，避免长条页加载后大幅重排（审查 #16）。
-    private func placeholderHeight(for url: URL, viewport: CGSize) -> CGFloat {
+    private func placeholderHeight(for url: URL, pageIndex: Int, viewport: CGSize) -> CGFloat {
         let store = PageGeometryStore.shared
         let fallbackRatio: CGFloat = 1.35
         let ratio = store.aspectRatio(for: url)
-            ?? store.neighbouringAspectRatio(for: url, among: pages)
+            ?? store.neighbouringAspectRatio(forPageIndex: pageIndex, among: pages)
             ?? fallbackRatio
         return max(viewport.height, viewport.width * max(ratio, 0.2))
     }
 
     private func restoreUnexpectedScrollToTopIfNeeded(visibleHeight: CGFloat) -> Bool {
         guard let scrollView, currentPageIndex > 0 else { return false }
-        guard Date() > allowTopOffsetUntil else { return false }
         let minOffsetY = -scrollView.adjustedContentInset.top
         let currentY = scrollView.contentOffset.y
         let hadMeaningfulPosition = lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
@@ -4944,6 +5175,20 @@ private struct ReaderProgressThumbnail: View {
     }
 }
 
+private struct ReaderOptionalPanGestureModifier: ViewModifier {
+    let isEnabled: Bool
+    let gesture: AnyGesture<Void>
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.highPriorityGesture(gesture)
+        } else {
+            content
+        }
+    }
+}
+
 struct LocalImageView: View {
     let url: URL
     var comic: ComicBook? = nil
@@ -4968,6 +5213,7 @@ struct LocalImageView: View {
     var imageLoadDelay: TimeInterval = 0
     var showsLoadingIndicator: Bool = true
     var isPageTapGestureEnabled: Bool = true
+    var isSingleFingerPanEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     /// 缩放态回传：外层翻页容器据此在 scale > 1 时屏蔽翻页拖拽。
@@ -5085,8 +5331,14 @@ struct LocalImageView: View {
                     // 放大后把图片裁剪在自身布局框内，避免溢出到相邻页面与翻页过渡叠加。
                     .clipped()
                     .gesture(zoomGesture)
-                    // 放大后页内平移优先于外层翻页拖拽，避免拖动被父级手势反复截断。
-                    .highPriorityGesture(gatedPanGesture)
+                    // 只有分页阅读器才安装高优先级单指 pan。连续滚动完全不安装该 recognizer，
+                    // 让 UIScrollView 的 panGesture 独占单指拖动。
+                    .modifier(
+                        ReaderOptionalPanGestureModifier(
+                            isEnabled: isSingleFingerPanEnabled,
+                            gesture: gatedPanGesture
+                        )
+                    )
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
@@ -6391,7 +6643,10 @@ struct LocalImageView: View {
 
     private var preferredDecodeMaxPixelSize: CGFloat {
         imageFitMode == .fitWidth
-            ? ReaderImageCache.fitWidthMaxPixelSize
+            ? ReaderImageCache.shared.fitWidthDecodeMaxPixelSize(
+                for: url,
+                viewportWidthPoints: viewportWidth
+            )
             : ReaderImageCache.fitScreenMaxPixelSize
     }
 
