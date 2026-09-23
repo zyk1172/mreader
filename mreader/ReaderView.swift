@@ -3293,6 +3293,23 @@ private final class ReaderScrollPageMetricsStore {
     var frames: [Int: CGRect] = [:]
 }
 
+/// 滚动热路径的纯运行时状态。这里的值可以每帧变化，但不能使用 @State，
+/// 否则每次 KVO/contentOffset 更新都会让 SwiftUI 重新计算整个 reader body。
+private final class ReaderScrollRuntimeState {
+    var lastStepTime = Date.distantPast
+    var visiblePageUpdateWorkItem: DispatchWorkItem?
+    var scrollIdleWorkItem: DispatchWorkItem?
+    var lastStableContentOffsetY: CGFloat = 0
+    var lastPageFrameCommitDate = Date.distantPast
+
+    func cancelScheduledWork() {
+        visiblePageUpdateWorkItem?.cancel()
+        visiblePageUpdateWorkItem = nil
+        scrollIdleWorkItem?.cancel()
+        scrollIdleWorkItem = nil
+    }
+}
+
 private final class ReaderScrollRestoreState {
     var targetIndex: Int?
     var targetPageProgress: CGFloat = 0
@@ -3363,13 +3380,9 @@ struct ContinuousScrollReader: View {
     /// reader 的 body 在滚动时失效并重建可见页。
     @State private var pageMetrics = ReaderScrollPageMetricsStore()
     @State private var restoreState = ReaderScrollRestoreState()
+    @State private var runtimeState = ReaderScrollRuntimeState()
     @State private var viewportSize: CGSize = .zero
     @State private var didRestorePosition = false
-    @State private var lastStepTime = Date.distantPast
-    @State private var visiblePageUpdateWorkItem: DispatchWorkItem?
-    @State private var scrollIdleWorkItem: DispatchWorkItem?
-    @State private var lastStableContentOffsetY: CGFloat = 0
-    @State private var lastPageFrameCommitDate = Date.distantPast
 
     var body: some View {
         GeometryReader { viewportProxy in
@@ -3465,18 +3478,15 @@ struct ContinuousScrollReader: View {
                 .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                     let now = Date()
                     guard pageMetrics.frames != frames else { return }
-                    guard !didRestorePosition || now.timeIntervalSince(lastPageFrameCommitDate) >= 0.08 else {
+                    guard !didRestorePosition || now.timeIntervalSince(runtimeState.lastPageFrameCommitDate) >= 0.08 else {
                         return
                     }
-                    lastPageFrameCommitDate = now
+                    runtimeState.lastPageFrameCommitDate = now
                     pageMetrics.frames = frames
                     scheduleVisiblePageUpdate(delay: 0.04)
                 }
                 .onDisappear {
-                    visiblePageUpdateWorkItem?.cancel()
-                    visiblePageUpdateWorkItem = nil
-                    scrollIdleWorkItem?.cancel()
-                    scrollIdleWorkItem = nil
+                    runtimeState.cancelScheduledWork()
                     restoreState.cancel()
                     updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
                 }
@@ -3487,8 +3497,8 @@ struct ContinuousScrollReader: View {
     private func stepScroll(_ direction: Int) {
         guard let scrollView else { return }
         let now = Date()
-        guard now.timeIntervalSince(lastStepTime) > 0.24 else { return }
-        lastStepTime = now
+        guard now.timeIntervalSince(runtimeState.lastStepTime) > 0.24 else { return }
+        runtimeState.lastStepTime = now
 
         HapticManager.shared.play(.light)
         let visibleHeight = max(scrollView.bounds.height - scrollView.adjustedContentInset.top - scrollView.adjustedContentInset.bottom, 1)
@@ -3513,8 +3523,8 @@ struct ContinuousScrollReader: View {
             pageProgress: CGFloat(savedPageProgress)
         )
         didRestorePosition = false
-        visiblePageUpdateWorkItem?.cancel()
-        visiblePageUpdateWorkItem = nil
+        runtimeState.visiblePageUpdateWorkItem?.cancel()
+        runtimeState.visiblePageUpdateWorkItem = nil
 
         DispatchQueue.main.async {
             guard restoreState.generation == generation else { return }
@@ -3578,7 +3588,7 @@ struct ContinuousScrollReader: View {
             CGPoint(x: scrollView.contentOffset.x, y: targetY),
             animated: false
         )
-        lastStableContentOffsetY = targetY
+        runtimeState.lastStableContentOffsetY = targetY
         didRestorePosition = true
         restoreState.complete()
         MReaderLog.reader.debug(
@@ -3595,7 +3605,7 @@ struct ContinuousScrollReader: View {
             // 绝不再退回基于数千个估算页高的绝对 offset。
             proxy.scrollTo(targetIndex, anchor: .top)
             if let scrollView {
-                lastStableContentOffsetY = scrollView.contentOffset.y
+                runtimeState.lastStableContentOffsetY = scrollView.contentOffset.y
             }
             didRestorePosition = true
             restoreState.complete(stabilizationDuration: 1.8)
@@ -3615,12 +3625,12 @@ struct ContinuousScrollReader: View {
     }
 
     private func scheduleVisiblePageUpdate(delay: TimeInterval = 0.12) {
-        guard visiblePageUpdateWorkItem == nil else { return }
+        guard runtimeState.visiblePageUpdateWorkItem == nil else { return }
         let workItem = DispatchWorkItem {
-            visiblePageUpdateWorkItem = nil
+            runtimeState.visiblePageUpdateWorkItem = nil
             updateCurrentPageFromVisibleFrames()
         }
-        visiblePageUpdateWorkItem = workItem
+        runtimeState.visiblePageUpdateWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
@@ -3633,12 +3643,12 @@ struct ContinuousScrollReader: View {
     }
 
     private func scheduleScrollIdleProgressCommit(delay: TimeInterval = 0.45) {
-        scrollIdleWorkItem?.cancel()
+        runtimeState.scrollIdleWorkItem?.cancel()
         let workItem = DispatchWorkItem {
-            scrollIdleWorkItem = nil
+            runtimeState.scrollIdleWorkItem = nil
             updateCurrentPageFromVisibleFrames(forceNotifyProgress: true)
         }
-        scrollIdleWorkItem = workItem
+        runtimeState.scrollIdleWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
@@ -3710,7 +3720,7 @@ struct ContinuousScrollReader: View {
             let denominator = max(maxOffsetY - minOffsetY, 1)
             progress = min(max((scrollView.contentOffset.y - minOffsetY) / denominator, 0), 1)
             if scrollView.contentOffset.y > minOffsetY + 8 {
-                lastStableContentOffsetY = scrollView.contentOffset.y
+                runtimeState.lastStableContentOffsetY = scrollView.contentOffset.y
             }
         } else {
             progress = CGFloat(visiblePageIndex) / CGFloat(max(pages.count - 1, 1))
@@ -3746,12 +3756,12 @@ struct ContinuousScrollReader: View {
         guard let scrollView, currentPageIndex > 0 else { return false }
         let minOffsetY = -scrollView.adjustedContentInset.top
         let currentY = scrollView.contentOffset.y
-        let hadMeaningfulPosition = lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
+        let hadMeaningfulPosition = runtimeState.lastStableContentOffsetY > minOffsetY + max(visibleHeight * 0.45, 160)
         let jumpedToTop = currentY <= minOffsetY + 2
         guard hadMeaningfulPosition, jumpedToTop else { return false }
 
         let maxOffsetY = max(minOffsetY, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-        let restoreY = min(max(lastStableContentOffsetY, minOffsetY), maxOffsetY)
+        let restoreY = min(max(runtimeState.lastStableContentOffsetY, minOffsetY), maxOffsetY)
         MReaderLog.reader.notice(
             "scroll prevented unexpected top jump page=\(currentPageIndex, privacy: .public) restoreY=\(Int(restoreY), privacy: .public)"
         )
