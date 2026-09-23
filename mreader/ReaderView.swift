@@ -3226,12 +3226,11 @@ private extension UIView {
     }
 }
 
-/// 连续滚动的页高/页框缓存。
+/// 连续滚动的页框缓存。
 ///
-/// 这两个字典的值由滚动位置派生，并且每个滚动 tick 都会更新。把它们放进 `@State`
-/// 会让 `ContinuousScrollReader` 的 body 在每个滚动 tick 失效一次，从而重建所有可见
-/// 页（每页都是包含大量覆盖层与手势的 `LocalImageView`）。放进普通的引用类型容器后，
-/// 更新只影响读取它们的回调，不再触发 SwiftUI 的视图失效。
+/// 页框由滚动位置派生，并且会频繁更新。把字典直接放进 `@State` 会让
+/// `ContinuousScrollReader` 的 body 在滚动时反复失效并重建可见页；使用普通引用类型
+/// 容器后，更新只影响读取它的回调，不触发 SwiftUI 视图树重建。
 private final class ReaderScrollPageMetricsStore {
     var frames: [Int: CGRect] = [:]
 }
@@ -3301,8 +3300,8 @@ struct ContinuousScrollReader: View {
     let onHideControls: () -> Void
 
     @State private var scrollView: UIScrollView?
-    /// 非观察状态容器：滚动位置派生的页高/页框不能写进 `@State`，否则每次滚动
-    /// 都会让整个 reader 的 body 失效并重建所有可见页（审查：滚动掉帧、首开重排）。
+    /// 非观察状态容器：滚动位置派生的页框不能直接写进值类型 `@State`，否则会让
+    /// reader 的 body 在滚动时失效并重建可见页。
     @State private var pageMetrics = ReaderScrollPageMetricsStore()
     @State private var restoreState = ReaderScrollRestoreState()
     @State private var viewportSize: CGSize = .zero
