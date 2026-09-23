@@ -2798,7 +2798,7 @@ nonisolated enum ReaderProgressPolicy {
 }
 
 @MainActor
-private final class ReaderLiveScrollPositionStore {
+final class ReaderLiveScrollPositionStore {
     var pageIndex: Int
     var progress: Double
     var pageProgress: Double
