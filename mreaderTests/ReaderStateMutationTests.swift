@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import mreader
 
 @MainActor
@@ -9,6 +10,126 @@ final class ReaderStateMutationTests: XCTestCase {
 
         XCTAssertFalse(ReaderGestureGate.isZoomed(scale: 1.05))
         XCTAssertTrue(ReaderGestureGate.isZoomed(scale: 1.051))
+    }
+
+    func testContinuousScrollDoesNotInstallSingleFingerPanGesture() {
+        XCTAssertFalse(ReaderGestureGate.allowsSingleFingerPan(readingMode: .continuousScroll))
+        XCTAssertFalse(ReaderGestureGate.allowsSingleFingerPan(readingMode: .infiniteScroll))
+        XCTAssertTrue(ReaderGestureGate.allowsSingleFingerPan(readingMode: .horizontalPage))
+        XCTAssertTrue(ReaderGestureGate.allowsSingleFingerPan(readingMode: .verticalPage))
+        XCTAssertTrue(ReaderGestureGate.allowsSingleFingerPan(readingMode: .doublePage))
+        XCTAssertTrue(ReaderGestureGate.allowsSingleFingerPan(readingMode: .guidedPanel))
+    }
+
+    func testContinuousScrollRejectsImplausibleRestoreJump() {
+        XCTAssertFalse(
+            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
+                current: 4_887,
+                observed: 0,
+                pageCount: 5_000,
+                isStabilizing: true,
+                isUserInteracting: false
+            )
+        )
+        XCTAssertTrue(
+            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
+                current: 4_887,
+                observed: 4_888,
+                pageCount: 5_000,
+                isStabilizing: true,
+                isUserInteracting: true
+            )
+        )
+        XCTAssertFalse(
+            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
+                current: 4_887,
+                observed: 0,
+                pageCount: 5_000,
+                isStabilizing: false,
+                isUserInteracting: false
+            )
+        )
+        XCTAssertTrue(
+            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
+                current: 100,
+                observed: 130,
+                pageCount: 5_000,
+                isStabilizing: false,
+                isUserInteracting: true
+            )
+        )
+    }
+
+    func testContinuousScrollRestoreUsesTargetFrameRelativeOffset() {
+        let y = ReaderContinuousScrollPolicy.alignedContentOffsetY(
+            currentOffsetY: 10_000,
+            targetFrame: CGRect(x: 0, y: 20, width: 390, height: 2_000),
+            pageProgress: 0.25,
+            minimumOffsetY: 0,
+            maximumOffsetY: 20_000
+        )
+        XCTAssertEqual(y, 10_520, accuracy: 0.001)
+
+        let clamped = ReaderContinuousScrollPolicy.alignedContentOffsetY(
+            currentOffsetY: 19_900,
+            targetFrame: CGRect(x: 0, y: 100, width: 390, height: 2_000),
+            pageProgress: 1,
+            minimumOffsetY: 0,
+            maximumOffsetY: 20_000
+        )
+        XCTAssertEqual(clamped, 20_000, accuracy: 0.001)
+    }
+
+    func testFitWidthDecodePolicyUsesSmallestSufficientTier() {
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.maxPixelSize(
+                sourceSize: CGSize(width: 1_200, height: 1_800),
+                viewportWidthPoints: 390,
+                displayScale: 3
+            ),
+            4_096
+        )
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.maxPixelSize(
+                sourceSize: CGSize(width: 1_200, height: 6_000),
+                viewportWidthPoints: 390,
+                displayScale: 3
+            ),
+            6_144
+        )
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.maxPixelSize(
+                sourceSize: CGSize(width: 1_200, height: 12_000),
+                viewportWidthPoints: 390,
+                displayScale: 3
+            ),
+            8_192
+        )
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.maxPixelSize(
+                sourceSize: nil,
+                viewportWidthPoints: 390,
+                displayScale: 3
+            ),
+            8_192
+        )
+    }
+
+    func testRemotePageGeometryReadsPixelSizeWithoutFullDecode() throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: 10, height: 20),
+            format: format
+        )
+        let image = renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 10, height: 20))
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let size = try XCTUnwrap(RemotePageGeometry.pixelSize(from: data))
+        XCTAssertEqual(size.width, 10, accuracy: 0.001)
+        XCTAssertEqual(size.height, 20, accuracy: 0.001)
     }
 
     func testDoublePageGateRequiresEveryPageToLeaveZoom() {
