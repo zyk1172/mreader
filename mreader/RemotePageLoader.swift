@@ -178,7 +178,10 @@ nonisolated enum RemotePageLoader {
     }
 
     static func pruneDiskCache() async {
-        await RemotePageCache.shared.pruneDiskCacheIfNeeded()
+        let limitBytes = Int64(remoteCacheLimits().diskLimitMB) * 1024 * 1024
+        await Task.detached(priority: .background) {
+            pruneRemotePageDiskCache(limitBytes: limitBytes)
+        }.value
     }
 
     static func removeCachedPages(sourceID: UUID, bookID: String) {
@@ -305,6 +308,40 @@ nonisolated private func remoteCacheLimits() -> (memoryLimitMB: Int, diskLimitMB
 
 nonisolated private func remotePrefetchBudgetBytes() -> Int64 {
     Int64(ReaderMemoryBudgetPlanner.budget().remotePrefetchMB) * 1024 * 1024
+}
+
+nonisolated private func pruneRemotePageDiskCache(limitBytes: Int64) {
+    let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("MReaderRemotePageCache", isDirectory: true)
+    let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
+    guard let enumerator = FileManager.default.enumerator(
+        at: root,
+        includingPropertiesForKeys: Array(keys),
+        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+    ) else { return }
+
+    var entries: [(url: URL, size: Int64, date: Date)] = []
+    for case let url as URL in enumerator {
+        guard let values = try? url.resourceValues(forKeys: keys),
+              values.isRegularFile == true else { continue }
+        entries.append((
+            url,
+            Int64(values.fileSize ?? 0),
+            values.contentModificationDate ?? .distantPast
+        ))
+    }
+
+    var total = entries.reduce(Int64(0)) { $0 + $1.size }
+    guard total > limitBytes else {
+        MReaderLog.reader.debug("remote cache disk size=\(total, privacy: .public)")
+        return
+    }
+    for entry in entries.sorted(by: { $0.date < $1.date }) {
+        try? FileManager.default.removeItem(at: entry.url)
+        total -= entry.size
+        if total <= limitBytes { break }
+    }
+    MReaderLog.reader.notice("remote cache pruned disk size=\(total, privacy: .public)")
 }
 
 actor RemotePageCache {
@@ -466,49 +503,6 @@ actor RemotePageCache {
         }
     }
 
-    func pruneDiskCacheIfNeeded() {
-        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MReaderRemotePageCache", isDirectory: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-
-        var entries: [(url: URL, size: Int64, date: Date)] = []
-        for sourceFolder in files {
-            guard let pageFiles = try? FileManager.default.contentsOfDirectory(
-                at: sourceFolder,
-                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-            for bookFolder in pageFiles {
-                guard let images = try? FileManager.default.contentsOfDirectory(
-                    at: bookFolder,
-                    includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-                    options: [.skipsHiddenFiles]
-                ) else { continue }
-                for imageURL in images {
-                    let values = try? imageURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-                    let size = Int64(values?.fileSize ?? 0)
-                    entries.append((imageURL, size, values?.contentModificationDate ?? .distantPast))
-                }
-            }
-        }
-
-        var total = entries.reduce(Int64(0)) { $0 + $1.size }
-        guard total > diskLimitBytes else {
-            MReaderLog.reader.debug("remote cache disk size=\(total, privacy: .public)")
-            return
-        }
-        for entry in entries.sorted(by: { $0.date < $1.date }) {
-            try? FileManager.default.removeItem(at: entry.url)
-            total -= entry.size
-            if total <= diskLimitBytes { break }
-        }
-        MReaderLog.reader.notice("remote cache pruned disk size=\(total, privacy: .public)")
-    }
-
     private func memoryKey(for key: PageCacheKey) -> String {
         "\(key.sourceID.uuidString)#\(key.bookID)#\(key.pageIndex)"
     }
@@ -551,6 +545,7 @@ final class RemotePagePrefetcher {
     private var previewTasks: [UUID: [URL: Task<Void, Never>]] = [:]
     private var previewComicIDs: [UUID] = []
     private var lastDiskPruneDate = Date.distantPast
+    private var diskPruneTask: Task<Void, Never>?
     private let prefetchBudgetBytes: Int64 = remotePrefetchBudgetBytes()
     private let previewBudgetBytes: Int64 = 60 * 1024 * 1024
     private let unknownPageEstimateBytes: Int64 = 24 * 1024 * 1024
@@ -688,8 +683,19 @@ final class RemotePagePrefetcher {
         }
         if Date().timeIntervalSince(lastDiskPruneDate) > 60 {
             lastDiskPruneDate = Date()
-            Task(priority: .background) {
+            diskPruneTask?.cancel()
+            diskPruneTask = Task(priority: .background) { [weak self] in
+                // 首开/恢复位置阶段最需要磁盘 I/O；把 2GB+ 缓存目录扫描推迟到阅读稳定后。
+                do {
+                    try await Task.sleep(for: .seconds(20))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 await RemotePageLoader.pruneDiskCache()
+                await MainActor.run {
+                    self?.diskPruneTask = nil
+                }
             }
         }
     }
