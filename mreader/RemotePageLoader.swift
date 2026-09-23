@@ -349,7 +349,6 @@ actor RemotePageCache {
 
     private let memoryCache = NSCache<NSString, NSData>()
     private var cachedKeys: Set<String> = []
-    private let diskLimitBytes: Int64
     private let memoryLimitMB: Int
     private var activeDownloads: [PageCacheKey: Task<Data?, Never>] = [:]
     private var geometryRegisteredKeys: Set<PageCacheKey> = []
@@ -357,7 +356,6 @@ actor RemotePageCache {
     private init() {
         let limits = remoteCacheLimits()
         memoryLimitMB = limits.memoryLimitMB
-        diskLimitBytes = Int64(limits.diskLimitMB) * 1024 * 1024
         memoryCache.countLimit = 0
         memoryCache.totalCostLimit = limits.memoryLimitMB * 1024 * 1024
         registerMemoryWarningObserver()
