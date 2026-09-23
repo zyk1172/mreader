@@ -21,63 +21,80 @@ final class ReaderStateMutationTests: XCTestCase {
         XCTAssertTrue(ReaderGestureGate.allowsSingleFingerPan(readingMode: .guidedPanel))
     }
 
-    func testContinuousScrollRejectsImplausibleRestoreJump() {
-        XCTAssertFalse(
-            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
-                current: 4_887,
-                observed: 0,
-                pageCount: 5_000,
-                isStabilizing: true,
-                isUserInteracting: false
-            )
+    func testContinuousScrollPageProgressUsesStablePageStartOffset() {
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.pageProgress(
+                contentOffsetY: 10_500,
+                pageStartOffsetY: 10_000,
+                pageHeight: 2_000
+            ),
+            0.25,
+            accuracy: 0.001
         )
-        XCTAssertTrue(
-            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
-                current: 4_887,
-                observed: 4_888,
-                pageCount: 5_000,
-                isStabilizing: true,
-                isUserInteracting: true
-            )
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.pageProgress(
+                contentOffsetY: 9_000,
+                pageStartOffsetY: 10_000,
+                pageHeight: 2_000
+            ),
+            0,
+            accuracy: 0.001
         )
-        XCTAssertFalse(
-            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
-                current: 4_887,
-                observed: 0,
-                pageCount: 5_000,
-                isStabilizing: false,
-                isUserInteracting: false
-            )
-        )
-        XCTAssertTrue(
-            ReaderContinuousScrollPolicy.shouldAcceptVisiblePage(
-                current: 100,
-                observed: 130,
-                pageCount: 5_000,
-                isStabilizing: false,
-                isUserInteracting: true
-            )
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.pageProgress(
+                contentOffsetY: 13_000,
+                pageStartOffsetY: 10_000,
+                pageHeight: 2_000
+            ),
+            1,
+            accuracy: 0.001
         )
     }
 
-    func testContinuousScrollRestoreUsesTargetFrameRelativeOffset() {
-        let y = ReaderContinuousScrollPolicy.alignedContentOffsetY(
-            currentOffsetY: 10_000,
-            targetFrame: CGRect(x: 0, y: 20, width: 390, height: 2_000),
-            pageProgress: 0.25,
-            minimumOffsetY: 0,
-            maximumOffsetY: 20_000
+    func testContinuousScrollRestoreUsesPageTopAndHeightOnly() {
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.restoredContentOffsetY(
+                pageTopOffsetY: 10_000,
+                pageHeight: 2_000,
+                pageProgress: 0.25,
+                minimumOffsetY: 0,
+                maximumOffsetY: 20_000
+            ),
+            10_500,
+            accuracy: 0.001
         )
-        XCTAssertEqual(y, 10_520, accuracy: 0.001)
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.restoredContentOffsetY(
+                pageTopOffsetY: 19_900,
+                pageHeight: 2_000,
+                pageProgress: 1,
+                minimumOffsetY: 0,
+                maximumOffsetY: 20_000
+            ),
+            20_000,
+            accuracy: 0.001
+        )
+    }
 
-        let clamped = ReaderContinuousScrollPolicy.alignedContentOffsetY(
-            currentOffsetY: 19_900,
-            targetFrame: CGRect(x: 0, y: 100, width: 390, height: 2_000),
-            pageProgress: 1,
-            minimumOffsetY: 0,
-            maximumOffsetY: 20_000
+    func testContinuousScrollEstimatesPageStartAcrossDirectionChanges() {
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.estimatedPageStartOffsetY(
+                currentOffsetY: 10_000,
+                newPageHeight: 2_000,
+                movingBackward: false
+            ),
+            10_000,
+            accuracy: 0.001
         )
-        XCTAssertEqual(clamped, 20_000, accuracy: 0.001)
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.estimatedPageStartOffsetY(
+                currentOffsetY: 10_000,
+                newPageHeight: 2_000,
+                movingBackward: true
+            ),
+            8_000,
+            accuracy: 0.001
+        )
     }
 
     func testFitWidthDecodePolicyUsesSmallestSufficientTier() {
