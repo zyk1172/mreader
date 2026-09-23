@@ -163,6 +163,7 @@ nonisolated enum RemotePageLoader {
     static func imageData(forRemotePageURL url: URL) async -> Data? {
         guard let request = RemotePageRequest(url: url) else { return nil }
         if let offline = OfflinePageStore.data(for: request.cacheKey), !offline.isEmpty {
+            await registerPageGeometryIfAvailable(offline, for: request.cacheKey)
             MReaderLog.reader.debug(
                 "offline page cache hit page=\(request.pageIndex, privacy: .public) key=\(request.cacheKey.logDescription, privacy: .public)"
             )
@@ -194,7 +195,7 @@ nonisolated enum RemotePageLoader {
         try? FileManager.default.removeItem(at: url)
     }
 
-    private static func pageURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
+    nonisolated static func pageURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
         var components = URLComponents()
         components.scheme = scheme
         components.host = sourceID.uuidString
@@ -209,6 +210,14 @@ nonisolated enum RemotePageLoader {
         pageBookDirectory(sourceID: sourceID, fileName: RemoteImageLoader.safeFileName(bookID))
             .appendingPathComponent("\(pageIndex)")
             .appendingPathExtension("img")
+    }
+
+    static func registerPageGeometryIfAvailable(_ data: Data, for key: PageCacheKey) async {
+        guard let size = RemotePageGeometry.pixelSize(from: data) else { return }
+        let url = pageURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
+        await MainActor.run {
+            PageGeometryStore.shared.setSize(size, for: url)
+        }
     }
 
     nonisolated static func legacyPageCacheURL(sourceID: UUID, bookID: String, pageIndex: Int) -> URL {
@@ -258,6 +267,30 @@ nonisolated struct PageCacheKey: Hashable, Sendable {
     }
 }
 
+/// 只读压缩图片 header 获取像素尺寸，不触发整页 bitmap 解码。
+/// Komga 预取拿到 Data 后立即登记几何，LazyVStack 在页面真正出现前就能预留正确高度。
+nonisolated enum RemotePageGeometry {
+    static func pixelSize(from data: Data) -> CGSize? {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(
+                data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary
+              ),
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                source,
+                0,
+                [kCGImageSourceShouldCache: false] as CFDictionary
+              ) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
+    }
+}
+
 enum RemotePagePriority: Sendable {
     case current
     case prefetch
@@ -282,6 +315,7 @@ actor RemotePageCache {
     private let diskLimitBytes: Int64
     private let memoryLimitMB: Int
     private var activeDownloads: [PageCacheKey: Task<Data?, Never>] = [:]
+    private var geometryRegisteredKeys: Set<PageCacheKey> = []
 
     private init() {
         let limits = remoteCacheLimits()
@@ -319,10 +353,12 @@ actor RemotePageCache {
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {
         let cacheKey = memoryKey(for: key)
         if let cached = memoryCache.object(forKey: cacheKey as NSString) {
+            let data = cached as Data
+            await registerGeometryIfNeeded(data, for: key)
             MReaderLog.reader.debug(
                 "remote cache memory hit page=\(key.pageIndex, privacy: .public) key=\(key.logDescription, privacy: .public) memoryLimitMB=\(self.memoryLimitMB, privacy: .public)"
             )
-            return cached as Data
+            return data
         }
 
         let diskURL = RemotePageLoader.pageCacheURL(sourceID: key.sourceID, bookID: key.bookID, pageIndex: key.pageIndex)
@@ -332,6 +368,7 @@ actor RemotePageCache {
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: candidate.path)
                 memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
                 cachedKeys.insert(cacheKey)
+                await registerGeometryIfNeeded(data, for: key)
                 MReaderLog.reader.debug(
                     "remote cache disk hit page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
                 )
@@ -362,11 +399,26 @@ actor RemotePageCache {
         if let data {
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
             cachedKeys.insert(cacheKey)
+            await registerGeometryIfNeeded(data, for: key)
             MReaderLog.reader.debug(
                 "remote cache stored page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
             )
         }
         return data
+    }
+
+    private func registerGeometryIfNeeded(_ data: Data, for key: PageCacheKey) async {
+        guard !geometryRegisteredKeys.contains(key) else { return }
+        guard let size = RemotePageGeometry.pixelSize(from: data) else { return }
+        geometryRegisteredKeys.insert(key)
+        let url = RemotePageLoader.pageURL(
+            sourceID: key.sourceID,
+            bookID: key.bookID,
+            pageIndex: key.pageIndex
+        )
+        await MainActor.run {
+            PageGeometryStore.shared.setSize(size, for: url)
+        }
     }
 
     func clearMemoryCache() {
