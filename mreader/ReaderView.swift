@@ -3569,7 +3569,7 @@ struct ContinuousScrollReader: View {
                 viewportSize = newSize
             }
             .onChange(of: readingMode) { _, _ in
-                restoreScrollPosition(animated: false)
+                restoreScrollPosition(proxy, animated: false)
             }
             .onChange(of: scrollJumpRequestID) { _, _ in
                 restoreScrollPosition(proxy, animated: true)
