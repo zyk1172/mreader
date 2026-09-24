@@ -81,15 +81,18 @@ struct ArchitectureAuditRegressionTests {
 
     @Test func cancelledReaderPermitWaiterDoesNotConsumeCapacity() async {
         let pool = ReaderAsyncPermitPool(maximumConcurrentPermits: 1)
-        #expect(await pool.acquire())
+        let firstPermit = await pool.acquire()
+        #expect(firstPermit)
 
         let blocked = Task { await pool.acquire() }
         await Task.yield()
         blocked.cancel()
-        #expect(await blocked.value == false)
+        let cancelledResult = await blocked.value
+        #expect(cancelledResult == false)
 
         await pool.release()
-        #expect(await pool.acquire())
+        let replacementPermit = await pool.acquire()
+        #expect(replacementPermit)
         await pool.release()
     }
 
@@ -109,10 +112,12 @@ struct ArchitectureAuditRegressionTests {
         ReaderSessionRegistry.shared.activate(newSession)
         await cache.beginReaderSession(sessionID: newSession)
         await cache.releaseReaderSessionMemory(sessionID: oldSession)
-        #expect(await cache.cachedBlocks(key: "page")?.count == 1)
+        let survivesStaleRelease = await cache.cachedBlocks(key: "page")
+        #expect(survivesStaleRelease?.count == 1)
 
         await cache.releaseReaderSessionMemory(sessionID: newSession)
-        #expect(await cache.cachedBlocks(key: "page") == nil)
+        let clearedByOwner = await cache.cachedBlocks(key: "page")
+        #expect(clearedByOwner == nil)
         ReaderSessionRegistry.shared.deactivate(newSession)
     }
 }
