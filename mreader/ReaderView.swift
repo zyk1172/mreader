@@ -722,7 +722,11 @@ private final class ReaderImageCache {
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
             foregroundLoadKeys.insert(key)
-            defer { foregroundLoadKeys.remove(key) }
+            defer {
+                if epoch == generation {
+                    foregroundLoadKeys.remove(key)
+                }
+            }
             let image = await existingTask.value
             return epoch == generation && !Task.isCancelled ? image : nil
         }
@@ -730,7 +734,11 @@ private final class ReaderImageCache {
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
             foregroundLoadKeys.insert(higherKey)
-            defer { foregroundLoadKeys.remove(higherKey) }
+            defer {
+                if epoch == generation {
+                    foregroundLoadKeys.remove(higherKey)
+                }
+            }
             let image = await existingTask.value
             return epoch == generation && !Task.isCancelled ? image : nil
         }
@@ -743,7 +751,9 @@ private final class ReaderImageCache {
         loadingCosts[key] = estimatedCost
         foregroundLoadKeys.insert(key)
         let image = await task.value
-        foregroundLoadKeys.remove(key)
+        if epoch == generation {
+            foregroundLoadKeys.remove(key)
+        }
 
         // clearMemoryCache() 可能在 ImageIO 解码期间推进 generation 并清掉字典。
         // 旧任务此时绝不能移除新会话同 key 的任务，更不能把 UIImage 回填进缓存。
@@ -1501,12 +1511,14 @@ struct ReaderView: View {
             ReaderImageCache.shared.releaseReaderSessionMemory()
             ReaderProgressThumbnailCache.shared.releaseReaderSessionMemory()
             Task {
+                // 远程 Data 缓存可能达到数百 MB，优先释放；模型 runtime 最后卸载，
+                // 即使当前 Core ML 同步 prediction 尚未返回，也不阻塞其余缓存清理。
+                await RemotePageCache.shared.releaseReaderSessionMemory()
                 await AITranslationPageCoordinator.shared.releaseReaderSessionMemory()
                 await OCRRecognitionCache.shared.releaseReaderSessionMemory()
                 await AppleTranslationPageCache.shared.clearMemoryCache()
                 await TranslationContextRegistry.shared.clearSessionMemory()
                 await MangaVisionService.shared.releaseReaderSessionMemory()
-                await RemotePageCache.shared.releaseReaderSessionMemory()
                 await OCRRuntimeService.flush()
                 MReaderLog.reader.notice("reader session memory released")
             }
