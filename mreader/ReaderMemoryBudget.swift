@@ -63,7 +63,7 @@ nonisolated enum ReaderMemoryBudgetPlanner {
             )
         default:
             return ReaderMemoryBudget(
-                decodedImageCacheMB: 384,
+                decodedImageCacheMB: 500,
                 decodedImagePreloadMB: 288,
                 remotePageDataCacheMB: 128,
                 remotePageDataDiskMB: 512,
@@ -73,7 +73,7 @@ nonisolated enum ReaderMemoryBudgetPlanner {
     }
 
     /// 解码位图缓存的下限（3GB 机型，即 iPad mini 5）。
-    static let minimumDecodedImageCacheMB = 384
+    static let minimumDecodedImageCacheMB = 500
 
     static func budget() -> ReaderMemoryBudget {
         budget(forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)

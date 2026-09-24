@@ -446,10 +446,16 @@ actor PanelDetectionService {
         )
     }
 
-    func clearCache() {
+    func releaseReaderSessionMemory() {
+        // Layouts are cheap to restore from disk. Advancing generation prevents an
+        // in-flight Guided Panel calculation from repopulating memory after Reader exit.
         generation = UUID()
         memoryOrder.removeAll()
         memoryCache.removeAll()
+    }
+
+    func clearCache() {
+        releaseReaderSessionMemory()
         diskWritesSincePrune = 0
         lastDiskPruneAt = .distantPast
         try? fileManager.removeItem(at: cacheDirectory)

@@ -3446,6 +3446,24 @@ struct mreaderTests {
         await cache.clearMemoryCache()
     }
 
+    @Test func remotePageCacheReleasesReaderSessionMemory() async {
+        let cache = RemotePageCache.shared
+        await cache.clearMemoryCache()
+        let key = PageCacheKey(
+            sourceID: UUID(),
+            bookID: "reader-session-release",
+            pageIndex: 42
+        )
+        await cache.storeForDiagnostics(Data(repeating: 7, count: 1024), for: key)
+        let cachedBeforeRelease = await cache.containsInMemoryForDiagnostics(key)
+        #expect(cachedBeforeRelease)
+
+        await cache.releaseReaderSessionMemory()
+
+        let cachedAfterRelease = await cache.containsInMemoryForDiagnostics(key)
+        #expect(!cachedAfterRelease)
+    }
+
     @Test func librarySyncCoordinatorCoalescesConcurrentRefreshes() async {
         let coordinator = LibrarySyncCoordinator()
         let probe = LibrarySyncProbe()
@@ -3673,30 +3691,45 @@ struct mreaderTests {
         #expect(decoded.pageCount == 128)
     }
 
-    @Test func continuousPrefetchFollowsScrollDirectionWithinBounds() {
+    @Test func readerCacheWindowKeepsFourAheadOneBehind() {
+        #expect(ReaderPrefetchPolicy.cacheForwardCount == 4)
+        #expect(ReaderPrefetchPolicy.cacheBackwardCount == 1)
+
         let down = ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: 5,
             pageCount: 20,
             readingDirection: .rightToLeft,
             readingMode: .continuousScroll,
             scrollDirection: 1,
-            forwardCount: 3,
-            backwardCount: 1,
+            forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
+            backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
             includesCurrentPage: true
         )
         let up = ReaderPrefetchPolicy.pageIndices(
-            currentPageIndex: 1,
-            pageCount: 4,
+            currentPageIndex: 5,
+            pageCount: 20,
             readingDirection: .leftToRight,
             readingMode: .continuousScroll,
             scrollDirection: -1,
-            forwardCount: 3,
-            backwardCount: 1,
+            forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
+            backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
+            includesCurrentPage: true
+        )
+        let paged = ReaderPrefetchPolicy.pageIndices(
+            currentPageIndex: 5,
+            pageCount: 20,
+            readingDirection: .rightToLeft,
+            readingMode: .horizontalPage,
+            scrollDirection: -1,
+            forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
+            backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
             includesCurrentPage: false
         )
 
-        #expect(down == [5, 6, 7, 8, 4])
-        #expect(up == [0, 2])
+        #expect(down == [5, 6, 7, 8, 9, 4])
+        #expect(up == [5, 4, 3, 2, 1, 6])
+        // Paged readers always advance logical page index with +1.
+        #expect(paged == [6, 7, 8, 9, 4])
     }
 
 }

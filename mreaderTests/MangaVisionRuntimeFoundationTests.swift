@@ -111,6 +111,132 @@ struct MangaVisionRuntimeFoundationTests {
         #expect(await provider.inferenceCalls() == 1)
     }
 
+    @Test func cancellingOneCoalescedConsumerDoesNotCancelSibling() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "consumer-cancel"),
+            delayMilliseconds: 120
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let comicID = UUID()
+        let url = URL(fileURLWithPath: "/tmp/mreader-runtime-consumer-cancel.png")
+        let identity = PageContentIdentity.remote(
+            provider: "fixture",
+            resource: "consumer-cancel",
+            revision: "1"
+        )
+        let image = makeImage()
+
+        let first = Task {
+            try await service.analysis(
+                comicID: comicID,
+                pageIndex: 0,
+                pageURL: url,
+                image: image,
+                contentIdentity: identity
+            )
+        }
+        try await Task.sleep(nanoseconds: 15_000_000)
+        let second = Task {
+            try await service.analysis(
+                comicID: comicID,
+                pageIndex: 0,
+                pageURL: url,
+                image: image,
+                contentIdentity: identity
+            )
+        }
+        try await Task.sleep(nanoseconds: 15_000_000)
+
+        first.cancel()
+        do {
+            _ = try await first.value
+            Issue.record("cancelled consumer unexpectedly returned a result")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        let siblingResult = try await second.value
+        #expect(!siblingResult.panels.isEmpty)
+        #expect(await provider.inferenceCalls() == 1)
+    }
+
+    @Test func readerSessionReleaseWaitsForSharedInferenceThenUnloadsRuntime() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "deferred-runtime-release"),
+            delayMilliseconds: 80
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let request = Task {
+            try await service.analysis(
+                comicID: UUID(),
+                pageIndex: 0,
+                pageURL: URL(fileURLWithPath: "/tmp/mreader-runtime-deferred-release.png"),
+                image: makeImage(),
+                contentIdentity: .remote(
+                    provider: "fixture",
+                    resource: "deferred-release",
+                    revision: "1"
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 15_000_000)
+        await service.releaseReaderSessionMemory()
+        #expect(await provider.runtimeReleaseCalls() == 0)
+
+        _ = try await request.value
+        for _ in 0..<20 {
+            if await provider.runtimeReleaseCalls() > 0 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let releaseCalls = await provider.runtimeReleaseCalls()
+        #expect(releaseCalls == 1)
+    }
+
+    @Test func newerReaderSessionCancelsOlderDeferredRuntimeUnload() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "reader-session-race"),
+            delayMilliseconds: 60
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let firstSession = UUID()
+        let secondSession = UUID()
+        await service.beginReaderSession(sessionID: firstSession)
+
+        let request = Task {
+            try await service.analysis(
+                comicID: UUID(),
+                pageIndex: 0,
+                pageURL: URL(fileURLWithPath: "/tmp/mreader-runtime-session-race.png"),
+                image: makeImage(),
+                contentIdentity: .remote(
+                    provider: "fixture",
+                    resource: "session-race",
+                    revision: "1"
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 10_000_000)
+        await service.releaseReaderSessionMemory(sessionID: firstSession)
+        await service.beginReaderSession(sessionID: secondSession)
+        _ = try await request.value
+
+        try await Task.sleep(nanoseconds: 5_000_000)
+        let releasesBeforeSecondClose = await provider.runtimeReleaseCalls()
+        #expect(releasesBeforeSecondClose == 0)
+
+        await service.releaseReaderSessionMemory(sessionID: secondSession)
+        let releasesAfterSecondClose = await provider.runtimeReleaseCalls()
+        #expect(releasesAfterSecondClose == 1)
+    }
+
     @Test func modelBuildChangeInvalidatesCacheWithoutManualVersionBump() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -404,13 +530,14 @@ private enum RuntimeFoundationFakeError: Error {
     case inferenceFailed
 }
 
-private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionManifestProviding {
+private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
     private let manifest: MangaVisionModelManifest
     private let delayMilliseconds: UInt64
     private let ignoresCancellation: Bool
     private let error: Error?
     private var descriptorCallCount = 0
     private var inferenceCallCount = 0
+    private var runtimeReleaseCallCount = 0
 
     init(
         manifest: MangaVisionModelManifest,
@@ -433,6 +560,14 @@ private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionMan
 
     func mangaVisionManifest() async -> MangaVisionModelManifest {
         manifest
+    }
+
+    func releaseRuntimeMemory() async {
+        runtimeReleaseCallCount += 1
+    }
+
+    func runtimeReleaseCalls() -> Int {
+        runtimeReleaseCallCount
     }
 
     func analyzePage(

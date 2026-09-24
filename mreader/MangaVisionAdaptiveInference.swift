@@ -318,7 +318,7 @@ actor MangaVisionInferenceScheduler {
     }
 }
 
-actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing, MangaVisionInferencePassDiagnosticsProviding {
+actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionSourceImageAnalyzing, MangaVisionInferencePassDiagnosticsProviding, MangaVisionRuntimeReleasable {
     private let base: any MangaVisionProvider
     private let scheduler: MangaVisionInferenceScheduler
     private let resourceStateOverride: MangaVisionResourceState?
@@ -459,6 +459,12 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
 
     func totalInferencePassCountForDiagnostics() async -> Int {
         totalInferencePassCount
+    }
+
+    func releaseRuntimeMemory() async {
+        if let releasable = base as? any MangaVisionRuntimeReleasable {
+            await releasable.releaseRuntimeMemory()
+        }
     }
 
     private func performPass(

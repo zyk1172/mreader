@@ -14,7 +14,7 @@ nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
     }
 }
 
-actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProviding {
+actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
     static let shared = MangaVisionProviderRouter(
         v2b5: MangaVisionV2B5Provider.shared
     )
@@ -60,5 +60,11 @@ actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProvidi
             sourceImageSize: sourceImageSize,
             pageIdentifier: pageIdentifier
         )
+    }
+
+    func releaseRuntimeMemory() async {
+        if let releasable = v2b5 as? any MangaVisionRuntimeReleasable {
+            await releasable.releaseRuntimeMemory()
+        }
     }
 }
