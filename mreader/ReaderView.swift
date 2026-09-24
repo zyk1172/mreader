@@ -3241,8 +3241,9 @@ private final class ReaderScrollMotionGovernor: NSObject {
     }
 
     private func configure(_ scrollView: UIScrollView) {
-        // .fast 表示更快衰减，不是更高滚动速度；配合下面的逐帧上限减少长距离甩飞。
-        scrollView.decelerationRate = .fast
+        // 限速器已经负责削掉峰值，这里只把惯性衰减调到 normal(0.998) 与 fast(0.99)
+        // 之间，避免 .fast 带来的“突然刹住”感，同时显著缩短高速甩动的滑行距离。
+        scrollView.decelerationRate = UIScrollView.DecelerationRate(rawValue: 0.994)
     }
 
     @objc
