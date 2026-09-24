@@ -708,7 +708,7 @@ final class RemotePagePrefetcher {
                 // 首屏先让当前页的 userInitiated 读取/解码起跑，邻页稍后再占磁盘与 ImageIO。
                 if isContinuous {
                     do {
-                        try await Task.sleep(for: .milliseconds(120))
+                        try await Task.sleep(for: .milliseconds(300))
                     } catch {
                         return
                     }
@@ -756,15 +756,15 @@ final class RemotePagePrefetcher {
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
-        let cacheWindow = ReaderPageCacheWindowPolicy.window(for: readingMode)
+        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
         return ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: currentPageIndex,
             pageCount: pageCount,
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: cacheWindow.forwardCount,
-            backwardCount: cacheWindow.backwardCount,
+            forwardCount: isContinuous ? 3 : 7,
+            backwardCount: isContinuous ? 1 : 2,
             includesCurrentPage: true
         )
     }
@@ -773,7 +773,7 @@ final class RemotePagePrefetcher {
         guard pages.indices.contains(currentPageIndex),
               RemotePageLoader.isRemotePageURL(pages[currentPageIndex].url) else { return }
         let candidateIndices = windowIndices(currentPageIndex: currentPageIndex, pageCount: pages.count, readingDirection: readingDirection, readingMode: readingMode, scrollDirection: 1)
-        let urls = candidateIndices.map { pages[$0].url }
+        let urls = candidateIndices.prefix(5).map { pages[$0].url }
         for url in urls {
             guard tasks[url] == nil else { continue }
             tasks[url] = Task(priority: .userInitiated) { [url] in
