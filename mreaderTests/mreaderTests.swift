@@ -3455,11 +3455,13 @@ struct mreaderTests {
             pageIndex: 42
         )
         await cache.storeForDiagnostics(Data(repeating: 7, count: 1024), for: key)
-        #expect(await cache.containsInMemoryForDiagnostics(key))
+        let cachedBeforeRelease = await cache.containsInMemoryForDiagnostics(key)
+        #expect(cachedBeforeRelease)
 
         await cache.releaseReaderSessionMemory()
 
-        #expect(!(await cache.containsInMemoryForDiagnostics(key)))
+        let cachedAfterRelease = await cache.containsInMemoryForDiagnostics(key)
+        #expect(!cachedAfterRelease)
     }
 
     @Test func librarySyncCoordinatorCoalescesConcurrentRefreshes() async {
