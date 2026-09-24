@@ -320,8 +320,10 @@ actor AITranslationPageCoordinator {
     /// 实时页翻译 coordinator 只服务 Reader；离线整本翻译使用独立的
     /// OfflineTranslationCoordinator/TranslationRuntimeService。Reader 关闭时可以
     /// 安全推进代际并取消整个实时 workPool，避免旧结果在退出后重新填充 80 页内存缓存。
-    func releaseReaderSessionMemory(sessionID: UUID) async {
-        guard activeReaderSessionID == sessionID else { return }
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) async {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
         activeReaderSessionID = nil
         generation = UUID()
         memoryCache.removeAll()
