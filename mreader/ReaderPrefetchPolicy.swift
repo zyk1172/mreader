@@ -1,5 +1,21 @@
 import Foundation
 
+nonisolated struct ReaderPageCacheWindow: Equatable {
+    let forwardCount: Int
+    let backwardCount: Int
+}
+
+nonisolated enum ReaderPageCacheWindowPolicy {
+    static func window(for readingMode: ReadingMode) -> ReaderPageCacheWindow {
+        switch readingMode {
+        case .continuousScroll, .infiniteScroll:
+            return ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+        default:
+            return ReaderPageCacheWindow(forwardCount: 8, backwardCount: 2)
+        }
+    }
+}
+
 nonisolated enum ReaderPrefetchPolicy {
     static func pageIndices(
         currentPageIndex: Int,
