@@ -78,6 +78,40 @@ struct ArchitectureAuditRegressionTests {
         catch is CancellationError {} catch { Issue.record("Unexpected error: \(error)") }
         #expect(try await pool.value(forKey: "page") { 3 } == 3)
     }
+
+    @Test func cancelledReaderPermitWaiterDoesNotConsumeCapacity() async {
+        let pool = ReaderAsyncPermitPool(maximumConcurrentPermits: 1)
+        #expect(await pool.acquire())
+
+        let blocked = Task { await pool.acquire() }
+        await Task.yield()
+        blocked.cancel()
+        #expect(await blocked.value == false)
+
+        await pool.release()
+        #expect(await pool.acquire())
+        await pool.release()
+    }
+
+    @Test func staleReaderSessionCannotClearNewAppleTranslationCache() async {
+        let cache = AppleTranslationPageCache()
+        let oldSession = UUID()
+        let newSession = UUID()
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.2),
+            translation: "translation"
+        )
+
+        await cache.beginReaderSession(sessionID: oldSession)
+        await cache.store([block], key: "page")
+        await cache.beginReaderSession(sessionID: newSession)
+        await cache.releaseReaderSessionMemory(sessionID: oldSession)
+        #expect(await cache.cachedBlocks(key: "page")?.count == 1)
+
+        await cache.releaseReaderSessionMemory(sessionID: newSession)
+        #expect(await cache.cachedBlocks(key: "page") == nil)
+    }
 }
 
 private actor AuditGate {
