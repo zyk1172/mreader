@@ -787,15 +787,14 @@ final class RemotePagePrefetcher {
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
-        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
-        return ReaderPrefetchPolicy.pageIndices(
+        ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: currentPageIndex,
             pageCount: pageCount,
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 3 : 7,
-            backwardCount: isContinuous ? 1 : 2,
+            forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
+            backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
             includesCurrentPage: true
         )
     }
