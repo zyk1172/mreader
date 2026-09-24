@@ -3719,7 +3719,7 @@ struct mreaderTests {
             currentPageIndex: 5,
             pageCount: 20,
             readingDirection: .rightToLeft,
-            readingMode: .singlePage,
+            readingMode: .horizontalPage,
             scrollDirection: -1,
             forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
             backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
