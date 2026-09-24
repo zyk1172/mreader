@@ -311,13 +311,19 @@ actor AITranslationPageCoordinator {
         return cachedBlocks(forKey: prepared.cacheKey) != nil
     }
 
-    func clearCache() async {
+    /// Reader 会话结束：取消在途翻译并释放仅内存缓存，但保留磁盘页缓存。
+    func releaseReaderSessionMemory() async {
         generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
+        await workPool.cancelAll()
+        MReaderLog.aiTranslation.debug("translation reader-session memory released")
+    }
+
+    func clearCache() async {
+        await releaseReaderSessionMemory()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-        await workPool.cancelAll()
     }
 
     private func cachedBlocks(forKey key: String) -> [TextBlock]? {
