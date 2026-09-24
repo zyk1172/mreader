@@ -51,6 +51,11 @@ actor AppleTranslationPageCache {
         }
     }
 
+    func clearMemoryCache() {
+        memoryCache.removeAll()
+        memoryOrder.removeAll()
+    }
+
     nonisolated static func key(
         pageURL: URL,
         sourceLanguage: String,
