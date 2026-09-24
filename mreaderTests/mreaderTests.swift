@@ -3446,6 +3446,22 @@ struct mreaderTests {
         await cache.clearMemoryCache()
     }
 
+    @Test func remotePageCacheReleasesReaderSessionMemory() async {
+        let cache = RemotePageCache.shared
+        await cache.clearMemoryCache()
+        let key = PageCacheKey(
+            sourceID: UUID(),
+            bookID: "reader-session-release",
+            pageIndex: 42
+        )
+        await cache.storeForDiagnostics(Data(repeating: 7, count: 1024), for: key)
+        #expect(await cache.containsInMemoryForDiagnostics(key))
+
+        await cache.releaseReaderSessionMemory()
+
+        #expect(!(await cache.containsInMemoryForDiagnostics(key)))
+    }
+
     @Test func librarySyncCoordinatorCoalescesConcurrentRefreshes() async {
         let coordinator = LibrarySyncCoordinator()
         let probe = LibrarySyncProbe()
