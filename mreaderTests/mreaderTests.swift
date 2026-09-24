@@ -1496,11 +1496,21 @@ struct mreaderTests {
         }
     }
 
+    @Test func readerMemoryBudgetGivesSixGigabyteDevicesEightHundredMegabytesRemoteCache() {
+        let sixGB = ReaderMemoryBudgetPlanner.budget(
+            forPhysicalMemoryBytes: 6 * 1_024 * 1_024 * 1_024
+        )
+
+        #expect(sixGB.remotePageDataCacheMB == 800)
+        #expect(sixGB.decodedImageCacheMB == 896)
+        #expect(sixGB.remotePrefetchMB <= sixGB.remotePageDataCacheMB)
+    }
+
     @Test func readerMemoryBudgetDoesNotLeaveRemoteCacheAtLegacyFloor() {
         // 16 Pro 是 8GB：远程页压缩数据缓存曾经只有 180MB，与解码位图缓存差了一个数量级。
         let sixteenPro = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
-        #expect(sixteenPro.remotePageDataCacheMB >= 512)
+        #expect(sixteenPro.remotePageDataCacheMB >= 1_024)
         #expect(sixteenPro.decodedImageCacheMB >= 1_024)
     }
 
