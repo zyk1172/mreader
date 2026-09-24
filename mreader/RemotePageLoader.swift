@@ -537,8 +537,10 @@ actor RemotePageCache {
         activeReaderSessionID = sessionID
     }
 
-    func releaseReaderSessionMemory(sessionID: UUID) {
-        guard activeReaderSessionID == sessionID else { return }
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
         activeReaderSessionID = nil
         // RemotePageCache is also used by offline translation. Reader teardown therefore
         // advances only the memory-cache generation: existing downloads may finish and
