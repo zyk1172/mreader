@@ -197,6 +197,46 @@ struct MangaVisionRuntimeFoundationTests {
         #expect(releaseCalls == 1)
     }
 
+    @Test func newerReaderSessionCancelsOlderDeferredRuntimeUnload() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "reader-session-race"),
+            delayMilliseconds: 60
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let firstSession = UUID()
+        let secondSession = UUID()
+        await service.beginReaderSession(sessionID: firstSession)
+
+        let request = Task {
+            try await service.analysis(
+                comicID: UUID(),
+                pageIndex: 0,
+                pageURL: URL(fileURLWithPath: "/tmp/mreader-runtime-session-race.png"),
+                image: makeImage(),
+                contentIdentity: .remote(
+                    provider: "fixture",
+                    resource: "session-race",
+                    revision: "1"
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 10_000_000)
+        await service.releaseReaderSessionMemory(sessionID: firstSession)
+        await service.beginReaderSession(sessionID: secondSession)
+        _ = try await request.value
+
+        try await Task.sleep(nanoseconds: 5_000_000)
+        let releasesBeforeSecondClose = await provider.runtimeReleaseCalls()
+        #expect(releasesBeforeSecondClose == 0)
+
+        await service.releaseReaderSessionMemory(sessionID: secondSession)
+        let releasesAfterSecondClose = await provider.runtimeReleaseCalls()
+        #expect(releasesAfterSecondClose == 1)
+    }
+
     @Test func modelBuildChangeInvalidatesCacheWithoutManualVersionBump() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
