@@ -102,17 +102,18 @@ actor OCRRecognitionCache {
         return result
     }
 
-    /// Reader 会话结束：取消 OCR workPool 并释放结果内存，保留磁盘缓存。
-    func releaseReaderSessionMemory() async {
-        generation = UUID()
+    /// Reader 会话结束只释放 OCR 内存结果。Reader 自己的 consumer 会随
+    /// Task 取消退出；不能 cancelAll，因为离线翻译/后台 OCR 索引共用这个 workPool。
+    func releaseReaderSessionMemory() {
         memoryCache.removeAll()
         memoryOrder.removeAll()
-        await workPool.cancelAll()
         MReaderLog.aiVision.debug("OCR reader-session memory released")
     }
 
     func clearCache() async {
-        await releaseReaderSessionMemory()
+        generation = UUID()
+        releaseReaderSessionMemory()
+        await workPool.cancelAll()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
