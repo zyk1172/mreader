@@ -106,7 +106,9 @@ nonisolated enum OfflineTranslationConcurrencyPolicy {
             if availableMB < 700 { return 1 }
             if availableMB < 1_400 { return min(2, physicalGB >= 3 ? 2 : 1) }
         }
-        return physicalGB >= 4 ? 3 : 2
+        if physicalGB >= 4 { return 3 }
+        if physicalGB >= 3 { return 2 }
+        return 1
     }
 
     static func currentMaximumConcurrentPages() -> Int {
