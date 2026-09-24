@@ -5719,6 +5719,11 @@ struct LocalImageView: View {
         }
         .task(id: imageLoadTaskID) {
             guard retainsDecodedImage else {
+                cancelLiveTranslationForPage()
+                offlineTranslationTask?.cancel()
+                offlineTranslationTask = nil
+                ocrMagnificationTask?.cancel()
+                ocrMagnificationTask = nil
                 uiImage = nil
                 loadedPageURL = nil
                 isLoadingImage = false
@@ -5737,17 +5742,6 @@ struct LocalImageView: View {
             }
             guard !Task.isCancelled else { return }
             await loadImage()
-        }
-        .onChange(of: retainsDecodedImage) { _, shouldRetain in
-            guard !shouldRetain else { return }
-            cancelLiveTranslationForPage()
-            offlineTranslationTask?.cancel()
-            offlineTranslationTask = nil
-            ocrMagnificationTask?.cancel()
-            ocrMagnificationTask = nil
-            uiImage = nil
-            loadedPageURL = nil
-            isLoadingImage = false
         }
         .onDisappear {
             cancelLiveTranslationForPage()
