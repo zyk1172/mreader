@@ -452,8 +452,10 @@ actor PanelDetectionService {
         activeReaderSessionID = sessionID
     }
 
-    func releaseReaderSessionMemory(sessionID: UUID) {
-        guard activeReaderSessionID == sessionID else { return }
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
         activeReaderSessionID = nil
         // Layouts are cheap to restore from disk. Advancing generation prevents an
         // in-flight Guided Panel calculation from repopulating memory after Reader exit.
