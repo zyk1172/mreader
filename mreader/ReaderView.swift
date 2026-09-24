@@ -1076,6 +1076,8 @@ struct ReaderView: View {
     }
     @State private var translationPrefetchTask: Task<Void, Never>?
     @State private var mangaVisionPreanalysisTask: Task<Void, Never>?
+    @State private var readerSessionSetupTask: Task<Void, Never>?
+    @State private var readerSessionID = UUID()
     @State private var activityLastRecordedAt = Date()
     @State private var activityLastPageIndex: Int
     @State private var dismissGestureProgress: CGFloat = 0
@@ -1493,16 +1495,32 @@ struct ReaderView: View {
             }
             recordReaderInteraction()
             applyEPUBPresetBeforeFirstOpen()
-            Task {
-                await initializeReadingPresetIfNeeded()
-            }
             recordReaderOpenIfNeeded()
-            preloadPages(around: currentPageIndex)
-            scheduleTranslationPrefetch(around: currentPageIndex)
+
+            readerSessionSetupTask?.cancel()
+            let sessionID = UUID()
+            readerSessionID = sessionID
+            readerSessionSetupTask = Task { @MainActor in
+                await MangaVisionService.shared.beginReaderSession(sessionID: sessionID)
+                guard !Task.isCancelled, readerSessionID == sessionID else { return }
+
+                // Reader-scoped prefetch starts only after the model service knows a new
+                // Reader owns the runtime, so a deferred unload from the previous Reader
+                // cannot race with these requests.
+                preloadPages(around: currentPageIndex)
+                scheduleTranslationPrefetch(around: currentPageIndex)
+
+                await initializeReadingPresetIfNeeded()
+                guard !Task.isCancelled, readerSessionID == sessionID else { return }
+                readerSessionSetupTask = nil
+            }
         }
         .onDisappear {
             // Reader 会话结束必须先阻止所有新工作，再释放内存缓存。
             // 磁盘缓存保留，重新打开时仍可快速恢复；这里只清理会话内存和在途任务。
+            let closingSessionID = readerSessionID
+            readerSessionSetupTask?.cancel()
+            readerSessionSetupTask = nil
             RemotePagePrefetcher.shared.cancelAll()
             translationPrefetchTask?.cancel()
             translationPrefetchTask = nil
@@ -1519,7 +1537,7 @@ struct ReaderView: View {
                 await AppleTranslationPageCache.shared.clearMemoryCache()
                 await TranslationContextRegistry.shared.clearSessionMemory()
                 await PanelDetectionService.shared.releaseReaderSessionMemory()
-                await MangaVisionService.shared.releaseReaderSessionMemory()
+                await MangaVisionService.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
                 await OCRRuntimeService.flush()
                 MReaderLog.reader.notice("reader session memory released")
             }
