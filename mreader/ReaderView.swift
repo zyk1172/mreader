@@ -2957,7 +2957,11 @@ private struct ReaderPageTapRecognizer: UIViewRepresentable {
         context.coordinator.onPreviousPage = onPreviousPage
         context.coordinator.onNextPage = onNextPage
         context.coordinator.onLongPress = onLongPress
-        context.coordinator.attach(to: uiView.window)
+        if isEnabled {
+            context.coordinator.attach(to: uiView.window)
+        } else {
+            context.coordinator.detach()
+        }
     }
 
     final class InstallingView: UIView {
@@ -2992,6 +2996,10 @@ private struct ReaderPageTapRecognizer: UIViewRepresentable {
         }
 
         func attach(to view: UIView?) {
+            guard isEnabled else {
+                detach()
+                return
+            }
             if hostView == nil && view == nil {
                 return
             }
