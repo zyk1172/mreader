@@ -476,7 +476,6 @@ actor RemotePageCache {
         }.value
         guard let size else { return }
         geometryRegisteredKeys.insert(key)
-        geometryRegisteredOrder.removeAll { $0 == key }
         geometryRegisteredOrder.append(key)
         while geometryRegisteredOrder.count > maximumGeometryRegistrationCount {
             geometryRegisteredKeys.remove(geometryRegisteredOrder.removeFirst())
