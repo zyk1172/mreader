@@ -2626,8 +2626,8 @@ struct ReaderView: View {
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 1 : 4,
-            backwardCount: isContinuous ? 1 : 2,
+            forwardCount: ReaderPrefetchPolicy.cacheForwardCount,
+            backwardCount: ReaderPrefetchPolicy.cacheBackwardCount,
             includesCurrentPage: false
         )
         let urls = preferredIndices.compactMap { pageIndex -> URL? in
