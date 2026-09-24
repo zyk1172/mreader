@@ -537,6 +537,7 @@ private final class ReaderProgressThumbnailCache {
 
     private let cache = NSCache<NSString, UIImage>()
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private var generation = UUID()
 
     private init() {
         cache.countLimit = 32
@@ -547,19 +548,32 @@ private final class ReaderProgressThumbnailCache {
         if let cached = cache.object(forKey: key as NSString) {
             return cached
         }
+        let epoch = generation
         if let task = inFlight[key] {
-            return await task.value
+            let image = await task.value
+            return epoch == generation && !Task.isCancelled ? image : nil
         }
         let task = Task {
             await decodeReaderImage(from: url, maxPixelSize: 640)
         }
         inFlight[key] = task
         let image = await task.value
+        guard epoch == generation, !Task.isCancelled else { return nil }
         inFlight[key] = nil
         if let image {
             cache.setObject(image, forKey: key as NSString)
         }
         return image
+    }
+
+    func releaseReaderSessionMemory() {
+        generation = UUID()
+        for task in inFlight.values {
+            task.cancel()
+        }
+        inFlight.removeAll()
+        cache.removeAllObjects()
+        MReaderLog.reader.debug("reader thumbnail cache released")
     }
 }
 
@@ -615,6 +629,8 @@ private final class ReaderImageCache {
     /// Foreground readers that joined a preload task protect that task from a
     /// subsequent preload-window refresh cancelling the shared decode.
     private var foregroundLoadKeys: Set<String> = []
+    /// Reader 关闭时推进代际。旧解码即使 ImageIO 已经无法中断，也禁止在关闭后回填缓存。
+    private var generation = UUID()
     private let preloadBudgetBytes: Int
     private var lastKnownViewportWidthPoints: CGFloat = 430
     private var lastKnownDisplayScale: CGFloat = 3
@@ -702,18 +718,21 @@ private final class ReaderImageCache {
         if let cached = cachedImage(for: url, maxPixelSize: maxPixelSize) {
             return cached
         }
+        let epoch = generation
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
             foregroundLoadKeys.insert(key)
             defer { foregroundLoadKeys.remove(key) }
-            return await existingTask.value
+            let image = await existingTask.value
+            return epoch == generation && !Task.isCancelled ? image : nil
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
             foregroundLoadKeys.insert(higherKey)
             defer { foregroundLoadKeys.remove(higherKey) }
-            return await existingTask.value
+            let image = await existingTask.value
+            return epoch == generation && !Task.isCancelled ? image : nil
         }
 
         let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
@@ -725,6 +744,10 @@ private final class ReaderImageCache {
         foregroundLoadKeys.insert(key)
         let image = await task.value
         foregroundLoadKeys.remove(key)
+
+        // clearMemoryCache() 可能在 ImageIO 解码期间推进 generation 并清掉字典。
+        // 旧任务此时绝不能移除新会话同 key 的任务，更不能把 UIImage 回填进缓存。
+        guard epoch == generation, !Task.isCancelled else { return nil }
         inFlightLoads[key] = nil
         loadingCosts[key] = nil
         if let image {
@@ -742,13 +765,14 @@ private final class ReaderImageCache {
         adaptiveFitWidthSizing: Bool = false
     ) {
         scheduledPreload?.cancel()
+        let epoch = generation
         var seenURLs = Set<URL>()
         let uniqueURLs = urls.filter { seenURLs.insert($0).inserted }
         scheduledPreload = Task { @MainActor [weak self] in
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self, self.generation == epoch else { return }
             self.startPreloading(
                 uniqueURLs,
                 maxPixelSize: maxPixelSize,
@@ -823,14 +847,15 @@ private final class ReaderImageCache {
                 return Task.isCancelled ? nil : image
             }
             inFlightLoads[candidate.key] = task
+            let epoch = generation
             Task { @MainActor [weak self] in
                 let image = await task.value
-                guard let self else { return }
+                guard let self, self.generation == epoch else { return }
                 self.inFlightLoads[candidate.key] = nil
                 self.loadingCosts[candidate.key] = nil
                 self.preloadKeys.remove(candidate.key)
                 self.activePreloadCount = max(0, self.activePreloadCount - 1)
-                if let image {
+                if let image, !Task.isCancelled {
                     self.cache.setObject(image, forKey: candidate.key as NSString, cost: image.cacheCost)
                 }
                 self.drainPreloadQueue()
@@ -839,19 +864,24 @@ private final class ReaderImageCache {
     }
 
     func clearMemoryCache() {
+        generation = UUID()
         scheduledPreload?.cancel()
         scheduledPreload = nil
         preloadQueue.removeAll()
-        for key in preloadKeys {
-            inFlightLoads[key]?.cancel()
-            inFlightLoads[key] = nil
-            loadingCosts[key] = nil
+        for task in inFlightLoads.values {
+            task.cancel()
         }
+        inFlightLoads.removeAll()
+        loadingCosts.removeAll()
         preloadKeys.removeAll()
         foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
         MReaderLog.reader.debug("decoded image cache memory cleared")
+    }
+
+    func releaseReaderSessionMemory() {
+        clearMemoryCache()
     }
 
     private static func clearSharedMemoryCache() {
@@ -1461,11 +1491,25 @@ struct ReaderView: View {
             scheduleTranslationPrefetch(around: currentPageIndex)
         }
         .onDisappear {
+            // Reader 会话结束必须先阻止所有新工作，再释放内存缓存。
+            // 磁盘缓存保留，重新打开时仍可快速恢复；这里只清理会话内存和在途任务。
             RemotePagePrefetcher.shared.cancelAll()
             translationPrefetchTask?.cancel()
             translationPrefetchTask = nil
             mangaVisionPreanalysisTask?.cancel()
             mangaVisionPreanalysisTask = nil
+            ReaderImageCache.shared.releaseReaderSessionMemory()
+            ReaderProgressThumbnailCache.shared.releaseReaderSessionMemory()
+            Task {
+                await AITranslationPageCoordinator.shared.releaseReaderSessionMemory()
+                await OCRRecognitionCache.shared.releaseReaderSessionMemory()
+                await AppleTranslationPageCache.shared.clearMemoryCache()
+                await TranslationContextRegistry.shared.clearSessionMemory()
+                await MangaVisionService.shared.releaseReaderSessionMemory()
+                await RemotePageCache.shared.releaseReaderSessionMemory()
+                await OCRRuntimeService.flush()
+                MReaderLog.reader.notice("reader session memory released")
+            }
             recordReadingActivity()
             persistCurrentReaderPosition(reason: "readerDisappear", force: true)
         }
@@ -5364,6 +5408,8 @@ struct LocalImageView: View {
     @State private var isOfflineTranslationDisplayed = false
     @State private var translationGeneration = UUID()
     @State private var ocrMagnificationTask: Task<Void, Never>?
+    @State private var cloudFallbackTask: Task<Void, Never>?
+    @State private var cloudFallbackGeneration = UUID()
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @State private var appleTranslationRequests: [AppleTranslationBlockRequest] = []
     @State private var appleTranslationGeneration = UUID()
@@ -5562,8 +5608,14 @@ struct LocalImageView: View {
             offlineTranslationTask?.cancel()
             offlineTranslationTask = nil
             translationGeneration = UUID()
+            appleTranslationGeneration = UUID()
+            appleTranslationRequests.removeAll()
+            appleSourceLanguageCode = nil
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
+            cloudFallbackTask?.cancel()
+            cloudFallbackTask = nil
+            cloudFallbackGeneration = UUID()
             if isTranslating {
                 isTranslating = false
                 onTranslationStateChange(false)
@@ -6954,7 +7006,16 @@ struct LocalImageView: View {
         targetLanguage targetCode: String
     ) {
         guard !missingIDs.isEmpty else { return }
-        Task {
+        cloudFallbackTask?.cancel()
+        let fallbackGeneration = UUID()
+        cloudFallbackGeneration = fallbackGeneration
+        cloudFallbackTask = Task {
+            defer {
+                if self.cloudFallbackGeneration == fallbackGeneration {
+                    self.cloudFallbackTask = nil
+                }
+            }
+            guard !Task.isCancelled, self.cloudFallbackGeneration == fallbackGeneration else { return }
             let missingBlocks = textBlocks.filter {
                 missingIDs.contains($0.id) &&
                 ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -6988,8 +7049,10 @@ struct LocalImageView: View {
                     modelDescriptor: activeConfiguration.textModelDescriptor
                 )
                 try Task.checkCancellation()
+                guard self.cloudFallbackGeneration == fallbackGeneration else { return }
                 await MainActor.run {
-                    guard (self.translationGeneration == generation || self.appleTranslationGeneration == generation),
+                    guard self.cloudFallbackGeneration == fallbackGeneration,
+                          (self.translationGeneration == generation || self.appleTranslationGeneration == generation),
                           self.url == pageURL,
                           self.targetLanguage == targetCode else { return }
                     // 线上 ID 是 b0/b1/...，顺序 = missingBlocks 中的位置
