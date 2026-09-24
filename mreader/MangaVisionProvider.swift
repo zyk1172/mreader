@@ -50,6 +50,12 @@ nonisolated protocol MangaVisionProvider: Sendable {
     ) async throws -> MangaPageAnalysis
 }
 
+/// Optional capability for providers that hold heavyweight runtime state (for example MLModel).
+/// Reader close may release that runtime without changing the provider's semantic contract.
+nonisolated protocol MangaVisionRuntimeReleasable: Sendable {
+    func releaseRuntimeMemory() async
+}
+
 nonisolated enum MangaVisionProviderError: Error, Sendable {
     case modelUnavailable
     case unsupportedOutput
