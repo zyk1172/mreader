@@ -102,13 +102,19 @@ actor OCRRecognitionCache {
         return result
     }
 
-    func clearCache() async {
+    /// Reader 会话结束：取消 OCR workPool 并释放结果内存，保留磁盘缓存。
+    func releaseReaderSessionMemory() async {
         generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
+        await workPool.cancelAll()
+        MReaderLog.aiVision.debug("OCR reader-session memory released")
+    }
+
+    func clearCache() async {
+        await releaseReaderSessionMemory()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-        await workPool.cancelAll()
     }
 
     private func cachedResult(forKey key: String) -> OCRPipelineResult? {
