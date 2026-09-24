@@ -2533,14 +2533,15 @@ struct ReaderView: View {
             )
         }
 
+        let cacheWindow = ReaderPageCacheWindowPolicy.window(for: readingMode)
         let preferredIndices = ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: index,
             pageCount: manager.pages.count,
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 4 : 4,
-            backwardCount: isContinuous ? 2 : 2,
+            forwardCount: cacheWindow.forwardCount,
+            backwardCount: cacheWindow.backwardCount,
             includesCurrentPage: false
         )
         let urls = preferredIndices.compactMap { pageIndex -> URL? in
