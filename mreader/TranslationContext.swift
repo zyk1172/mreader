@@ -156,7 +156,11 @@ actor TranslationContextRegistry {
         pagesByScope[scopeID] = pages
     }
 
-    func resetForDiagnostics() {
+    func clearSessionMemory() {
         pagesByScope.removeAll()
+    }
+
+    func resetForDiagnostics() {
+        clearSessionMemory()
     }
 }
