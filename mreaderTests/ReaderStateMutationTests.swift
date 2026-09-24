@@ -97,6 +97,49 @@ final class ReaderStateMutationTests: XCTestCase {
         )
     }
 
+    func testContinuousScrollVelocityLimiterCapsTrackingDeltaPerFrame() {
+        let limited = ReaderScrollVelocityPolicy.clampedOffsetY(
+            previousOffsetY: 1_000,
+            proposedOffsetY: 1_500,
+            viewportHeight: 800,
+            frameDuration: 1.0 / 60.0,
+            isTracking: true,
+            minimumOffsetY: 0,
+            maximumOffsetY: 20_000
+        )
+        XCTAssertEqual(limited, 1_040, accuracy: 0.001)
+    }
+
+    func testContinuousScrollVelocityLimiterIsStricterDuringDeceleration() {
+        let tracking = ReaderScrollVelocityPolicy.maximumDelta(
+            viewportHeight: 800,
+            frameDuration: 1.0 / 60.0,
+            isTracking: true
+        )
+        let decelerating = ReaderScrollVelocityPolicy.maximumDelta(
+            viewportHeight: 800,
+            frameDuration: 1.0 / 60.0,
+            isTracking: false
+        )
+        XCTAssertGreaterThan(tracking, decelerating)
+        XCTAssertEqual(tracking, 40, accuracy: 0.001)
+        XCTAssertEqual(decelerating, 24.6666667, accuracy: 0.001)
+    }
+
+    func testContinuousScrollVelocityLimiterPreservesNormalSlowMotion() {
+        let proposed: CGFloat = 1_018
+        let limited = ReaderScrollVelocityPolicy.clampedOffsetY(
+            previousOffsetY: 1_000,
+            proposedOffsetY: proposed,
+            viewportHeight: 800,
+            frameDuration: 1.0 / 60.0,
+            isTracking: false,
+            minimumOffsetY: 0,
+            maximumOffsetY: 20_000
+        )
+        XCTAssertEqual(limited, proposed, accuracy: 0.001)
+    }
+
     func testFitWidthDecodePolicyUsesSmallestSufficientTier() {
         XCTAssertEqual(
             ReaderFitWidthDecodePolicy.maxPixelSize(
