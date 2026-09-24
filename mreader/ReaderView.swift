@@ -3144,17 +3144,37 @@ nonisolated struct ReaderScrollGeometrySnapshot: Equatable, Sendable {
 
 nonisolated enum ReaderScrollVelocityPolicy {
     /// 手指直接拖动时允许略快一些；松手后的惯性更保守，避免一甩跨过尚未解码的多页。
-    static let trackingScreensPerSecond: CGFloat = 3.0
-    static let deceleratingScreensPerSecond: CGFloat = 1.85
+    /// 这里把已有“滚动速度”设置真正应用到物理滚动，而不再只影响点按步进距离。
+    static func screensPerSecond(
+        for scrollSpeed: ScrollSpeed,
+        isTracking: Bool
+    ) -> CGFloat {
+        switch (scrollSpeed, isTracking) {
+        case (.slow, true):
+            return 1.8
+        case (.slow, false):
+            return 1.10
+        case (.standard, true):
+            return 2.4
+        case (.standard, false):
+            return 1.45
+        case (.fast, true):
+            return 3.0
+        case (.fast, false):
+            return 1.85
+        }
+    }
 
     static func maximumDelta(
         viewportHeight: CGFloat,
         frameDuration: TimeInterval,
+        scrollSpeed: ScrollSpeed,
         isTracking: Bool
     ) -> CGFloat {
-        let screensPerSecond = isTracking
-            ? trackingScreensPerSecond
-            : deceleratingScreensPerSecond
+        let screensPerSecond = screensPerSecond(
+            for: scrollSpeed,
+            isTracking: isTracking
+        )
         return max(
             4,
             max(viewportHeight, 1) * screensPerSecond * max(frameDuration, 1.0 / 240.0)
@@ -3166,6 +3186,7 @@ nonisolated enum ReaderScrollVelocityPolicy {
         proposedOffsetY: CGFloat,
         viewportHeight: CGFloat,
         frameDuration: TimeInterval,
+        scrollSpeed: ScrollSpeed,
         isTracking: Bool,
         minimumOffsetY: CGFloat,
         maximumOffsetY: CGFloat
@@ -3173,6 +3194,7 @@ nonisolated enum ReaderScrollVelocityPolicy {
         let maxDelta = maximumDelta(
             viewportHeight: viewportHeight,
             frameDuration: frameDuration,
+            scrollSpeed: scrollSpeed,
             isTracking: isTracking
         )
         let delta = proposedOffsetY - previousOffsetY
@@ -3194,8 +3216,10 @@ private final class ReaderScrollMotionGovernor: NSObject {
     private var displayLink: CADisplayLink?
     private var lastOffsetY: CGFloat = 0
     private var idleFrames = 0
+    private var scrollSpeed: ScrollSpeed = .standard
 
-    func attach(to scrollView: UIScrollView) {
+    func attach(to scrollView: UIScrollView, scrollSpeed: ScrollSpeed) {
+        self.scrollSpeed = scrollSpeed
         guard self.scrollView !== scrollView else {
             configure(scrollView)
             return
@@ -3292,6 +3316,7 @@ private final class ReaderScrollMotionGovernor: NSObject {
             proposedOffsetY: proposedY,
             viewportHeight: scrollView.bounds.height,
             frameDuration: frameDuration,
+            scrollSpeed: scrollSpeed,
             isTracking: isTracking,
             minimumOffsetY: minimumOffsetY,
             maximumOffsetY: maximumOffsetY
@@ -3557,7 +3582,10 @@ struct ContinuousScrollReader: View {
                     if scrollView !== resolvedScrollView {
                         scrollView = resolvedScrollView
                     }
-                    motionGovernor.attach(to: resolvedScrollView)
+                    motionGovernor.attach(
+                        to: resolvedScrollView,
+                        scrollSpeed: scrollSpeed
+                    )
                 }
             )
             // 只在滚动阶段变化时读取几何。滚动每一帧不执行 SwiftUI 状态写入、
