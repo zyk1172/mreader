@@ -471,27 +471,21 @@ final class PageGeometryStore {
     static let shared = PageGeometryStore()
     private let maximumEntryCount = 512
     private var sizes: [String: CGSize] = [:]
-    private var accessOrder: [String] = []
+    private var insertionOrder: [String] = []
 
     func setSize(_ size: CGSize, for url: URL) {
         let key = url.absoluteString
+        if sizes[key] == nil {
+            insertionOrder.append(key)
+        }
         sizes[key] = size
-        touch(key)
-        while accessOrder.count > maximumEntryCount {
-            sizes[accessOrder.removeFirst()] = nil
+        while insertionOrder.count > maximumEntryCount {
+            sizes[insertionOrder.removeFirst()] = nil
         }
     }
 
     func size(for url: URL) -> CGSize? {
-        let key = url.absoluteString
-        guard let size = sizes[key] else { return nil }
-        touch(key)
-        return size
-    }
-
-    private func touch(_ key: String) {
-        accessOrder.removeAll { $0 == key }
-        accessOrder.append(key)
+        sizes[url.absoluteString]
     }
 
     /// height/width。长条页比例远大于 1，是占位高度唯一的正确来源。
