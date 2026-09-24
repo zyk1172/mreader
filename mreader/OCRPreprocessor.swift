@@ -96,19 +96,27 @@ struct OCRPreprocessor {
         }
 
         let plannedRegions = MangaVisionTextROIPlanner.recognitionRegions(from: visionTextRegions)
-        let slices = plannedRegions.isEmpty
-            ? sliceImage(normalizedImage, fullPixelSize: fullSize)
-            : cropImage(
+        // Keep only lightweight CGRect descriptors. Materializing every cropped UIImage up front
+        // multiplies peak memory on long pages; each slice is now created only for the iteration
+        // that consumes it and is released before the next slice is materialized.
+        let sliceRects = plannedRegions.isEmpty
+            ? fullPageSliceRects(normalizedImage, fullPixelSize: fullSize)
+            : plannedRegionRects(
                 normalizedImage,
                 fullPixelSize: fullSize,
                 normalizedRegions: plannedRegions
             )
         MReaderLog.aiVision.debug(
-            "OCR preprocess slices=\(slices.count, privacy: .public) mangaVisionROI=\(plannedRegions.count, privacy: .public) fallbackFullPage=\(plannedRegions.isEmpty, privacy: .public) strategy=\(options.recognitionMode.rawValue, privacy: .public) image=\(Int(fullSize.width), privacy: .public)x\(Int(fullSize.height), privacy: .public)"
+            "OCR preprocess slices=\(sliceRects.count, privacy: .public) mangaVisionROI=\(plannedRegions.count, privacy: .public) fallbackFullPage=\(plannedRegions.isEmpty, privacy: .public) strategy=\(options.recognitionMode.rawValue, privacy: .public) image=\(Int(fullSize.width), privacy: .public)x\(Int(fullSize.height), privacy: .public)"
         )
         var allBlocks: [TextBlock] = []
-        for slice in slices {
+        for sliceRect in sliceRects {
             try Task.checkCancellation()
+            guard let slice = materializeSlice(
+                normalizedImage,
+                fullPixelSize: fullSize,
+                rect: sliceRect
+            ) else { continue }
             let original = OCRImageVariant(
                 name: "original",
                 image: slice.image,
@@ -234,8 +242,13 @@ struct OCRPreprocessor {
             image: normalizedImage
         ) {
             MReaderLog.aiVision.notice("OCR ImageAnalyzer indicates Japanese coverage gap; running ja-JP accurate pass")
-            for slice in slices {
+            for sliceRect in sliceRects {
                 try Task.checkCancellation()
+                guard let slice = materializeSlice(
+                    normalizedImage,
+                    fullPixelSize: fullSize,
+                    rect: sliceRect
+                ) else { continue }
                 let original = OCRImageVariant(
                     name: "original",
                     image: slice.image,
@@ -311,14 +324,14 @@ struct OCRPreprocessor {
         return confidence < 0.58 || usefulRatio < 0.42
     }
 
-    nonisolated private static func cropImage(
+    nonisolated private static func plannedRegionRects(
         _ image: UIImage,
         fullPixelSize: CGSize,
         normalizedRegions: [CGRect]
-    ) -> [(image: UIImage, rect: CGRect)] {
+    ) -> [CGRect] {
         guard let cgImage = image.cgImage else { return [] }
         let bounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
-        return normalizedRegions.compactMap { normalized -> (UIImage, CGRect)? in
+        return normalizedRegions.compactMap { normalized -> CGRect? in
             var pixelRect = MangaPageCoordinateSpace.pixelRect(
                 fromNormalized: normalized,
                 imageSize: fullPixelSize
@@ -326,32 +339,54 @@ struct OCRPreprocessor {
             guard !pixelRect.isNull, pixelRect.width >= 4, pixelRect.height >= 4 else { return nil }
             // Integral rounding can leave maxX/maxY one pixel outside on fractional source sizes.
             pixelRect = pixelRect.intersection(bounds)
-            guard let cropped = cgImage.cropping(to: pixelRect) else { return nil }
-            return (
-                UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation),
-                pixelRect
-            )
+            return pixelRect
         }
     }
 
-    nonisolated private static func sliceImage(_ image: UIImage, fullPixelSize: CGSize) -> [(image: UIImage, rect: CGRect)] {
-        guard let cgImage = image.cgImage else { return [(image, CGRect(origin: .zero, size: fullPixelSize))] }
+    nonisolated private static func fullPageSliceRects(
+        _ image: UIImage,
+        fullPixelSize: CGSize
+    ) -> [CGRect] {
+        guard let cgImage = image.cgImage else {
+            return [CGRect(origin: .zero, size: fullPixelSize)]
+        }
         let width = cgImage.width
         let height = cgImage.height
         let sliceHeight = height > 3600 ? 2600 : height
         let overlap = max(0, Int(Double(sliceHeight) * 0.1))
-        var output: [(UIImage, CGRect)] = []
+        var rects: [CGRect] = []
         var y = 0
         while y < height {
             let h = min(sliceHeight, height - y)
-            let rect = CGRect(x: 0, y: y, width: width, height: h)
-            if let cropped = cgImage.cropping(to: rect) {
-                output.append((UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation), rect))
-            }
+            rects.append(CGRect(x: 0, y: y, width: width, height: h))
             if y + h >= height { break }
             y += max(1, sliceHeight - overlap)
         }
-        return output.isEmpty ? [(image, CGRect(origin: .zero, size: fullPixelSize))] : output
+        return rects.isEmpty ? [CGRect(origin: .zero, size: fullPixelSize)] : rects
+    }
+
+    nonisolated private static func materializeSlice(
+        _ image: UIImage,
+        fullPixelSize: CGSize,
+        rect: CGRect
+    ) -> (image: UIImage, rect: CGRect)? {
+        guard let cgImage = image.cgImage else {
+            let fullRect = CGRect(origin: .zero, size: fullPixelSize)
+            guard rect.equalTo(fullRect) else { return nil }
+            return (image, fullRect)
+        }
+        let bounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+        let croppedRect = rect.integral.intersection(bounds)
+        guard !croppedRect.isNull,
+              croppedRect.width >= 4,
+              croppedRect.height >= 4,
+              let cropped = cgImage.cropping(to: croppedRect) else {
+            return nil
+        }
+        return (
+            UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation),
+            croppedRect
+        )
     }
 
     nonisolated private static func enhancedImage(_ image: UIImage, inverted: Bool) -> UIImage? {
