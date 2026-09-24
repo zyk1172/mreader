@@ -347,11 +347,19 @@ nonisolated private func pruneRemotePageDiskCache(limitBytes: Int64) {
 actor RemotePageCache {
     static let shared = RemotePageCache()
 
+    private struct ActiveDownload {
+        let id: UUID
+        let generation: UUID
+        let task: Task<Data?, Never>
+    }
+
     private let memoryCache = NSCache<NSString, NSData>()
     private var cachedKeys: Set<String> = []
     private let memoryLimitMB: Int
-    private var activeDownloads: [PageCacheKey: Task<Data?, Never>] = [:]
+    private var activeDownloads: [PageCacheKey: ActiveDownload] = [:]
     private var geometryRegisteredKeys: Set<PageCacheKey> = []
+    /// 关闭 Reader 时推进代际，阻止旧磁盘/网络请求在清理后重新填充 NSCache。
+    private var generation = UUID()
 
     private init() {
         let limits = remoteCacheLimits()
@@ -386,6 +394,7 @@ actor RemotePageCache {
     }
 
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {
+        let epoch = generation
         let cacheKey = memoryKey(for: key)
         if let cached = memoryCache.object(forKey: cacheKey as NSString) {
             let data = cached as Data
@@ -402,6 +411,7 @@ actor RemotePageCache {
             candidates: [diskURL, legacyDiskURL],
             priority: priority
         ) {
+            guard epoch == generation, !Task.isCancelled else { return nil }
             let data = diskHit.data
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
             cachedKeys.insert(cacheKey)
@@ -412,11 +422,15 @@ actor RemotePageCache {
             return data
         }
 
-        if let task = activeDownloads[key] {
+        if let entry = activeDownloads[key] {
             MReaderLog.reader.debug(
                 "remote cache joined request page=\(key.pageIndex, privacy: .public) priority=\(String(describing: priority), privacy: .public)"
             )
-            return await task.value
+            let data = await entry.task.value
+            guard epoch == generation,
+                  entry.generation == generation,
+                  !Task.isCancelled else { return nil }
+            return data
         }
 
         let taskPriority: TaskPriority
@@ -426,12 +440,20 @@ actor RemotePageCache {
         case .prefetch:
             taskPriority = .utility
         }
+        let requestID = UUID()
         let task = Task(priority: taskPriority) { [diskURL] in
             await Self.download(key: key, diskURL: diskURL)
         }
-        activeDownloads[key] = task
+        activeDownloads[key] = ActiveDownload(
+            id: requestID,
+            generation: epoch,
+            task: task
+        )
         let data = await task.value
-        activeDownloads[key] = nil
+        if activeDownloads[key]?.id == requestID {
+            activeDownloads[key] = nil
+        }
+        guard epoch == generation, !Task.isCancelled else { return nil }
         if let data {
             memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
             cachedKeys.insert(cacheKey)
@@ -493,6 +515,17 @@ actor RemotePageCache {
         MReaderLog.reader.debug("remote cache memory cleared")
     }
 
+    func releaseReaderSessionMemory() {
+        generation = UUID()
+        for entry in activeDownloads.values {
+            entry.task.cancel()
+        }
+        activeDownloads.removeAll()
+        geometryRegisteredKeys.removeAll()
+        clearMemoryCache()
+        MReaderLog.reader.notice("remote reader-session memory released")
+    }
+
     func retainMemoryPages(_ keysToKeep: Set<PageCacheKey>) {
         let memoryKeysToKeep = Set(keysToKeep.map(memoryKey(for:)))
         let keysToRemove = cachedKeys.subtracting(memoryKeysToKeep)
@@ -522,7 +555,7 @@ actor RemotePageCache {
     func cancelDownloadsOutside(_ keys: Set<PageCacheKey>) {
         let cancelling = activeDownloads.keys.filter { !keys.contains($0) }
         for key in cancelling {
-            activeDownloads[key]?.cancel()
+            activeDownloads[key]?.task.cancel()
             activeDownloads[key] = nil
         }
         if !cancelling.isEmpty {
