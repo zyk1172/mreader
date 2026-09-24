@@ -349,7 +349,6 @@ actor RemotePageCache {
 
     private struct ActiveDownload {
         let id: UUID
-        let generation: UUID
         let task: Task<Data?, Never>
     }
 
@@ -446,7 +445,6 @@ actor RemotePageCache {
         }
         activeDownloads[key] = ActiveDownload(
             id: requestID,
-            generation: epoch,
             task: task
         )
         let data = await task.value
