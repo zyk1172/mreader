@@ -1581,7 +1581,10 @@ struct ReaderView: View {
                 await AppleTranslationPageCache.shared.beginReaderSession(sessionID: sessionID)
                 await TranslationContextRegistry.shared.beginReaderSession(sessionID: sessionID)
                 await PanelDetectionService.shared.beginReaderSession(sessionID: sessionID)
-                await MangaVisionService.shared.beginReaderSession(sessionID: sessionID)
+                await MangaVisionService.shared.beginReaderSession(
+                    sessionID: sessionID,
+                    requiresActiveReader: true
+                )
                 guard !Task.isCancelled, readerSessionID == sessionID else { return }
 
                 // Reader-scoped prefetch starts only after the model service knows a new
