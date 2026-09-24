@@ -57,8 +57,10 @@ actor AppleTranslationPageCache {
         }
     }
 
-    func releaseReaderSessionMemory(sessionID: UUID) {
-        guard activeReaderSessionID == sessionID else { return }
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
         activeReaderSessionID = nil
         clearMemoryCache()
     }
