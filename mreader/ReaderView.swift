@@ -620,7 +620,7 @@ actor ReaderAsyncPermitPool {
         }
 
         let id = UUID()
-        return await withTaskCancellationHandler {
+        let granted = await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 if Task.isCancelled {
                     continuation.resume(returning: false)
@@ -631,6 +631,15 @@ actor ReaderAsyncPermitPool {
         } onCancel: {
             Task { await self.cancelWaiter(id: id) }
         }
+
+        // Cancellation may race with release(): if release granted this waiter just
+        // before cancelWaiter ran, immediately hand the permit onward instead of
+        // letting a cancelled task transiently consume capacity.
+        if granted, Task.isCancelled {
+            release()
+            return false
+        }
+        return granted
     }
 
     func release() {
