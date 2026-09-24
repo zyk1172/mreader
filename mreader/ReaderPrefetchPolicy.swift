@@ -9,7 +9,9 @@ nonisolated enum ReaderPageCacheWindowPolicy {
     static func window(for readingMode: ReadingMode) -> ReaderPageCacheWindow {
         switch readingMode {
         case .continuousScroll, .infiniteScroll:
-            return ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+            // 条漫解码预取保持小窗口：避免滚动过程中持续抢占 ImageIO/CPU。
+            // 远程压缩页缓存有独立窗口，不与 decoded-image 预取窗口绑定。
+            return ReaderPageCacheWindow(forwardCount: 1, backwardCount: 1)
         default:
             return ReaderPageCacheWindow(forwardCount: 8, backwardCount: 2)
         }
