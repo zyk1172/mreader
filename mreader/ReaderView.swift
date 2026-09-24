@@ -6666,10 +6666,12 @@ struct LocalImageView: View {
                 onTranslationStateChange(false)
             }
         }
+        guard !Task.isCancelled else { return }
         let maxPixelSize = preferredDecodeMaxPixelSize
         if let cachedImage = ReaderImageCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard self.url == pageURL else { return }
+                guard !Task.isCancelled, self.url == pageURL else { return }
                 isLoadingImage = false
                 loadFailed = false
                 uiImage = cachedImage
