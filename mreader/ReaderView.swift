@@ -3261,203 +3261,6 @@ nonisolated struct ReaderScrollGeometrySnapshot: Equatable, Sendable {
     }
 }
 
-nonisolated enum ReaderScrollVelocityPolicy {
-    /// 手指直接拖动时允许略快一些；松手后的惯性更保守，避免一甩跨过尚未解码的多页。
-    /// 这里把已有“滚动速度”设置真正应用到物理滚动，而不再只影响点按步进距离。
-    static func screensPerSecond(
-        for scrollSpeed: ScrollSpeed,
-        isTracking: Bool
-    ) -> CGFloat {
-        switch (scrollSpeed, isTracking) {
-        case (.slow, true):
-            return 3.5
-        case (.slow, false):
-            return 1.15
-        case (.standard, true):
-            return 4.5
-        case (.standard, false):
-            return 1.55
-        case (.fast, true):
-            return 5.5
-        case (.fast, false):
-            return 1.95
-        }
-    }
-
-    static func maximumDelta(
-        viewportHeight: CGFloat,
-        frameDuration: TimeInterval,
-        scrollSpeed: ScrollSpeed,
-        isTracking: Bool
-    ) -> CGFloat {
-        let screensPerSecond = screensPerSecond(
-            for: scrollSpeed,
-            isTracking: isTracking
-        )
-        return max(
-            4,
-            max(viewportHeight, 1) * screensPerSecond * max(frameDuration, 1.0 / 240.0)
-        )
-    }
-
-    static func clampedOffsetY(
-        previousOffsetY: CGFloat,
-        proposedOffsetY: CGFloat,
-        viewportHeight: CGFloat,
-        frameDuration: TimeInterval,
-        scrollSpeed: ScrollSpeed,
-        isTracking: Bool,
-        minimumOffsetY: CGFloat,
-        maximumOffsetY: CGFloat
-    ) -> CGFloat {
-        let maxDelta = maximumDelta(
-            viewportHeight: viewportHeight,
-            frameDuration: frameDuration,
-            scrollSpeed: scrollSpeed,
-            isTracking: isTracking
-        )
-        let delta = proposedOffsetY - previousOffsetY
-        let limitedDelta = min(max(delta, -maxDelta), maxDelta)
-        return min(
-            max(previousOffsetY + limitedDelta, minimumOffsetY),
-            maximumOffsetY
-        )
-    }
-}
-
-/// 纯 UIKit 运行时限速器。
-///
-/// 它只在手指拖动/惯性阶段启动 CADisplayLink，直接约束 UIScrollView 的每帧位移；
-/// 不写任何 SwiftUI @State，也不参与 Preference / Geometry 反馈。
-@MainActor
-private final class ReaderScrollMotionGovernor: NSObject {
-    private weak var scrollView: UIScrollView?
-    private var displayLink: CADisplayLink?
-    private var lastOffsetY: CGFloat = 0
-    private var idleFrames = 0
-    private var scrollSpeed: ScrollSpeed = .standard
-
-    func attach(to scrollView: UIScrollView, scrollSpeed: ScrollSpeed) {
-        self.scrollSpeed = scrollSpeed
-        guard self.scrollView !== scrollView else {
-            configure(scrollView)
-            return
-        }
-        detach()
-        self.scrollView = scrollView
-        configure(scrollView)
-        scrollView.panGestureRecognizer.addTarget(self, action: #selector(handlePan(_:)))
-    }
-
-    func detach() {
-        displayLink?.invalidate()
-        displayLink = nil
-        if let scrollView {
-            scrollView.panGestureRecognizer.removeTarget(self, action: #selector(handlePan(_:)))
-        }
-        scrollView = nil
-        idleFrames = 0
-    }
-
-    private func configure(_ scrollView: UIScrollView) {
-        // 限速器已经负责削掉峰值，这里只把惯性衰减调到 normal(0.998) 与 fast(0.99)
-        // 之间，避免 .fast 带来的“突然刹住”感，同时显著缩短高速甩动的滑行距离。
-        scrollView.decelerationRate = UIScrollView.DecelerationRate(rawValue: 0.994)
-    }
-
-    @objc
-    private func handlePan(_ recognizer: UIPanGestureRecognizer) {
-        guard let scrollView else { return }
-        switch recognizer.state {
-        case .began:
-            lastOffsetY = scrollView.contentOffset.y
-            idleFrames = 0
-            startDisplayLink()
-        case .changed:
-            if displayLink == nil {
-                lastOffsetY = scrollView.contentOffset.y
-                startDisplayLink()
-            }
-            idleFrames = 0
-        case .ended, .cancelled, .failed:
-            // 惯性是否真正开始要到后续 run-loop 才稳定，保留 displayLink 数帧判断。
-            idleFrames = 0
-            startDisplayLink()
-        default:
-            break
-        }
-    }
-
-    private func startDisplayLink() {
-        guard displayLink == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(step(_:)))
-        displayLink = link
-        link.add(to: .main, forMode: .common)
-    }
-
-    @objc
-    private func step(_ link: CADisplayLink) {
-        guard let scrollView else {
-            stopDisplayLink()
-            return
-        }
-
-        let panState = scrollView.panGestureRecognizer.state
-        let isTracking = panState == .began || panState == .changed || scrollView.isTracking
-        let isMoving = isTracking || scrollView.isDragging || scrollView.isDecelerating
-
-        if !isMoving {
-            idleFrames += 1
-            if idleFrames >= 4 {
-                stopDisplayLink()
-            }
-            lastOffsetY = scrollView.contentOffset.y
-            return
-        }
-        idleFrames = 0
-
-        let frameDuration: TimeInterval
-        if link.targetTimestamp > link.timestamp {
-            frameDuration = link.targetTimestamp - link.timestamp
-        } else {
-            frameDuration = link.duration
-        }
-
-        let minimumOffsetY = -scrollView.adjustedContentInset.top
-        let maximumOffsetY = max(
-            minimumOffsetY,
-            scrollView.contentSize.height
-                - scrollView.bounds.height
-                + scrollView.adjustedContentInset.bottom
-        )
-        let proposedY = scrollView.contentOffset.y
-        let clampedY = ReaderScrollVelocityPolicy.clampedOffsetY(
-            previousOffsetY: lastOffsetY,
-            proposedOffsetY: proposedY,
-            viewportHeight: scrollView.bounds.height,
-            frameDuration: frameDuration,
-            scrollSpeed: scrollSpeed,
-            isTracking: isTracking,
-            minimumOffsetY: minimumOffsetY,
-            maximumOffsetY: maximumOffsetY
-        )
-
-        if abs(clampedY - proposedY) > 0.5 {
-            scrollView.setContentOffset(
-                CGPoint(x: scrollView.contentOffset.x, y: clampedY),
-                animated: false
-            )
-        }
-        lastOffsetY = clampedY
-    }
-
-    private func stopDisplayLink() {
-        displayLink?.invalidate()
-        displayLink = nil
-        idleFrames = 0
-    }
-}
-
 private struct ReaderScrollViewResolver: UIViewRepresentable {
     let onResolve: (UIScrollView) -> Void
 
@@ -3644,7 +3447,6 @@ struct ContinuousScrollReader: View {
 
     @State private var scrolledPageID: Int?
     @State private var scrollView: UIScrollView?
-    @State private var motionGovernor = ReaderScrollMotionGovernor()
     @State private var runtimeState = ReaderScrollRuntimeState()
     @State private var restoreState = ReaderScrollRestoreState()
     @State private var viewportSize: CGSize = .zero
@@ -3703,10 +3505,6 @@ struct ContinuousScrollReader: View {
                     if scrollView !== resolvedScrollView {
                         scrollView = resolvedScrollView
                     }
-                    motionGovernor.attach(
-                        to: resolvedScrollView,
-                        scrollSpeed: scrollSpeed
-                    )
                 }
             )
             // 只在滚动阶段变化时读取几何。滚动每一帧不执行 SwiftUI 状态写入、
@@ -3740,7 +3538,6 @@ struct ContinuousScrollReader: View {
                 restoreScrollPosition(animated: true)
             }
             .onDisappear {
-                motionGovernor.detach()
                 runtimeState.cancelScheduledWork()
                 restoreState.cancel()
                 if let geometry = currentGeometrySnapshot() ?? runtimeState.geometry {
