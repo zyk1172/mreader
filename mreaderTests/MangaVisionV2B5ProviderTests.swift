@@ -195,7 +195,7 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         guard bundledModelURL() != nil else {
             throw XCTSkip("Bundled V2B5 model is unavailable in this test bundle.")
         }
-        let provider = MangaVisionV2B5Provider.shared
+        let provider = MangaVisionV2B5Provider()
         _ = await provider.descriptor
         let loadedBeforeRelease = await provider.runtimeIsLoadedForDiagnostics()
         XCTAssertTrue(loadedBeforeRelease)
