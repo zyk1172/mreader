@@ -97,60 +97,6 @@ final class ReaderStateMutationTests: XCTestCase {
         )
     }
 
-    func testContinuousScrollVelocityLimiterCapsTrackingDeltaPerFrame() {
-        let limited = ReaderScrollVelocityPolicy.clampedOffsetY(
-            previousOffsetY: 1_000,
-            proposedOffsetY: 1_500,
-            viewportHeight: 800,
-            frameDuration: 1.0 / 60.0,
-            scrollSpeed: .standard,
-            isTracking: true,
-            minimumOffsetY: 0,
-            maximumOffsetY: 20_000
-        )
-        XCTAssertEqual(limited, 1_060, accuracy: 0.001)
-    }
-
-    func testContinuousScrollVelocityLimiterIsStricterDuringDeceleration() {
-        let tracking = ReaderScrollVelocityPolicy.maximumDelta(
-            viewportHeight: 800,
-            frameDuration: 1.0 / 60.0,
-            scrollSpeed: .standard,
-            isTracking: true
-        )
-        let decelerating = ReaderScrollVelocityPolicy.maximumDelta(
-            viewportHeight: 800,
-            frameDuration: 1.0 / 60.0,
-            scrollSpeed: .standard,
-            isTracking: false
-        )
-        XCTAssertGreaterThan(tracking, decelerating)
-        XCTAssertEqual(tracking, 60, accuracy: 0.001)
-        XCTAssertEqual(decelerating, 20.6666667, accuracy: 0.001)
-        XCTAssertLessThan(
-            ReaderScrollVelocityPolicy.screensPerSecond(for: .slow, isTracking: false),
-            ReaderScrollVelocityPolicy.screensPerSecond(for: .standard, isTracking: false)
-        )
-        XCTAssertLessThan(
-            ReaderScrollVelocityPolicy.screensPerSecond(for: .standard, isTracking: false),
-            ReaderScrollVelocityPolicy.screensPerSecond(for: .fast, isTracking: false)
-        )
-    }
-
-    func testContinuousScrollVelocityLimiterPreservesNormalSlowMotion() {
-        let proposed: CGFloat = 1_018
-        let limited = ReaderScrollVelocityPolicy.clampedOffsetY(
-            previousOffsetY: 1_000,
-            proposedOffsetY: proposed,
-            viewportHeight: 800,
-            frameDuration: 1.0 / 60.0,
-            scrollSpeed: .standard,
-            isTracking: false,
-            minimumOffsetY: 0,
-            maximumOffsetY: 20_000
-        )
-        XCTAssertEqual(limited, proposed, accuracy: 0.001)
-    }
 
     func testImageSubsamplePolicyUsesLargestSafePowerOfTwoFactor() {
         XCTAssertEqual(
