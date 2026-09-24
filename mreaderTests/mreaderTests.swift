@@ -1466,16 +1466,30 @@ struct mreaderTests {
     }
 
     @Test func readerMemoryBudgetKeepsThreeGigabyteDeviceUsable() {
-        // iPad mini 5（A12 / 3GB）是本工程支持的最低内存机型，它必须拿到足够大的
-        // 解码缓存：单页 4096px 位图约 15-45MB，180MB 只放得下 4-11 页。
+        // iPad mini 5（A12 / 3GB）是最低内存支持档。静态预算要能保留多页，
+        // 但不再把 512MB decoded cache 当作不可收缩的产品约束。
         let miniFive = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
 
         #expect(miniFive.decodedImageCacheMB >= ReaderMemoryBudgetPlanner.minimumDecodedImageCacheMB)
-        #expect(miniFive.decodedImageCacheMB >= 512)
-        #expect(miniFive.decodedImagePreloadMB >= 256)
+        #expect(miniFive.decodedImageCacheMB == 384)
         #expect(miniFive.decodedImagePreloadMB < miniFive.decodedImageCacheMB)
-        #expect(miniFive.remotePageDataCacheMB >= 128)
+        #expect(miniFive.remotePageDataCacheMB >= 96)
         #expect(miniFive.remotePageDataDiskMB >= 512)
+    }
+
+    @Test func readerMemoryBudgetShrinksWithProcessHeadroom() {
+        let physical = UInt64(3 * 1_024 * 1_024 * 1_024)
+        let baseline = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: physical)
+        let pressured = ReaderMemoryBudgetPlanner.budget(
+            forPhysicalMemoryBytes: physical,
+            availableMemoryBytes: UInt64(512 * 1_024 * 1_024)
+        )
+
+        #expect(pressured.decodedImageCacheMB < baseline.decodedImageCacheMB)
+        #expect(pressured.decodedImagePreloadMB < baseline.decodedImagePreloadMB)
+        #expect(pressured.remotePageDataCacheMB < baseline.remotePageDataCacheMB)
+        #expect(pressured.remotePrefetchMB < baseline.remotePrefetchMB)
+        #expect(pressured.decodedImagePreloadMB < pressured.decodedImageCacheMB)
     }
 
     @Test func readerMemoryBudgetGrowsWithPhysicalMemory() {
@@ -1496,12 +1510,12 @@ struct mreaderTests {
         }
     }
 
-    @Test func readerMemoryBudgetDoesNotLeaveRemoteCacheAtLegacyFloor() {
-        // 16 Pro 是 8GB：远程页压缩数据缓存曾经只有 180MB，与解码位图缓存差了一个数量级。
+    @Test func readerMemoryBudgetKeepsRemoteDataProportional() {
         let sixteenPro = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
-        #expect(sixteenPro.remotePageDataCacheMB >= 512)
-        #expect(sixteenPro.decodedImageCacheMB >= 1_024)
+        #expect(sixteenPro.remotePageDataCacheMB >= 320)
+        #expect(sixteenPro.remotePageDataCacheMB < sixteenPro.decodedImageCacheMB)
+        #expect(sixteenPro.decodedImageCacheMB >= 768)
     }
 
     @Test func phoneShelfWidensColumnsInShortWideWindows() {
