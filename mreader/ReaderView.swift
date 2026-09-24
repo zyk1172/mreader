@@ -604,7 +604,7 @@ private final class ReaderProgressThumbnailCache {
     }
 }
 
-private actor ReaderAsyncPermitPool {
+actor ReaderAsyncPermitPool {
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<Bool, Never>
