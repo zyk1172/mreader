@@ -732,14 +732,16 @@ private final class ReaderImageCache {
         if let existingTask = inFlightLoads[key] {
             foregroundLoadKeys.insert(key)
             defer { foregroundLoadKeys.remove(key) }
-            return await existingTask.value
+            let image = await existingTask.value
+            return Task.isCancelled ? nil : image
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
             foregroundLoadKeys.insert(higherKey)
             defer { foregroundLoadKeys.remove(higherKey) }
-            return await existingTask.value
+            let image = await existingTask.value
+            return Task.isCancelled ? nil : image
         }
 
         let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
@@ -750,14 +752,18 @@ private final class ReaderImageCache {
         loadingCosts[key] = estimatedCost
         foregroundLoadKeys.insert(key)
         let image = await task.value
+        let callerCancelled = Task.isCancelled
+        if callerCancelled {
+            task.cancel()
+        }
         foregroundLoadKeys.remove(key)
         inFlightLoads[key] = nil
         loadingCosts[key] = nil
-        if let image {
+        if !callerCancelled, let image {
             storeDecodedImage(image, for: url, key: key)
         }
         drainPreloadQueue()
-        return image
+        return callerCancelled ? nil : image
     }
 
     func preload(
@@ -797,6 +803,7 @@ private final class ReaderImageCache {
         for staleKey in preloadKeys.subtracting(desiredKeys) {
             guard !foregroundLoadKeys.contains(staleKey) else { continue }
             inFlightLoads[staleKey]?.cancel()
+            preloadKeys.remove(staleKey)
         }
 
         let candidates = urls
@@ -854,11 +861,12 @@ private final class ReaderImageCache {
             Task { @MainActor [weak self] in
                 let image = await task.value
                 guard let self else { return }
+                let shouldStore = self.preloadKeys.contains(candidate.key)
                 self.inFlightLoads[candidate.key] = nil
                 self.loadingCosts[candidate.key] = nil
                 self.preloadKeys.remove(candidate.key)
                 self.activePreloadCount = max(0, self.activePreloadCount - 1)
-                if let image {
+                if shouldStore, let image {
                     self.storeDecodedImage(image, for: candidate.url, key: candidate.key)
                 }
                 self.drainPreloadQueue()
