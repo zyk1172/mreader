@@ -102,3 +102,30 @@ nonisolated enum ReaderMemoryBudgetPlanner {
         )
     }
 }
+
+
+/// Main-actor ownership marker used to reject late setup work from a Reader that
+/// has already disappeared. Per-service session IDs still guard teardown; this
+/// registry prevents a cancelled old setup task from claiming a service after a
+/// newer Reader has become active.
+@MainActor
+final class ReaderSessionRegistry {
+    static let shared = ReaderSessionRegistry()
+
+    private(set) var activeSessionID: UUID?
+
+    private init() {}
+
+    func activate(_ sessionID: UUID) {
+        activeSessionID = sessionID
+    }
+
+    func deactivate(_ sessionID: UUID) {
+        guard activeSessionID == sessionID else { return }
+        activeSessionID = nil
+    }
+
+    func isActive(_ sessionID: UUID) -> Bool {
+        activeSessionID == sessionID
+    }
+}
