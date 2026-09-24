@@ -439,13 +439,23 @@ actor MangaVisionService {
         requestGeneration
     }
 
+    func inFlightConsumerCountForDiagnostics() -> Int {
+        inFlight.values.reduce(0) { $0 + $1.consumers.count }
+    }
+
     /// Invalidates outstanding requests without deleting valid cached results. This is used
     /// when a reader/session boundary makes old work irrelevant even if Core ML cannot stop.
     func invalidateInFlightAnalyses() {
         advanceGenerationAndCancelInFlight()
     }
 
-    func beginReaderSession(sessionID: UUID) {
+    func beginReaderSession(
+        sessionID: UUID,
+        requiresActiveReader: Bool = false
+    ) async {
+        if requiresActiveReader {
+            guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
+        }
         activeReaderSessionID = sessionID
         // A newly opened Reader owns the runtime again. Any deferred unload from the
         // previously closed Reader must not fire after this point.

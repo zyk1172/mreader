@@ -78,6 +78,48 @@ struct ArchitectureAuditRegressionTests {
         catch is CancellationError {} catch { Issue.record("Unexpected error: \(error)") }
         #expect(try await pool.value(forKey: "page") { 3 } == 3)
     }
+
+    @Test func cancelledReaderPermitWaiterDoesNotConsumeCapacity() async {
+        let pool = ReaderAsyncPermitPool(maximumConcurrentPermits: 1)
+        let firstPermit = await pool.acquire()
+        #expect(firstPermit)
+
+        let blocked = Task { await pool.acquire() }
+        await Task.yield()
+        blocked.cancel()
+        let cancelledResult = await blocked.value
+        #expect(cancelledResult == false)
+
+        await pool.release()
+        let replacementPermit = await pool.acquire()
+        #expect(replacementPermit)
+        await pool.release()
+    }
+
+    @Test func staleReaderSessionCannotClearNewAppleTranslationCache() async {
+        let cache = AppleTranslationPageCache()
+        let oldSession = UUID()
+        let newSession = UUID()
+        let block = TextBlock(
+            text: "原文",
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.2),
+            translation: "translation"
+        )
+
+        ReaderSessionRegistry.shared.activate(oldSession)
+        await cache.beginReaderSession(sessionID: oldSession)
+        await cache.store([block], key: "page")
+        ReaderSessionRegistry.shared.activate(newSession)
+        await cache.beginReaderSession(sessionID: newSession)
+        await cache.releaseReaderSessionMemory(sessionID: oldSession)
+        let survivesStaleRelease = await cache.cachedBlocks(key: "page")
+        #expect(survivesStaleRelease?.count == 1)
+
+        await cache.releaseReaderSessionMemory(sessionID: newSession)
+        let clearedByOwner = await cache.cachedBlocks(key: "page")
+        #expect(clearedByOwner == nil)
+        ReaderSessionRegistry.shared.deactivate(newSession)
+    }
 }
 
 private actor AuditGate {

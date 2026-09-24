@@ -354,11 +354,14 @@ actor RemotePageCache {
 
     private let memoryCache = NSCache<NSString, NSData>()
     private var cachedKeys: Set<String> = []
-    private let memoryLimitMB: Int
+    private var memoryLimitMB: Int
     private var activeDownloads: [PageCacheKey: ActiveDownload] = [:]
     private var geometryRegisteredKeys: Set<PageCacheKey> = []
+    private var geometryRegisteredOrder: [PageCacheKey] = []
+    private let maximumGeometryRegistrationCount = 512
     /// 关闭 Reader 时推进代际，阻止旧磁盘/网络请求在清理后重新填充 NSCache。
     private var generation = UUID()
+    private var activeReaderSessionID: UUID?
 
     private init() {
         let limits = remoteCacheLimits()
@@ -393,6 +396,7 @@ actor RemotePageCache {
     }
 
     func data(for key: PageCacheKey, priority: RemotePagePriority) async -> Data? {
+        applyDynamicMemoryLimit()
         let epoch = generation
         let cacheKey = memoryKey(for: key)
         if let cached = memoryCache.object(forKey: cacheKey as NSString) {
@@ -472,6 +476,10 @@ actor RemotePageCache {
         }.value
         guard let size else { return }
         geometryRegisteredKeys.insert(key)
+        geometryRegisteredOrder.append(key)
+        while geometryRegisteredOrder.count > maximumGeometryRegistrationCount {
+            geometryRegisteredKeys.remove(geometryRegisteredOrder.removeFirst())
+        }
         let url = RemotePageLoader.pageURL(
             sourceID: key.sourceID,
             bookID: key.bookID,
@@ -509,18 +517,37 @@ actor RemotePageCache {
         }.value
     }
 
+    private func applyDynamicMemoryLimit() {
+        let nextLimitMB = remoteCacheLimits().memoryLimitMB
+        if nextLimitMB != memoryLimitMB {
+            memoryLimitMB = nextLimitMB
+            memoryCache.totalCostLimit = nextLimitMB * 1024 * 1024
+        }
+    }
+
     func clearMemoryCache() {
         memoryCache.removeAllObjects()
         cachedKeys.removeAll()
         MReaderLog.reader.debug("remote cache memory cleared")
     }
 
-    func releaseReaderSessionMemory() {
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
+        activeReaderSessionID = sessionID
+    }
+
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
+        activeReaderSessionID = nil
         // RemotePageCache is also used by offline translation. Reader teardown therefore
         // advances only the memory-cache generation: existing downloads may finish and
         // populate disk, but completions from the old Reader session cannot refill NSCache.
         generation = UUID()
         clearMemoryCache()
+        geometryRegisteredKeys.removeAll()
+        geometryRegisteredOrder.removeAll()
         MReaderLog.reader.notice("remote reader-session memory released")
     }
 
@@ -606,7 +633,9 @@ final class RemotePagePrefetcher {
     private var previewComicIDs: [UUID] = []
     private var lastDiskPruneDate = Date.distantPast
     private var diskPruneTask: Task<Void, Never>?
-    private let prefetchBudgetBytes: Int64 = remotePrefetchBudgetBytes()
+    private var prefetchBudgetBytes: Int64 {
+        remotePrefetchBudgetBytes()
+    }
     private let previewBudgetBytes: Int64 = 60 * 1024 * 1024
     private let unknownPageEstimateBytes: Int64 = 24 * 1024 * 1024
 

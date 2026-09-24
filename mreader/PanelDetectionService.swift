@@ -384,6 +384,7 @@ actor PanelDetectionService {
     private var memoryCache: [String: PanelPageLayout] = [:]
     private var memoryOrder: [String] = []
     private var generation = UUID()
+    private var activeReaderSessionID: UUID?
     private var diskWritesSincePrune = 0
     private var lastDiskPruneAt = Date.distantPast
 
@@ -446,7 +447,16 @@ actor PanelDetectionService {
         )
     }
 
-    func releaseReaderSessionMemory() {
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
+        activeReaderSessionID = sessionID
+    }
+
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
+        activeReaderSessionID = nil
         // Layouts are cheap to restore from disk. Advancing generation prevents an
         // in-flight Guided Panel calculation from repopulating memory after Reader exit.
         generation = UUID()
@@ -455,7 +465,9 @@ actor PanelDetectionService {
     }
 
     func clearCache() {
-        releaseReaderSessionMemory()
+        generation = UUID()
+        memoryOrder.removeAll()
+        memoryCache.removeAll()
         diskWritesSincePrune = 0
         lastDiskPruneAt = .distantPast
         try? fileManager.removeItem(at: cacheDirectory)

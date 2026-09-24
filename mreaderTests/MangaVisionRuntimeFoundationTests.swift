@@ -114,9 +114,10 @@ struct MangaVisionRuntimeFoundationTests {
     @Test func cancellingOneCoalescedConsumerDoesNotCancelSibling() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let inferenceGate = RuntimeFoundationInferenceGate()
         let provider = RuntimeFoundationFakeProvider(
             manifest: makeManifest(build: "consumer-cancel"),
-            delayMilliseconds: 120
+            inferenceGate: inferenceGate
         )
         let service = MangaVisionService(provider: provider, cacheDirectory: directory)
         let comicID = UUID()
@@ -137,7 +138,8 @@ struct MangaVisionRuntimeFoundationTests {
                 contentIdentity: identity
             )
         }
-        try await Task.sleep(nanoseconds: 15_000_000)
+        await inferenceGate.waitUntilStarted()
+
         let second = Task {
             try await service.analysis(
                 comicID: comicID,
@@ -147,9 +149,22 @@ struct MangaVisionRuntimeFoundationTests {
                 contentIdentity: identity
             )
         }
-        try await Task.sleep(nanoseconds: 15_000_000)
+
+        for _ in 0..<100 {
+            if await service.inFlightConsumerCountForDiagnostics() == 2 { break }
+            await Task.yield()
+        }
+        #expect(await service.inFlightConsumerCountForDiagnostics() == 2)
 
         first.cancel()
+        for _ in 0..<100 {
+            if await service.inFlightConsumerCountForDiagnostics() == 1 { break }
+            await Task.yield()
+        }
+        #expect(await service.inFlightConsumerCountForDiagnostics() == 1)
+
+        await inferenceGate.open()
+
         do {
             _ = try await first.value
             Issue.record("cancelled consumer unexpectedly returned a result")
@@ -530,10 +545,36 @@ private enum RuntimeFoundationFakeError: Error {
     case inferenceFailed
 }
 
+private actor RuntimeFoundationInferenceGate {
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        didStart = true
+        for waiter in startWaiters { waiter.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if didStart { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func open() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
     private let manifest: MangaVisionModelManifest
     private let delayMilliseconds: UInt64
     private let ignoresCancellation: Bool
+    private let inferenceGate: RuntimeFoundationInferenceGate?
     private let error: Error?
     private var descriptorCallCount = 0
     private var inferenceCallCount = 0
@@ -543,11 +584,13 @@ private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionMan
         manifest: MangaVisionModelManifest,
         delayMilliseconds: UInt64 = 0,
         ignoresCancellation: Bool = false,
+        inferenceGate: RuntimeFoundationInferenceGate? = nil,
         error: Error? = nil
     ) {
         self.manifest = manifest
         self.delayMilliseconds = delayMilliseconds
         self.ignoresCancellation = ignoresCancellation
+        self.inferenceGate = inferenceGate
         self.error = error
     }
 
@@ -577,7 +620,9 @@ private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionMan
     ) async throws -> MangaPageAnalysis {
         _ = image
         inferenceCallCount += 1
-        if delayMilliseconds > 0 {
+        if let inferenceGate {
+            await inferenceGate.wait()
+        } else if delayMilliseconds > 0 {
             if ignoresCancellation {
                 try? await Task.sleep(nanoseconds: delayMilliseconds * 1_000_000)
             } else {

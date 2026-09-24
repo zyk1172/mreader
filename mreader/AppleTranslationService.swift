@@ -20,7 +20,13 @@ actor AppleTranslationPageCache {
 
     private var memoryCache: [String: [TextBlock]] = [:]
     private var memoryOrder: [String] = []
+    private var activeReaderSessionID: UUID?
     private let memoryPageLimit = 40
+
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
+        activeReaderSessionID = sessionID
+    }
 
     func cachedBlocks(key: String) -> [TextBlock]? {
         if let blocks = memoryCache[key] {
@@ -49,6 +55,14 @@ actor AppleTranslationPageCache {
             memoryOrder.remove(at: index)
             memoryOrder.append(key)
         }
+    }
+
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
+        activeReaderSessionID = nil
+        clearMemoryCache()
     }
 
     func clearMemoryCache() {
