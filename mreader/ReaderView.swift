@@ -260,6 +260,37 @@ nonisolated enum ReaderContinuousScrollPolicy {
             ? currentOffsetY - max(newPageHeight, 1)
             : currentOffsetY
     }
+
+    static func approximateRestoreContentOffsetY(
+        progress: CGFloat,
+        minimumOffsetY: CGFloat,
+        maximumOffsetY: CGFloat
+    ) -> CGFloat {
+        let normalized = min(max(progress, 0), 1)
+        return minimumOffsetY + (maximumOffsetY - minimumOffsetY) * normalized
+    }
+
+    static func hasReachedRestoreTarget(
+        targetIndex: Int,
+        visiblePageID: Int?,
+        pageCount: Int,
+        contentOffsetY: CGFloat,
+        minimumOffsetY: CGFloat,
+        maximumOffsetY: CGFloat
+    ) -> Bool {
+        if visiblePageID == targetIndex {
+            return true
+        }
+        if targetIndex == 0, contentOffsetY <= minimumOffsetY + 2 {
+            return true
+        }
+        let lastIndex = max(0, pageCount - 1)
+        if targetIndex >= max(0, lastIndex - 1),
+           contentOffsetY >= maximumOffsetY - 2 {
+            return true
+        }
+        return false
+    }
 }
 
 /// Downward reader dismissal is deliberately a two-finger-only gesture. The
@@ -3392,6 +3423,8 @@ private final class ReaderScrollRestoreState {
     var targetIndex: Int?
     var targetPageProgress: CGFloat = 0
     var attemptsRemaining = 0
+    var didPrimeApproximateOffset = false
+    var didScheduleFinalFallback = false
     var generation = UUID()
 
     var isRestoring: Bool { targetIndex != nil }
@@ -3401,7 +3434,10 @@ private final class ReaderScrollRestoreState {
         generation = UUID()
         self.targetIndex = targetIndex
         targetPageProgress = min(max(pageProgress, 0), 1)
-        attemptsRemaining = 24
+        // 仅用于打开/显式跳转；不会进入正常滑动热路径。
+        attemptsRemaining = 48
+        didPrimeApproximateOffset = false
+        didScheduleFinalFallback = false
         return generation
     }
 
@@ -3413,11 +3449,15 @@ private final class ReaderScrollRestoreState {
     func complete() {
         targetIndex = nil
         attemptsRemaining = 0
+        didPrimeApproximateOffset = false
+        didScheduleFinalFallback = false
     }
 
     func cancel() {
         targetIndex = nil
         attemptsRemaining = 0
+        didPrimeApproximateOffset = false
+        didScheduleFinalFallback = false
         generation = UUID()
     }
 }
@@ -3451,7 +3491,8 @@ struct ContinuousScrollReader: View {
 
     var body: some View {
         GeometryReader { viewportProxy in
-            ScrollView {
+            ScrollViewReader { proxy in
+                ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(pages) { page in
                         LocalImageView(
@@ -3510,7 +3551,7 @@ struct ContinuousScrollReader: View {
                 runtimeState.updateGeometry(exact)
                 if newPhase == .idle {
                     if restoreState.isRestoring {
-                        finishRestore(using: exact)
+                        finishRestore(using: exact, proxy: proxy, generation: restoreState.generation)
                     } else {
                         commitCurrentScrollPosition(using: exact, notifyParent: true)
                     }
@@ -3521,7 +3562,7 @@ struct ContinuousScrollReader: View {
             }
             .onAppear {
                 viewportSize = viewportProxy.size
-                restoreScrollPosition(animated: false)
+                restoreScrollPosition(proxy, animated: false)
             }
             .onChange(of: viewportProxy.size) { _, newSize in
                 guard newSize != .zero else { return }
@@ -3531,14 +3572,15 @@ struct ContinuousScrollReader: View {
                 restoreScrollPosition(animated: false)
             }
             .onChange(of: scrollJumpRequestID) { _, _ in
-                restoreScrollPosition(animated: true)
+                restoreScrollPosition(proxy, animated: true)
             }
-            .onDisappear {
-                runtimeState.cancelScheduledWork()
-                restoreState.cancel()
-                if let geometry = currentGeometrySnapshot() ?? runtimeState.geometry {
-                    runtimeState.updateGeometry(geometry)
-                    commitCurrentScrollPosition(using: geometry, notifyParent: true)
+                .onDisappear {
+                    runtimeState.cancelScheduledWork()
+                    restoreState.cancel()
+                    if let geometry = currentGeometrySnapshot() ?? runtimeState.geometry {
+                        runtimeState.updateGeometry(geometry)
+                        commitCurrentScrollPosition(using: geometry, notifyParent: true)
+                    }
                 }
             }
         }
@@ -3586,7 +3628,7 @@ struct ContinuousScrollReader: View {
         }
     }
 
-    private func restoreScrollPosition(animated: Bool) {
+    private func restoreScrollPosition(_ proxy: ScrollViewProxy, animated: Bool) {
         guard readingMode == .continuousScroll || readingMode == .infiniteScroll else { return }
         let targetIndex = min(max(currentPageIndex, 0), max(0, pages.count - 1))
         let generation = restoreState.begin(
@@ -3596,24 +3638,31 @@ struct ContinuousScrollReader: View {
         didRestorePosition = false
         runtimeState.cancelScheduledWork()
 
-        if animated {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                scrolledPageID = targetIndex
+        // ScrollPosition 只负责原生可见页跟踪；远距离恢复使用命令式 scrollTo。
+        // 这样重试是真正的“再次跳转”，而不是重复给同一个 binding 值赋值。
+        DispatchQueue.main.async {
+            guard restoreState.generation == generation else { return }
+            if animated {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    proxy.scrollTo(targetIndex, anchor: .top)
+                }
+            } else {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo(targetIndex, anchor: .top)
+                }
             }
-        } else {
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                scrolledPageID = targetIndex
-            }
+            scheduleRestoreFinalization(
+                proxy,
+                generation: generation,
+                delay: animated ? 0.36 : 0.08
+            )
         }
-        scheduleRestoreFinalization(
-            generation: generation,
-            delay: animated ? 0.36 : 0.12
-        )
     }
 
     private func scheduleRestoreFinalization(
+        _ proxy: ScrollViewProxy,
         generation: UUID,
         delay: TimeInterval
     ) {
@@ -3624,49 +3673,100 @@ struct ContinuousScrollReader: View {
                   restoreState.isRestoring else { return }
             if let geometry = currentGeometrySnapshot() {
                 runtimeState.updateGeometry(geometry)
-                finishRestore(using: geometry)
+                finishRestore(using: geometry, proxy: proxy, generation: generation)
             } else {
-                retryRestore(generation: generation)
+                retryRestore(proxy, generation: generation)
             }
         }
         runtimeState.restoreWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func retryRestore(generation: UUID) {
+    private func retryRestore(_ proxy: ScrollViewProxy, generation: UUID) {
         guard restoreState.generation == generation,
               let targetIndex = restoreState.targetIndex else { return }
-        guard restoreState.consumeRetry() else {
-            didRestorePosition = true
-            restoreState.complete()
-            MReaderLog.reader.notice(
-                "native scroll restore timeout page=\(targetIndex, privacy: .public); kept ScrollPosition target"
-            )
+
+        if !restoreState.consumeRetry() {
+            guard !restoreState.didScheduleFinalFallback else {
+                didRestorePosition = true
+                restoreState.complete()
+                MReaderLog.reader.error(
+                    "native scroll restore failed exact target page=\(targetIndex, privacy: .public); kept last fallback position"
+                )
+                return
+            }
+            restoreState.didScheduleFinalFallback = true
+            primeApproximateRestoreOffsetIfNeeded(targetIndex: targetIndex)
+            proxy.scrollTo(targetIndex, anchor: .top)
+            scheduleRestoreFinalization(proxy, generation: generation, delay: 0.20)
             return
         }
 
-        scrolledPageID = targetIndex
-        scheduleRestoreFinalization(generation: generation, delay: 0.06)
+        // 第一次确认仍未抵达目标时，用已保存的全局进度把 UIScrollView 先送到目标附近，
+        // 帮助超长 LazyVStack materialize 远端区域；只执行一次。
+        primeApproximateRestoreOffsetIfNeeded(targetIndex: targetIndex)
+        proxy.scrollTo(targetIndex, anchor: .top)
+        scheduleRestoreFinalization(proxy, generation: generation, delay: 0.075)
     }
 
-    private func finishRestore(using geometry: ReaderScrollGeometrySnapshot) {
-        guard let targetIndex = restoreState.targetIndex,
+    private func primeApproximateRestoreOffsetIfNeeded(targetIndex: Int) {
+        guard targetIndex > 0,
+              !restoreState.didPrimeApproximateOffset,
+              let scrollView else { return }
+        restoreState.didPrimeApproximateOffset = true
+
+        let minimumOffsetY = -scrollView.adjustedContentInset.top
+        let maximumOffsetY = max(
+            minimumOffsetY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+        )
+        guard maximumOffsetY > minimumOffsetY + max(scrollView.bounds.height, 1) else { return }
+
+        let storedProgress = CGFloat(min(max(scrollProgress, 0), 1))
+        let indexProgress = CGFloat(targetIndex) / CGFloat(max(pages.count - 1, 1))
+        let progressHint = storedProgress > 0.0001 ? storedProgress : indexProgress
+        let approximateY = ReaderContinuousScrollPolicy.approximateRestoreContentOffsetY(
+            progress: progressHint,
+            minimumOffsetY: minimumOffsetY,
+            maximumOffsetY: maximumOffsetY
+        )
+        guard approximateY > minimumOffsetY + 2 else { return }
+
+        scrollView.setContentOffset(
+            CGPoint(x: scrollView.contentOffset.x, y: approximateY),
+            animated: false
+        )
+        if let geometry = currentGeometrySnapshot() {
+            runtimeState.updateGeometry(geometry)
+        }
+        MReaderLog.reader.debug(
+            "native scroll restore primed page=\(targetIndex, privacy: .public) progress=\(String(format: "%.4f", progressHint), privacy: .public) approximateY=\(Int(approximateY), privacy: .public)"
+        )
+    }
+
+    private func finishRestore(
+        using geometry: ReaderScrollGeometrySnapshot,
+        proxy: ScrollViewProxy,
+        generation: UUID
+    ) {
+        guard restoreState.generation == generation,
+              let targetIndex = restoreState.targetIndex,
               pages.indices.contains(targetIndex) else {
             restoreState.complete()
             didRestorePosition = true
             return
         }
 
-        // 远距离恢复到 4000+ 页时，ScrollPosition 可能还在 LazyVStack 估算阶段；
-        // 非零目标仍停在内容顶部就继续等，不再依赖每页 frame preference。
-        if targetIndex > 0,
-           geometry.contentOffsetY <= geometry.minimumOffsetY + 2,
-           restoreState.consumeRetry() {
-            scrolledPageID = targetIndex
-            scheduleRestoreFinalization(
-                generation: restoreState.generation,
-                delay: 0.06
-            )
+        let reachedTarget = ReaderContinuousScrollPolicy.hasReachedRestoreTarget(
+            targetIndex: targetIndex,
+            visiblePageID: scrolledPageID,
+            pageCount: pages.count,
+            contentOffsetY: geometry.contentOffsetY,
+            minimumOffsetY: geometry.minimumOffsetY,
+            maximumOffsetY: geometry.maximumOffsetY
+        )
+        guard reachedTarget else {
+            retryRestore(proxy, generation: generation)
             return
         }
 
@@ -3696,9 +3796,8 @@ struct ContinuousScrollReader: View {
             )
         )
 
-        let globalProgress: CGFloat
         let denominator = max(geometry.maximumOffsetY - geometry.minimumOffsetY, 1)
-        globalProgress = min(
+        let globalProgress = min(
             max((restoredY - geometry.minimumOffsetY) / denominator, 0),
             1
         )
