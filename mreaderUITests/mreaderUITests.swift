@@ -197,6 +197,37 @@ final class mreaderUITests: XCTestCase {
     }
 
     @MainActor
+    func testReaderPagingMemoryAndHitchMetrics() throws {
+        let app = launchApp()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+
+        // Keep CI deterministic: one recorded iteration plus XCTest's warm-up pass.
+        // The xcresult now carries target-app memory delta and hitch-time telemetry
+        // for a real Reader page transition without hard-coding simulator-specific
+        // thresholds that would turn normal runner variance into false failures.
+        let options = XCTMeasureOptions()
+        options.iterationCount = 1
+        options.invocationOptions = .manuallyStop
+        measure(
+            metrics: [
+                XCTMemoryMetric(application: app),
+                XCTHitchMetric(application: app)
+            ],
+            options: options
+        ) {
+            reader.swipeLeft()
+            stopMeasuring()
+            reader.swipeRight()
+            XCTAssertTrue(reader.exists)
+        }
+    }
+
+    @MainActor
     func testV2B5ProviderReaderGuidedPanelAndOCRControls() throws {
         let app = launchV2B5ReaderFixture()
         let openReader = element("mreader.shelf.uiTestingFixture", in: app)
