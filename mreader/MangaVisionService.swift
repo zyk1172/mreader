@@ -401,6 +401,18 @@ actor MangaVisionService {
         advanceGenerationAndCancelInFlight()
     }
 
+    /// Reader 会话结束：取消旧推理、清分析内存，并释放底层 Core ML runtime。
+    /// 磁盘分析缓存保留，重新打开同页仍可直接命中。
+    func releaseReaderSessionMemory() async {
+        advanceGenerationAndCancelInFlight()
+        memoryCache.removeAll()
+        memoryOrder.removeAll()
+        if let releasable = provider as? any MangaVisionRuntimeReleasable {
+            await releasable.releaseRuntimeMemory()
+        }
+        MReaderLog.reader.notice("Manga Vision reader-session memory released")
+    }
+
     func clearCache() {
         advanceGenerationAndCancelInFlight()
         memoryCache.removeAll()
