@@ -1518,6 +1518,7 @@ struct ReaderView: View {
                 await OCRRecognitionCache.shared.releaseReaderSessionMemory()
                 await AppleTranslationPageCache.shared.clearMemoryCache()
                 await TranslationContextRegistry.shared.clearSessionMemory()
+                await PanelDetectionService.shared.releaseReaderSessionMemory()
                 await MangaVisionService.shared.releaseReaderSessionMemory()
                 await OCRRuntimeService.flush()
                 MReaderLog.reader.notice("reader session memory released")
