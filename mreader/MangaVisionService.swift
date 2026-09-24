@@ -439,6 +439,10 @@ actor MangaVisionService {
         requestGeneration
     }
 
+    func inFlightConsumerCountForDiagnostics() -> Int {
+        inFlight.values.reduce(0) { $0 + $1.consumers.count }
+    }
+
     /// Invalidates outstanding requests without deleting valid cached results. This is used
     /// when a reader/session boundary makes old work irrelevant even if Core ML cannot stop.
     func invalidateInFlightAnalyses() {
