@@ -3895,6 +3895,7 @@ struct GuidedPanelReader: View {
     @State private var isPanelTransitioning = false
     @State private var panelMotionTask: Task<Void, Never>?
     @State private var pageBoundaryPreparationTask: Task<Void, Never>?
+    @State private var promotedMangaVisionTask: Task<Void, Never>?
     @State private var layoutStore = GuidedPanelLayoutStore()
     @State private var focusStore = GuidedPanelFocusPreviewStore()
     @State private var pageTransitionTarget: GuidedPanelPageTransitionTarget?
@@ -4027,6 +4028,8 @@ struct GuidedPanelReader: View {
             panelMotionTask = nil
             pageBoundaryPreparationTask?.cancel()
             pageBoundaryPreparationTask = nil
+            promotedMangaVisionTask?.cancel()
+            promotedMangaVisionTask = nil
             isPanelTransitioning = false
             layoutStore.prefetchTask?.cancel()
             layoutStore.prefetchTask = nil
@@ -4507,7 +4510,8 @@ struct GuidedPanelReader: View {
         // user reaches the page boundary unusually quickly.
         let comicID = comic.id
         let pages = pages
-        Task(priority: .userInitiated) {
+        promotedMangaVisionTask?.cancel()
+        promotedMangaVisionTask = Task(priority: .userInitiated) {
             await MangaVisionService.shared.preanalyze(
                 comicID: comicID,
                 pages: pages,
