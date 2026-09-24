@@ -1520,6 +1520,9 @@ struct ReaderView: View {
             translationPrefetchTask = nil
             mangaVisionPreanalysisTask?.cancel()
             mangaVisionPreanalysisTask = nil
+            Task {
+                await MangaVisionService.shared.invalidateInFlightAnalyses()
+            }
             recordReadingActivity()
             persistCurrentReaderPosition(reason: "readerDisappear", force: true)
         }
