@@ -111,6 +111,57 @@ struct MangaVisionRuntimeFoundationTests {
         #expect(await provider.inferenceCalls() == 1)
     }
 
+    @Test func cancellingOneCoalescedConsumerDoesNotCancelSibling() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "consumer-cancel"),
+            delayMilliseconds: 120
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let comicID = UUID()
+        let url = URL(fileURLWithPath: "/tmp/mreader-runtime-consumer-cancel.png")
+        let identity = PageContentIdentity.remote(
+            provider: "fixture",
+            resource: "consumer-cancel",
+            revision: "1"
+        )
+        let image = makeImage()
+
+        let first = Task {
+            try await service.analysis(
+                comicID: comicID,
+                pageIndex: 0,
+                pageURL: url,
+                image: image,
+                contentIdentity: identity
+            )
+        }
+        try await Task.sleep(nanoseconds: 15_000_000)
+        let second = Task {
+            try await service.analysis(
+                comicID: comicID,
+                pageIndex: 0,
+                pageURL: url,
+                image: image,
+                contentIdentity: identity
+            )
+        }
+        try await Task.sleep(nanoseconds: 15_000_000)
+
+        first.cancel()
+        do {
+            _ = try await first.value
+            Issue.record("cancelled consumer unexpectedly returned a result")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        let siblingResult = try await second.value
+        #expect(!siblingResult.panels.isEmpty)
+        #expect(await provider.inferenceCalls() == 1)
+    }
+
     @Test func modelBuildChangeInvalidatesCacheWithoutManualVersionBump() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
