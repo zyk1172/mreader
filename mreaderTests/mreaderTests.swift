@@ -3684,14 +3684,14 @@ struct mreaderTests {
         #expect(decoded.pageCount == 128)
     }
 
-    @Test func readerCacheWindowUsesFourTwoForStripModes() {
+    @Test func readerCacheWindowKeepsStripDecodePrefetchSmall() {
         #expect(
             ReaderPageCacheWindowPolicy.window(for: .continuousScroll)
-                == ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+                == ReaderPageCacheWindow(forwardCount: 1, backwardCount: 1)
         )
         #expect(
             ReaderPageCacheWindowPolicy.window(for: .infiniteScroll)
-                == ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+                == ReaderPageCacheWindow(forwardCount: 1, backwardCount: 1)
         )
     }
 
