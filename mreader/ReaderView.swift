@@ -5474,7 +5474,12 @@ private struct ReaderProgressThumbnail: View {
         .accessibilityLabel("\(pageNumber)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .task(id: url.absoluteString) {
-            image = await ReaderProgressThumbnailCache.shared.image(for: url)
+            let loaded = await ReaderProgressThumbnailCache.shared.image(for: url)
+            guard !Task.isCancelled else { return }
+            image = loaded
+        }
+        .onDisappear {
+            image = nil
         }
     }
 }
