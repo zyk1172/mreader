@@ -22,6 +22,20 @@ nonisolated struct OCRCandidateRecognitionResult: Sendable {
     let visionKitReference: AppleOCRReference?
 }
 
+nonisolated enum OCRMemoryPolicy {
+    static func highResolutionMaxPixelSize(availableMemoryBytes: UInt64?) -> CGFloat {
+        guard let availableMemoryBytes, availableMemoryBytes > 0 else { return 4_500 }
+        let availableMB = availableMemoryBytes / UInt64(1_024 * 1_024)
+        if availableMB < 700 { return 2_800 }
+        if availableMB < 1_400 { return 3_600 }
+        return 4_500
+    }
+
+    static func currentHighResolutionMaxPixelSize() -> CGFloat {
+        highResolutionMaxPixelSize(availableMemoryBytes: UInt64(os_proc_available_memory()))
+    }
+}
+
 struct OCRPreprocessor {
     struct Options: Sendable {
         var isRightToLeft: Bool
@@ -34,8 +48,6 @@ struct OCRPreprocessor {
 
     // CIContext 创建成本高，整个 OCR 预处理共享一个
     nonisolated private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
-    // OCR 高清图上限：普通对白 4500px 足够，避免每次 12000px 解码带来巨大内存/耗时峰值
-    nonisolated private static let highResolutionMaxPixelSize: CGFloat = 4_500
     // 低阈值只能用于明确的恢复 pass，不能污染第一遍页面定位。
     nonisolated private static let recoveryMinimumTextHeightScale = 0.72
 
@@ -58,18 +70,19 @@ struct OCRPreprocessor {
 
     nonisolated static func highResolutionImage(from url: URL, fallback: UIImage?) async -> UIImage? {
         await Task.detached(priority: .userInitiated) {
+            let maxPixelSize = OCRMemoryPolicy.currentHighResolutionMaxPixelSize()
             if RemotePageLoader.isRemotePageURL(url),
                let data = await RemotePageLoader.imageData(forRemotePageURL: url),
-               let image = imageFromData(data, maxPixelSize: highResolutionMaxPixelSize) {
+               let image = imageFromData(data, maxPixelSize: maxPixelSize) {
                 return image
             }
             if ComicManager.isArchivePageURL(url),
                let data = ComicManager.imageData(forArchivePageURL: url),
-               let image = imageFromData(data, maxPixelSize: highResolutionMaxPixelSize) {
+               let image = imageFromData(data, maxPixelSize: maxPixelSize) {
                 return image
             }
             if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-               let image = imageFromSource(source, maxPixelSize: highResolutionMaxPixelSize) {
+               let image = imageFromSource(source, maxPixelSize: maxPixelSize) {
                 return image
             }
             return fallback
