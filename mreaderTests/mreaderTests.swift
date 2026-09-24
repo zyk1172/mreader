@@ -3684,6 +3684,31 @@ struct mreaderTests {
         #expect(decoded.pageCount == 128)
     }
 
+    @Test func readerCacheWindowUsesFourTwoForStripModes() {
+        #expect(
+            ReaderPageCacheWindowPolicy.window(for: .continuousScroll)
+                == ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+        )
+        #expect(
+            ReaderPageCacheWindowPolicy.window(for: .infiniteScroll)
+                == ReaderPageCacheWindow(forwardCount: 4, backwardCount: 2)
+        )
+    }
+
+    @Test func readerCacheWindowUsesEightTwoForPagedModes() {
+        for mode in [
+            ReadingMode.horizontalPage,
+            .verticalPage,
+            .doublePage,
+            .guidedPanel
+        ] {
+            #expect(
+                ReaderPageCacheWindowPolicy.window(for: mode)
+                    == ReaderPageCacheWindow(forwardCount: 8, backwardCount: 2)
+            )
+        }
+    }
+
     @Test func continuousPrefetchFollowsScrollDirectionWithinBounds() {
         let down = ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: 5,
