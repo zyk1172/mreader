@@ -3151,17 +3151,17 @@ nonisolated enum ReaderScrollVelocityPolicy {
     ) -> CGFloat {
         switch (scrollSpeed, isTracking) {
         case (.slow, true):
-            return 1.8
+            return 3.5
         case (.slow, false):
-            return 1.10
+            return 1.15
         case (.standard, true):
-            return 2.4
+            return 4.5
         case (.standard, false):
-            return 1.45
+            return 1.55
         case (.fast, true):
-            return 3.0
+            return 5.5
         case (.fast, false):
-            return 1.85
+            return 1.95
         }
     }
 
