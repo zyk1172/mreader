@@ -577,7 +577,7 @@ nonisolated enum MangaVisionV2B5ProductionIdentity {
     static let calibrationRevision = "v2b5-calibration-v1"
 }
 
-actor MangaVisionV2B5Provider: MangaVisionProvider {
+actor MangaVisionV2B5Provider: MangaVisionProvider, MangaVisionRuntimeReleasable {
     static let shared = MangaVisionV2B5Provider()
     static let modelResourceName = "MangaVisionV2B5"
     static let modelIdentifier = "manga-vision-v2b5-coreml-fp32-640"
@@ -680,6 +680,16 @@ actor MangaVisionV2B5Provider: MangaVisionProvider {
 
     func mainThreadExecutionObservedForDiagnostics() -> Bool {
         mainThreadExecutionObserved
+    }
+
+    func runtimeIsLoadedForDiagnostics() -> Bool {
+        runtime != nil
+    }
+
+    func releaseRuntimeMemory() {
+        guard runtime != nil else { return }
+        runtime = nil
+        MReaderLog.reader.notice("Manga Vision Core ML runtime released")
     }
 
     private func loadRuntime() throws -> Runtime {
