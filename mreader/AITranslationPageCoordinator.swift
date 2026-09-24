@@ -221,6 +221,7 @@ actor AITranslationPageCoordinator {
     private var memoryOrder: [String] = []
     private let workPool = SharedPageTaskPool<AITranslationPipelineResult>()
     private var generation = UUID()
+    private var activeReaderSessionID: UUID?
     private let memoryPageLimit = 80
     private let diskByteLimit: Int64 = 50 * 1024 * 1024
 
@@ -311,10 +312,16 @@ actor AITranslationPageCoordinator {
         return cachedBlocks(forKey: prepared.cacheKey) != nil
     }
 
+    func beginReaderSession(sessionID: UUID) {
+        activeReaderSessionID = sessionID
+    }
+
     /// 实时页翻译 coordinator 只服务 Reader；离线整本翻译使用独立的
     /// OfflineTranslationCoordinator/TranslationRuntimeService。Reader 关闭时可以
     /// 安全推进代际并取消整个实时 workPool，避免旧结果在退出后重新填充 80 页内存缓存。
-    func releaseReaderSessionMemory() async {
+    func releaseReaderSessionMemory(sessionID: UUID) async {
+        guard activeReaderSessionID == sessionID else { return }
+        activeReaderSessionID = nil
         generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
@@ -323,7 +330,10 @@ actor AITranslationPageCoordinator {
     }
 
     func clearCache() async {
-        await releaseReaderSessionMemory()
+        generation = UUID()
+        memoryCache.removeAll()
+        memoryOrder.removeAll()
+        await workPool.cancelAll()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
