@@ -22,9 +22,9 @@ nonisolated struct ReaderMemoryBudget: Equatable {
 /// 单进程 jetsam 上限约 1.3GB，所以最保守的一档必须按「设备能承受多少」来给，而不是按
 /// 「比它更弱的设备」留余量：旧的 180MB 只放得下 4 页 4096px 位图，往回翻一页就要重新解码。
 ///
-/// 比例大致是「解码位图约三分之一、远程压缩数据约八分之一」的进程预算。NSCache 在内存压力
-/// 下会自行逐出，进程收到 memory warning 时解码缓存与远程数据缓存都会整体清空，因此上限
-/// 可以给到这一档而不会直接换来 jetsam。
+/// 6GB 以上设备把远程压缩页缓存提高到至少 800MB。超大 Komga 条漫（数 GB / 数千页）
+/// 连续翻页时，384MB 会过早逐出刚预取的压缩页，导致下一页重新走磁盘甚至网络。
+/// 该缓存使用 NSCache，收到 memory warning 时会主动整体清空，因此 800MB 是上限而非强制常驻。
 nonisolated enum ReaderMemoryBudgetPlanner {
     static func budget(forPhysicalMemoryBytes bytes: UInt64) -> ReaderMemoryBudget {
         let ramGB = Double(bytes) / (1024 * 1024 * 1024)
@@ -33,7 +33,7 @@ nonisolated enum ReaderMemoryBudgetPlanner {
             return ReaderMemoryBudget(
                 decodedImageCacheMB: 1_024,
                 decodedImagePreloadMB: 768,
-                remotePageDataCacheMB: 512,
+                remotePageDataCacheMB: 1_024,
                 remotePageDataDiskMB: 3_072,
                 remotePrefetchMB: 1_024
             )
@@ -41,7 +41,7 @@ nonisolated enum ReaderMemoryBudgetPlanner {
             return ReaderMemoryBudget(
                 decodedImageCacheMB: 896,
                 decodedImagePreloadMB: 672,
-                remotePageDataCacheMB: 384,
+                remotePageDataCacheMB: 800,
                 remotePageDataDiskMB: 2_048,
                 remotePrefetchMB: 768
             )
