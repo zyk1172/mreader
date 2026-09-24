@@ -817,8 +817,10 @@ private final class ReaderImageCache {
         preloadQueue = candidates
         maximumConcurrentPreloads = max(1, maximumConcurrent)
         let queuedBytes = candidates.reduce(0) { $0 + $1.cost }
+        let residentBytes = cachedCostByKey.values.reduce(0, +)
+        let activeBytes = loadingCosts.values.reduce(0, +)
         MReaderLog.reader.debug(
-            "decoded image preload budget=\(self.preloadBudgetBytes, privacy: .public) queuedBytes=\(queuedBytes, privacy: .public) queued=\(candidates.count, privacy: .public)"
+            "decoded image preload budget=\(self.preloadBudgetBytes, privacy: .public) residentMB=\(residentBytes / (1024 * 1024), privacy: .public) activeMB=\(activeBytes / (1024 * 1024), privacy: .public) queuedBytes=\(queuedBytes, privacy: .public) queued=\(candidates.count, privacy: .public)"
         )
         drainPreloadQueue()
     }
@@ -864,21 +866,36 @@ private final class ReaderImageCache {
         }
     }
 
-    func clearMemoryCache() {
+    func cancelPreloads() {
         scheduledPreload?.cancel()
         scheduledPreload = nil
         preloadQueue.removeAll()
-        for key in preloadKeys {
+
+        let cancellingKeys = preloadKeys.subtracting(foregroundLoadKeys)
+        for key in cancellingKeys {
             inFlightLoads[key]?.cancel()
             inFlightLoads[key] = nil
             loadingCosts[key] = nil
+            preloadKeys.remove(key)
         }
-        preloadKeys.removeAll()
+        // activePreloadCount 会由仍在执行的 completion 正常归零；这里不能强行置 0，
+        // 否则旧 completion 回来后可能和新一轮 preload 产生并发计数错乱。
+        if !cancellingKeys.isEmpty {
+            MReaderLog.reader.debug(
+                "decoded image preloads cancelled count=\(cancellingKeys.count, privacy: .public)"
+            )
+        }
+    }
+
+    func clearMemoryCache() {
+        cancelPreloads()
         foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
         cachedURLByKey.removeAll()
         cachedCostByKey.removeAll()
+        loadingCosts.removeAll()
+        inFlightLoads.removeAll()
         MReaderLog.reader.debug("decoded image cache memory cleared")
     }
 
@@ -1490,6 +1507,7 @@ struct ReaderView: View {
         }
         .onDisappear {
             RemotePagePrefetcher.shared.cancelAll()
+            ReaderImageCache.shared.cancelPreloads()
             translationPrefetchTask?.cancel()
             translationPrefetchTask = nil
             mangaVisionPreanalysisTask?.cancel()
@@ -5758,6 +5776,17 @@ struct LocalImageView: View {
                 loadFailed = false
                 recognizedPipelineCache = nil
                 recognizedPipelineCacheKey = nil
+                layoutStore = TranslationLayoutStore()
+                textBlocks.removeAll(keepingCapacity: false)
+                ocrTextBlocks.removeAll(keepingCapacity: false)
+                debugRawBlocks.removeAll(keepingCapacity: false)
+                debugCandidateBlocks.removeAll(keepingCapacity: false)
+                debugFilteredBlocks.removeAll(keepingCapacity: false)
+                debugFilteredOutBlocks.removeAll(keepingCapacity: false)
+                debugLineBlocks.removeAll(keepingCapacity: false)
+                debugBubbleBlocks.removeAll(keepingCapacity: false)
+                debugRejectedBlocks.removeAll(keepingCapacity: false)
+                appleTranslationRequests.removeAll(keepingCapacity: false)
 #if DEBUG
                 mangaVisionDebugAnalysis = nil
 #endif
@@ -6690,14 +6719,17 @@ struct LocalImageView: View {
         }
 
         let loadedImage = await ReaderImageCache.shared.loadImage(for: url, maxPixelSize: maxPixelSize)
+        guard !Task.isCancelled else { return }
         await MainActor.run {
-            guard self.url == pageURL else { return }
+            guard !Task.isCancelled, self.url == pageURL else { return }
             self.uiImage = loadedImage
             self.loadedPageURL = loadedImage == nil ? nil : pageURL
             self.loadFailed = loadedImage == nil
             self.isLoadingImage = false
         }
+        guard !Task.isCancelled else { return }
         let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+        guard !Task.isCancelled else { return }
         if isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
