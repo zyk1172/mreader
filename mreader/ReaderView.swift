@@ -992,6 +992,7 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         return nil
     }
     let image = autoreleasepool { () -> UIImage? in
+        let decodeStartedAt = ProcessInfo.processInfo.systemUptime
         let source: CGImageSource?
         if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
             source = CGImageSourceCreateWithData(data as CFData, nil)
@@ -1029,6 +1030,16 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         }
 
         if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            let elapsedMS = (ProcessInfo.processInfo.systemUptime - decodeStartedAt) * 1_000
+            let outputMB = (cgImage.bytesPerRow * cgImage.height) / (1024 * 1024)
+            if elapsedMS >= 80 || subsampleFactor != nil {
+                let sourceDescription = sourceSize.map {
+                    "\(Int($0.width))x\(Int($0.height))"
+                } ?? "unknown"
+                MReaderLog.reader.debug(
+                    "image decode completed source=\(sourceDescription, privacy: .public) output=\(cgImage.width, privacy: .public)x\(cgImage.height, privacy: .public) outputMB=\(outputMB, privacy: .public) targetMax=\(Int(maxPixelSize), privacy: .public) subsample=\(subsampleFactor ?? 1, privacy: .public) elapsedMS=\(String(format: "%.1f", elapsedMS), privacy: .public)"
+                )
+            }
             return UIImage(cgImage: cgImage)
         }
         return UIImage(contentsOfFile: url.path)
