@@ -1,6 +1,11 @@
 import Foundation
 
 nonisolated enum ReaderPrefetchPolicy {
+    /// Unified Reader cache window: keep four pages ahead of the active reading
+    /// direction and one page behind. Callers decide whether the current page is included.
+    static let cacheForwardCount = 4
+    static let cacheBackwardCount = 1
+
     static func pageIndices(
         currentPageIndex: Int,
         pageCount: Int,
