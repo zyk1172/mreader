@@ -189,10 +189,12 @@ struct MangaVisionRuntimeFoundationTests {
         #expect(await provider.runtimeReleaseCalls() == 0)
 
         _ = try await request.value
-        for _ in 0..<20 where await provider.runtimeReleaseCalls() == 0 {
+        for _ in 0..<20 {
+            if await provider.runtimeReleaseCalls() > 0 { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
-        #expect(await provider.runtimeReleaseCalls() == 1)
+        let releaseCalls = await provider.runtimeReleaseCalls()
+        #expect(releaseCalls == 1)
     }
 
     @Test func modelBuildChangeInvalidatesCacheWithoutManualVersionBump() async throws {
