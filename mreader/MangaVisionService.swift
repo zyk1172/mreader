@@ -445,7 +445,8 @@ actor MangaVisionService {
         advanceGenerationAndCancelInFlight()
     }
 
-    func beginReaderSession(sessionID: UUID) {
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
         activeReaderSessionID = sessionID
         // A newly opened Reader owns the runtime again. Any deferred unload from the
         // previously closed Reader must not fire after this point.
