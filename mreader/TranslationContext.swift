@@ -118,7 +118,12 @@ actor TranslationContextRegistry {
     static let shared = TranslationContextRegistry()
 
     private var pagesByScope: [String: [Int: String]] = [:]
+    private var activeReaderSessionID: UUID?
     private let lookBackPageCount = 2
+
+    func beginReaderSession(sessionID: UUID) {
+        activeReaderSessionID = sessionID
+    }
 
     func context(
         scopeID: String?,
@@ -154,6 +159,12 @@ actor TranslationContextRegistry {
             pages = pages.filter { keep.contains($0.key) }
         }
         pagesByScope[scopeID] = pages
+    }
+
+    func releaseReaderSessionMemory(sessionID: UUID) {
+        guard activeReaderSessionID == sessionID else { return }
+        activeReaderSessionID = nil
+        clearSessionMemory()
     }
 
     func clearSessionMemory() {
