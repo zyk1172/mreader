@@ -312,7 +312,8 @@ actor AITranslationPageCoordinator {
         return cachedBlocks(forKey: prepared.cacheKey) != nil
     }
 
-    func beginReaderSession(sessionID: UUID) {
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
         activeReaderSessionID = sessionID
     }
 
