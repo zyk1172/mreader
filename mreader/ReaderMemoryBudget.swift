@@ -1,5 +1,5 @@
-import Darwin
 import Foundation
+import os
 
 /// Reader image/data budgets. Physical RAM chooses the baseline tier; the runtime
 /// budget is then clamped against the process headroom reported by
@@ -92,7 +92,7 @@ nonisolated enum ReaderMemoryBudgetPlanner {
     static let minimumDecodedImageCacheMB = 384
 
     static func currentAvailableMemoryBytes() -> UInt64 {
-        os_proc_available_memory()
+        UInt64(os_proc_available_memory())
     }
 
     static func budget() -> ReaderMemoryBudget {
