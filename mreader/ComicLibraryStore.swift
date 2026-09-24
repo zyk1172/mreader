@@ -243,6 +243,9 @@ final class ComicLibraryStore: ObservableObject {
     private var pendingKomgaProgressTasks: [UUID: Task<Void, Never>] = [:]
     private var loadWaiters: [CheckedContinuation<Void, Never>] = []
     private var comicsSaveRevision = 0
+    private var pendingProgressSaveTask: Task<Void, Never>?
+    private var pendingProgressSaveToken: UUID?
+    private static let progressSaveDebounceNanoseconds: UInt64 = 300_000_000
     private var lastKomgaSyncCount = 0
     private var lastOPDSSyncCount = 0
     private var lastKomgaStartupSourceCount = 0
@@ -425,7 +428,7 @@ final class ComicLibraryStore: ObservableObject {
             merged.metadataUpdatedAt = Date()
         }
         comics[index] = merged
-        sortAndSave()
+        sortAndSave(debouncePersistence: true)
         if merged.sourceType == .komga {
             scheduleKomgaProgressSync(for: merged)
         }
@@ -1023,14 +1026,18 @@ final class ComicLibraryStore: ObservableObject {
         }
     }
 
-    private func sortAndSave() {
+    private func sortAndSave(debouncePersistence: Bool = false) {
         comics.sort { lhs, rhs in
             let lhsFinished = ComicReadingProgress.isFinished(lhs)
             let rhsFinished = ComicReadingProgress.isFinished(rhs)
             if lhsFinished != rhsFinished { return !lhsFinished }
             return lhs.lastReadAt > rhs.lastReadAt
         }
-        save()
+        if debouncePersistence {
+            scheduleProgressSave()
+        } else {
+            save()
+        }
     }
 
     func runStartupMaintenance() {
@@ -1397,12 +1404,38 @@ final class ComicLibraryStore: ObservableObject {
     }
 
     private func save() {
+        pendingProgressSaveTask?.cancel()
+        pendingProgressSaveTask = nil
+        pendingProgressSaveToken = nil
         comicsSaveRevision += 1
         let revision = comicsSaveRevision
         let snapshot = comics
         let url = libraryURL
         Task {
             await diskStore.saveComics(snapshot, revision: revision, to: url)
+        }
+    }
+
+    private func scheduleProgressSave() {
+        pendingProgressSaveTask?.cancel()
+        comicsSaveRevision += 1
+        let revision = comicsSaveRevision
+        let snapshot = comics
+        let url = libraryURL
+        let token = UUID()
+        pendingProgressSaveToken = token
+
+        pendingProgressSaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.progressSaveDebounceNanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.diskStore.saveComics(snapshot, revision: revision, to: url)
+            guard let self, self.pendingProgressSaveToken == token else { return }
+            self.pendingProgressSaveTask = nil
+            self.pendingProgressSaveToken = nil
         }
     }
 
