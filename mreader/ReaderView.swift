@@ -1573,6 +1573,7 @@ struct ReaderView: View {
             readerSessionSetupTask?.cancel()
             let sessionID = UUID()
             readerSessionID = sessionID
+            ReaderSessionRegistry.shared.activate(sessionID)
             readerSessionSetupTask = Task { @MainActor in
                 await RemotePageCache.shared.beginReaderSession(sessionID: sessionID)
                 await AITranslationPageCoordinator.shared.beginReaderSession(sessionID: sessionID)
@@ -1598,6 +1599,7 @@ struct ReaderView: View {
             // Reader 会话结束必须先阻止所有新工作，再释放内存缓存。
             // 磁盘缓存保留，重新打开时仍可快速恢复；这里只清理会话内存和在途任务。
             let closingSessionID = readerSessionID
+            ReaderSessionRegistry.shared.deactivate(closingSessionID)
             readerSessionSetupTask?.cancel()
             readerSessionSetupTask = nil
             RemotePagePrefetcher.shared.cancelAll()
@@ -5732,6 +5734,11 @@ struct LocalImageView: View {
         }
         .onChange(of: retainsDecodedImage) { _, shouldRetain in
             guard !shouldRetain else { return }
+            cancelLiveTranslationForPage()
+            offlineTranslationTask?.cancel()
+            offlineTranslationTask = nil
+            ocrMagnificationTask?.cancel()
+            ocrMagnificationTask = nil
             uiImage = nil
             loadedPageURL = nil
             isLoadingImage = false
