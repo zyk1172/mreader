@@ -311,19 +311,19 @@ actor AITranslationPageCoordinator {
         return cachedBlocks(forKey: prepared.cacheKey) != nil
     }
 
-    /// Reader 会话结束只释放内存结果。当前 Reader 的 Task 取消会通过
-    /// SharedPageTaskPool 的 consumer cancellation 自动退出；不能 cancelAll，
-    /// 否则会误杀可能共享同一 pipeline 的后台工作。
-    func releaseReaderSessionMemory() {
+    /// 实时页翻译 coordinator 只服务 Reader；离线整本翻译使用独立的
+    /// OfflineTranslationCoordinator/TranslationRuntimeService。Reader 关闭时可以
+    /// 安全推进代际并取消整个实时 workPool，避免旧结果在退出后重新填充 80 页内存缓存。
+    func releaseReaderSessionMemory() async {
+        generation = UUID()
         memoryCache.removeAll()
         memoryOrder.removeAll()
+        await workPool.cancelAll()
         MReaderLog.aiTranslation.debug("translation reader-session memory released")
     }
 
     func clearCache() async {
-        generation = UUID()
-        releaseReaderSessionMemory()
-        await workPool.cancelAll()
+        await releaseReaderSessionMemory()
         try? fileManager.removeItem(at: cacheDirectory)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
