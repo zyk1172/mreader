@@ -756,15 +756,15 @@ final class RemotePagePrefetcher {
     }
 
     private func windowIndices(currentPageIndex: Int, pageCount: Int, readingDirection: ReadingDirection, readingMode: ReadingMode, scrollDirection: Int) -> [Int] {
-        let isContinuous = readingMode == .continuousScroll || readingMode == .infiniteScroll
+        let cacheWindow = ReaderPageCacheWindowPolicy.window(for: readingMode)
         return ReaderPrefetchPolicy.pageIndices(
             currentPageIndex: currentPageIndex,
             pageCount: pageCount,
             readingDirection: readingDirection,
             readingMode: readingMode,
             scrollDirection: scrollDirection,
-            forwardCount: isContinuous ? 8 : 7,
-            backwardCount: isContinuous ? 2 : 2,
+            forwardCount: cacheWindow.forwardCount,
+            backwardCount: cacheWindow.backwardCount,
             includesCurrentPage: true
         )
     }
@@ -773,7 +773,7 @@ final class RemotePagePrefetcher {
         guard pages.indices.contains(currentPageIndex),
               RemotePageLoader.isRemotePageURL(pages[currentPageIndex].url) else { return }
         let candidateIndices = windowIndices(currentPageIndex: currentPageIndex, pageCount: pages.count, readingDirection: readingDirection, readingMode: readingMode, scrollDirection: 1)
-        let urls = candidateIndices.prefix(8).map { pages[$0].url }
+        let urls = candidateIndices.map { pages[$0].url }
         for url in urls {
             guard tasks[url] == nil else { continue }
             tasks[url] = Task(priority: .userInitiated) { [url] in
