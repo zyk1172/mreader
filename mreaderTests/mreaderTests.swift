@@ -1492,6 +1492,47 @@ struct mreaderTests {
         #expect(pressured.decodedImagePreloadMB < pressured.decodedImageCacheMB)
     }
 
+    @Test func fitWidthUnknownGeometryAvoidsMaximumDecodeTier() {
+        let resolved = ReaderFitWidthDecodePolicy.maxPixelSize(
+            sourceSize: nil,
+            viewportWidthPoints: 430,
+            displayScale: 3
+        )
+
+        #expect(resolved == ReaderFitWidthDecodePolicy.defaultUnknownPixelSize)
+        #expect(resolved < ReaderFitWidthDecodePolicy.maximumPixelSize)
+    }
+
+    @Test func offlineTranslationConcurrencyShrinksUnderMemoryPressure() {
+        let threeGB = UInt64(3 * 1_024 * 1_024 * 1_024)
+        let eightGB = UInt64(8 * 1_024 * 1_024 * 1_024)
+
+        #expect(
+            OfflineTranslationConcurrencyPolicy.maximumConcurrentPages(
+                physicalMemoryBytes: threeGB,
+                availableMemoryBytes: UInt64(2_000 * 1_024 * 1_024)
+            ) == 2
+        )
+        #expect(
+            OfflineTranslationConcurrencyPolicy.maximumConcurrentPages(
+                physicalMemoryBytes: eightGB,
+                availableMemoryBytes: UInt64(2_000 * 1_024 * 1_024)
+            ) == 3
+        )
+        #expect(
+            OfflineTranslationConcurrencyPolicy.maximumConcurrentPages(
+                physicalMemoryBytes: eightGB,
+                availableMemoryBytes: UInt64(1_000 * 1_024 * 1_024)
+            ) == 2
+        )
+        #expect(
+            OfflineTranslationConcurrencyPolicy.maximumConcurrentPages(
+                physicalMemoryBytes: eightGB,
+                availableMemoryBytes: UInt64(500 * 1_024 * 1_024)
+            ) == 1
+        )
+    }
+
     @Test func readerMemoryBudgetGrowsWithPhysicalMemory() {
         let threeGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 3 * 1_024 * 1_024 * 1_024)
         let fourGB = ReaderMemoryBudgetPlanner.budget(forPhysicalMemoryBytes: 4 * 1_024 * 1_024 * 1_024)
