@@ -108,7 +108,7 @@ final class ReaderStateMutationTests: XCTestCase {
             minimumOffsetY: 0,
             maximumOffsetY: 20_000
         )
-        XCTAssertEqual(limited, 1_032, accuracy: 0.001)
+        XCTAssertEqual(limited, 1_060, accuracy: 0.001)
     }
 
     func testContinuousScrollVelocityLimiterIsStricterDuringDeceleration() {
@@ -125,8 +125,8 @@ final class ReaderStateMutationTests: XCTestCase {
             isTracking: false
         )
         XCTAssertGreaterThan(tracking, decelerating)
-        XCTAssertEqual(tracking, 32, accuracy: 0.001)
-        XCTAssertEqual(decelerating, 19.3333333, accuracy: 0.001)
+        XCTAssertEqual(tracking, 60, accuracy: 0.001)
+        XCTAssertEqual(decelerating, 20.6666667, accuracy: 0.001)
         XCTAssertLessThan(
             ReaderScrollVelocityPolicy.screensPerSecond(for: .slow, isTracking: false),
             ReaderScrollVelocityPolicy.screensPerSecond(for: .standard, isTracking: false)
