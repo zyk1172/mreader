@@ -197,11 +197,13 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         }
         let provider = MangaVisionV2B5Provider.shared
         _ = await provider.descriptor
-        XCTAssertTrue(await provider.runtimeIsLoadedForDiagnostics())
+        let loadedBeforeRelease = await provider.runtimeIsLoadedForDiagnostics()
+        XCTAssertTrue(loadedBeforeRelease)
 
         await provider.releaseRuntimeMemory()
 
-        XCTAssertFalse(await provider.runtimeIsLoadedForDiagnostics())
+        let loadedAfterRelease = await provider.runtimeIsLoadedForDiagnostics()
+        XCTAssertFalse(loadedAfterRelease)
     }
 
     func testDecoderMapsClassIndexFourToBalloonAndKeepsBoxCoordinates() throws {
