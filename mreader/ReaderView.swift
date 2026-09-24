@@ -2661,19 +2661,16 @@ struct ReaderView: View {
             guard manager.pages.indices.contains(pageIndex) else { return nil }
             return manager.pages[pageIndex].url
         }
-        var decodedKeepURLs = Set(urls)
-        if manager.pages.indices.contains(index) {
-            decodedKeepURLs.insert(manager.pages[index].url)
-        }
-        ReaderImageCache.shared.retainPages(decodedKeepURLs)
+        // 连续滚动热路径不要按“当前页窗口”主动逐出 decoded cache。
+        // NSCache 自身预算/系统内存压力负责淘汰；主动逐出会让轻微回滚立即重新解码。
         ReaderImageCache.shared.preload(
             urls,
             // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
             maxPixelSize: isContinuous
                 ? ReaderImageCache.fitWidthMaxPixelSize
                 : ReaderImageCache.fitScreenMaxPixelSize,
-            maximumConcurrent: isContinuous ? 2 : 2,
-            delay: isContinuous ? 0.12 : 0.15,
+            maximumConcurrent: isContinuous ? 1 : 2,
+            delay: isContinuous ? 0.60 : 0.15,
             adaptiveFitWidthSizing: isContinuous
         )
 
@@ -3485,7 +3482,6 @@ struct ContinuousScrollReader: View {
                             showsLoadingIndicator: page.index == currentPageIndex,
                             isPageTapGestureEnabled: !areControlsVisible,
                             isSingleFingerPanEnabled: false,
-                            releasesImageOnDisappear: true,
                             onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                             onPreviousPage: { stepScroll(-1) },
                             onNextPage: { stepScroll(1) },
