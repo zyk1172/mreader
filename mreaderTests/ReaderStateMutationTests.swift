@@ -98,6 +98,61 @@ final class ReaderStateMutationTests: XCTestCase {
     }
 
 
+    func testContinuousScrollLongListRestoreUsesGlobalProgressAsApproximateOffset() {
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.approximateRestoreContentOffsetY(
+                progress: 0.25,
+                minimumOffsetY: -20,
+                maximumOffsetY: 99_980
+            ),
+            24_980,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            ReaderContinuousScrollPolicy.approximateRestoreContentOffsetY(
+                progress: 2,
+                minimumOffsetY: 0,
+                maximumOffsetY: 10_000
+            ),
+            10_000,
+            accuracy: 0.001
+        )
+    }
+
+    func testContinuousScrollLongListRestoreDoesNotAcceptTopAsDistantTarget() {
+        XCTAssertFalse(
+            ReaderContinuousScrollPolicy.hasReachedRestoreTarget(
+                targetIndex: 780,
+                visiblePageID: 0,
+                pageCount: 5_000,
+                contentOffsetY: 0,
+                minimumOffsetY: 0,
+                maximumOffsetY: 200_000
+            )
+        )
+        XCTAssertTrue(
+            ReaderContinuousScrollPolicy.hasReachedRestoreTarget(
+                targetIndex: 780,
+                visiblePageID: 780,
+                pageCount: 5_000,
+                contentOffsetY: 11_000,
+                minimumOffsetY: 0,
+                maximumOffsetY: 200_000
+            )
+        )
+        XCTAssertTrue(
+            ReaderContinuousScrollPolicy.hasReachedRestoreTarget(
+                targetIndex: 4_999,
+                visiblePageID: 4_997,
+                pageCount: 5_000,
+                contentOffsetY: 200_000,
+                minimumOffsetY: 0,
+                maximumOffsetY: 200_000
+            )
+        )
+    }
+
+
     func testImageSubsamplePolicyUsesLargestSafePowerOfTwoFactor() {
         XCTAssertEqual(
             ReaderImageSubsamplePolicy.factor(
