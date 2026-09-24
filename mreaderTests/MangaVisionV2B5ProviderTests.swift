@@ -191,6 +191,19 @@ final class MangaVisionV2B5ProviderTests: XCTestCase {
         )
     }
 
+    func testProviderRuntimeCanBeReleasedAfterReaderSession() async throws {
+        guard bundledModelURL() != nil else {
+            throw XCTSkip("Bundled V2B5 model is unavailable in this test bundle.")
+        }
+        let provider = MangaVisionV2B5Provider.shared
+        _ = await provider.descriptor
+        XCTAssertTrue(await provider.runtimeIsLoadedForDiagnostics())
+
+        await provider.releaseRuntimeMemory()
+
+        XCTAssertFalse(await provider.runtimeIsLoadedForDiagnostics())
+    }
+
     func testDecoderMapsClassIndexFourToBalloonAndKeepsBoxCoordinates() throws {
         let raw = try makeRawOutputs()
         let p2Class = try XCTUnwrap(raw["conv2d_77"])
