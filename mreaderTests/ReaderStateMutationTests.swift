@@ -152,6 +152,36 @@ final class ReaderStateMutationTests: XCTestCase {
         XCTAssertEqual(limited, proposed, accuracy: 0.001)
     }
 
+    func testImageSubsamplePolicyUsesLargestSafePowerOfTwoFactor() {
+        XCTAssertEqual(
+            ReaderImageSubsamplePolicy.factor(
+                sourceSize: CGSize(width: 4_000, height: 30_000),
+                targetMaxPixelSize: 8_192
+            ),
+            2
+        )
+        XCTAssertEqual(
+            ReaderImageSubsamplePolicy.factor(
+                sourceSize: CGSize(width: 4_000, height: 40_000),
+                targetMaxPixelSize: 8_192
+            ),
+            4
+        )
+        XCTAssertEqual(
+            ReaderImageSubsamplePolicy.factor(
+                sourceSize: CGSize(width: 8_000, height: 70_000),
+                targetMaxPixelSize: 8_192
+            ),
+            8
+        )
+        XCTAssertNil(
+            ReaderImageSubsamplePolicy.factor(
+                sourceSize: CGSize(width: 2_000, height: 8_000),
+                targetMaxPixelSize: 8_192
+            )
+        )
+    }
+
     func testFitWidthDecodePolicyUsesSmallestSufficientTier() {
         XCTAssertEqual(
             ReaderFitWidthDecodePolicy.maxPixelSize(
