@@ -3744,6 +3744,40 @@ private struct TopComicRow: View {
     }
 }
 
+@MainActor
+private final class CoverThumbnailCache {
+    static let shared = CoverThumbnailCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 96
+        cache.totalCostLimit = 64 * 1024 * 1024
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                CoverThumbnailCache.shared.removeAll()
+            }
+        }
+    }
+
+    func image(for key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func store(_ image: UIImage, for key: String) {
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 1
+        cache.setObject(image, forKey: key as NSString, cost: cost)
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+    }
+}
+
 struct CoverImageView: View {
     let path: String?
     let remoteSourceID: UUID?
@@ -3802,6 +3836,7 @@ struct CoverImageView: View {
         .task(id: coverTaskID) { await loadCover() }
     }
 
+    @MainActor
     private func loadCover() async {
         let resolvedPath = RemoteImageLoader.resolvedCoverPath(
             persistedPath: path,
@@ -3812,10 +3847,30 @@ struct CoverImageView: View {
             image = nil
             return
         }
+
+        let cacheKey = Self.thumbnailCacheKey(for: resolvedPath)
+        if let cached = CoverThumbnailCache.shared.image(for: cacheKey) {
+            image = cached
+            return
+        }
+
         let loadedImage = await Task.detached(priority: .utility) {
             await Self.makeThumbnail(path: resolvedPath, maxPixelSize: 640)
         }.value
+        guard !Task.isCancelled else { return }
+        if let loadedImage {
+            CoverThumbnailCache.shared.store(loadedImage, for: cacheKey)
+        }
         image = loadedImage
+    }
+
+    nonisolated private static func thumbnailCacheKey(for path: String) -> String {
+        guard FileManager.default.fileExists(atPath: path) else { return path }
+        let url = URL(fileURLWithPath: path)
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values?.fileSize ?? 0
+        return "\(path)#\(size)#\(modified)"
     }
 
     private static func makeThumbnail(path: String, maxPixelSize: CGFloat) async -> UIImage? {
