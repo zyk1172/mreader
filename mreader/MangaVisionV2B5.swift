@@ -686,7 +686,7 @@ actor MangaVisionV2B5Provider: MangaVisionProvider, MangaVisionRuntimeReleasable
         runtime != nil
     }
 
-    func releaseRuntimeMemory() {
+    func releaseRuntimeMemory() async {
         guard runtime != nil else { return }
         runtime = nil
         MReaderLog.reader.notice("Manga Vision Core ML runtime released")
