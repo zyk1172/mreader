@@ -110,8 +110,10 @@ actor OCRRecognitionCache {
 
     /// Reader 会话结束只释放 OCR 内存结果。Reader 自己的 consumer 会随
     /// Task 取消退出；不能 cancelAll，因为离线翻译/后台 OCR 索引共用这个 workPool。
-    func releaseReaderSessionMemory(sessionID: UUID) {
-        guard activeReaderSessionID == sessionID else { return }
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+        }
         activeReaderSessionID = nil
         memoryCache.removeAll()
         memoryOrder.removeAll()
