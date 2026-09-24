@@ -3473,6 +3473,7 @@ struct ContinuousScrollReader: View {
                                 isOCREnabled: comic.isOCREnabled,
                                 isAITranslationEnabled: comic.isAITranslationEnabled,
                                 isAutoTranslationEnabled: comic.isAutoTranslationEnabled && page.index == currentPageIndex,
+                                reportsTranslationActivity: page.index == currentPageIndex,
                                 aiTranslationModeRaw: comic.aiTranslationModeRaw,
                                 translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
                                 translateRequestID: translateRequestID,
@@ -3494,7 +3495,7 @@ struct ContinuousScrollReader: View {
                                 showsLoadingIndicator: page.index == currentPageIndex,
                                 isPageTapGestureEnabled: !areControlsVisible,
                                 isSingleFingerPanEnabled: ReaderGestureGate.allowsSingleFingerPan(readingMode: readingMode),
-                                onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
+                                onTranslationStateChange: onTranslationStateChange,
                                 onPreviousPage: { stepScroll(-1) },
                                 onNextPage: { stepScroll(1) },
                                 areControlsVisible: areControlsVisible,
@@ -4811,6 +4812,7 @@ struct AnimatedPageReader: View {
             // 卷曲动画的“被揭示页”不在此触发自动翻译，避免拖拽松手时白做；
             // 下一页的翻译由 Reader 层 scheduleTranslationPrefetch 统一预取。
             isAutoTranslationEnabled: index == currentPageIndex ? comic.isAutoTranslationEnabled : false,
+            reportsTranslationActivity: index == currentPageIndex,
             aiTranslationModeRaw: comic.aiTranslationModeRaw,
             translationSourceLanguageRaw: comic.translationSourceLanguageRaw,
             translateRequestID: translateRequestID,
@@ -5369,6 +5371,9 @@ struct LocalImageView: View {
     let isOCREnabled: Bool
     let isAITranslationEnabled: Bool
     let isAutoTranslationEnabled: Bool
+    /// 当前 LocalImageView 是否是 Reader 的活动页。翻页后旧页仍需保留稳定回调，
+    /// 以便归还它之前上报的翻译进行中名额。
+    var reportsTranslationActivity: Bool = true
     let aiTranslationModeRaw: String
     let translationSourceLanguageRaw: String
     let translateRequestID: UUID
@@ -5436,6 +5441,7 @@ struct LocalImageView: View {
     @State private var recognizedPipelineCache: OCRPipelineResult?
     @State private var recognizedPipelineCacheKey: String?
     @State private var isTranslating = false
+    @State private var didReportTranslationActivity = false
     @State private var isRecognizingOCR = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
@@ -5673,6 +5679,11 @@ struct LocalImageView: View {
             if newValue {
                 startTranslation()
             } else {
+                cancelLiveTranslationForPage()
+            }
+        }
+        .onChange(of: reportsTranslationActivity) { _, isActivePage in
+            if !isActivePage {
                 cancelLiveTranslationForPage()
             }
         }
@@ -6852,6 +6863,18 @@ struct LocalImageView: View {
         }
     }
     
+    private func beginTranslationActivityIfNeeded() {
+        guard reportsTranslationActivity, !didReportTranslationActivity else { return }
+        didReportTranslationActivity = true
+        onTranslationStateChange(true)
+    }
+
+    private func endTranslationActivityIfNeeded() {
+        guard didReportTranslationActivity else { return }
+        didReportTranslationActivity = false
+        onTranslationStateChange(false)
+    }
+
     /// 当前 LocalImageView 失去自动翻译资格（通常意味着用户已经翻到下一页）时，
     /// 必须立即取消本页实时翻译，而不是等视图真正 onDisappear。
     ///
@@ -6872,8 +6895,8 @@ struct LocalImageView: View {
 
         if isTranslating {
             isTranslating = false
-            onTranslationStateChange(false)
         }
+        endTranslationActivityIfNeeded()
     }
 
     // 触发 AI 流程
@@ -6897,8 +6920,8 @@ struct LocalImageView: View {
         // 旧 task 会因 generation 失效而退出，不能重复 +1。
         if !isTranslating {
             isTranslating = true
-            onTranslationStateChange(true)
         }
+        beginTranslationActivityIfNeeded()
 
         translationTask = Task {
             do {
@@ -6942,8 +6965,8 @@ struct LocalImageView: View {
                 }
                 if self.isTranslating {
                     self.isTranslating = false
-                    self.onTranslationStateChange(false)
                 }
+                self.endTranslationActivityIfNeeded()
                 self.translationTask = nil
             }
         }
