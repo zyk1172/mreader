@@ -755,12 +755,25 @@ actor MangaVisionService {
     }
 
     nonisolated private static func thumbnail(source: CGImageSource, maximumDimension: Int) -> UIImage? {
-        let options: [CFString: Any] = [
+        var options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceThumbnailMaxPixelSize: maximumDimension
         ]
+        if let properties = CGImageSourceCopyPropertiesAtIndex(
+            source,
+            0,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+           let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+           let factor = ReaderImageSubsamplePolicy.factor(
+               sourceSize: CGSize(width: width, height: height),
+               targetMaxPixelSize: CGFloat(maximumDimension)
+           ) {
+            options[kCGImageSourceSubsampleFactor] = factor
+        }
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         return UIImage(cgImage: cgImage)
     }
