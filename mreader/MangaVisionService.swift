@@ -57,6 +57,7 @@ actor MangaVisionService {
     private var requestGeneration = MangaVisionRequestGeneration(rawValue: 0)
     /// Reader close asks for runtime release, but only once shared/background consumers are idle.
     private var pendingRuntimeReleaseToken: UUID?
+    private var activeReaderSessionID: UUID?
     private let memoryPageLimit = 48
     private let diskByteLimit: Int64 = 24 * 1024 * 1024
     private let diskHighWaterBytes: Int64 = 27 * 1024 * 1024
@@ -140,8 +141,6 @@ actor MangaVisionService {
         if var existing = inFlight[key], existing.generation == requestGeneration {
             existing.consumers.insert(consumerID)
             inFlight[key] = existing
-            // A new active consumer supersedes a pending "release when idle" request.
-            pendingRuntimeReleaseToken = nil
             return try await awaitInFlightRequest(
                 existing,
                 consumerID: consumerID,
@@ -183,8 +182,6 @@ actor MangaVisionService {
 
         let generation = requestGeneration
         let requestID = UUID()
-        // Any new inference means the runtime is actively needed again.
-        pendingRuntimeReleaseToken = nil
         // The task inherits the caller's scheduling priority. The adaptive provider also
         // receives an explicit request class so prefetch work cannot outrank reader work.
         let task = Task {
@@ -448,10 +445,24 @@ actor MangaVisionService {
         advanceGenerationAndCancelInFlight()
     }
 
+    func beginReaderSession(sessionID: UUID) {
+        activeReaderSessionID = sessionID
+        // A newly opened Reader owns the runtime again. Any deferred unload from the
+        // previously closed Reader must not fire after this point.
+        pendingRuntimeReleaseToken = nil
+    }
+
     /// Reader 会话结束只清分析内存，并请求“空闲后”卸载 Core ML runtime。
     /// 当前 Reader 的 analysis consumer 会由其 Task cancellation 单独释放；离线翻译/
     /// 后台 OCR 若仍共享同一推理，不应被 Reader 关闭误杀。
-    func releaseReaderSessionMemory() async {
+    ///
+    /// sessionID is supplied by ReaderView in production. Tests may omit it when using an
+    /// isolated service instance.
+    func releaseReaderSessionMemory(sessionID: UUID? = nil) async {
+        if let sessionID {
+            guard activeReaderSessionID == sessionID else { return }
+            activeReaderSessionID = nil
+        }
         memoryCache.removeAll()
         memoryOrder.removeAll()
         let token = UUID()
@@ -654,7 +665,9 @@ actor MangaVisionService {
     }
 
     private func releaseRuntimeIfIdle(token: UUID) async {
-        guard pendingRuntimeReleaseToken == token, inFlight.isEmpty else { return }
+        guard pendingRuntimeReleaseToken == token,
+              activeReaderSessionID == nil,
+              inFlight.isEmpty else { return }
         pendingRuntimeReleaseToken = nil
         if let releasable = provider as? any MangaVisionRuntimeReleasable {
             await releasable.releaseRuntimeMemory()
