@@ -103,6 +103,7 @@ final class ReaderStateMutationTests: XCTestCase {
             proposedOffsetY: 1_500,
             viewportHeight: 800,
             frameDuration: 1.0 / 60.0,
+            scrollSpeed: .standard,
             isTracking: true,
             minimumOffsetY: 0,
             maximumOffsetY: 20_000
@@ -114,16 +115,26 @@ final class ReaderStateMutationTests: XCTestCase {
         let tracking = ReaderScrollVelocityPolicy.maximumDelta(
             viewportHeight: 800,
             frameDuration: 1.0 / 60.0,
+            scrollSpeed: .standard,
             isTracking: true
         )
         let decelerating = ReaderScrollVelocityPolicy.maximumDelta(
             viewportHeight: 800,
             frameDuration: 1.0 / 60.0,
+            scrollSpeed: .standard,
             isTracking: false
         )
         XCTAssertGreaterThan(tracking, decelerating)
-        XCTAssertEqual(tracking, 40, accuracy: 0.001)
-        XCTAssertEqual(decelerating, 24.6666667, accuracy: 0.001)
+        XCTAssertEqual(tracking, 32, accuracy: 0.001)
+        XCTAssertEqual(decelerating, 19.3333333, accuracy: 0.001)
+        XCTAssertLessThan(
+            ReaderScrollVelocityPolicy.screensPerSecond(for: .slow, isTracking: false),
+            ReaderScrollVelocityPolicy.screensPerSecond(for: .standard, isTracking: false)
+        )
+        XCTAssertLessThan(
+            ReaderScrollVelocityPolicy.screensPerSecond(for: .standard, isTracking: false),
+            ReaderScrollVelocityPolicy.screensPerSecond(for: .fast, isTracking: false)
+        )
     }
 
     func testContinuousScrollVelocityLimiterPreservesNormalSlowMotion() {
@@ -133,6 +144,7 @@ final class ReaderStateMutationTests: XCTestCase {
             proposedOffsetY: proposed,
             viewportHeight: 800,
             frameDuration: 1.0 / 60.0,
+            scrollSpeed: .standard,
             isTracking: false,
             minimumOffsetY: 0,
             maximumOffsetY: 20_000
