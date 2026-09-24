@@ -121,7 +121,8 @@ actor TranslationContextRegistry {
     private var activeReaderSessionID: UUID?
     private let lookBackPageCount = 2
 
-    func beginReaderSession(sessionID: UUID) {
+    func beginReaderSession(sessionID: UUID) async {
+        guard await ReaderSessionRegistry.shared.isActive(sessionID) else { return }
         activeReaderSessionID = sessionID
     }
 
