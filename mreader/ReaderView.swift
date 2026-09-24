@@ -593,6 +593,10 @@ private final class ReaderImageCache {
     }
 
     private let cache = NSCache<NSString, UIImage>()
+    /// NSCache 本身不可枚举；额外记录 key -> URL/cost，才能按阅读窗口主动逐出旧页。
+    /// 这里只保存轻量元数据，不持有 UIImage。
+    private var cachedURLByKey: [String: URL] = [:]
+    private var cachedCostByKey: [String: Int] = [:]
     private var inFlightLoads: [String: Task<UIImage?, Never>] = [:]
     private var loadingCosts: [String: Int] = [:]
     private var scheduledPreload: Task<Void, Never>?
@@ -667,11 +671,45 @@ private final class ReaderImageCache {
 
     func cachedImage(for url: URL, maxPixelSize: CGFloat = 4096) -> UIImage? {
         for tier in resolutionTiers where tier >= maxPixelSize {
-            if let image = cache.object(forKey: cacheKey(for: url, maxPixelSize: tier) as NSString) {
+            let key = cacheKey(for: url, maxPixelSize: tier)
+            if let image = cache.object(forKey: key as NSString) {
                 return image
             }
+            // NSCache 可能已在系统压力下自行逐出；同步清理我们的轻量索引。
+            cachedURLByKey.removeValue(forKey: key)
+            cachedCostByKey.removeValue(forKey: key)
         }
         return nil
+    }
+
+    private func storeDecodedImage(_ image: UIImage, for url: URL, key: String) {
+        let cost = image.cacheCost
+        cache.setObject(image, forKey: key as NSString, cost: cost)
+        cachedURLByKey[key] = url
+        cachedCostByKey[key] = cost
+    }
+
+    /// 只保留当前阅读窗口里的解码位图。
+    ///
+    /// 之前 NSCache 虽有 896MB 上限，但已访问过的 LazyVStack cell 还会单独强引用 UIImage，
+    /// 导致 NSCache 淘汰也无法真正释放。窗口化逐出让全局缓存本身也不再积累整段历史页面。
+    func retainPages(_ urlsToKeep: Set<URL>) {
+        let staleKeys = cachedURLByKey.compactMap { key, url in
+            urlsToKeep.contains(url) ? nil : key
+        }
+        guard !staleKeys.isEmpty else { return }
+
+        var evictedBytes = 0
+        for key in staleKeys {
+            evictedBytes += cachedCostByKey[key] ?? 0
+            cache.removeObject(forKey: key as NSString)
+            cachedURLByKey.removeValue(forKey: key)
+            cachedCostByKey.removeValue(forKey: key)
+        }
+        let residentBytes = cachedCostByKey.values.reduce(0, +)
+        MReaderLog.reader.debug(
+            "decoded cache window evicted=\(staleKeys.count, privacy: .public) freedMB=\(evictedBytes / (1024 * 1024), privacy: .public) residentMB=\(residentBytes / (1024 * 1024), privacy: .public) keepPages=\(urlsToKeep.count, privacy: .public)"
+        )
     }
 
     /// 返回 ≥ 请求分辨率且在途的 task 对应 cacheKey（项11：让低分辨率请求 join 高分辨率在途任务）。
@@ -716,7 +754,7 @@ private final class ReaderImageCache {
         inFlightLoads[key] = nil
         loadingCosts[key] = nil
         if let image {
-            cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
+            storeDecodedImage(image, for: url, key: key)
         }
         drainPreloadQueue()
         return image
@@ -819,7 +857,7 @@ private final class ReaderImageCache {
                 self.preloadKeys.remove(candidate.key)
                 self.activePreloadCount = max(0, self.activePreloadCount - 1)
                 if let image {
-                    self.cache.setObject(image, forKey: candidate.key as NSString, cost: image.cacheCost)
+                    self.storeDecodedImage(image, for: candidate.url, key: candidate.key)
                 }
                 self.drainPreloadQueue()
             }
@@ -839,6 +877,8 @@ private final class ReaderImageCache {
         foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
+        cachedURLByKey.removeAll()
+        cachedCostByKey.removeAll()
         MReaderLog.reader.debug("decoded image cache memory cleared")
     }
 
@@ -2548,6 +2588,11 @@ struct ReaderView: View {
             guard manager.pages.indices.contains(pageIndex) else { return nil }
             return manager.pages[pageIndex].url
         }
+        var decodedKeepURLs = Set(urls)
+        if manager.pages.indices.contains(index) {
+            decodedKeepURLs.insert(manager.pages[index].url)
+        }
+        ReaderImageCache.shared.retainPages(decodedKeepURLs)
         ReaderImageCache.shared.preload(
             urls,
             // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
@@ -3565,6 +3610,7 @@ struct ContinuousScrollReader: View {
                             showsLoadingIndicator: page.index == currentPageIndex,
                             isPageTapGestureEnabled: !areControlsVisible,
                             isSingleFingerPanEnabled: false,
+                            releasesImageOnDisappear: true,
                             onTranslationStateChange: page.index == currentPageIndex ? onTranslationStateChange : { _ in },
                             onPreviousPage: { stepScroll(-1) },
                             onNextPage: { stepScroll(1) },
@@ -5430,6 +5476,9 @@ struct LocalImageView: View {
     var isPageTapGestureEnabled: Bool = true
     var isSingleFingerPanEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
+    /// LazyVStack 不会像 UITableView 一样保证立即回收 cell 状态。
+    /// 条漫离屏后主动释放 UIImage，避免几千页阅读过程中 @State 把历史位图全部强引用。
+    var releasesImageOnDisappear: Bool = false
     var onTranslationStateChange: (Bool) -> Void = { _ in }
     /// 缩放态回传：外层翻页容器据此在 scale > 1 时屏蔽翻页拖拽。
     var onZoomChange: (Bool) -> Void = { _ in }
@@ -5690,12 +5739,28 @@ struct LocalImageView: View {
             translationGeneration = UUID()
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
+            pendingSingleTapWorkItem?.cancel()
+            pendingSingleTapWorkItem = nil
             if isTranslating {
                 isTranslating = false
                 onTranslationStateChange(false)
             }
             if isZoomedIn {
                 onZoomChange(false)
+            }
+
+            if releasesImageOnDisappear {
+                // 关键：LazyVStack 的离屏 cell 身份可能继续存在，@State 如果不清理会继续
+                // 强引用 UIImage，绕过 NSCache 的 totalCostLimit，表现成持续增长的“伪泄漏”。
+                uiImage = nil
+                loadedPageURL = nil
+                isLoadingImage = true
+                loadFailed = false
+                recognizedPipelineCache = nil
+                recognizedPipelineCacheKey = nil
+#if DEBUG
+                mangaVisionDebugAnalysis = nil
+#endif
             }
         }
         .onChange(of: isZoomedIn) { _, zoomed in
