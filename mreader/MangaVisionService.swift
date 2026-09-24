@@ -38,6 +38,7 @@ actor MangaVisionService {
         let generation: MangaVisionRequestGeneration
         let startedAt: ContinuousClock.Instant
         let task: Task<MangaPageAnalysis, Error>
+        var consumers: Set<UUID>
     }
 
     private struct DiskEntry {
@@ -54,6 +55,8 @@ actor MangaVisionService {
     private var memoryOrder: [String] = []
     private var inFlight: [String: InFlightRequest] = [:]
     private var requestGeneration = MangaVisionRequestGeneration(rawValue: 0)
+    /// Reader close asks for runtime release, but only once shared/background consumers are idle.
+    private var pendingRuntimeReleaseToken: UUID?
     private let memoryPageLimit = 48
     private let diskByteLimit: Int64 = 24 * 1024 * 1024
     private let diskHighWaterBytes: Int64 = 27 * 1024 * 1024
@@ -133,37 +136,22 @@ actor MangaVisionService {
             return cached
         }
 
-        if let existing = inFlight[key], existing.generation == requestGeneration {
-            do {
-                var value = try await existing.task.value
-                value.cacheRevision = value.cacheRevision ?? modelKey
-                guard existing.generation == requestGeneration else {
-                    throw MangaVisionServiceError.staleResult
-                }
-                if let committed = memoryCache[key] {
-                    lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
-                    return committed
-                }
-                return try finalize(
-                    value,
-                    request: existing,
-                    key: key,
-                    diskURL: diskURL,
-                    manifest: manifest,
-                    identity: identity,
-                    analysisStart: analysisStart
-                )
-            } catch {
-                handleFailure(
-                    error,
-                    request: existing,
-                    key: key,
-                    manifest: manifest,
-                    identity: identity,
-                    analysisStart: analysisStart
-                )
-                throw error
-            }
+        let consumerID = UUID()
+        if var existing = inFlight[key], existing.generation == requestGeneration {
+            existing.consumers.insert(consumerID)
+            inFlight[key] = existing
+            // A new active consumer supersedes a pending "release when idle" request.
+            pendingRuntimeReleaseToken = nil
+            return try await awaitInFlightRequest(
+                existing,
+                consumerID: consumerID,
+                key: key,
+                modelKey: modelKey,
+                diskURL: diskURL,
+                manifest: manifest,
+                identity: identity,
+                analysisStart: analysisStart
+            )
         }
 
         let sourceSize = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
@@ -195,53 +183,112 @@ actor MangaVisionService {
 
         let generation = requestGeneration
         let requestID = UUID()
+        // Any new inference means the runtime is actively needed again.
+        pendingRuntimeReleaseToken = nil
         // The task inherits the caller's scheduling priority. The adaptive provider also
         // receives an explicit request class so prefetch work cannot outrank reader work.
         let task = Task {
+            let result: MangaPageAnalysis
             if let sourceAnalyzer {
-                return try await sourceAnalyzer.analyzeSourceImage(
+                result = try await sourceAnalyzer.analyzeSourceImage(
                     image: analysisImage,
                     sourceImageSize: sourceSize,
                     pageIdentifier: identity,
                     requestClass: requestClass
                 )
+            } else {
+                result = try await provider.analyzePage(
+                    image: analysisImage,
+                    sourceImageSize: sourceSize,
+                    pageIdentifier: identity
+                )
             }
-            return try await provider.analyzePage(
-                image: analysisImage,
-                sourceImageSize: sourceSize,
-                pageIdentifier: identity
-            )
+            // Core ML prediction itself is synchronous; if cancellation arrived while it
+            // was running, discard the result immediately after the pass returns.
+            try Task.checkCancellation()
+            return result
         }
         let request = InFlightRequest(
             id: requestID,
             generation: generation,
             startedAt: .now,
-            task: task
+            task: task,
+            consumers: [consumerID]
         )
         inFlight[key] = request
 
-        do {
-            var result = try await task.value
-            result.cacheRevision = result.cacheRevision ?? modelKey
-            return try finalize(
-                result,
-                request: request,
-                key: key,
-                diskURL: diskURL,
-                manifest: manifest,
-                identity: identity,
-                analysisStart: analysisStart
-            )
-        } catch {
-            handleFailure(
-                error,
-                request: request,
-                key: key,
-                manifest: manifest,
-                identity: identity,
-                analysisStart: analysisStart
-            )
-            throw error
+        return try await awaitInFlightRequest(
+            request,
+            consumerID: consumerID,
+            key: key,
+            modelKey: modelKey,
+            diskURL: diskURL,
+            manifest: manifest,
+            identity: identity,
+            analysisStart: analysisStart
+        )
+    }
+
+    private func awaitInFlightRequest(
+        _ request: InFlightRequest,
+        consumerID: UUID,
+        key: String,
+        modelKey: String,
+        diskURL: URL,
+        manifest: MangaVisionModelManifest,
+        identity: MangaPageIdentifier,
+        analysisStart: ContinuousClock.Instant
+    ) async throws -> MangaPageAnalysis {
+        try await withTaskCancellationHandler {
+            do {
+                var value = try await request.task.value
+                try Task.checkCancellation()
+                value.cacheRevision = value.cacheRevision ?? modelKey
+                guard request.generation == requestGeneration else {
+                    throw MangaVisionServiceError.staleResult
+                }
+
+                let output: MangaPageAnalysis
+                if let committed = memoryCache[key] {
+                    lastAnalysisMilliseconds = Self.milliseconds(analysisStart.duration(to: .now))
+                    output = committed
+                } else {
+                    output = try finalize(
+                        value,
+                        request: request,
+                        key: key,
+                        diskURL: diskURL,
+                        manifest: manifest,
+                        identity: identity,
+                        analysisStart: analysisStart
+                    )
+                }
+                releaseConsumer(key: key, requestID: request.id, consumerID: consumerID)
+                return output
+            } catch {
+                releaseConsumer(key: key, requestID: request.id, consumerID: consumerID)
+                // Caller cancellation is consumer-local. Do not tear down a shared request
+                // that still has offline/background consumers.
+                if !Task.isCancelled {
+                    handleFailure(
+                        error,
+                        request: request,
+                        key: key,
+                        manifest: manifest,
+                        identity: identity,
+                        analysisStart: analysisStart
+                    )
+                }
+                throw error
+            }
+        } onCancel: {
+            Task {
+                await self.releaseConsumer(
+                    key: key,
+                    requestID: request.id,
+                    consumerID: consumerID
+                )
+            }
         }
     }
 
@@ -401,15 +448,15 @@ actor MangaVisionService {
         advanceGenerationAndCancelInFlight()
     }
 
-    /// Reader 会话结束：取消旧推理、清分析内存，并释放底层 Core ML runtime。
-    /// 磁盘分析缓存保留，重新打开同页仍可直接命中。
+    /// Reader 会话结束只清分析内存，并请求“空闲后”卸载 Core ML runtime。
+    /// 当前 Reader 的 analysis consumer 会由其 Task cancellation 单独释放；离线翻译/
+    /// 后台 OCR 若仍共享同一推理，不应被 Reader 关闭误杀。
     func releaseReaderSessionMemory() async {
-        advanceGenerationAndCancelInFlight()
         memoryCache.removeAll()
         memoryOrder.removeAll()
-        if let releasable = provider as? any MangaVisionRuntimeReleasable {
-            await releasable.releaseRuntimeMemory()
-        }
+        let token = UUID()
+        pendingRuntimeReleaseToken = token
+        await releaseRuntimeIfIdle(token: token)
         MReaderLog.reader.notice("Manga Vision reader-session memory released")
     }
 
@@ -498,6 +545,7 @@ actor MangaVisionService {
         }
 
         inFlight[key] = nil
+        schedulePendingRuntimeReleaseIfIdle()
         let inferenceMS = Self.milliseconds(request.startedAt.duration(to: .now))
         inferenceCount += 1
         totalInferenceMilliseconds += inferenceMS
@@ -540,6 +588,7 @@ actor MangaVisionService {
     ) {
         if inFlight[key]?.id == request.id {
             inFlight[key] = nil
+            schedulePendingRuntimeReleaseIfIdle()
         }
         let outcome: MangaVisionDiagnosticOutcome = request.generation == requestGeneration
             ? .failure
@@ -581,7 +630,39 @@ actor MangaVisionService {
         )
     }
 
+    private func releaseConsumer(
+        key: String,
+        requestID: UUID,
+        consumerID: UUID
+    ) {
+        guard var request = inFlight[key], request.id == requestID else { return }
+        request.consumers.remove(consumerID)
+        if request.consumers.isEmpty {
+            request.task.cancel()
+            inFlight[key] = nil
+            schedulePendingRuntimeReleaseIfIdle()
+        } else {
+            inFlight[key] = request
+        }
+    }
+
+    private func schedulePendingRuntimeReleaseIfIdle() {
+        guard inFlight.isEmpty, let token = pendingRuntimeReleaseToken else { return }
+        Task {
+            await self.releaseRuntimeIfIdle(token: token)
+        }
+    }
+
+    private func releaseRuntimeIfIdle(token: UUID) async {
+        guard pendingRuntimeReleaseToken == token, inFlight.isEmpty else { return }
+        pendingRuntimeReleaseToken = nil
+        if let releasable = provider as? any MangaVisionRuntimeReleasable {
+            await releasable.releaseRuntimeMemory()
+        }
+    }
+
     private func advanceGenerationAndCancelInFlight() {
+        pendingRuntimeReleaseToken = nil
         requestGeneration = requestGeneration.advanced()
         for request in inFlight.values {
             request.task.cancel()
