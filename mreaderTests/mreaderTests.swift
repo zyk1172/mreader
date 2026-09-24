@@ -2776,33 +2776,34 @@ struct mreaderTests {
         #expect(publications[0].acquisitionURL.absoluteString == "https://example.com/files/two.cbz")
     }
 
-    @Test func visiblePageUsesLargestVisibleArea() {
-        let frames = [
-            0: CGRect(x: 0, y: -700, width: 390, height: 800),
-            1: CGRect(x: 0, y: 100, width: 390, height: 800),
-            2: CGRect(x: 0, y: 900, width: 390, height: 800)
-        ]
-
-        let result = ReaderVisiblePageDetector.visiblePageIndex(
-            frames: frames,
-            viewport: CGRect(x: 0, y: 0, width: 390, height: 844)
+    @Test func nativeScrollGeometryNormalizesProgressWithoutPerPageFrames() {
+        let snapshot = ReaderScrollGeometrySnapshot(
+            contentOffsetY: 5_000,
+            contentHeight: 20_000,
+            containerHeight: 1_000,
+            insetTop: 0,
+            insetBottom: 0
         )
-
-        #expect(result == 1)
+        #expect(abs(snapshot.normalizedProgress - (5_000.0 / 19_000.0)) < 0.0001)
     }
 
-    @Test func visiblePageUsesCenterDistanceAsTieBreaker() {
-        let frames = [
-            4: CGRect(x: 0, y: -200, width: 390, height: 600),
-            5: CGRect(x: 0, y: 300, width: 390, height: 400)
-        ]
-
-        let result = ReaderVisiblePageDetector.visiblePageIndex(
-            frames: frames,
-            viewport: CGRect(x: 0, y: 0, width: 390, height: 700)
+    @Test func nativeScrollGeometryClampsAtContentBounds() {
+        let beforeTop = ReaderScrollGeometrySnapshot(
+            contentOffsetY: -100,
+            contentHeight: 10_000,
+            containerHeight: 1_000,
+            insetTop: 0,
+            insetBottom: 0
         )
-
-        #expect(result == 5)
+        let afterBottom = ReaderScrollGeometrySnapshot(
+            contentOffsetY: 20_000,
+            contentHeight: 10_000,
+            containerHeight: 1_000,
+            insetTop: 0,
+            insetBottom: 0
+        )
+        #expect(beforeTop.normalizedProgress == 0)
+        #expect(afterBottom.normalizedProgress == 1)
     }
 
     @Test func progressDoesNotResetWhenReaderPagesAreReleasedDuringDismiss() {
