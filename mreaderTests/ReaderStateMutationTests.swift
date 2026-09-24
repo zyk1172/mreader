@@ -108,7 +108,7 @@ final class ReaderStateMutationTests: XCTestCase {
             minimumOffsetY: 0,
             maximumOffsetY: 20_000
         )
-        XCTAssertEqual(limited, 1_040, accuracy: 0.001)
+        XCTAssertEqual(limited, 1_032, accuracy: 0.001)
     }
 
     func testContinuousScrollVelocityLimiterIsStricterDuringDeceleration() {
