@@ -162,6 +162,39 @@ struct MangaVisionRuntimeFoundationTests {
         #expect(await provider.inferenceCalls() == 1)
     }
 
+    @Test func readerSessionReleaseWaitsForSharedInferenceThenUnloadsRuntime() async throws {
+        let directory = temporaryCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = RuntimeFoundationFakeProvider(
+            manifest: makeManifest(build: "deferred-runtime-release"),
+            delayMilliseconds: 80
+        )
+        let service = MangaVisionService(provider: provider, cacheDirectory: directory)
+        let request = Task {
+            try await service.analysis(
+                comicID: UUID(),
+                pageIndex: 0,
+                pageURL: URL(fileURLWithPath: "/tmp/mreader-runtime-deferred-release.png"),
+                image: makeImage(),
+                contentIdentity: .remote(
+                    provider: "fixture",
+                    resource: "deferred-release",
+                    revision: "1"
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 15_000_000)
+        await service.releaseReaderSessionMemory()
+        #expect(await provider.runtimeReleaseCalls() == 0)
+
+        _ = try await request.value
+        for _ in 0..<20 where await provider.runtimeReleaseCalls() == 0 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(await provider.runtimeReleaseCalls() == 1)
+    }
+
     @Test func modelBuildChangeInvalidatesCacheWithoutManualVersionBump() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -455,13 +488,14 @@ private enum RuntimeFoundationFakeError: Error {
     case inferenceFailed
 }
 
-private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionManifestProviding {
+private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
     private let manifest: MangaVisionModelManifest
     private let delayMilliseconds: UInt64
     private let ignoresCancellation: Bool
     private let error: Error?
     private var descriptorCallCount = 0
     private var inferenceCallCount = 0
+    private var runtimeReleaseCallCount = 0
 
     init(
         manifest: MangaVisionModelManifest,
@@ -484,6 +518,14 @@ private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionMan
 
     func mangaVisionManifest() async -> MangaVisionModelManifest {
         manifest
+    }
+
+    func releaseRuntimeMemory() async {
+        runtimeReleaseCallCount += 1
+    }
+
+    func runtimeReleaseCalls() -> Int {
+        runtimeReleaseCallCount
     }
 
     func analyzePage(
