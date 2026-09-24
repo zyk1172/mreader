@@ -103,14 +103,17 @@ struct ArchitectureAuditRegressionTests {
             translation: "translation"
         )
 
+        ReaderSessionRegistry.shared.activate(oldSession)
         await cache.beginReaderSession(sessionID: oldSession)
         await cache.store([block], key: "page")
+        ReaderSessionRegistry.shared.activate(newSession)
         await cache.beginReaderSession(sessionID: newSession)
         await cache.releaseReaderSessionMemory(sessionID: oldSession)
         #expect(await cache.cachedBlocks(key: "page")?.count == 1)
 
         await cache.releaseReaderSessionMemory(sessionID: newSession)
         #expect(await cache.cachedBlocks(key: "page") == nil)
+        ReaderSessionRegistry.shared.deactivate(newSession)
     }
 }
 
