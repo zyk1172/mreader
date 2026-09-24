@@ -411,10 +411,12 @@ actor RemotePageCache {
             candidates: [diskURL, legacyDiskURL],
             priority: priority
         ) {
-            guard epoch == generation, !Task.isCancelled else { return nil }
+            guard !Task.isCancelled else { return nil }
             let data = diskHit.data
-            memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
-            cachedKeys.insert(cacheKey)
+            if epoch == generation {
+                memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+                cachedKeys.insert(cacheKey)
+            }
             await registerGeometryIfNeeded(data, for: key)
             MReaderLog.reader.debug(
                 "remote cache disk hit page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
@@ -427,9 +429,7 @@ actor RemotePageCache {
                 "remote cache joined request page=\(key.pageIndex, privacy: .public) priority=\(String(describing: priority), privacy: .public)"
             )
             let data = await entry.task.value
-            guard epoch == generation,
-                  entry.generation == generation,
-                  !Task.isCancelled else { return nil }
+            guard !Task.isCancelled else { return nil }
             return data
         }
 
@@ -453,10 +453,12 @@ actor RemotePageCache {
         if activeDownloads[key]?.id == requestID {
             activeDownloads[key] = nil
         }
-        guard epoch == generation, !Task.isCancelled else { return nil }
+        guard !Task.isCancelled else { return nil }
         if let data {
-            memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
-            cachedKeys.insert(cacheKey)
+            if epoch == generation {
+                memoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
+                cachedKeys.insert(cacheKey)
+            }
             await registerGeometryIfNeeded(data, for: key)
             MReaderLog.reader.debug(
                 "remote cache stored page=\(key.pageIndex, privacy: .public) bytes=\(data.count, privacy: .public) key=\(key.logDescription, privacy: .public)"
@@ -516,12 +518,10 @@ actor RemotePageCache {
     }
 
     func releaseReaderSessionMemory() {
+        // RemotePageCache is also used by offline translation. Reader teardown therefore
+        // advances only the memory-cache generation: existing downloads may finish and
+        // populate disk, but completions from the old Reader session cannot refill NSCache.
         generation = UUID()
-        for entry in activeDownloads.values {
-            entry.task.cancel()
-        }
-        activeDownloads.removeAll()
-        geometryRegisteredKeys.removeAll()
         clearMemoryCache()
         MReaderLog.reader.notice("remote reader-session memory released")
     }
