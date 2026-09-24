@@ -469,14 +469,29 @@ nonisolated private func deviceMemoryBytes() -> UInt64 {
 @MainActor
 final class PageGeometryStore {
     static let shared = PageGeometryStore()
+    private let maximumEntryCount = 512
     private var sizes: [String: CGSize] = [:]
+    private var accessOrder: [String] = []
 
     func setSize(_ size: CGSize, for url: URL) {
-        sizes[url.absoluteString] = size
+        let key = url.absoluteString
+        sizes[key] = size
+        touch(key)
+        while accessOrder.count > maximumEntryCount {
+            sizes[accessOrder.removeFirst()] = nil
+        }
     }
 
     func size(for url: URL) -> CGSize? {
-        sizes[url.absoluteString]
+        let key = url.absoluteString
+        guard let size = sizes[key] else { return nil }
+        touch(key)
+        return size
+    }
+
+    private func touch(_ key: String) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
     }
 
     /// height/width。长条页比例远大于 1，是占位高度唯一的正确来源。
@@ -541,6 +556,16 @@ private final class ReaderProgressThumbnailCache {
 
     private init() {
         cache.countLimit = 32
+        cache.totalCostLimit = 48 * 1024 * 1024
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                ReaderProgressThumbnailCache.shared.releaseReaderSessionMemory()
+            }
+        }
     }
 
     func image(for url: URL) async -> UIImage? {
@@ -558,10 +583,12 @@ private final class ReaderProgressThumbnailCache {
         }
         inFlight[key] = task
         let image = await task.value
+        if epoch == generation {
+            inFlight[key] = nil
+        }
         guard epoch == generation, !Task.isCancelled else { return nil }
-        inFlight[key] = nil
         if let image {
-            cache.setObject(image, forKey: key as NSString)
+            cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
         }
         return image
     }
@@ -577,35 +604,58 @@ private final class ReaderProgressThumbnailCache {
     }
 }
 
-private actor ReaderImageDecodeLimiter {
-    static let shared = ReaderImageDecodeLimiter(maximumConcurrentDecodes: 2)
-
-    private let maximumConcurrentDecodes: Int
-    private var activeDecodes = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(maximumConcurrentDecodes: Int) {
-        self.maximumConcurrentDecodes = max(1, maximumConcurrentDecodes)
+private actor ReaderAsyncPermitPool {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
     }
 
-    func acquire() async {
-        if activeDecodes < maximumConcurrentDecodes {
-            activeDecodes += 1
-            return
+    private let maximumConcurrentPermits: Int
+    private var activePermits = 0
+    private var waiters: [Waiter] = []
+
+    init(maximumConcurrentPermits: Int) {
+        self.maximumConcurrentPermits = max(1, maximumConcurrentPermits)
+    }
+
+    func acquire() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        if activePermits < maximumConcurrentPermits {
+            activePermits += 1
+            return true
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: id) }
         }
     }
 
     func release() {
         if waiters.isEmpty {
-            activeDecodes = max(0, activeDecodes - 1)
+            activePermits = max(0, activePermits - 1)
         } else {
-            waiters.removeFirst().resume()
+            waiters.removeFirst().continuation.resume(returning: true)
         }
     }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
 }
+
+private let readerForegroundImageLoadLimiter = ReaderAsyncPermitPool(maximumConcurrentPermits: 3)
+private let readerImageDecodeLimiter = ReaderAsyncPermitPool(maximumConcurrentPermits: 2)
 
 @MainActor
 private final class ReaderImageCache {
@@ -631,13 +681,14 @@ private final class ReaderImageCache {
     private var foregroundLoadKeys: Set<String> = []
     /// Reader 关闭时推进代际。旧解码即使 ImageIO 已经无法中断，也禁止在关闭后回填缓存。
     private var generation = UUID()
-    private let preloadBudgetBytes: Int
+    private var preloadBudgetBytes: Int {
+        ReaderMemoryBudgetPlanner.budget().decodedImagePreloadMB * 1024 * 1024
+    }
     private var lastKnownViewportWidthPoints: CGFloat = 430
     private var lastKnownDisplayScale: CGFloat = 3
 
     private init() {
         let budget = ReaderMemoryBudgetPlanner.budget()
-        preloadBudgetBytes = budget.decodedImagePreloadMB * 1024 * 1024
         cache.countLimit = 0
         cache.totalCostLimit = budget.decodedImageCacheMB * 1024 * 1024
         // 分档结果直接落日志：换设备或换机型的现场可以直接核对是否命中了预期档位。
@@ -744,26 +795,30 @@ private final class ReaderImageCache {
         }
 
         let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
+        applyDynamicMemoryLimit()
         let task = Task.detached(priority: .userInitiated) {
-            await decodeReaderImage(from: url, maxPixelSize: maxPixelSize)
+            await loadForegroundReaderImage(from: url, maxPixelSize: maxPixelSize)
         }
         inFlightLoads[key] = task
         loadingCosts[key] = estimatedCost
         foregroundLoadKeys.insert(key)
         let image = await task.value
         if epoch == generation {
+            // Cleanup must happen even when the caller was cancelled while awaiting the
+            // detached decode. Otherwise completed Tasks/UIImage results and their costs
+            // remain retained until the whole Reader closes and can permanently stall preload.
             foregroundLoadKeys.remove(key)
+            inFlightLoads[key] = nil
+            loadingCosts[key] = nil
+            drainPreloadQueue()
         }
 
-        // clearMemoryCache() 可能在 ImageIO 解码期间推进 generation 并清掉字典。
-        // 旧任务此时绝不能移除新会话同 key 的任务，更不能把 UIImage 回填进缓存。
+        // clearMemoryCache() may have advanced generation and a new Reader may already own
+        // the same key. Old completions must not touch that new session or repopulate cache.
         guard epoch == generation, !Task.isCancelled else { return nil }
-        inFlightLoads[key] = nil
-        loadingCosts[key] = nil
         if let image {
             cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
         }
-        drainPreloadQueue()
         return image
     }
 
@@ -873,6 +928,13 @@ private final class ReaderImageCache {
         }
     }
 
+    private func applyDynamicMemoryLimit() {
+        let dynamicLimit = ReaderMemoryBudgetPlanner.budget().decodedImageCacheMB * 1024 * 1024
+        if cache.totalCostLimit != dynamicLimit {
+            cache.totalCostLimit = dynamicLimit
+        }
+    }
+
     func clearMemoryCache() {
         generation = UUID()
         scheduledPreload?.cancel()
@@ -953,6 +1015,17 @@ private extension UIImage {
     }
 }
 
+nonisolated private func loadForegroundReaderImage(from url: URL, maxPixelSize: CGFloat) async -> UIImage? {
+    guard await readerForegroundImageLoadLimiter.acquire() else { return nil }
+    if Task.isCancelled {
+        await readerForegroundImageLoadLimiter.release()
+        return nil
+    }
+    let image = await decodeReaderImage(from: url, maxPixelSize: maxPixelSize)
+    await readerForegroundImageLoadLimiter.release()
+    return Task.isCancelled ? nil : image
+}
+
 nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat) async -> UIImage? {
     let remoteData: Data?
     if RemotePageLoader.isRemotePageURL(url) {
@@ -960,9 +1033,9 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
     } else {
         remoteData = nil
     }
-    await ReaderImageDecodeLimiter.shared.acquire()
+    guard await readerImageDecodeLimiter.acquire() else { return nil }
     if Task.isCancelled {
-        await ReaderImageDecodeLimiter.shared.release()
+        await readerImageDecodeLimiter.release()
         return nil
     }
     let image = autoreleasepool { () -> UIImage? in
@@ -988,10 +1061,10 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         return UIImage(contentsOfFile: url.path)
     }
     if Task.isCancelled {
-        await ReaderImageDecodeLimiter.shared.release()
+        await readerImageDecodeLimiter.release()
         return nil
     }
-    await ReaderImageDecodeLimiter.shared.release()
+    await readerImageDecodeLimiter.release()
     if let image {
         let pixelSize = CGSize(
             width: image.size.width * image.scale,
@@ -1501,6 +1574,12 @@ struct ReaderView: View {
             let sessionID = UUID()
             readerSessionID = sessionID
             readerSessionSetupTask = Task { @MainActor in
+                await RemotePageCache.shared.beginReaderSession(sessionID: sessionID)
+                await AITranslationPageCoordinator.shared.beginReaderSession(sessionID: sessionID)
+                await OCRRecognitionCache.shared.beginReaderSession(sessionID: sessionID)
+                await AppleTranslationPageCache.shared.beginReaderSession(sessionID: sessionID)
+                await TranslationContextRegistry.shared.beginReaderSession(sessionID: sessionID)
+                await PanelDetectionService.shared.beginReaderSession(sessionID: sessionID)
                 await MangaVisionService.shared.beginReaderSession(sessionID: sessionID)
                 guard !Task.isCancelled, readerSessionID == sessionID else { return }
 
@@ -1531,12 +1610,12 @@ struct ReaderView: View {
             Task {
                 // 远程 Data 缓存可能达到数百 MB，优先释放；模型 runtime 最后卸载，
                 // 即使当前 Core ML 同步 prediction 尚未返回，也不阻塞其余缓存清理。
-                await RemotePageCache.shared.releaseReaderSessionMemory()
-                await AITranslationPageCoordinator.shared.releaseReaderSessionMemory()
-                await OCRRecognitionCache.shared.releaseReaderSessionMemory()
-                await AppleTranslationPageCache.shared.clearMemoryCache()
-                await TranslationContextRegistry.shared.clearSessionMemory()
-                await PanelDetectionService.shared.releaseReaderSessionMemory()
+                await RemotePageCache.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
+                await AITranslationPageCoordinator.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
+                await OCRRecognitionCache.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
+                await AppleTranslationPageCache.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
+                await TranslationContextRegistry.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
+                await PanelDetectionService.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
                 await MangaVisionService.shared.releaseReaderSessionMemory(sessionID: closingSessionID)
                 await OCRRuntimeService.flush()
                 MReaderLog.reader.notice("reader session memory released")
@@ -3493,6 +3572,7 @@ struct ContinuousScrollReader: View {
                                 ),
                                 imageLoadDelay: 0,
                                 showsLoadingIndicator: page.index == currentPageIndex,
+                                retainsDecodedImage: abs(page.index - currentPageIndex) <= 3,
                                 isPageTapGestureEnabled: !areControlsVisible,
                                 isSingleFingerPanEnabled: ReaderGestureGate.allowsSingleFingerPan(readingMode: readingMode),
                                 onTranslationStateChange: onTranslationStateChange,
@@ -5389,6 +5469,7 @@ struct LocalImageView: View {
     var placeholderHeight: CGFloat? = nil
     var imageLoadDelay: TimeInterval = 0
     var showsLoadingIndicator: Bool = true
+    var retainsDecodedImage: Bool = true
     var isPageTapGestureEnabled: Bool = true
     var isSingleFingerPanEnabled: Bool = true
     var isLongPressTranslationEnabled: Bool = true
@@ -5484,7 +5565,7 @@ struct LocalImageView: View {
     }
 
     private var imageLoadTaskID: String {
-        "\(url.absoluteString)#delay=\(Int((imageLoadDelay * 1_000).rounded()))"
+        "\(url.absoluteString)#delay=\(Int((imageLoadDelay * 1_000).rounded()))#retain=\(retainsDecodedImage)"
     }
 
     var body: some View {
@@ -5629,6 +5710,12 @@ struct LocalImageView: View {
             }
         }
         .task(id: imageLoadTaskID) {
+            guard retainsDecodedImage else {
+                uiImage = nil
+                loadedPageURL = nil
+                isLoadingImage = false
+                return
+            }
             // 视图身份可能被复用：分镜跨页要靠同一个视图身份才能让相机在
             // scaleEffect/offset 上插值（否则整页就是硬切）。所以不能只看
             // uiImage 是否为空，必须比对已经加载的是不是当前这一页。
@@ -5642,6 +5729,12 @@ struct LocalImageView: View {
             }
             guard !Task.isCancelled else { return }
             await loadImage()
+        }
+        .onChange(of: retainsDecodedImage) { _, shouldRetain in
+            guard !shouldRetain else { return }
+            uiImage = nil
+            loadedPageURL = nil
+            isLoadingImage = false
         }
         .onDisappear {
             cancelLiveTranslationForPage()
