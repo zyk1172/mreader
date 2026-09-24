@@ -5638,23 +5638,11 @@ struct LocalImageView: View {
             await loadImage()
         }
         .onDisappear {
-            translationTask?.cancel()
-            translationTask = nil
+            cancelLiveTranslationForPage()
             offlineTranslationTask?.cancel()
             offlineTranslationTask = nil
-            translationGeneration = UUID()
-            appleTranslationGeneration = UUID()
-            appleTranslationRequests.removeAll()
-            appleSourceLanguageCode = nil
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
-            cloudFallbackTask?.cancel()
-            cloudFallbackTask = nil
-            cloudFallbackGeneration = UUID()
-            if isTranslating {
-                isTranslating = false
-                onTranslationStateChange(false)
-            }
             if isZoomedIn {
                 onZoomChange(false)
             }
@@ -5682,8 +5670,11 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: isAutoTranslationEnabled) { _, newValue in
-            guard newValue else { return }
-            startTranslation()
+            if newValue {
+                startTranslation()
+            } else {
+                cancelLiveTranslationForPage()
+            }
         }
         .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
             offlineTranslationTask?.cancel()
@@ -6509,18 +6500,12 @@ struct LocalImageView: View {
     private func loadImage() async {
         let pageURL = url
         await MainActor.run {
-            translationTask?.cancel()
-            translationTask = nil
+            cancelLiveTranslationForPage()
             offlineTranslationTask?.cancel()
             offlineTranslationTask = nil
             isOfflineTranslationDisplayed = false
-            translationGeneration = UUID()
             ocrMagnificationTask?.cancel()
             ocrMagnificationTask = nil
-            if isTranslating {
-                isTranslating = false
-                onTranslationStateChange(false)
-            }
         }
         let maxPixelSize = preferredDecodeMaxPixelSize
         if let cachedImage = ReaderImageCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
@@ -6867,6 +6852,30 @@ struct LocalImageView: View {
         }
     }
     
+    /// 当前 LocalImageView 失去自动翻译资格（通常意味着用户已经翻到下一页）时，
+    /// 必须立即取消本页实时翻译，而不是等视图真正 onDisappear。
+    ///
+    /// 连续滚动和分页动画都会让上一页视图继续存活一段时间；只依赖 onDisappear 会让
+    /// 上一页任务长期占着 Reader 的 activeTranslationCount，从而堵住后续自动翻译。
+    private func cancelLiveTranslationForPage() {
+        translationTask?.cancel()
+        translationTask = nil
+        translationGeneration = UUID()
+
+        appleTranslationGeneration = UUID()
+        appleTranslationRequests.removeAll()
+        appleSourceLanguageCode = nil
+
+        cloudFallbackTask?.cancel()
+        cloudFallbackTask = nil
+        cloudFallbackGeneration = UUID()
+
+        if isTranslating {
+            isTranslating = false
+            onTranslationStateChange(false)
+        }
+    }
+
     // 触发 AI 流程
     private func startTranslation(force: Bool = false) {
         translationTask?.cancel()
@@ -6884,8 +6893,12 @@ struct LocalImageView: View {
         appleTranslationRequests = []
         appleSourceLanguageCode = nil
         translationErrorMessage = nil
-        isTranslating = true
-        onTranslationStateChange(true)
+        // 同一个 LocalImageView 的翻译重启仍然只占一个进行中名额。
+        // 旧 task 会因 generation 失效而退出，不能重复 +1。
+        if !isTranslating {
+            isTranslating = true
+            onTranslationStateChange(true)
+        }
 
         translationTask = Task {
             do {
@@ -6919,15 +6932,18 @@ struct LocalImageView: View {
                     }
                 }
             }
-            // 无论任务是否被新任务取代，都要归还“进行中”计数，避免进度边框卡住；
-            // 只有最新代际才允许清理翻译状态（isTranslating / translationTask）。
+            // 只有仍属于当前页、当前 generation 的任务才有权归还进行中名额。
+            // 被翻页/重启淘汰的旧 task 已在取消路径里归还，不能再替新任务 -1。
             await MainActor.run {
-                self.onTranslationStateChange(false)
-                guard self.translationGeneration == generation else { return }
-                if self.translationErrorMessage == nil {
+                guard self.translationGeneration == generation,
+                      self.url == pageURL else { return }
+                if self.translationErrorMessage == nil, !Task.isCancelled {
                     HapticManager.shared.play(.success)
                 }
-                self.isTranslating = false
+                if self.isTranslating {
+                    self.isTranslating = false
+                    self.onTranslationStateChange(false)
+                }
                 self.translationTask = nil
             }
         }
