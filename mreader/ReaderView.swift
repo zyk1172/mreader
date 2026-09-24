@@ -191,6 +191,19 @@ nonisolated enum ReaderGestureGate {
 
 /// fit-width 解码只需要保证“显示宽度”达到屏幕需要的像素数；固定 8192 最长边会让
 /// 普通长页做无谓大解码。返回离散档位，保证 ReaderImageCache 可以跨请求稳定复用。
+nonisolated enum ReaderImageSubsamplePolicy {
+    static func factor(sourceSize: CGSize, targetMaxPixelSize: CGFloat) -> Int? {
+        guard sourceSize.width > 0,
+              sourceSize.height > 0,
+              targetMaxPixelSize > 0 else { return nil }
+        let ratio = max(sourceSize.width, sourceSize.height) / targetMaxPixelSize
+        if ratio >= 8 { return 8 }
+        if ratio >= 4 { return 4 }
+        if ratio >= 2 { return 2 }
+        return nil
+    }
+}
+
 nonisolated enum ReaderFitWidthDecodePolicy {
     static let tiers: [CGFloat] = [4096, 6144, 8192]
     static let maximumPixelSize: CGFloat = 8192
@@ -988,13 +1001,33 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
             source = CGImageSourceCreateWithURL(url as CFURL, nil)
         }
         guard let source else { return nil }
-        let options: [CFString: Any] = [
+
+        let sourceSize = imagePixelSize(from: source)
+        var options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceShouldCache: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
         ]
+        let subsampleFactor = sourceSize.flatMap {
+            ReaderImageSubsamplePolicy.factor(
+                sourceSize: $0,
+                targetMaxPixelSize: maxPixelSize
+            )
+        }
+        if let subsampleFactor {
+            options[kCGImageSourceSubsampleFactor] = subsampleFactor
+        }
+
+        if let sourceSize,
+           max(sourceSize.width, sourceSize.height) >= maxPixelSize * 2 {
+            let sourceType = CGImageSourceGetType(source) as String? ?? "unknown"
+            MReaderLog.reader.debug(
+                "image decode source=\(Int(sourceSize.width), privacy: .public)x\(Int(sourceSize.height), privacy: .public) targetMax=\(Int(maxPixelSize), privacy: .public) subsample=\(subsampleFactor ?? 1, privacy: .public) type=\(sourceType, privacy: .public)"
+            )
+        }
+
         if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return UIImage(cgImage: cgImage)
         }
