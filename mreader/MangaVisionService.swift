@@ -23,8 +23,11 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// It owns page/model cache identity and in-flight coalescing so consumers never
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
+    // This integration branch intentionally bypasses every legacy provider/router
+    // choice. Adaptive inference may add MangaLayout4 tile passes, but every model
+    // pass still uses MangaLayout4V1Provider and failures are never retried with V2B5.
     static let shared = MangaVisionService(
-        provider: AdaptiveMangaVisionProvider(base: MangaVisionProviderRouter.shared)
+        provider: AdaptiveMangaVisionProvider(base: MangaLayout4V1Provider.shared)
     )
     nonisolated static let analysisRevision = "manga-vision-page-v4-demand-identity"
 
@@ -501,7 +504,7 @@ actor MangaVisionService {
         } else {
             // Compatibility providers (primarily tests/alternate adapters) still work.
             // Their descriptor is consulted only when they do not implement the static
-            // manifest contract; the bundled V2B5 provider never takes this path.
+            // manifest contract; the MangaLayout4 V1 provider never takes this path.
             let descriptor = await provider.descriptor
             let compatibilityIdentity = "descriptor:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
             manifest = MangaVisionModelManifest(

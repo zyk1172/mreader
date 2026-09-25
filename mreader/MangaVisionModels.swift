@@ -174,9 +174,9 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
 
 /// The single page-vision contract consumed by reader/OCR/translation business code.
 nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
-    /// MangaLayout4 adds only backward-compatible optional fields. Keep the production
-    /// analysis schema stable so the still-default V2B5 route does not invalidate its
-    /// cache merely because the development adapter exists.
+    /// MangaLayout4 adds only backward-compatible optional fields. Keep the analysis
+    /// schema stable while the model-specific manifest/cache identity separates this
+    /// integration branch from historical V2B5 cache entries.
     static let schemaVersion = 4
 
     let schemaVersion: Int

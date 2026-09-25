@@ -1,14 +1,13 @@
 import CoreGraphics
 import Foundation
 
-/// Production remains pinned to the frozen V2B5 provider. MangaLayout4 V1 is
-/// available only through explicit dependency injection/development routing until
-/// its Python/Swift parity and device-quality gates are complete.
+/// Branch-local integration route. This branch is intentionally MangaLayout4 V1-only:
+/// there is no V2B5/legacy fallback path. If the new model cannot load or infer, the
+/// error must propagate so device testing can never be mistaken for legacy output.
 nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
-    case v2b5 = "V2B5"
     case mangaLayout4V1 = "MangaLayout4V1"
 
-    static let productionDefault: Self = .v2b5
+    static let productionDefault: Self = .mangaLayout4V1
 
     static var currentForDiagnostics: Self {
         .productionDefault
@@ -17,48 +16,29 @@ nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
 
 actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
     static let shared = MangaVisionProviderRouter(
-        v2b5: MangaVisionV2B5Provider.shared,
-        mangaLayout4V1: MangaLayout4V1Provider.shared,
-        mode: .productionDefault
+        provider: MangaLayout4V1Provider.shared
     )
 
-    private let v2b5: any MangaVisionProvider
-    private let mangaLayout4V1: any MangaVisionProvider
-    private let mode: MangaVisionProviderMode
+    private let provider: any MangaVisionProvider
 
-    init(
-        v2b5: any MangaVisionProvider,
-        mangaLayout4V1: any MangaVisionProvider = MangaLayout4V1Provider.shared,
-        mode: MangaVisionProviderMode = .productionDefault
-    ) {
-        self.v2b5 = v2b5
-        self.mangaLayout4V1 = mangaLayout4V1
-        self.mode = mode
+    init(provider: any MangaVisionProvider = MangaLayout4V1Provider.shared) {
+        self.provider = provider
     }
 
+    /// Kept only for existing development call sites. The sole selectable mode on
+    /// this integration branch is MangaLayout4 V1.
     static func development(mode: MangaVisionProviderMode) -> MangaVisionProviderRouter {
-        MangaVisionProviderRouter(
-            v2b5: MangaVisionV2B5Provider.shared,
-            mangaLayout4V1: MangaLayout4V1Provider.shared,
-            mode: mode
-        )
-    }
-
-    private var activeProvider: any MangaVisionProvider {
-        switch mode {
-        case .v2b5: v2b5
-        case .mangaLayout4V1: mangaLayout4V1
-        }
+        precondition(mode == .mangaLayout4V1)
+        return MangaVisionProviderRouter(provider: MangaLayout4V1Provider.shared)
     }
 
     var descriptor: MangaVisionProviderDescriptor {
         get async {
-            await activeProvider.descriptor
+            await provider.descriptor
         }
     }
 
     func mangaVisionManifest() async -> MangaVisionModelManifest {
-        let provider = activeProvider
         if let manifestProvider = provider as? any MangaVisionManifestProviding {
             return await manifestProvider.mangaVisionManifest()
         }
@@ -82,7 +62,7 @@ actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProvidi
         sourceImageSize: CGSize,
         pageIdentifier: MangaPageIdentifier
     ) async throws -> MangaPageAnalysis {
-        try await activeProvider.analyzePage(
+        try await provider.analyzePage(
             image: image,
             sourceImageSize: sourceImageSize,
             pageIdentifier: pageIdentifier
@@ -90,7 +70,6 @@ actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProvidi
     }
 
     func releaseRuntimeMemory() async {
-        let provider = activeProvider
         if let releasable = provider as? any MangaVisionRuntimeReleasable {
             await releasable.releaseRuntimeMemory()
         }

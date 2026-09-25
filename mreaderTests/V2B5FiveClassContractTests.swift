@@ -26,10 +26,10 @@ final class V2B5FiveClassContractTests: XCTestCase {
         )
     }
 
-    func testProductionProviderIsV2B5() {
-        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .v2b5)
-        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .v2b5)
+    func testV2B5RemainsHistoricalExplicitProviderOnly() {
         XCTAssertEqual(MangaVisionV2B5Provider.modelResourceName, "MangaVisionV2B5")
+        XCTAssertEqual(MangaVisionProviderMode.allCases, [.mangaLayout4V1])
+        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .mangaLayout4V1)
     }
 
     func testFiveClassesAreExposedToMangaPageAnalysis() {

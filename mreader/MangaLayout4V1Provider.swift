@@ -40,7 +40,9 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionRuntimeReleasable,
         get async {
             if let runtime { return runtime.descriptor }
             if let loaded = try? loadRuntime() { return loaded.descriptor }
-            return Self.fallbackDescriptor
+            // Descriptor metadata is static and does not imply a successful model load.
+            // analyzePage still fails hard with modelUnavailable; no legacy model is tried.
+            return Self.declaredDescriptor
         }
     }
 
@@ -224,7 +226,7 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionRuntimeReleasable,
         return loaded
     }
 
-    private static let fallbackDescriptor = MangaVisionProviderDescriptor(
+    private static let declaredDescriptor = MangaVisionProviderDescriptor(
         modelIdentifier: modelIdentifier,
         modelVersion: MangaLayout4V1ProductionIdentity.modelVersion,
         inputSize: MangaLayout4V1Preprocessor.inputSize,

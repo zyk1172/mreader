@@ -273,9 +273,14 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertFalse(capabilities.supportsBody)
     }
 
-    func testProductionRouteRemainsV2B5() {
-        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .v2b5)
-        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .v2b5)
+    func testIntegrationBranchRouteIsMangaLayout4Only() async {
+        XCTAssertEqual(MangaVisionProviderMode.allCases, [.mangaLayout4V1])
+        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .mangaLayout4V1)
+        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .mangaLayout4V1)
+
+        let descriptor = await MangaVisionProviderRouter.shared.descriptor
+        XCTAssertEqual(descriptor.modelIdentifier, MangaLayout4V1Provider.modelIdentifier)
+        XCTAssertNotEqual(descriptor.modelIdentifier, MangaVisionV2B5Provider.modelIdentifier)
     }
 
     func testBundledFormalModelMatchesThirteenOutputContractWhenMaterialized() throws {
