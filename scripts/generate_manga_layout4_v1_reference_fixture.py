@@ -26,13 +26,13 @@ LEVELS = {
     "p5": (32, 20, 20),
 }
 CLASS_NAMES = ["frame", "text", "balloon", "onomatopoeia"]
-SCORE_THRESHOLDS = {
-    "frame": 0.40,
+SCORE_THRESHOLDS = {name: 0.05 for name in CLASS_NAMES}
+NMS_THRESHOLDS = {
+    "frame": 0.50,
     "text": 0.50,
-    "balloon": 0.30,
-    "onomatopoeia": 0.30,
+    "balloon": 0.45,
+    "onomatopoeia": 0.45,
 }
-NMS_THRESHOLDS = {name: 0.35 for name in CLASS_NAMES}
 PRE_NMS_TOPK = 1200
 MAX_DETECTIONS = 300
 MASK_THRESHOLD = 0.50
