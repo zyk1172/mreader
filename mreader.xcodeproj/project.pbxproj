@@ -109,6 +109,7 @@
 				788190932FE2DAA6007BDA15 /* Sources */,
 				788190942FE2DAA6007BDA15 /* Frameworks */,
 				788190952FE2DAA6007BDA15 /* Resources */,
+				D17E00020000000000000004 /* Embed MangaLayout4 V1 */,
 			);
 			buildRules = (
 			);
@@ -246,6 +247,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		D17E00020000000000000004 /* Embed MangaLayout4 V1 */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/.local-models/MangaLayout4V1.mlpackage",
+			);
+			name = "Embed MangaLayout4 V1";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/MangaLayout4V1.mlmodelc",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\nMODEL=\"$SRCROOT/.local-models/MangaLayout4V1.mlpackage\"\nOUTPUT_ROOT=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nif [[ ! -d \"$MODEL\" ]]; then\n  if [[ \"${CI:-}\" == \"true\" || \"${CI:-}\" == \"1\" ]] && [[ \"${MREADER_REQUIRE_MANGA_LAYOUT4_MODEL:-0}\" != \"1\" ]]; then\n    echo \"warning: MangaLayout4V1.mlpackage unavailable in CI; skipping real-model embedding\"\n    exit 0\n  fi\n  echo \"error: MangaLayout4V1.mlpackage was not materialized before build\" >&2\n  exit 1\nfi\nmkdir -p \"$OUTPUT_ROOT\"\nrm -rf \"$OUTPUT_ROOT/MangaLayout4V1.mlmodelc\"\nxcrun coremlc compile \"$MODEL\" \"$OUTPUT_ROOT\"\ntest -d \"$OUTPUT_ROOT/MangaLayout4V1.mlmodelc\"\necho \"Embedded MangaLayout4 V1 model: $OUTPUT_ROOT/MangaLayout4V1.mlmodelc\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		788190932FE2DAA6007BDA15 /* Sources */ = {
