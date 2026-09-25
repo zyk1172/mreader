@@ -7,22 +7,22 @@ import UIKit
 @Suite(.serialized)
 @MainActor
 struct MangaVisionPostRemediationIntegrationTests {
-    @Test func adaptiveMergeUsesVersionedCalibrationProfile() {
+    @Test func adaptiveMergeUsesVersionedLayout4CalibrationProfile() {
         let identifier = MangaPageIdentifier(
             scope: "post-remediation-calibration",
             pageIndex: 0,
             sourceFingerprint: "fixture"
         )
-        let baselineFace = MangaVisionRegion(
+        let baselineSFX = MangaVisionRegion(
             id: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
-            type: .face,
+            type: .onomatopoeia,
             normalizedRect: CGRect(x: 0.10, y: 0.10, width: 0.30, height: 0.20),
             confidence: 0.92
         )
-        let refinementFace = MangaVisionRegion(
+        let refinementSFX = MangaVisionRegion(
             id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
-            type: .face,
-            normalizedRect: CGRect(x: 0.195, y: 0.10, width: 0.30, height: 0.20),
+            type: .onomatopoeia,
+            normalizedRect: CGRect(x: 0.12, y: 0.11, width: 0.29, height: 0.19),
             confidence: 0.84
         )
         let baselineBalloon = MangaVisionRegion(
@@ -40,12 +40,12 @@ struct MangaVisionPostRemediationIntegrationTests {
         let baseline = analysis(
             identifier: identifier,
             balloons: [baselineBalloon],
-            faces: [baselineFace]
+            onomatopoeias: [baselineSFX]
         )
         let refinement = analysis(
             identifier: identifier,
             balloons: [refinementBalloon],
-            faces: [refinementFace]
+            onomatopoeias: [refinementSFX]
         )
 
         let merged = MangaVisionAnalysisComposer.merge(
@@ -53,21 +53,19 @@ struct MangaVisionPostRemediationIntegrationTests {
             refinements: [refinement]
         )
         let profile = MangaVisionCalibrationProfile.bundled
-        let expectedFaces = profile.deduplicated(
-            [baselineFace, refinementFace],
-            type: .face
+        let expectedSFX = profile.deduplicated(
+            [baselineSFX, refinementSFX],
+            type: .onomatopoeia
         )
         let expectedBalloons = profile.deduplicated(
             [baselineBalloon, refinementBalloon],
             type: .balloon
         )
 
-        // These geometries intentionally sit between the old adaptive thresholds and
-        // the revisioned profile so a copied/hard-coded threshold set fails this test.
-        #expect(expectedFaces.count == 1)
-        #expect(expectedBalloons.count == 2)
-        #expect(merged.faces == expectedFaces)
+        #expect(merged.onomatopoeias == expectedSFX)
         #expect(merged.balloons == expectedBalloons)
+        #expect(profile.calibration(for: .onomatopoeia).nmsIOUThreshold == 0.35)
+        #expect(profile.calibration(for: .balloon).nmsIOUThreshold == 0.35)
     }
 
     @Test func plannerAndReleaseGateShareOneInferencePassBudget() {
@@ -164,7 +162,7 @@ struct MangaVisionPostRemediationIntegrationTests {
     private func analysis(
         identifier: MangaPageIdentifier,
         balloons: [MangaVisionRegion] = [],
-        faces: [MangaVisionRegion] = []
+        onomatopoeias: [MangaVisionRegion] = []
     ) -> MangaPageAnalysis {
         MangaPageAnalysis(
             pageIdentifier: identifier,
@@ -172,8 +170,7 @@ struct MangaVisionPostRemediationIntegrationTests {
             panels: [],
             texts: [],
             balloons: balloons,
-            faces: faces,
-            bodies: [],
+            onomatopoeias: onomatopoeias,
             modelIdentifier: "post-remediation-fixture",
             modelVersion: 1
         )
@@ -202,7 +199,7 @@ private actor MangaVisionPassCountingFakeProvider: MangaVisionProvider {
                 modelIdentifier: "post-remediation-pass-counting-fake",
                 modelVersion: 1,
                 inputSize: CGSize(width: 640, height: 640),
-                supportedRegionTypes: [.panel, .text, .balloon]
+                supportedRegionTypes: [.panel, .text, .balloon, .onomatopoeia]
             )
         }
     }
@@ -218,8 +215,7 @@ private actor MangaVisionPassCountingFakeProvider: MangaVisionProvider {
             panels: [],
             texts: [],
             balloons: [],
-            faces: [],
-            bodies: [],
+            onomatopoeias: [],
             modelIdentifier: "post-remediation-pass-counting-fake",
             modelVersion: 1
         )

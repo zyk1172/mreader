@@ -26,8 +26,6 @@ struct MangaVisionLayerTests {
             panels: [],
             texts: [],
             balloons: [balloon],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 3
         )
@@ -87,8 +85,6 @@ struct MangaVisionLayerTests {
             panels: [],
             texts: [],
             balloons: [balloon],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 3
         )
@@ -137,8 +133,6 @@ struct MangaVisionLayerTests {
             panels: [],
             texts: [],
             balloons: [balloon],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 3
         )
@@ -202,8 +196,6 @@ struct MangaVisionLayerTests {
             panels: [],
             texts: [textRegion],
             balloons: [],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 3
         )
@@ -246,8 +238,6 @@ struct MangaVisionLayerTests {
             panels: [],
             texts: [region(.text, x: 0.14, y: 0.14, width: 0.16, height: 0.08)],
             balloons: [region(.balloon, x: 0.10, y: 0.10, width: 0.30, height: 0.26)],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 3
         )
@@ -297,11 +287,11 @@ struct MangaVisionLayerTests {
     @Test func sameTypeNMSKeepsHigherConfidenceButDoesNotMergeDifferentTypes() {
         let high = region(.text, x: 0.1, y: 0.1, width: 0.3, height: 0.2, confidence: 0.9)
         let low = region(.text, x: 0.11, y: 0.11, width: 0.29, height: 0.19, confidence: 0.5)
-        let face = region(.face, x: 0.11, y: 0.11, width: 0.29, height: 0.19, confidence: 0.8)
-        let result = MangaVisionRegionPostProcessor.deduplicated([low, face, high])
+        let sfx = region(.onomatopoeia, x: 0.11, y: 0.11, width: 0.29, height: 0.19, confidence: 0.8)
+        let result = MangaVisionRegionPostProcessor.deduplicated([low, sfx, high])
         #expect(result.count == 2)
         #expect(result.contains { $0.id == high.id })
-        #expect(result.contains { $0.id == face.id })
+        #expect(result.contains { $0.id == sfx.id })
     }
 
     @Test func textROIPaddingDeduplicatesAndClampsAtPageEdges() {
@@ -345,70 +335,36 @@ struct MangaVisionLayerTests {
         #expect(ltr.map(\.id) == [left.id, right.id, lower.id])
     }
 
-    @Test func faceAndBodyPairWithinPanel() {
-        let panel = region(.panel, x: 0.05, y: 0.05, width: 0.9, height: 0.9)
-        let body = region(.body, x: 0.20, y: 0.22, width: 0.34, height: 0.65, confidence: 0.85)
-        let face = region(.face, x: 0.30, y: 0.20, width: 0.13, height: 0.14, confidence: 0.9)
-        let people = MangaSemanticAnalyzer.personCandidates(
-            faces: [face], bodies: [body], panels: [panel]
-        )
-        #expect(people.count == 1)
-        #expect(people[0].face?.id == face.id)
-        #expect(people[0].body?.id == body.id)
-        #expect(people[0].panelID == panel.id)
+    @Test func onomatopoeiaAndTextBothDriveOCRRegionPlanning() {
+        let text = region(.text, x: 0.10, y: 0.10, width: 0.20, height: 0.08, confidence: 0.90)
+        let sfx = region(.onomatopoeia, x: 0.60, y: 0.30, width: 0.16, height: 0.12, confidence: 0.90)
+        let rois = MangaVisionTextROIPlanner.recognitionRegions(from: [text, sfx])
+
+        #expect(rois.count == 2)
+        #expect(rois.contains { $0.contains(CGPoint(x: text.normalizedRect.midX, y: text.normalizedRect.midY)) })
+        #expect(rois.contains { $0.contains(CGPoint(x: sfx.normalizedRect.midX, y: sfx.normalizedRect.midY)) })
     }
 
-    @Test func faceOnlyAndBodyOnlyRemainValidPersonCandidates() {
-        let panel = region(.panel, x: 0.0, y: 0.0, width: 1.0, height: 1.0)
-        let face = region(.face, x: 0.1, y: 0.1, width: 0.12, height: 0.12)
-        let body = region(.body, x: 0.7, y: 0.5, width: 0.2, height: 0.4)
-        let people = MangaSemanticAnalyzer.personCandidates(
-            faces: [face], bodies: [body], panels: [panel]
+    @Test func semanticPageAssignsTextAndOnomatopoeiaWithoutPersonHints() {
+        let panel = region(.panel, x: 0.05, y: 0.05, width: 0.90, height: 0.90)
+        let text = region(.text, x: 0.15, y: 0.20, width: 0.20, height: 0.08)
+        let sfx = region(.onomatopoeia, x: 0.60, y: 0.50, width: 0.18, height: 0.12)
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(scope: "semantic-layout4", pageIndex: 0, sourceFingerprint: "fixture"),
+            imageSize: CGSize(width: 1000, height: 1500),
+            panels: [panel],
+            texts: [text],
+            balloons: [],
+            onomatopoeias: [sfx],
+            modelIdentifier: MangaLayout4V1Provider.modelIdentifier,
+            modelVersion: 1
         )
-        #expect(people.count == 2)
-        #expect(people.contains { $0.face?.id == face.id && $0.body == nil })
-        #expect(people.contains { $0.body?.id == body.id && $0.face == nil })
-    }
 
-    @Test func multiplePeopleDoNotCollapseIntoOneCandidate() {
-        let panel = region(.panel, x: 0, y: 0, width: 1, height: 1)
-        let bodies = [
-            region(.body, x: 0.10, y: 0.25, width: 0.30, height: 0.65),
-            region(.body, x: 0.60, y: 0.25, width: 0.30, height: 0.65)
-        ]
-        let faces = [
-            region(.face, x: 0.18, y: 0.20, width: 0.13, height: 0.14),
-            region(.face, x: 0.68, y: 0.20, width: 0.13, height: 0.14)
-        ]
-        let people = MangaSemanticAnalyzer.personCandidates(
-            faces: faces, bodies: bodies, panels: [panel]
-        )
-        #expect(people.count == 2)
-        #expect(people.allSatisfy { $0.face != nil && $0.body != nil })
-    }
+        let semantic = MangaSemanticAnalyzer.makeSemanticPage(from: analysis, isRightToLeft: true)
 
-    @Test func speakerAssociationProducesRankedHintsNotAnAuthoritativeAssignment() {
-        let nearPerson = MangaPersonCandidate(
-            panelID: nil,
-            face: region(.face, x: 0.60, y: 0.20, width: 0.12, height: 0.12),
-            body: nil,
-            confidence: 0.9
-        )
-        let farPerson = MangaPersonCandidate(
-            panelID: nil,
-            face: region(.face, x: 0.05, y: 0.75, width: 0.12, height: 0.12),
-            body: nil,
-            confidence: 0.9
-        )
-        let text = region(.text, x: 0.62, y: 0.08, width: 0.18, height: 0.08)
-        let hints = MangaSemanticAnalyzer.speakerCandidates(
-            for: text,
-            persons: [farPerson, nearPerson]
-        )
-        #expect(hints.count == 2)
-        guard hints.count == 2 else { return }
-        #expect(hints.first?.person.id == nearPerson.id)
-        #expect(hints[0].score > hints[1].score)
+        #expect(semantic.panels.count == 1)
+        #expect(Set(semantic.panels[0].texts.map { $0.region.id }) == Set([text.id, sfx.id]))
+        #expect(semantic.unassignedTexts.isEmpty)
     }
 
     @Test func samePageAnalysisUsesProviderOnlyOnce() async throws {
@@ -519,8 +475,6 @@ private actor FakeMangaVisionProvider: MangaVisionProvider {
             ],
             texts: [],
             balloons: [],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fake-manga-vision",
             modelVersion: version
         )
