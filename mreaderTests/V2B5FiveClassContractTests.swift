@@ -16,8 +16,9 @@ final class V2B5FiveClassContractTests: XCTestCase {
         )
         XCTAssertEqual(
             Set(MangaVisionV2B5ClassOrder.regionTypes),
-            Set(MangaRegionType.allCases)
+            Set([.panel, .text, .face, .body, .balloon])
         )
+        XCTAssertFalse(MangaVisionV2B5ClassOrder.regionTypes.contains(.onomatopoeia))
         XCTAssertEqual(MangaVisionV2B5OutputContract.inputShape, [1, 3, 640, 640])
         XCTAssertEqual(
             MangaVisionV2B5OutputContract.specs.filter { $0.role == "classification" }.map(\.channels),
@@ -103,6 +104,7 @@ final class V2B5FiveClassContractTests: XCTestCase {
         XCTAssertTrue(capabilities.supportsFace)
         XCTAssertTrue(capabilities.supportsBody)
         XCTAssertTrue(capabilities.supportsBalloon)
+        XCTAssertFalse(capabilities.supportsOnomatopoeia)
         XCTAssertFalse(capabilities.supportsBalloonMask)
     }
 
