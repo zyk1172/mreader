@@ -63,15 +63,33 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         )
     }
 
-    func testValidationCandidateThresholdsArePerClass() {
+    func testFrozenTrainingPostprocessThresholdsMatchReferenceDecoder() {
         let config = MangaLayout4V1Configuration()
-        XCTAssertEqual(config.frameScoreThreshold, 0.40)
-        XCTAssertEqual(config.textScoreThreshold, 0.50)
-        XCTAssertEqual(config.balloonScoreThreshold, 0.30)
-        XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.30)
         for layoutClass in MangaLayout4V1Class.allCases {
-            XCTAssertEqual(config.nmsThreshold(for: layoutClass), 0.35)
+            XCTAssertEqual(config.scoreThreshold(for: layoutClass), 0.05)
         }
+        XCTAssertEqual(config.frameNMSThreshold, 0.50)
+        XCTAssertEqual(config.textNMSThreshold, 0.50)
+        XCTAssertEqual(config.balloonNMSThreshold, 0.45)
+        XCTAssertEqual(config.onomatopoeiaNMSThreshold, 0.45)
+    }
+
+    func testGuidedPanelAcceptsQualityFocalFrameScoresKeptByLayout4() {
+        let panels = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
+                confidence: 0.09,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.53, y: 0.05, width: 0.42, height: 0.40),
+                confidence: 0.08,
+                source: .coreML
+            )
+        ]
+        let processed = PanelPostProcessor.process(panels)
+        XCTAssertEqual(processed.count, 2)
+        XCTAssertTrue(PanelLayoutQuality.isUsable(processed))
     }
 
     func testSigmoidFeatureGridAndSoftplusMatchReferenceMath() {
