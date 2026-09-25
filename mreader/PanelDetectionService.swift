@@ -4,7 +4,6 @@ import UIKit
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
-    case visionRectangle
     case fullPageFallback
 }
 
@@ -119,10 +118,6 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
 }
 
 nonisolated enum PanelPostProcessor {
-    private static let smallFloatingAreaThreshold: CGFloat = 0.07
-    private static let substantialPanelAreaThreshold: CGFloat = 0.085
-    private static let structuralAlignmentTolerance: CGFloat = 0.035
-    private static let pageEdgeTolerance: CGFloat = 0.075
 
     static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -164,32 +159,10 @@ nonisolated enum PanelPostProcessor {
             }
         }
 
-        return suppressLikelyDialogueBoxes(in: kept)
+        return kept
     }
 
-    /// Vision rectangle detection sees both comic panels and speech balloons as rectangles.
-    /// A balloon is commonly a much smaller box fully contained by a real panel. In that
-    /// case confidence is not a useful tie-breaker: Vision can assign the balloon a higher
-    /// confidence than the panel border. Prefer the containing box when the area difference
-    /// is large, while preserving confidence-based NMS for genuinely near-identical boxes.
     private static func shouldPrefer(_ candidate: DetectedPanel, over existing: DetectedPanel) -> Bool {
-        let intersection = existing.rect.intersection(candidate.rect)
-        if !intersection.isNull {
-            let intersectionArea = area(intersection)
-            let existingArea = area(existing.rect)
-            let candidateArea = area(candidate.rect)
-            let smallerArea = min(existingArea, candidateArea)
-            let largerArea = max(existingArea, candidateArea)
-            let containment = intersectionArea / max(smallerArea, 0.0001)
-            let sizeRatio = smallerArea / max(largerArea, 0.0001)
-
-            if (candidate.source == .visionRectangle || existing.source == .visionRectangle),
-               containment >= 0.90,
-               sizeRatio <= 0.58 {
-                return candidateArea > existingArea
-            }
-        }
-
         if candidate.confidence != existing.confidence {
             return candidate.confidence > existing.confidence
         }
@@ -208,87 +181,10 @@ nonisolated enum PanelPostProcessor {
         let largerArea = max(lhsArea, rhsArea)
         let containment = intersectionArea / max(smallerArea, 0.0001)
         let sizeRatio = smallerArea / max(largerArea, 0.0001)
-        if lhs.source == .coreML, rhs.source == .coreML {
-            // The segmentation model already separates frame from balloon. Preserve
-            // real inset panels instead of treating containment alone as duplication.
-            return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
-        }
-        return iou >= 0.58 || containment >= 0.82
-    }
 
-    /// Reject small floating Vision rectangles once the page already contains convincing
-    /// panel-sized geometry. This is deliberately conservative: a small box is retained if
-    /// it aligns with another panel edge or sits on the page boundary, both common traits of
-    /// legitimate small panels and uncommon traits of dialogue balloons.
-    private static func suppressLikelyDialogueBoxes(in panels: [DetectedPanel]) -> [DetectedPanel] {
-        guard panels.count >= 2 else { return panels }
-        let hasSubstantialVisionPanel = panels.contains {
-            $0.source == .visionRectangle && area($0.rect) >= substantialPanelAreaThreshold
-        }
-
-        return panels.filter { candidate in
-            guard candidate.source == .visionRectangle else { return true }
-            let candidateArea = area(candidate.rect)
-            guard candidateArea < smallFloatingAreaThreshold else { return true }
-            guard !hasStructuralSupport(candidate, among: panels) else { return true }
-
-            let containedByLargerPanel = panels.contains { other in
-                guard other != candidate else { return false }
-                let otherArea = area(other.rect)
-                guard otherArea >= candidateArea * 1.8 else { return false }
-                let intersection = other.rect.intersection(candidate.rect)
-                guard !intersection.isNull else { return false }
-                return area(intersection) / max(candidateArea, 0.0001) >= 0.86
-            }
-            if containedByLargerPanel {
-                return false
-            }
-
-            return !hasSubstantialVisionPanel
-        }
-    }
-
-    /// A Vision-only result should look like a page layout, not a collection of floating
-    /// dialogue boxes. Large panels are self-supporting; small panels need edge/gutter
-    /// alignment with peers or a page-edge relationship.
-    static func hasVisionPanelStructure(_ panels: [DetectedPanel]) -> Bool {
-        guard !panels.isEmpty else { return false }
-        guard panels.allSatisfy({ $0.source == .visionRectangle }) else { return true }
-
-        let supportedCount = panels.filter { panel in
-            area(panel.rect) >= smallFloatingAreaThreshold
-                || hasStructuralSupport(panel, among: panels)
-        }.count
-        let requiredCount = max(2, Int(ceil(Double(panels.count) * 0.60)))
-        return supportedCount >= requiredCount
-    }
-
-    private static func hasStructuralSupport(
-        _ candidate: DetectedPanel,
-        among panels: [DetectedPanel]
-    ) -> Bool {
-        if touchesPageEdge(candidate.rect) {
-            return true
-        }
-
-        return panels.contains { other in
-            guard other != candidate else { return false }
-            return edgesAlign(candidate.rect, other.rect)
-        }
-    }
-
-    private static func touchesPageEdge(_ rect: CGRect) -> Bool {
-        rect.minX <= pageEdgeTolerance
-            || rect.minY <= pageEdgeTolerance
-            || rect.maxX >= 1 - pageEdgeTolerance
-            || rect.maxY >= 1 - pageEdgeTolerance
-    }
-
-    private static func edgesAlign(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-        abs(lhs.minX - rhs.minX) <= structuralAlignmentTolerance
-            || abs(lhs.maxX - rhs.maxX) <= structuralAlignmentTolerance
-            || abs(lhs.minY - rhs.minY) <= structuralAlignmentTolerance
-            || abs(lhs.maxY - rhs.maxY) <= structuralAlignmentTolerance
+        // MangaLayout4 already distinguishes frame from balloon. Only collapse
+        // genuinely duplicate frame detections; preserve real inset panels.
+        return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
     }
 
     private static func preferredCandidate(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
@@ -316,8 +212,6 @@ nonisolated enum PanelLayoutQuality {
         guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= layout4PanelThreshold else { return false }
-        guard PanelPostProcessor.hasVisionPanelStructure(panels) else { return false }
-
         let totalArea = panels.reduce(CGFloat.zero) { partial, panel in
             partial + panel.rect.width * panel.rect.height
         }
