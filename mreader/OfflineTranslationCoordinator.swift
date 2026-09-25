@@ -95,11 +95,34 @@ nonisolated enum OfflineTranslationExpirationDecision: Equatable, Sendable {
     }
 }
 
-/// 整本任务的唯一执行协调器：全局单任务、固定批次并发，checkpoint 顺序为 page -> manifest -> job。
+nonisolated enum OfflineTranslationConcurrencyPolicy {
+    static func maximumConcurrentPages(
+        physicalMemoryBytes: UInt64,
+        availableMemoryBytes: UInt64?
+    ) -> Int {
+        let physicalGB = Double(physicalMemoryBytes) / Double(1_024 * 1_024 * 1_024)
+        if let availableMemoryBytes, availableMemoryBytes > 0 {
+            let availableMB = availableMemoryBytes / UInt64(1_024 * 1_024)
+            if availableMB < 700 { return 1 }
+            if availableMB < 1_400 { return min(2, physicalGB >= 3 ? 2 : 1) }
+        }
+        if physicalGB >= 4 { return 3 }
+        if physicalGB >= 3 { return 2 }
+        return 1
+    }
+
+    static func currentMaximumConcurrentPages() -> Int {
+        maximumConcurrentPages(
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            availableMemoryBytes: UInt64(os_proc_available_memory())
+        )
+    }
+}
+
+/// 整本任务的唯一执行协调器：全局单任务、动态批次并发，checkpoint 顺序为 page -> manifest -> job。
 @MainActor
 final class OfflineTranslationCoordinator: ObservableObject {
     static let shared = OfflineTranslationCoordinator()
-    private static let maxConcurrentPages = 3
     private static let expensiveRevisionValidationPageInterval = 48
     private static let expensiveRevisionValidationTimeInterval: TimeInterval = 60
 
@@ -655,7 +678,11 @@ final class OfflineTranslationCoordinator: ObservableObject {
                 )
                 guard !remaining.isEmpty else { break }
 
-                let batch = Array(remaining.prefix(Self.maxConcurrentPages))
+                let maximumConcurrentPages = OfflineTranslationConcurrencyPolicy.currentMaximumConcurrentPages()
+                let batch = Array(remaining.prefix(maximumConcurrentPages))
+                MReaderLog.aiTranslation.debug(
+                    "offline translation batch concurrency=\(maximumConcurrentPages, privacy: .public) remaining=\(remaining.count, privacy: .public)"
+                )
                 let processingMode = record.processingMode ?? .vision
                 let sourcePreference = TranslationSourceLanguage(rawValue: record.resolvedSourceLanguage ?? "")
                     ?? record.sourceLanguage

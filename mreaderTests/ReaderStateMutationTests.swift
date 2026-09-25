@@ -111,7 +111,11 @@ final class ReaderStateMutationTests: XCTestCase {
                 viewportWidthPoints: 390,
                 displayScale: 3
             ),
-            8_192
+            ReaderFitWidthDecodePolicy.defaultUnknownPixelSize
+        )
+        XCTAssertLessThan(
+            ReaderFitWidthDecodePolicy.defaultUnknownPixelSize,
+            ReaderFitWidthDecodePolicy.maximumPixelSize
         )
     }
 

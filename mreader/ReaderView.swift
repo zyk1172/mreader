@@ -193,6 +193,7 @@ nonisolated enum ReaderGestureGate {
 /// 普通长页做无谓大解码。返回离散档位，保证 ReaderImageCache 可以跨请求稳定复用。
 nonisolated enum ReaderFitWidthDecodePolicy {
     static let tiers: [CGFloat] = [4096, 6144, 8192]
+    static let defaultUnknownPixelSize: CGFloat = 6144
     static let maximumPixelSize: CGFloat = 8192
 
     static func maxPixelSize(
@@ -205,7 +206,7 @@ nonisolated enum ReaderFitWidthDecodePolicy {
               sourceSize.height > 1,
               viewportWidthPoints > 1,
               displayScale > 0 else {
-            return maximumPixelSize
+            return defaultUnknownPixelSize
         }
         let aspect = sourceSize.height / sourceSize.width
         let requiredLongSide = max(4096, viewportWidthPoints * displayScale * max(aspect, 1))
@@ -537,6 +538,54 @@ final class PageGeometryStore {
             }.value
             if let size { setSize(size, for: page.url) }
         }
+    }
+}
+
+@MainActor
+private final class ReaderImageSourceMetadataStore {
+    struct Entry {
+        let cacheIdentity: String
+        let fileSize: Int
+    }
+
+    static let shared = ReaderImageSourceMetadataStore()
+
+    private let maximumEntryCount = 512
+    private var entries: [String: Entry] = [:]
+    private var insertionOrder: [String] = []
+
+    func entry(for url: URL) -> Entry {
+        if ComicManager.isArchivePageURL(url) {
+            let sourceKey = ComicManager.archivePageCacheKey(for: url) ?? url.absoluteString
+            return Entry(cacheIdentity: sourceKey, fileSize: 0)
+        }
+        if RemotePageLoader.isRemotePageURL(url) {
+            return Entry(cacheIdentity: url.absoluteString, fileSize: 0)
+        }
+
+        let lookupKey = url.absoluteString
+        if let cached = entries[lookupKey] {
+            return cached
+        }
+
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let fileSize = values?.fileSize ?? 0
+        let entry = Entry(
+            cacheIdentity: "\(url.path)#\(fileSize)#\(modified)",
+            fileSize: fileSize
+        )
+        entries[lookupKey] = entry
+        insertionOrder.append(lookupKey)
+        while insertionOrder.count > maximumEntryCount {
+            entries[insertionOrder.removeFirst()] = nil
+        }
+        return entry
+    }
+
+    func clear() {
+        entries.removeAll()
+        insertionOrder.removeAll()
     }
 }
 
@@ -952,6 +1001,7 @@ private final class ReaderImageCache {
         foregroundLoadKeys.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
+        ReaderImageSourceMetadataStore.shared.clear()
         MReaderLog.reader.debug("decoded image cache memory cleared")
     }
 
@@ -964,17 +1014,8 @@ private final class ReaderImageCache {
     }
 
     private func cacheKey(for url: URL, maxPixelSize: CGFloat) -> String {
-        if ComicManager.isArchivePageURL(url) {
-            let sourceKey = ComicManager.archivePageCacheKey(for: url) ?? url.absoluteString
-            return "\(sourceKey)#px=\(Int(maxPixelSize))"
-        }
-        if RemotePageLoader.isRemotePageURL(url) {
-            return "\(url.absoluteString)#px=\(Int(maxPixelSize))"
-        }
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-        let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-        let size = values?.fileSize ?? 0
-        return "\(url.path)#\(size)#\(mtime)#px=\(Int(maxPixelSize))"
+        let metadata = ReaderImageSourceMetadataStore.shared.entry(for: url)
+        return "\(metadata.cacheIdentity)#px=\(Int(maxPixelSize))"
     }
 
     private func estimatedDecodedCost(for url: URL, maxPixelSize: CGFloat) -> Int {
@@ -997,16 +1038,9 @@ private final class ReaderImageCache {
         if RemotePageLoader.isRemotePageURL(url) {
             return Int(maxPixelSize * maxPixelSize * 0.55)
         }
-        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-           let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
-           let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
-           width > 0,
-           height > 0 {
-            let scale = min(1, maxPixelSize / max(width, height))
-            return Int(width * scale * height * scale * 4)
-        }
-        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let fileSize = ReaderImageSourceMetadataStore.shared.entry(for: url).fileSize
+        // Geometry is registered after the first decode. Before then, avoid synchronous
+        // ImageIO property reads on MainActor and use a conservative compressed-size estimate.
         return max(fileSize * 6, 12 * 1024 * 1024)
     }
 }
@@ -7657,12 +7691,30 @@ private struct CoreTextTranslationView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: TranslationTextUIView, context: Context) {
-        uiView.text = text
-        uiView.fontSize = fontSize
-        uiView.color = color
-        uiView.textOrientation = textOrientation
-        uiView.lineSpacing = lineSpacing
-        uiView.setNeedsDisplay()
+        var needsRedraw = false
+        if uiView.text != text {
+            uiView.text = text
+            needsRedraw = true
+        }
+        if uiView.fontSize != fontSize {
+            uiView.fontSize = fontSize
+            needsRedraw = true
+        }
+        if !uiView.color.isEqual(color) {
+            uiView.color = color
+            needsRedraw = true
+        }
+        if uiView.textOrientation != textOrientation {
+            uiView.textOrientation = textOrientation
+            needsRedraw = true
+        }
+        if uiView.lineSpacing != lineSpacing {
+            uiView.lineSpacing = lineSpacing
+            needsRedraw = true
+        }
+        if needsRedraw {
+            uiView.setNeedsDisplay()
+        }
     }
 }
 
@@ -7710,47 +7762,53 @@ private struct AppleIntelligenceGlowBorder: View {
     let colors: [Color]
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { context in
             let duration = max(animationDuration, 0.1)
-            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: duration) / duration
+            let phase = context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: duration) / duration
             GeometryReader { proxy in
                 let bandWidth = max(lineWidth, 1)
                 let screenCornerRadius = adaptiveScreenCornerRadius(for: proxy.size)
                 let outerCornerRadius = (screenCornerRadius > 0 ? screenCornerRadius : cornerRadius) + 5
-                let layerCount = 36
-                let layerWidth = bandWidth / CGFloat(layerCount)
-                let outwardExpansion = max(layerWidth * 1.5, 1)
-                let drawingSize = CGSize(
+                let outwardExpansion = max(bandWidth * 0.55, 3)
+                let shape = RoundedRectangle(cornerRadius: outerCornerRadius, style: .continuous)
+                let gradient = flowingGradient(phase: phase)
+
+                ZStack {
+                    shape
+                        .inset(by: outwardExpansion)
+                        .strokeBorder(
+                            gradient,
+                            lineWidth: max(bandWidth * 0.72, 4),
+                            antialiased: true
+                        )
+                        .opacity(0.24)
+                        .blur(radius: max(blurRadius, bandWidth * 0.16))
+
+                    shape
+                        .inset(by: outwardExpansion + bandWidth * 0.20)
+                        .strokeBorder(
+                            gradient,
+                            lineWidth: max(bandWidth * 0.30, 2.2),
+                            antialiased: true
+                        )
+                        .opacity(0.78)
+
+                    shape
+                        .inset(by: outwardExpansion + bandWidth * 0.36)
+                        .strokeBorder(
+                            gradient,
+                            lineWidth: max(bandWidth * 0.09, 1.1),
+                            antialiased: true
+                        )
+                        .brightness(0.14)
+                }
+                .frame(
                     width: proxy.size.width + outwardExpansion * 2,
                     height: proxy.size.height + outwardExpansion * 2
                 )
-                ZStack {
-                    ForEach(0..<layerCount, id: \.self) { index in
-                        let progress = CGFloat(index) / CGFloat(max(layerCount - 1, 1))
-                        let opacity = 1.0 - Double(progress) * 0.94
-                        RoundedRectangle(
-                            cornerRadius: max(outerCornerRadius - CGFloat(index) * layerWidth, 0),
-                            style: .continuous
-                        )
-                        .inset(by: outwardExpansion + CGFloat(index) * layerWidth)
-                        .strokeBorder(
-                            flowingGradient(phase: phase + Double(index) * 0.004),
-                            lineWidth: max(layerWidth + 0.12, 0.55),
-                            antialiased: true
-                        )
-                        .opacity(opacity)
-                    }
-
-                    RoundedRectangle(cornerRadius: outerCornerRadius, style: .continuous)
-                        .inset(by: outwardExpansion)
-                        .strokeBorder(flowingGradient(phase: phase), lineWidth: max(layerWidth * 2.2, 1.2), antialiased: true)
-                        .opacity(1)
-                        .brightness(0.16)
-                }
-                .frame(width: drawingSize.width, height: drawingSize.height)
                 .offset(x: -outwardExpansion, y: -outwardExpansion)
             }
-            .drawingGroup()
         }
     }
 
@@ -7810,7 +7868,7 @@ private struct AppleIntelligenceGlowBorder: View {
         return (width, height)
     }
 
-    private static var deviceModelIdentifier: String {
+    private static let deviceModelIdentifier: String = {
         var systemInfo = utsname()
         uname(&systemInfo)
         return withUnsafePointer(to: &systemInfo.machine) { pointer in
@@ -7818,7 +7876,7 @@ private struct AppleIntelligenceGlowBorder: View {
                 String(cString: machinePointer)
             }
         }
-    }
+    }()
 
     private static let squareScreenIPhoneIdentifiers: Set<String> = [
         "iPhone10,1", "iPhone10,4",
