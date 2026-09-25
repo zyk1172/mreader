@@ -134,9 +134,14 @@ nonisolated enum PanelPostProcessor {
                 return nil
             }
             let area = rect.width * rect.height
+            let minimumConfidence: Float = panel.source == .coreML
+                ? MangaVisionCalibrationProfile.bundled
+                    .calibration(for: .panel)
+                    .confidenceThreshold
+                : 0.24
             guard area >= 0.012,
                   area <= (panel.source == .coreML ? 1.0 : 0.94),
-                  panel.confidence >= 0.24 else {
+                  panel.confidence >= minimumConfidence else {
                 return nil
             }
             return DetectedPanel(
@@ -301,12 +306,16 @@ nonisolated enum PanelPostProcessor {
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
         let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
+        let layout4PanelThreshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .panel)
+            .confidenceThreshold
         if panels.count == 1, let panel = panels.first, panel.source == .coreML {
-            return panel.confidence >= 0.5 && panel.rect.width * panel.rect.height >= 0.22
+            return panel.confidence >= layout4PanelThreshold
+                && panel.rect.width * panel.rect.height >= 0.22
         }
         guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
-        guard averageConfidence >= 0.34 else { return false }
+        guard averageConfidence >= layout4PanelThreshold else { return false }
         guard PanelPostProcessor.hasVisionPanelStructure(panels) else { return false }
 
         let totalArea = panels.reduce(CGFloat.zero) { partial, panel in
