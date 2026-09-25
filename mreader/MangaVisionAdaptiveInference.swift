@@ -65,7 +65,7 @@ nonisolated struct MangaVisionInferencePlan: Sendable, Equatable {
 }
 
 nonisolated enum MangaVisionInferencePlanner {
-    static let revision = "adaptive-full-plus-overlap-tiles-v1"
+    static let revision = "adaptive-full-plus-overlap-tiles-v2-layout4-qfl"
     private static let refinementAspectThreshold: CGFloat = 1.65
     private static let forcedRefinementAspectThreshold: CGFloat = 1.90
     private static let tileOverlapFraction: CGFloat = 0.18
@@ -178,10 +178,16 @@ nonisolated enum MangaVisionInferencePlanner {
         if plan.sourceAspectRatio >= forcedRefinementAspectThreshold { return true }
         if baseline.panels.count <= 2 { return true }
         guard !baseline.panels.isEmpty else { return true }
-        let averagePanelConfidence = baseline.panels.reduce(0.0) {
-            $0 + Double($1.confidence)
-        } / Double(baseline.panels.count)
-        return averagePanelConfidence < 0.55
+
+        // Layout4 uses Quality Focal classification, so the previous detector's
+        // absolute confidence scale (for example 0.55) is not a valid signal for
+        // deciding whether to spend extra tile passes. Use page-layout coverage
+        // instead: if the baseline frame boxes cover too little of the page, refine.
+        let coveredArea = baseline.panels.reduce(CGFloat.zero) { partial, panel in
+            let rect = MangaPageCoordinateSpace.clampedNormalizedRect(panel.normalizedRect)
+            return partial + rect.width * rect.height
+        }
+        return coveredArea < 0.22
     }
 
     static func prefetchMaximumSourceDimension(
