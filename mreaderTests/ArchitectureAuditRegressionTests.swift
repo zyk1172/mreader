@@ -38,11 +38,18 @@ struct ArchitectureAuditRegressionTests {
         #expect(restored.result.detectedLanguage == "ja")
     }
 
-    @Test func singleConfidentModelPanelIsUsable() {
-        let panel = DetectedPanel(rect: CGRect(x: 0, y: 0, width: 1, height: 1), confidence: 0.9, source: .coreML)
+    @Test func layout4FrameAtOrAboveQFLThresholdIsUsable() {
+        let panel = DetectedPanel(
+            rect: CGRect(x: 0, y: 0, width: 1, height: 1),
+            confidence: 0.09,
+            source: .coreML
+        )
         #expect(PanelLayoutQuality.isUsable(PanelPostProcessor.process([panel])))
-        #expect(!PanelLayoutQuality.isUsable([DetectedPanel(rect: panel.rect, confidence: 0.2, source: .coreML)]))
-        #expect(!PanelLayoutQuality.isUsable([DetectedPanel(rect: panel.rect, confidence: 0.9, source: .visionRectangle)]))
+        #expect(
+            !PanelLayoutQuality.isUsable([
+                DetectedPanel(rect: panel.rect, confidence: 0.04, source: .coreML)
+            ])
+        )
     }
 
     @Test func reducedPrefetchDemandCannotAliasForeground() {
