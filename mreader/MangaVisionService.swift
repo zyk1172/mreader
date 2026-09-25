@@ -546,7 +546,8 @@ actor MangaVisionService {
                 analysisTotalMilliseconds: totalMS,
                 panelCount: result.panels.count,
                 textCount: result.texts.count,
-                balloonCount: result.balloons.count
+                balloonCount: result.balloons.count,
+            onomatopoeiaCount: result.onomatopoeias.count
             )
             throw MangaVisionServiceError.staleResult
         }
@@ -593,11 +594,12 @@ actor MangaVisionService {
             analysisTotalMilliseconds: totalMS,
             panelCount: result.panels.count,
             textCount: result.texts.count,
-            balloonCount: result.balloons.count
+            balloonCount: result.balloons.count,
+        onomatopoeiaCount: result.onomatopoeias.count
         )
         let inferenceLabel = String(format: "%.1f", inferenceMS)
         MReaderLog.aiVision.debug(
-            "MangaVision analyze model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) balloon=\(result.balloons.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
+            "MangaVision analyze model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) balloon=\(result.balloons.count, privacy: .public) sfx=\(result.onomatopoeias.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
         )
         return result
     }
@@ -647,7 +649,8 @@ actor MangaVisionService {
             analysisTotalMilliseconds: totalMS,
             panelCount: 0,
             textCount: 0,
-            balloonCount: 0
+            balloonCount: 0,
+        onomatopoeiaCount: 0
         )
         MReaderLog.aiVision.error(
             "MangaVision primary inference failed model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) reason=\(reason, privacy: .public)"

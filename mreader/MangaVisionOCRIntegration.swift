@@ -28,12 +28,12 @@ nonisolated enum MangaVisionOCRGeometry {
             iouThreshold: 0.58,
             containmentThreshold: 0.90
         )
-        let textRegions = MangaVisionRegionPostProcessor.deduplicated(
-            analysis.texts.filter(isUsableTextRegion),
-            iouThreshold: 0.58,
+        let contentRegions = MangaVisionRegionPostProcessor.deduplicated(
+            (analysis.texts + analysis.onomatopoeias).filter(isUsableContentRegion),
+            iouThreshold: 0.35,
             containmentThreshold: 0.88
         )
-        guard !balloons.isEmpty || !textRegions.isEmpty else { return blocks }
+        guard !balloons.isEmpty || !contentRegions.isEmpty else { return blocks }
 
         return blocks.map { block in
             var enriched = block
@@ -97,7 +97,7 @@ nonisolated enum MangaVisionOCRGeometry {
             if enriched.layoutSafeRegion == nil,
                let safeRegion = bestTextSafeRegion(
                     for: enriched.boundingBox,
-                    textRegions: textRegions
+                    textRegions: contentRegions
                ) {
                 enriched.layoutSafeRegion = safeRegion
             }
@@ -233,7 +233,10 @@ nonisolated enum MangaVisionOCRGeometry {
     }
 
     private static func isUsableBalloon(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .balloon, region.confidence >= 0.20 else { return false }
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .balloon)
+            .confidenceThreshold
+        guard region.type == .balloon, region.confidence >= threshold else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.004
@@ -242,8 +245,12 @@ nonisolated enum MangaVisionOCRGeometry {
             && area <= 0.55
     }
 
-    private static func isUsableTextRegion(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .text, region.confidence >= 0.18 else { return false }
+    private static func isUsableContentRegion(_ region: MangaVisionRegion) -> Bool {
+        guard region.type == .text || region.type == .onomatopoeia else { return false }
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: region.type)
+            .confidenceThreshold
+        guard region.confidence >= threshold else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.002
