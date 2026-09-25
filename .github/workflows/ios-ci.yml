@@ -41,6 +41,11 @@ jobs:
           MREADER_MODEL_TOKEN: ${{ secrets.MREADER_MODEL_READ_TOKEN }}
         run: bash scripts/materialize_private_model_weight.sh
 
+      - name: Generate MangaLayout4 Python parity fixture
+        run: |
+          python3 scripts/generate_manga_layout4_v1_reference_fixture.py \
+            --output mreaderTests/Fixtures/manga_layout4_v1_reference_parity.json
+
       - name: Resolve Swift packages
         run: xcodebuild -project mreader.xcodeproj -scheme mreader -resolvePackageDependencies
 
@@ -110,6 +115,7 @@ jobs:
             ${{ runner.temp }}/MangaVisionRegressionGate.xcresult
             ${{ runner.temp }}/MReaderUnitTests.xcresult
             ${{ runner.temp }}/MReaderDerivedData/Logs/Test/
+            mreaderTests/Fixtures/manga_layout4_v1_reference_parity.json
           if-no-files-found: warn
 
   ui-smoke:
