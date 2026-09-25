@@ -25,7 +25,7 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 actor MangaVisionService {
     // This integration branch intentionally bypasses every legacy provider/router
     // choice. Adaptive inference may add MangaLayout4 tile passes, but every model
-    // pass still uses MangaLayout4V1Provider and failures are never retried with V2B5.
+    // pass still uses MangaLayout4V1Provider and failures are never retried with another detector model.
     static let shared = MangaVisionService(
         provider: AdaptiveMangaVisionProvider(base: MangaLayout4V1Provider.shared)
     )

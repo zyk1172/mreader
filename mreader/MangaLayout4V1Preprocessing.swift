@@ -186,7 +186,7 @@ nonisolated enum MangaLayout4V1Preprocessor {
     }
 
     /// Integer fixed-point reproduction of Pillow's bilinear resize path already
-    /// validated by the V2B5 golden fixtures. MangaLayout4 V1 uses the same PIL
+    /// validated against the Python reference fixture. MangaLayout4 V1 uses the same PIL
     /// Image.Resampling.BILINEAR contract.
     private static func pillowBilinearResize(
         sourcePixels: [UInt8],

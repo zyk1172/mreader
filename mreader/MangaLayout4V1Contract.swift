@@ -3,7 +3,7 @@ import CoreML
 import Foundation
 
 /// Frozen class order exported by MangaLayout4 V1. This mapping is intentionally
-/// independent from the legacy V2B5 five-class contract.
+/// frozen to the four-class MangaLayout4 V1 contract.
 nonisolated enum MangaLayout4V1Class: Int, CaseIterable, Sendable {
     case frame = 0
     case text = 1
