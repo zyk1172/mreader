@@ -298,9 +298,16 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             forResource: MangaLayout4V1Provider.modelResourceName,
             withExtension: "mlmodelc"
         ) else {
-            throw XCTSkip(
-                "MangaLayout4V1 formal model is not materialized in this checkout; contract gate remains pending"
+            let ci = ProcessInfo.processInfo.environment["CI"]
+            if ci == "true" || ci == "1" {
+                throw XCTSkip(
+                    "CI has no formal MangaLayout4V1 artifact; synthetic parity is the available gate"
+                )
+            }
+            XCTFail(
+                "Local app bundle is missing MangaLayout4V1.mlmodelc; model materialization must not be bypassed"
             )
+            return
         }
         let model = try MLModel(contentsOf: modelURL)
         XCTAssertEqual(
