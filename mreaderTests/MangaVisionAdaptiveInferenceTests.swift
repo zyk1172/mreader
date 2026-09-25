@@ -198,8 +198,6 @@ struct MangaVisionAdaptiveInferenceTests {
             imageSize: CGSize(width: 1_000, height: 4_000),
             panels: [region],
             texts: [],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fake",
             modelVersion: 1
         )
@@ -295,8 +293,6 @@ private actor MangaVisionAdaptiveFakeProvider: MangaVisionProvider, MangaVisionM
             ],
             texts: [],
             balloons: [],
-            faces: [],
-            bodies: [],
             modelIdentifier: manifest.modelID,
             modelVersion: manifest.compatibilityDescriptor.modelVersion
         )

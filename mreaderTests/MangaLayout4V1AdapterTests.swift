@@ -19,8 +19,6 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             MangaLayout4V1Class.allCases.map(\.regionType),
             [.panel, .text, .balloon, .onomatopoeia]
         )
-        XCTAssertFalse(MangaLayout4V1Class.allCases.map(\.regionType).contains(.face))
-        XCTAssertFalse(MangaLayout4V1Class.allCases.map(\.regionType).contains(.body))
     }
 
     func testThirteenOutputContractIsNamedAndShapeFrozen() {
@@ -250,15 +248,12 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             texts: [],
             balloons: [balloon],
             onomatopoeias: [sfx],
-            faces: [],
-            bodies: [],
             modelIdentifier: MangaLayout4V1Provider.modelIdentifier,
             modelVersion: 1
         )
         XCTAssertEqual(analysis.balloons.first?.contours.count, 2)
         XCTAssertEqual(analysis.onomatopoeias.map(\.id), [sfx.id])
-        XCTAssertTrue(analysis.faces.isEmpty)
-        XCTAssertTrue(analysis.bodies.isEmpty)
+        XCTAssertEqual(MangaRegionType.allCases, [.panel, .text, .balloon, .onomatopoeia])
     }
 
     func testMangaLayout4CapabilitiesAreExplicit() async {
@@ -269,18 +264,15 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertTrue(capabilities.supportsBalloon)
         XCTAssertTrue(capabilities.supportsOnomatopoeia)
         XCTAssertTrue(capabilities.supportsBalloonMask)
-        XCTAssertFalse(capabilities.supportsFace)
-        XCTAssertFalse(capabilities.supportsBody)
     }
 
-    func testIntegrationBranchRouteIsMangaLayout4Only() async {
-        XCTAssertEqual(MangaVisionProviderMode.allCases, [.mangaLayout4V1])
-        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .mangaLayout4V1)
-        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .mangaLayout4V1)
-
-        let descriptor = await MangaVisionProviderRouter.shared.descriptor
-        XCTAssertEqual(descriptor.modelIdentifier, MangaLayout4V1Provider.modelIdentifier)
-        XCTAssertNotEqual(descriptor.modelIdentifier, MangaVisionV2B5Provider.modelIdentifier)
+    func testIntegrationBranchServiceIsMangaLayout4Only() async {
+        let manifest = await MangaVisionService.shared.modelManifestForDiagnostics()
+        XCTAssertEqual(manifest.modelID, MangaLayout4V1Provider.modelIdentifier)
+        XCTAssertEqual(
+            manifest.semanticClasses,
+            Set([.panel, .text, .balloon, .onomatopoeia])
+        )
     }
 
     func testBundledFormalModelMatchesThirteenOutputContractWhenMaterialized() throws {

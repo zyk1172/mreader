@@ -642,8 +642,6 @@ private actor RuntimeFoundationFakeProvider: MangaVisionProvider, MangaVisionMan
             ],
             texts: [],
             balloons: [],
-            faces: [],
-            bodies: [],
             modelIdentifier: manifest.modelID,
             modelVersion: 4
         )
