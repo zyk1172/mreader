@@ -1162,7 +1162,6 @@ struct ReaderView: View {
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
     @State private var showMangaVisionFeedbackSheet = false
-    @State private var pendingMangaVisionHardCaseFeedback: MangaVisionHardCaseFeedback?
     @State private var mangaVisionHardCaseToast: String?
     @State private var mangaVisionHardCaseToastToken = UUID()
     @State private var showOfflineTranslationStart = false
@@ -1547,16 +1546,9 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
-        .sheet(
-            isPresented: $showMangaVisionFeedbackSheet,
-            onDismiss: {
-                guard let feedback = pendingMangaVisionHardCaseFeedback else { return }
-                pendingMangaVisionHardCaseFeedback = nil
-                captureMangaVisionHardCase(feedback)
-            }
-        ) {
+        .sheet(isPresented: $showMangaVisionFeedbackSheet) {
             MangaVisionHardCaseFeedbackSheet { feedback in
-                pendingMangaVisionHardCaseFeedback = feedback
+                captureMangaVisionHardCase(feedback)
             }
         }
         .sheet(isPresented: $showOfflineTranslationStart) {
