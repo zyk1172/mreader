@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import UIKit
-@preconcurrency import Vision
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
@@ -116,42 +115,6 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
 
     var cgRect: CGRect {
         CGRect(x: x, y: y, width: width, height: height)
-    }
-}
-
-nonisolated protocol PanelDetecting: Sendable {
-    var identifier: String { get }
-    func detectPanels(in image: CGImage) throws -> [DetectedPanel]
-}
-
-nonisolated struct VisionRectanglePanelDetector: PanelDetecting {
-    let identifier = "vision-rectangle-v3-bubble-filter"
-
-    func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
-        let request = VNDetectRectanglesRequest()
-        request.maximumObservations = 30
-        request.minimumConfidence = 0.30
-        request.minimumSize = 0.06
-        request.minimumAspectRatio = 0.06
-        request.maximumAspectRatio = 1
-        request.quadratureTolerance = 24
-
-        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        try handler.perform([request])
-
-        return (request.results ?? []).map { observation in
-            let box = observation.boundingBox
-            return DetectedPanel(
-                rect: CGRect(
-                    x: box.minX,
-                    y: 1 - box.maxY,
-                    width: box.width,
-                    height: box.height
-                ),
-                confidence: observation.confidence,
-                source: .visionRectangle
-            )
-        }
     }
 }
 
@@ -380,7 +343,6 @@ actor PanelDetectionService {
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
     private let visionService: MangaVisionService
-    private let fallbackDetector: any PanelDetecting
     private var memoryCache: [String: PanelPageLayout] = [:]
     private var memoryOrder: [String] = []
     private var generation = UUID()
@@ -389,13 +351,11 @@ actor PanelDetectionService {
     private var lastDiskPruneAt = Date.distantPast
 
     init(
-        visionService: MangaVisionService = .shared,
-        fallbackDetector: any PanelDetecting = VisionRectanglePanelDetector()
+        visionService: MangaVisionService = .shared
     ) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
         self.visionService = visionService
-        self.fallbackDetector = fallbackDetector
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
@@ -479,7 +439,7 @@ actor PanelDetectionService {
         isRightToLeft: Bool
     ) -> [CGRect] {
         let candidates = rects.map {
-            DetectedPanel(rect: $0, confidence: 1, source: .visionRectangle)
+            DetectedPanel(rect: $0, confidence: 1, source: .coreML)
         }
         return PanelReadingOrder.ordered(candidates, isRightToLeft: isRightToLeft).map(\.rect)
     }
@@ -615,16 +575,10 @@ actor PanelDetectionService {
             )
         }
         var processed = PanelPostProcessor.process(primaryPanels)
-        var detectorIdentifier = primaryIdentifier
+        let detectorIdentifier = primaryIdentifier
 
-        if !PanelLayoutQuality.isUsable(processed) {
-            let fallbackPanels = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
-            let fallbackProcessed = PanelPostProcessor.process(fallbackPanels)
-            if PanelLayoutQuality.isUsable(fallbackProcessed) {
-                processed = fallbackProcessed
-                detectorIdentifier = fallbackDetector.identifier
-            }
-        }
+        // This Layout4 integration branch must expose model failures directly.
+        // Do not substitute Vision rectangle detection when Layout4 frame output is unusable.
 
         var result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
@@ -670,7 +624,7 @@ actor PanelDetectionService {
             )
         }
 
-        result.isTransient = mangaAnalysis == nil || detectorIdentifier != primaryIdentifier || result.usedFallback
+        result.isTransient = mangaAnalysis == nil || result.usedFallback
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }
