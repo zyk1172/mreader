@@ -228,7 +228,7 @@ struct GuidedPanelFoundationTests {
         DetectedPanel(
             rect: CGRect(x: x, y: y, width: width, height: height),
             confidence: confidence,
-            source: .visionRectangle
+            source: .coreML
         )
     }
 }
