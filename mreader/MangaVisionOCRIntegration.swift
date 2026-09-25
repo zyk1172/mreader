@@ -23,15 +23,17 @@ nonisolated enum MangaVisionOCRGeometry {
         analysis: MangaPageAnalysis
     ) -> [TextBlock] {
         guard !blocks.isEmpty else { return blocks }
-        let balloons = MangaVisionRegionPostProcessor.deduplicated(
+        let profile = MangaVisionCalibrationProfile.bundled
+        let balloons = profile.deduplicated(
             analysis.balloons.filter(isUsableBalloon),
-            iouThreshold: 0.58,
-            containmentThreshold: 0.90
+            type: .balloon
         )
-        let contentRegions = MangaVisionRegionPostProcessor.deduplicated(
-            (analysis.texts + analysis.onomatopoeias).filter(isUsableContentRegion),
-            iouThreshold: 0.35,
-            containmentThreshold: 0.88
+        let contentRegions = profile.deduplicated(
+            analysis.texts.filter(isUsableContentRegion),
+            type: .text
+        ) + profile.deduplicated(
+            analysis.onomatopoeias.filter(isUsableContentRegion),
+            type: .onomatopoeia
         )
         guard !balloons.isEmpty || !contentRegions.isEmpty else { return blocks }
 
