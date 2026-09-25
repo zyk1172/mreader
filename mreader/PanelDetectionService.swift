@@ -118,120 +118,42 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
 }
 
 nonisolated enum PanelPostProcessor {
-
     static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let filtered = candidates.compactMap { panel -> DetectedPanel? in
-            let rect = panel.rect.standardized.intersection(unit)
-            guard !rect.isNull,
-                  rect.width >= 0.055,
-                  rect.height >= 0.045 else {
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .panel)
+            .confidenceThreshold
+
+        return candidates.compactMap { panel in
+            guard panel.source == .coreML,
+                  panel.confidence >= threshold else {
                 return nil
             }
-            let area = rect.width * rect.height
-            let minimumConfidence: Float = panel.source == .coreML
-                ? MangaVisionCalibrationProfile.bundled
-                    .calibration(for: .panel)
-                    .confidenceThreshold
-                : 0.24
-            guard area >= 0.012,
-                  area <= (panel.source == .coreML ? 1.0 : 0.94),
-                  panel.confidence >= minimumConfidence else {
+            let rect = panel.rect.standardized.intersection(unit)
+            guard !rect.isNull, rect.width > 0, rect.height > 0 else {
                 return nil
             }
             return DetectedPanel(
                 rect: rect,
                 confidence: panel.confidence,
-                source: panel.source,
+                source: .coreML,
                 contour: panel.contour
             )
         }
-
-        var kept: [DetectedPanel] = []
-        for candidate in filtered.sorted(by: preferredCandidate) {
-            if let duplicateIndex = kept.firstIndex(where: { areDuplicates($0, candidate) }) {
-                let existing = kept[duplicateIndex]
-                if shouldPrefer(candidate, over: existing) {
-                    kept[duplicateIndex] = candidate
-                }
-            } else {
-                kept.append(candidate)
-            }
-        }
-
-        return kept
-    }
-
-    private static func shouldPrefer(_ candidate: DetectedPanel, over existing: DetectedPanel) -> Bool {
-        if candidate.confidence != existing.confidence {
-            return candidate.confidence > existing.confidence
-        }
-        return area(candidate.rect) > area(existing.rect)
-    }
-
-    private static func areDuplicates(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
-        let intersection = lhs.rect.intersection(rhs.rect)
-        guard !intersection.isNull else { return false }
-        let intersectionArea = area(intersection)
-        let lhsArea = area(lhs.rect)
-        let rhsArea = area(rhs.rect)
-        let unionArea = max(lhsArea + rhsArea - intersectionArea, 0.0001)
-        let iou = intersectionArea / unionArea
-        let smallerArea = min(lhsArea, rhsArea)
-        let largerArea = max(lhsArea, rhsArea)
-        let containment = intersectionArea / max(smallerArea, 0.0001)
-        let sizeRatio = smallerArea / max(largerArea, 0.0001)
-
-        // MangaLayout4 already distinguishes frame from balloon. Only collapse
-        // genuinely duplicate frame detections; preserve real inset panels.
-        return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
-    }
-
-    private static func preferredCandidate(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
-        if lhs.confidence != rhs.confidence {
-            return lhs.confidence > rhs.confidence
-        }
-        return area(lhs.rect) > area(rhs.rect)
-    }
-
-    private static func area(_ rect: CGRect) -> CGFloat {
-        max(rect.width, 0) * max(rect.height, 0)
     }
 }
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
-        let layout4PanelThreshold = MangaVisionCalibrationProfile.bundled
+        let threshold = MangaVisionCalibrationProfile.bundled
             .calibration(for: .panel)
             .confidenceThreshold
-        if panels.count == 1, let panel = panels.first, panel.source == .coreML {
-            return panel.confidence >= layout4PanelThreshold
-                && panel.rect.width * panel.rect.height >= 0.22
+        return !panels.isEmpty && panels.allSatisfy { panel in
+            panel.source == .coreML
+                && panel.confidence >= threshold
+                && panel.rect.width > 0
+                && panel.rect.height > 0
         }
-        guard (2...maximumPanelCount).contains(panels.count) else { return false }
-        let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
-        guard averageConfidence >= layout4PanelThreshold else { return false }
-        let totalArea = panels.reduce(CGFloat.zero) { partial, panel in
-            partial + panel.rect.width * panel.rect.height
-        }
-        guard totalArea >= 0.22, totalArea <= 1.65 else { return false }
-
-        var excessiveOverlapPairs = 0
-        for lhsIndex in panels.indices {
-            for rhsIndex in panels.indices where rhsIndex > lhsIndex {
-                let lhs = panels[lhsIndex].rect
-                let rhs = panels[rhsIndex].rect
-                let intersection = lhs.intersection(rhs)
-                guard !intersection.isNull else { continue }
-                let intersectionArea = intersection.width * intersection.height
-                let smallerArea = min(lhs.width * lhs.height, rhs.width * rhs.height)
-                if intersectionArea / max(smallerArea, 0.0001) > 0.45 {
-                    excessiveOverlapPairs += 1
-                }
-            }
-        }
-        return excessiveOverlapPairs <= max(1, panels.count / 4)
     }
 }
 
