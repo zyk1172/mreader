@@ -5,6 +5,7 @@ struct MangaVisionDebugOverlayConfiguration: Sendable, Equatable {
     var showsPanels = true
     var showsTexts = true
     var showsBalloons = true
+    var showsOnomatopoeias = true
     var showsFaces = true
     var showsBodies = true
     var showsRelations = true
@@ -30,6 +31,9 @@ struct MangaVisionDebugOverlay: View {
             }
             if configuration.showsBalloons {
                 regionLayer(analysis.balloons, lineWidth: 1.8)
+            }
+            if configuration.showsOnomatopoeias {
+                regionLayer(analysis.onomatopoeias, lineWidth: 1.5)
             }
             if configuration.showsFaces {
                 regionLayer(analysis.faces, lineWidth: 1.5)
@@ -109,6 +113,7 @@ struct MangaVisionDebugOverlay: View {
         case .panel: []
         case .text: [5, 2]
         case .balloon: [10, 2, 2, 2]
+        case .onomatopoeia: [3, 2, 8, 2]
         case .face: [2, 2]
         case .body: [8, 3]
         }

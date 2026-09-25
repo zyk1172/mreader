@@ -5,6 +5,7 @@ nonisolated enum MangaRegionType: String, Codable, CaseIterable, Sendable, Hasha
     case panel
     case text
     case balloon
+    case onomatopoeia
     case face
     case body
 }
@@ -84,21 +85,32 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
     let type: MangaRegionType
     let normalizedRect: CGRect
     let confidence: Float
-    /// Optional mask-derived contour. Bounding-box-only providers leave this nil.
+    /// Primary mask-derived contour retained for compatibility with existing OCR/UI consumers.
+    /// Bounding-box-only providers leave this nil.
     let contour: MangaVisionContour?
+    /// Additional connected-component contours for instance masks. The adapter must not
+    /// silently union or discard them; legacy consumers may continue to use `contour`.
+    let secondaryContours: [MangaVisionContour]
+
+    var contours: [MangaVisionContour] {
+        if let contour { return [contour] + secondaryContours }
+        return secondaryContours
+    }
 
     init(
         id: UUID = UUID(),
         type: MangaRegionType,
         normalizedRect: CGRect,
         confidence: Float,
-        contour: MangaVisionContour? = nil
+        contour: MangaVisionContour? = nil,
+        secondaryContours: [MangaVisionContour] = []
     ) {
         self.id = id
         self.type = type
         self.normalizedRect = MangaPageCoordinateSpace.clampedNormalizedRect(normalizedRect)
         self.confidence = confidence
         self.contour = contour
+        self.secondaryContours = secondaryContours
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -107,6 +119,7 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
             && lhs.normalizedRect == rhs.normalizedRect
             && lhs.confidence == rhs.confidence
             && lhs.contour == rhs.contour
+            && lhs.secondaryContours == rhs.secondaryContours
     }
 
     func hash(into hasher: inout Hasher) {
@@ -118,10 +131,11 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
         hasher.combine(Double(normalizedRect.height))
         hasher.combine(confidence)
         hasher.combine(contour)
+        hasher.combine(secondaryContours)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, type, x, y, width, height, confidence, contour
+        case id, type, x, y, width, height, confidence, contour, secondaryContours
     }
 
     init(from decoder: Decoder) throws {
@@ -136,6 +150,10 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
             height: try container.decode(Double.self, forKey: .height)
         ))
         contour = try container.decodeIfPresent(MangaVisionContour.self, forKey: .contour)
+        secondaryContours = try container.decodeIfPresent(
+            [MangaVisionContour].self,
+            forKey: .secondaryContours
+        ) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -148,6 +166,9 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
         try container.encode(Double(normalizedRect.height), forKey: .height)
         try container.encode(confidence, forKey: .confidence)
         try container.encodeIfPresent(contour, forKey: .contour)
+        if !secondaryContours.isEmpty {
+            try container.encode(secondaryContours, forKey: .secondaryContours)
+        }
     }
 }
 
@@ -155,7 +176,7 @@ nonisolated struct MangaVisionRegion: Identifiable, Codable, Sendable, Hashable 
 nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     /// v3 adds optional mask-derived region contours. Old v2 entries are invalidated
     /// so Guided Panel does not keep stale box-only structure when masks are available.
-    static let schemaVersion = 4
+    static let schemaVersion = 5
 
     let schemaVersion: Int
     let pageIdentifier: MangaPageIdentifier
@@ -163,6 +184,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     let panels: [MangaVisionRegion]
     let texts: [MangaVisionRegion]
     let balloons: [MangaVisionRegion]
+    let onomatopoeias: [MangaVisionRegion]
     let faces: [MangaVisionRegion]
     let bodies: [MangaVisionRegion]
     let modelIdentifier: String?
@@ -176,6 +198,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         panels: [MangaVisionRegion],
         texts: [MangaVisionRegion],
         balloons: [MangaVisionRegion] = [],
+        onomatopoeias: [MangaVisionRegion] = [],
         faces: [MangaVisionRegion],
         bodies: [MangaVisionRegion],
         modelIdentifier: String?,
@@ -188,6 +211,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         self.panels = panels
         self.texts = texts
         self.balloons = balloons
+        self.onomatopoeias = onomatopoeias
         self.faces = faces
         self.bodies = bodies
         self.modelIdentifier = modelIdentifier
@@ -195,7 +219,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
     }
 
     var allRegions: [MangaVisionRegion] {
-        panels + texts + balloons + faces + bodies
+        panels + texts + balloons + onomatopoeias + faces + bodies
     }
 
     func regions(of type: MangaRegionType) -> [MangaVisionRegion] {
@@ -203,6 +227,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         case .panel: panels
         case .text: texts
         case .balloon: balloons
+        case .onomatopoeia: onomatopoeias
         case .face: faces
         case .body: bodies
         }
@@ -210,7 +235,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, pageIdentifier, imageWidth, imageHeight
-        case panels, texts, balloons, faces, bodies, modelIdentifier, modelVersion, cacheRevision
+        case panels, texts, balloons, onomatopoeias, faces, bodies, modelIdentifier, modelVersion, cacheRevision
     }
 
     init(from decoder: Decoder) throws {
@@ -224,6 +249,10 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         panels = try container.decode([MangaVisionRegion].self, forKey: .panels)
         texts = try container.decode([MangaVisionRegion].self, forKey: .texts)
         balloons = try container.decodeIfPresent([MangaVisionRegion].self, forKey: .balloons) ?? []
+        onomatopoeias = try container.decodeIfPresent(
+            [MangaVisionRegion].self,
+            forKey: .onomatopoeias
+        ) ?? []
         faces = try container.decode([MangaVisionRegion].self, forKey: .faces)
         bodies = try container.decode([MangaVisionRegion].self, forKey: .bodies)
         modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)
@@ -240,6 +269,7 @@ nonisolated struct MangaPageAnalysis: Codable, Sendable, Equatable {
         try container.encode(panels, forKey: .panels)
         try container.encode(texts, forKey: .texts)
         try container.encode(balloons, forKey: .balloons)
+        try container.encode(onomatopoeias, forKey: .onomatopoeias)
         try container.encode(faces, forKey: .faces)
         try container.encode(bodies, forKey: .bodies)
         try container.encodeIfPresent(modelIdentifier, forKey: .modelIdentifier)
