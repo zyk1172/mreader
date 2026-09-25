@@ -358,7 +358,7 @@ actor PanelDetectionService {
                 )
             } catch {
                 MReaderLog.aiVision.error(
-                    "Guided Panel MangaLayout4 analysis failed page=\(pageIndex, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    "Guided Panel MangaLayout4 analysis failed page=\(pageIndex ?? -1, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                 )
             }
         }
@@ -410,7 +410,7 @@ actor PanelDetectionService {
 
         if let mangaAnalysis, processed.isEmpty {
             MReaderLog.aiVision.error(
-                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex, privacy: .public) model=\(mangaAnalysis.modelIdentifier, privacy: .public)"
+                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex ?? -1, privacy: .public) model=\(mangaAnalysis.modelIdentifier, privacy: .public)"
             )
         }
 
