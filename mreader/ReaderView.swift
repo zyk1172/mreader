@@ -5530,8 +5530,6 @@ struct LocalImageView: View {
     @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
     @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
     @AppStorage("manga_vision_debug_texts") private var mangaVisionDebugTexts = true
-    @AppStorage("manga_vision_debug_faces") private var mangaVisionDebugFaces = true
-    @AppStorage("manga_vision_debug_bodies") private var mangaVisionDebugBodies = true
     @AppStorage("manga_vision_debug_relations") private var mangaVisionDebugRelations = true
 #endif
     @State private var isLoadingImage = true
@@ -6059,8 +6057,8 @@ struct LocalImageView: View {
                 configuration: MangaVisionDebugOverlayConfiguration(
                     showsPanels: mangaVisionDebugPanels,
                     showsTexts: mangaVisionDebugTexts,
-                    showsFaces: mangaVisionDebugFaces,
-                    showsBodies: mangaVisionDebugBodies,
+                    showsBalloons: true,
+                    showsOnomatopoeias: true,
                     showsRelations: mangaVisionDebugRelations
                 )
             )
