@@ -190,6 +190,7 @@ nonisolated struct MangaVisionHardCaseDetection: Codable, Sendable, Hashable, Id
         case .face: "face"
         case .body: "body"
         case .balloon: "balloon"
+        case .onomatopoeia: "onomatopoeia"
         }
     }
 }
