@@ -348,13 +348,19 @@ actor PanelDetectionService {
             )
         }
         if mangaAnalysis == nil {
-            mangaAnalysis = try? await visionService.analysis(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                pageURL: pageURL,
-                image: image,
-                requestClass: requestClass
-            )
+            do {
+                mangaAnalysis = try await visionService.analysis(
+                    comicID: comicID,
+                    pageIndex: pageIndex,
+                    pageURL: pageURL,
+                    image: image,
+                    requestClass: requestClass
+                )
+            } catch {
+                MReaderLog.aiVision.error(
+                    "Guided Panel MangaLayout4 analysis failed page=\(pageIndex, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         guard epoch == generation, !Task.isCancelled else {
             var temporary = Self.fullPageLayout(
@@ -399,8 +405,14 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        var processed = PanelPostProcessor.process(primaryPanels)
+        let processed = PanelPostProcessor.process(primaryPanels)
         let detectorIdentifier = primaryIdentifier
+
+        if let mangaAnalysis, processed.isEmpty {
+            MReaderLog.aiVision.error(
+                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex, privacy: .public) model=\(mangaAnalysis.modelIdentifier, privacy: .public)"
+            )
+        }
 
         // This Layout4 integration branch must expose model failures directly.
         // Do not substitute Vision rectangle detection when Layout4 frame output is unusable.
