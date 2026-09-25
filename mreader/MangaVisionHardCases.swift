@@ -37,9 +37,8 @@ nonisolated enum MangaVisionHardCaseImageRetentionPolicy: String, Codable, CaseI
 nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable, Sendable, Hashable {
     case frame
     case text
-    case face
-    case body
     case balloon
+    case onomatopoeia
     case readingOrder = "reading_order"
     case ocrTranslation = "ocr_translation"
     case other
@@ -48,9 +47,8 @@ nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable,
         switch self {
         case .frame: "Frame"
         case .text: "Text"
-        case .face: "Face"
-        case .body: "Body"
         case .balloon: "Balloon"
+        case .onomatopoeia: "Onomatopoeia"
         case .readingOrder: "阅读顺序"
         case .ocrTranslation: "OCR / 翻译"
         case .other: "其他"
@@ -69,14 +67,12 @@ nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Se
     case frameMerge = "frame_merge"
     case frameSplit = "frame_split"
     case readingOrderError = "reading_order_error"
-    case wrongPerson = "wrong_person"
-    case multipleFacesConfused = "multiple_faces_confused"
-    case overlappingPersonDuplicate = "overlapping_person_duplicate"
     case balloonTextAssociationError = "balloon_text_association_error"
+    case balloonMaskError = "balloon_mask_error"
+    case onomatopoeiaClassificationError = "onomatopoeia_classification_error"
     case roiError = "roi_error"
     case ocrAffected = "ocr_affected"
     case translationContextAffected = "translation_context_affected"
-    case potentialSpeakerAssociationError = "potential_speaker_association_error"
 
     var displayName: String {
         switch self {
@@ -90,14 +86,12 @@ nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Se
         case .frameMerge: "分镜合并"
         case .frameSplit: "分镜拆分"
         case .readingOrderError: "阅读顺序错误"
-        case .wrongPerson: "错人物"
-        case .multipleFacesConfused: "多人脸混淆"
-        case .overlappingPersonDuplicate: "人物重叠重复"
         case .balloonTextAssociationError: "气泡与文字对应错误"
+        case .balloonMaskError: "气泡 Mask 错误"
+        case .onomatopoeiaClassificationError: "拟声词分类错误"
         case .roiError: "ROI 错误"
         case .ocrAffected: "OCR 受影响"
         case .translationContextAffected: "翻译上下文受影响"
-        case .potentialSpeakerAssociationError: "潜在说话人关联错误"
         }
     }
 }
@@ -107,7 +101,6 @@ nonisolated enum MangaVisionHardCaseProductImpact: String, Codable, CaseIterable
     case guidedPanel = "guided_panel"
     case ocr
     case translation
-    case personAssociation = "person_association"
     case none
 
     var displayName: String {
@@ -116,7 +109,6 @@ nonisolated enum MangaVisionHardCaseProductImpact: String, Codable, CaseIterable
         case .guidedPanel: "Guided Panel"
         case .ocr: "OCR"
         case .translation: "翻译"
-        case .personAssociation: "人物关联"
         case .none: "没明显影响"
         }
     }
@@ -187,8 +179,6 @@ nonisolated struct MangaVisionHardCaseDetection: Codable, Sendable, Hashable, Id
         switch type {
         case .panel: "frame"
         case .text: "text"
-        case .face: "face"
-        case .body: "body"
         case .balloon: "balloon"
         case .onomatopoeia: "onomatopoeia"
         }
@@ -695,13 +685,8 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             ?? .zero
         let now = Date()
         let snapshotModelIdentifier = analysis?.modelIdentifier ?? manifest.modelID
-        let isV2B5 = snapshotModelIdentifier == MangaVisionV2B5Provider.modelIdentifier
-        let capturedModelName = isV2B5
-            ? MangaVisionV2B5ProductionIdentity.modelName
-            : snapshotModelIdentifier
-        let capturedModelSHA256 = isV2B5
-            ? MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256
-            : manifest.modelFileHash
+        let capturedModelName = snapshotModelIdentifier
+        let capturedModelSHA256 = manifest.modelFileHash
 
         let record = MangaVisionHardCaseRecord(
             id: UUID(),
