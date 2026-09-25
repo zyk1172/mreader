@@ -9,14 +9,14 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         let profile = MangaVisionCalibrationProfile.bundled
         XCTAssertFalse(profile.revision.isEmpty)
 
-        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.40)
-        XCTAssertEqual(profile.calibration(for: .panel).nmsIOUThreshold, 0.35)
-        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.50)
-        XCTAssertEqual(profile.calibration(for: .text).nmsIOUThreshold, 0.35)
-        XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.30)
-        XCTAssertEqual(profile.calibration(for: .balloon).nmsIOUThreshold, 0.35)
-        XCTAssertEqual(profile.calibration(for: .onomatopoeia).confidenceThreshold, 0.30)
-        XCTAssertEqual(profile.calibration(for: .onomatopoeia).nmsIOUThreshold, 0.35)
+        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.05)
+        XCTAssertEqual(profile.calibration(for: .panel).nmsIOUThreshold, 0.50)
+        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.05)
+        XCTAssertEqual(profile.calibration(for: .text).nmsIOUThreshold, 0.50)
+        XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.05)
+        XCTAssertEqual(profile.calibration(for: .balloon).nmsIOUThreshold, 0.45)
+        XCTAssertEqual(profile.calibration(for: .onomatopoeia).confidenceThreshold, 0.05)
+        XCTAssertEqual(profile.calibration(for: .onomatopoeia).nmsIOUThreshold, 0.45)
         XCTAssertEqual(Set(profile.byRegionType.keys), Set(MangaRegionType.allCases))
     }
 
