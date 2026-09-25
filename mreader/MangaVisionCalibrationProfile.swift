@@ -32,6 +32,11 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
                 nmsIOUThreshold: 0.58,
                 containmentThreshold: 0.90
             ),
+            .onomatopoeia: MangaVisionClassCalibration(
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35,
+                containmentThreshold: 0.90
+            ),
             // Kept explicit for forward-compatible checkpoints even though the
             // currently bundled checkpoint exports only frame/text/balloon.
             .face: MangaVisionClassCalibration(

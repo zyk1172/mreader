@@ -564,7 +564,15 @@ nonisolated enum MangaVisionAnalysisComposer {
                 type: region.type,
                 normalizedRect: mappedRect,
                 confidence: region.confidence,
-                contour: contour
+                contour: contour,
+                secondaryContours: region.secondaryContours.map { secondary in
+                    MangaVisionContour(points: secondary.cgPoints.map { point in
+                        CGPoint(
+                            x: sourceRect.minX + point.x * sourceRect.width,
+                            y: sourceRect.minY + point.y * sourceRect.height
+                        )
+                    })
+                }
             )
         }
 
@@ -574,6 +582,7 @@ nonisolated enum MangaVisionAnalysisComposer {
             panels: analysis.panels.compactMap(remapRegion),
             texts: analysis.texts.compactMap(remapRegion),
             balloons: analysis.balloons.compactMap(remapRegion),
+            onomatopoeias: analysis.onomatopoeias.compactMap(remapRegion),
             faces: analysis.faces.compactMap(remapRegion),
             bodies: analysis.bodies.compactMap(remapRegion),
             modelIdentifier: analysis.modelIdentifier,
@@ -599,6 +608,10 @@ nonisolated enum MangaVisionAnalysisComposer {
             baseline.balloons + refinements.flatMap(\.balloons),
             type: .balloon
         )
+        let onomatopoeias = profile.deduplicated(
+            baseline.onomatopoeias + refinements.flatMap(\.onomatopoeias),
+            type: .onomatopoeia
+        )
         let faces = profile.deduplicated(
             baseline.faces + refinements.flatMap(\.faces),
             type: .face
@@ -613,6 +626,7 @@ nonisolated enum MangaVisionAnalysisComposer {
             panels: panels,
             texts: texts,
             balloons: balloons,
+            onomatopoeias: onomatopoeias,
             faces: faces,
             bodies: bodies,
             modelIdentifier: baseline.modelIdentifier,
