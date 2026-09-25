@@ -23,14 +23,10 @@ nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     }
 }
 
-/// Capabilities are intentionally separate from semantic class support. V2B5
-/// exposes all five semantic classes as bounding boxes, while contour output is
-/// not part of the active model contract.
+/// Runtime capabilities for the four-class MangaLayout4 V1 contract.
 nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
     let supportsFrame: Bool
     let supportsText: Bool
-    let supportsFace: Bool
-    let supportsBody: Bool
     let supportsBalloon: Bool
     let supportsOnomatopoeia: Bool
     let supportsBalloonMask: Bool
@@ -41,8 +37,6 @@ nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
     ) {
         supportsFrame = supportedRegionTypes.contains(.panel)
         supportsText = supportedRegionTypes.contains(.text)
-        supportsFace = supportedRegionTypes.contains(.face)
-        supportsBody = supportedRegionTypes.contains(.body)
         supportsBalloon = supportedRegionTypes.contains(.balloon)
         supportsOnomatopoeia = supportedRegionTypes.contains(.onomatopoeia)
         self.supportsBalloonMask = supportsBalloonMask

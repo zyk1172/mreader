@@ -169,10 +169,6 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionRuntimeReleasable,
             texts: texts,
             balloons: balloonRegions,
             onomatopoeias: onomatopoeias,
-            // MangaLayout4 V1 intentionally has no face/body heads. Empty arrays
-            // disable weak speaker hints without fabricating compatibility boxes.
-            faces: [],
-            bodies: [],
             modelIdentifier: runtime.descriptor.modelIdentifier,
             modelVersion: runtime.descriptor.modelVersion
         )

@@ -583,8 +583,6 @@ nonisolated enum MangaVisionAnalysisComposer {
             texts: analysis.texts.compactMap(remapRegion),
             balloons: analysis.balloons.compactMap(remapRegion),
             onomatopoeias: analysis.onomatopoeias.compactMap(remapRegion),
-            faces: analysis.faces.compactMap(remapRegion),
-            bodies: analysis.bodies.compactMap(remapRegion),
             modelIdentifier: analysis.modelIdentifier,
             modelVersion: analysis.modelVersion,
             schemaVersion: analysis.schemaVersion
@@ -612,14 +610,6 @@ nonisolated enum MangaVisionAnalysisComposer {
             baseline.onomatopoeias + refinements.flatMap(\.onomatopoeias),
             type: .onomatopoeia
         )
-        let faces = profile.deduplicated(
-            baseline.faces + refinements.flatMap(\.faces),
-            type: .face
-        )
-        let bodies = profile.deduplicated(
-            baseline.bodies + refinements.flatMap(\.bodies),
-            type: .body
-        )
         return MangaPageAnalysis(
             pageIdentifier: baseline.pageIdentifier,
             imageSize: baseline.imageSize,
@@ -627,8 +617,6 @@ nonisolated enum MangaVisionAnalysisComposer {
             texts: texts,
             balloons: balloons,
             onomatopoeias: onomatopoeias,
-            faces: faces,
-            bodies: bodies,
             modelIdentifier: baseline.modelIdentifier,
             modelVersion: baseline.modelVersion,
             schemaVersion: baseline.schemaVersion

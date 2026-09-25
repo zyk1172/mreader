@@ -7,46 +7,34 @@ nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let containmentThreshold: CGFloat
 }
 
-/// One revisioned source of truth for detector filtering and same-class deduplication.
-/// Any production threshold change must bump `revision`; the manifest includes this
-/// value in cache identity so cached analyses cannot outlive their calibration.
+/// MangaLayout4 V1-only adaptive merge calibration. The primary provider already
+/// applies the Python-reference score thresholds and same-class NMS; these values
+/// keep tile merging aligned with that four-class contract.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let revision: String
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga109-yolo26s-seg-calibration-2026-09-17-v1",
+        revision: "manga-layout4-v1-adaptive-merge-2026-09-25-v1",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.24,
-                nmsIOUThreshold: 0.50,
+                confidenceThreshold: 0.40,
+                nmsIOUThreshold: 0.35,
                 containmentThreshold: 0.92
             ),
             .text: MangaVisionClassCalibration(
-                confidenceThreshold: 0.18,
-                nmsIOUThreshold: 0.55,
+                confidenceThreshold: 0.50,
+                nmsIOUThreshold: 0.35,
                 containmentThreshold: 0.88
             ),
             .balloon: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.58,
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35,
                 containmentThreshold: 0.90
             ),
             .onomatopoeia: MangaVisionClassCalibration(
                 confidenceThreshold: 0.30,
                 nmsIOUThreshold: 0.35,
-                containmentThreshold: 0.90
-            ),
-            // Kept explicit for forward-compatible checkpoints even though the
-            // currently bundled checkpoint exports only frame/text/balloon.
-            .face: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.45,
-                containmentThreshold: 0.90
-            ),
-            .body: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.55,
                 containmentThreshold: 0.90
             )
         ]
@@ -59,11 +47,7 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     }
 
     func calibration(for type: MangaRegionType) -> MangaVisionClassCalibration {
-        byRegionType[type] ?? MangaVisionClassCalibration(
-            confidenceThreshold: 0.20,
-            nmsIOUThreshold: 0.62,
-            containmentThreshold: 0.92
-        )
+        byRegionType[type]!
     }
 
     func deduplicated(_ regions: [MangaVisionRegion], type: MangaRegionType) -> [MangaVisionRegion] {
