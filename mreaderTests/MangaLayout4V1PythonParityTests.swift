@@ -301,13 +301,13 @@ final class MangaLayout4V1PythonParityTests: XCTestCase {
                 for pointIndex in actualPoints.indices {
                     XCTAssertEqual(
                         actualPoints[pointIndex].x,
-                        expectedPoints[pointIndex][0],
+                        CGFloat(expectedPoints[pointIndex][0]),
                         accuracy: 0.000_001,
                         "\(caseName) contour x \(pointIndex)"
                     )
                     XCTAssertEqual(
                         actualPoints[pointIndex].y,
-                        expectedPoints[pointIndex][1],
+                        CGFloat(expectedPoints[pointIndex][1]),
                         accuracy: 0.000_001,
                         "\(caseName) contour y \(pointIndex)"
                     )
@@ -324,10 +324,10 @@ final class MangaLayout4V1PythonParityTests: XCTestCase {
     ) {
         XCTAssertEqual(values.count, 4, message)
         guard values.count == 4 else { return }
-        XCTAssertEqual(rect.minX, values[0], accuracy: accuracy, message)
-        XCTAssertEqual(rect.minY, values[1], accuracy: accuracy, message)
-        XCTAssertEqual(rect.width, values[2], accuracy: accuracy, message)
-        XCTAssertEqual(rect.height, values[3], accuracy: accuracy, message)
+        XCTAssertEqual(rect.minX, CGFloat(values[0]), accuracy: accuracy, message)
+        XCTAssertEqual(rect.minY, CGFloat(values[1]), accuracy: accuracy, message)
+        XCTAssertEqual(rect.width, CGFloat(values[2]), accuracy: accuracy, message)
+        XCTAssertEqual(rect.height, CGFloat(values[3]), accuracy: accuracy, message)
     }
 
     private func loadFixture() throws -> ParityFixture {
