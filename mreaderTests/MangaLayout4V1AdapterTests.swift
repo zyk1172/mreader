@@ -179,6 +179,32 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertEqual(frame.modelRect.height, 40, accuracy: 0.002)
     }
 
+    func testDecoderKeepsQualityFocalFrameAboveFrozenTrainingThreshold() throws {
+        var outputs = try makeRawOutputs()
+        let p4Cls = try XCTUnwrap(outputs["p4_cls"])
+        let p4BBox = try XCTUnwrap(outputs["p4_bbox"])
+        set(
+            p4Cls,
+            channel: MangaLayout4V1Class.frame.rawValue,
+            y: 8,
+            x: 8,
+            value: logit(0.06)
+        )
+        let bboxRaw = Float(log(exp(3.0) - 1.0))
+        for channel in 0..<4 {
+            set(p4BBox, channel: channel, y: 8, x: 8, value: bboxRaw)
+        }
+
+        let decoded = try MangaLayout4V1Decoder.decode(
+            rawOutputs: outputs,
+            letterbox: MangaLayout4V1Letterbox.make(sourceWidth: 640, sourceHeight: 640)
+        )
+
+        let frame = try XCTUnwrap(decoded.detections.first { $0.layoutClass == .frame })
+        XCTAssertEqual(frame.confidence, 0.06, accuracy: 0.000_01)
+        XCTAssertEqual(decoded.diagnostics.postThresholdCounts[.frame], 1)
+    }
+
     func testBalloonMaskCombinationCropAndMultipleComponents() throws {
         let prototypes = try MLMultiArray(
             shape: [1, 8, 320, 320].map(NSNumber.init),
