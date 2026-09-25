@@ -64,8 +64,8 @@ struct MangaVisionPostRemediationIntegrationTests {
 
         #expect(merged.onomatopoeias == expectedSFX)
         #expect(merged.balloons == expectedBalloons)
-        #expect(profile.calibration(for: .onomatopoeia).nmsIOUThreshold == 0.35)
-        #expect(profile.calibration(for: .balloon).nmsIOUThreshold == 0.35)
+        #expect(profile.calibration(for: .onomatopoeia).nmsIOUThreshold == 0.45)
+        #expect(profile.calibration(for: .balloon).nmsIOUThreshold == 0.45)
     }
 
     @Test func plannerAndReleaseGateShareOneInferencePassBudget() {
