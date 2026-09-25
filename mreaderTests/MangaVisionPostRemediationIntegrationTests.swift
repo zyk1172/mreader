@@ -68,6 +68,27 @@ struct MangaVisionPostRemediationIntegrationTests {
         #expect(profile.calibration(for: .balloon).nmsIOUThreshold == 0.45)
     }
 
+    @Test func layout4IoUNMSPreservesNestedFrameWhenIoUIsBelowThreshold() {
+        let outer = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.90),
+            confidence: 0.12
+        )
+        let inset = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.65, y: 0.65, width: 0.18, height: 0.18),
+            confidence: 0.11
+        )
+
+        let kept = MangaVisionCalibrationProfile.bundled.deduplicated(
+            [outer, inset],
+            type: .panel
+        )
+
+        #expect(kept.count == 2)
+        #expect(Set(kept.map(\.id)) == Set([outer.id, inset.id]))
+    }
+
     @Test func plannerAndReleaseGateShareOneInferencePassBudget() {
         let plan = MangaVisionInferencePlanner.plan(
             sourceSize: CGSize(width: 1_000, height: 20_000),
