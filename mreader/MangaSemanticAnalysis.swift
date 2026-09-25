@@ -5,11 +5,15 @@ nonisolated enum MangaVisionTextROIPlanner {
     static let defaultPaddingFraction: CGFloat = 0.08
 
     static func recognitionRegions(
-        from textRegions: [MangaVisionRegion],
+        from contentRegions: [MangaVisionRegion],
         paddingFraction: CGFloat = defaultPaddingFraction
     ) -> [CGRect] {
-        let usable = textRegions.filter { region in
-            guard region.type == .text, region.confidence >= 0.12 else { return false }
+        let usable = contentRegions.filter { region in
+            guard region.type == .text || region.type == .onomatopoeia else { return false }
+            let threshold = MangaVisionCalibrationProfile.bundled
+                .calibration(for: region.type)
+                .confidenceThreshold
+            guard region.confidence >= threshold else { return false }
             let rect = region.normalizedRect
             return rect.width >= 0.002
                 && rect.height >= 0.002
@@ -17,15 +21,22 @@ nonisolated enum MangaVisionTextROIPlanner {
         }
         let deduplicated = MangaVisionRegionPostProcessor.deduplicated(
             usable,
-            iouThreshold: 0.58,
+            iouThreshold: 0.35,
             containmentThreshold: 0.88
         )
         var padded: [CGRect] = []
-        for region in MangaReadingGeometry.ordered(deduplicated, isRightToLeft: false,
-            rect: { $0.normalizedRect }, identity: { $0.id.uuidString }) {
+        for region in MangaReadingGeometry.ordered(
+            deduplicated,
+            isRightToLeft: false,
+            rect: { $0.normalizedRect },
+            identity: { $0.id.uuidString }
+        ) {
+            let regionPadding = region.type == .onomatopoeia
+                ? max(paddingFraction, 0.14)
+                : paddingFraction
             let rect = MangaPageCoordinateSpace.paddedNormalizedRect(
                 region.normalizedRect,
-                fraction: paddingFraction
+                fraction: regionPadding
             )
             guard rect.width > 0, rect.height > 0 else { continue }
             if let index = padded.firstIndex(where: {
@@ -33,17 +44,14 @@ nonisolated enum MangaVisionTextROIPlanner {
                     || MangaPageCoordinateSpace.containment(of: rect, in: $0) >= 0.90
                     || MangaPageCoordinateSpace.containment(of: $0, in: rect) >= 0.90
             }) {
-                padded[index] = MangaPageCoordinateSpace.clampedNormalizedRect(padded[index].union(rect))
+                padded[index] = MangaPageCoordinateSpace.clampedNormalizedRect(
+                    padded[index].union(rect)
+                )
             } else {
                 padded.append(rect)
             }
         }
         return padded
-    }
-
-    private static func readingGeometryPrecedes(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-        if abs(lhs.midY - rhs.midY) > 0.02 { return lhs.midY < rhs.midY }
-        return lhs.minX < rhs.minX
     }
 }
 
@@ -55,67 +63,46 @@ nonisolated enum MangaSemanticAnalyzer {
         let panels = orderedPanels(
             MangaVisionRegionPostProcessor.deduplicated(
                 analysis.panels,
-                iouThreshold: 0.68,
+                iouThreshold: 0.35,
                 containmentThreshold: 0.96
             ),
             isRightToLeft: isRightToLeft
         )
-        let texts = MangaVisionRegionPostProcessor.deduplicated(
-            analysis.texts,
-            iouThreshold: 0.58,
+        let content = MangaVisionRegionPostProcessor.deduplicated(
+            analysis.texts + analysis.onomatopoeias,
+            iouThreshold: 0.35,
             containmentThreshold: 0.88
         )
-        let people = personCandidates(
-            faces: analysis.faces,
-            bodies: analysis.bodies,
-            panels: panels
-        )
 
-        var textsByPanel: [UUID: [MangaVisionRegion]] = [:]
-        var unassignedTextRegions: [MangaVisionRegion] = []
-        for text in texts {
-            if let panel = owningPanel(for: text.normalizedRect, panels: panels) {
-                textsByPanel[panel.id, default: []].append(text)
+        var contentByPanel: [UUID: [MangaVisionRegion]] = [:]
+        var unassignedRegions: [MangaVisionRegion] = []
+        for region in content {
+            if let panel = owningPanel(for: region.normalizedRect, panels: panels) {
+                contentByPanel[panel.id, default: []].append(region)
             } else {
-                unassignedTextRegions.append(text)
+                unassignedRegions.append(region)
             }
         }
 
-        let personsByPanel = Dictionary(grouping: people.compactMap { person -> MangaPersonCandidate? in
-            guard person.panelID != nil else { return nil }
-            return person
-        }, by: { $0.panelID! })
-        let unassignedPersons = people.filter { $0.panelID == nil }
-
         let panelAnalyses = panels.map { panel -> MangaPanelAnalysis in
-            let panelPersons = personsByPanel[panel.id] ?? []
-            let orderedTexts = orderedTextRegions(
-                textsByPanel[panel.id] ?? [],
+            let ordered = orderedTextRegions(
+                contentByPanel[panel.id] ?? [],
                 isRightToLeft: isRightToLeft
             )
-            let semanticTexts = orderedTexts.map { text in
-                MangaSemanticText(
-                    region: text,
-                    speakerCandidates: speakerCandidates(for: text, persons: panelPersons)
-                )
-            }
             return MangaPanelAnalysis(
                 panel: panel,
-                texts: semanticTexts,
-                persons: panelPersons
+                texts: ordered.map { MangaSemanticText(region: $0) }
             )
         }
         let unassignedTexts = orderedTextRegions(
-            unassignedTextRegions,
+            unassignedRegions,
             isRightToLeft: isRightToLeft
-        ).map {
-            MangaSemanticText(region: $0, speakerCandidates: [])
-        }
+        ).map { MangaSemanticText(region: $0) }
+
         return MangaSemanticPage(
             pageAnalysis: analysis,
             panels: panelAnalyses,
-            unassignedTexts: unassignedTexts,
-            unassignedPersons: unassignedPersons
+            unassignedTexts: unassignedTexts
         )
     }
 
@@ -158,121 +145,27 @@ nonisolated enum MangaSemanticAnalyzer {
         )
     }
 
-    static func personCandidates(
-        faces: [MangaVisionRegion],
-        bodies: [MangaVisionRegion],
-        panels: [MangaVisionRegion]
-    ) -> [MangaPersonCandidate] {
-        let cleanFaces = MangaVisionRegionPostProcessor.deduplicated(faces)
-        let cleanBodies = MangaVisionRegionPostProcessor.deduplicated(bodies)
-        struct PairScore {
-            let faceIndex: Int
-            let bodyIndex: Int
-            let score: Float
-        }
-        var scores: [PairScore] = []
-        for (faceIndex, face) in cleanFaces.enumerated() {
-            for (bodyIndex, body) in cleanBodies.enumerated() {
-                let score = faceBodyScore(face: face.normalizedRect, body: body.normalizedRect)
-                if score >= 0.42 {
-                    scores.append(PairScore(
-                        faceIndex: faceIndex,
-                        bodyIndex: bodyIndex,
-                        score: score
-                    ))
-                }
-            }
-        }
-        scores.sort { $0.score > $1.score }
-        var usedFaces = Set<Int>()
-        var usedBodies = Set<Int>()
-        var result: [MangaPersonCandidate] = []
-        for pair in scores {
-            guard usedFaces.insert(pair.faceIndex).inserted else { continue }
-            guard usedBodies.insert(pair.bodyIndex).inserted else {
-                usedFaces.remove(pair.faceIndex)
-                continue
-            }
-            let face = cleanFaces[pair.faceIndex]
-            let body = cleanBodies[pair.bodyIndex]
-            let personRect = face.normalizedRect.union(body.normalizedRect)
-            result.append(MangaPersonCandidate(
-                panelID: owningPanel(for: personRect, panels: panels)?.id,
-                face: face,
-                body: body,
-                confidence: min(1, (face.confidence + body.confidence + pair.score) / 3)
-            ))
-        }
-        for (index, face) in cleanFaces.enumerated() where !usedFaces.contains(index) {
-            result.append(MangaPersonCandidate(
-                panelID: owningPanel(for: face.normalizedRect, panels: panels)?.id,
-                face: face,
-                body: nil,
-                confidence: face.confidence
-            ))
-        }
-        for (index, body) in cleanBodies.enumerated() where !usedBodies.contains(index) {
-            result.append(MangaPersonCandidate(
-                panelID: owningPanel(for: body.normalizedRect, panels: panels)?.id,
-                face: nil,
-                body: body,
-                confidence: body.confidence
-            ))
-        }
-        return result
-    }
-
-    static func speakerCandidates(
-        for text: MangaVisionRegion,
-        persons: [MangaPersonCandidate]
-    ) -> [MangaSpeakerCandidate] {
-        let textCenter = CGPoint(
-            x: text.normalizedRect.midX,
-            y: text.normalizedRect.midY
-        )
-        return persons.compactMap { person -> MangaSpeakerCandidate? in
-            let anchorRect = person.face?.normalizedRect ?? person.body?.normalizedRect
-            guard let anchorRect else { return nil }
-            let anchor = CGPoint(x: anchorRect.midX, y: anchorRect.midY)
-            let distance = hypot(textCenter.x - anchor.x, textCenter.y - anchor.y)
-            // Spatial proximity ranks association, while face confidence only
-            // controls whether a person is credible enough to remain a weak candidate.
-            // Keep a small prior for a strong but distant face: manga balloons do not
-            // always sit near their speaker. Body-only / weak-face candidates still do
-            // not become speaker hints.
-            guard let face = person.face, face.confidence >= 0.45,
-                  person.confidence >= 0.45 else { return nil }
-            let proximity = max(0, 1 - Float(distance / 0.75))
-            let evidenceConfidence = min(face.confidence, person.confidence)
-            let association = 0.20 + proximity * 0.80
-            let score = evidenceConfidence * association
-            // The intended boundary includes a 0.90-confidence distant face:
-            // 0.90 × 0.20 = 0.18. Float rounding can represent that product
-            // infinitesimally below 0.18, so compare with a tiny tolerance.
-            guard score + 0.000_1 >= 0.18 else { return nil }
-            return MangaSpeakerCandidate(person: person, score: score)
-        }.sorted { $0.score > $1.score }
-    }
-
     static func translationContext(
         semanticPage: MangaSemanticPage,
         blocks: [TextBlock]
     ) -> String {
         guard !semanticPage.panels.isEmpty else { return "" }
         var lines: [String] = [
-            "漫画页面视觉上下文（只用于翻译消歧；人物位置/说话人均为弱提示，不得据此虚构身份）："
+            "漫画页面视觉上下文（MangaLayout4 V1；frame=分镜、text=文字、balloon=气泡、onomatopoeia=拟声词；仅用于几何、阅读顺序与翻译消歧）："
         ]
         for (panelIndex, panel) in semanticPage.panels.enumerated() {
             let panelRect = panel.panel.normalizedRect
             lines.append(String(
-                format: "Panel %d rect=(%.3f,%.3f,%.3f,%.3f) persons=%d",
+                format: "Panel %d rect=(%.3f,%.3f,%.3f,%.3f) semanticRegions=%d",
                 panelIndex + 1,
                 Double(panelRect.minX), Double(panelRect.minY),
                 Double(panelRect.width), Double(panelRect.height),
-                panel.persons.count
+                panel.texts.count
             ))
             for semanticText in panel.texts {
-                guard let block = nearestOCRBlock(to: semanticText.region, blocks: blocks) else { continue }
+                guard let block = nearestOCRBlock(to: semanticText.region, blocks: blocks) else {
+                    continue
+                }
                 let source = block.text
                     .replacingOccurrences(of: "\n", with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -280,7 +173,7 @@ nonisolated enum MangaSemanticAnalyzer {
 
                 let order = (blocks.firstIndex(where: { $0.id == block.id }) ?? 0) + 1
                 let textRect = block.boundingBox
-                var metadata = "order=\(order) role=\(block.layoutRole.rawValue) orientation=\(block.textOrientation.rawValue)"
+                var metadata = "order=\(order) visionClass=\(semanticText.region.type.rawValue) role=\(block.layoutRole.rawValue) orientation=\(block.textOrientation.rawValue)"
                 metadata += String(
                     format: " textRect=(%.3f,%.3f,%.3f,%.3f)",
                     Double(textRect.minX), Double(textRect.minY),
@@ -293,20 +186,7 @@ nonisolated enum MangaSemanticAnalyzer {
                         Double(bubble.width), Double(bubble.height)
                     )
                 }
-
-                let hints = semanticText.speakerCandidates.prefix(3).compactMap { hint -> String? in
-                    guard let anchor = hint.person.face?.normalizedRect ?? hint.person.body?.normalizedRect else {
-                        return nil
-                    }
-                    return String(
-                        format: "person(x=%.3f,y=%.3f,weakAssociation=%.2f,detectionConfidence=%.2f)",
-                        Double(anchor.midX), Double(anchor.midY), Double(hint.score),
-                        Double(hint.person.confidence)
-                    )
-                }.joined(separator: ",")
-                lines.append(
-                    "  [\(metadata)] source=\(source)\(hints.isEmpty ? "" : " speakerHints=[\(hints)]")"
-                )
+                lines.append("  [\(metadata)] source=\(source)")
             }
         }
         return lines.joined(separator: "\n")
@@ -337,27 +217,6 @@ nonisolated enum MangaSemanticAnalyzer {
         } + remaining
     }
 
-    private static func faceBodyScore(face: CGRect, body: CGRect) -> Float {
-        let f = MangaPageCoordinateSpace.clampedNormalizedRect(face)
-        let b = MangaPageCoordinateSpace.clampedNormalizedRect(body)
-        guard f.width > 0, f.height > 0, b.width > 0, b.height > 0 else { return 0 }
-        let faceCenter = CGPoint(x: f.midX, y: f.midY)
-        let upperBody = CGRect(
-            x: b.minX - b.width * 0.12,
-            y: b.minY - b.height * 0.12,
-            width: b.width * 1.24,
-            height: b.height * 0.78
-        )
-        let inUpperBody: Float = upperBody.contains(faceCenter) ? 0.50 : 0
-        let containment = Float(MangaPageCoordinateSpace.containment(of: f, in: b))
-        let horizontalDistance = abs(f.midX - b.midX) / max(b.width, 0.001)
-        let horizontalScore = Float(max(0, 1 - horizontalDistance)) * 0.14
-        let expectedHead = CGPoint(x: b.midX, y: b.minY + b.height * 0.18)
-        let distance = hypot(faceCenter.x - expectedHead.x, faceCenter.y - expectedHead.y)
-        let distanceScore = Float(max(0, 1 - distance / max(b.height, 0.04))) * 0.16
-        return min(1, inUpperBody + containment * 0.20 + horizontalScore + distanceScore)
-    }
-
     private static func nearestOCRBlock(
         to region: MangaVisionRegion,
         blocks: [TextBlock]
@@ -379,4 +238,3 @@ nonisolated enum MangaSemanticAnalyzer {
         }
     }
 }
-
