@@ -10,15 +10,12 @@ import XCTest
 /// Core ML inference and local OCR rather than a lightweight unit check.
 @MainActor
 final class V2B5ProductionReviewTests: XCTestCase {
-    func testProductionDefaultProviderIsV2B5() {
-#if DEBUG
-        // DEBUG keeps the diagnostic selector independently configurable. The
-        // compile-time production choice is still asserted here so it cannot
-        // silently drift from the Release router branch.
-        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .v2b5)
-#else
-        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .v2b5)
-#endif
+    func testV2B5ReviewIsExplicitOnlyOnMangaLayout4IntegrationBranch() {
+        // Historical V2B5 review utilities remain available when invoked directly,
+        // but the application route on this integration branch must never select them.
+        XCTAssertEqual(MangaVisionProviderMode.allCases, [.mangaLayout4V1])
+        XCTAssertEqual(MangaVisionProviderMode.productionDefault, .mangaLayout4V1)
+        XCTAssertEqual(MangaVisionProviderMode.currentForDiagnostics, .mangaLayout4V1)
     }
 
     func testV2B5SimulatorValOnlyReview() async throws {
