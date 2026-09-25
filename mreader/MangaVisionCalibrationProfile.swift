@@ -4,7 +4,6 @@ import Foundation
 nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let confidenceThreshold: Float
     let nmsIOUThreshold: CGFloat
-    let containmentThreshold: CGFloat
 }
 
 /// MangaLayout4 V1-only adaptive merge calibration. These defaults mirror the
@@ -20,23 +19,19 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
         byRegionType: [
             .panel: MangaVisionClassCalibration(
                 confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.50,
-                containmentThreshold: 0.92
+                nmsIOUThreshold: 0.50
             ),
             .text: MangaVisionClassCalibration(
                 confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.50,
-                containmentThreshold: 0.88
+                nmsIOUThreshold: 0.50
             ),
             .balloon: MangaVisionClassCalibration(
                 confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.45,
-                containmentThreshold: 0.90
+                nmsIOUThreshold: 0.45
             ),
             .onomatopoeia: MangaVisionClassCalibration(
                 confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.45,
-                containmentThreshold: 0.90
+                nmsIOUThreshold: 0.45
             )
         ]
     )
@@ -52,11 +47,21 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     }
 
     func deduplicated(_ regions: [MangaVisionRegion], type: MangaRegionType) -> [MangaVisionRegion] {
-        let calibration = calibration(for: type)
-        return MangaVisionRegionPostProcessor.deduplicated(
-            regions,
-            iouThreshold: calibration.nmsIOUThreshold,
-            containmentThreshold: calibration.containmentThreshold
-        )
+        let threshold = calibration(for: type).nmsIOUThreshold
+        var kept: [MangaVisionRegion] = []
+        for candidate in regions
+            .filter({ $0.type == type })
+            .sorted(by: { $0.confidence > $1.confidence }) {
+            let suppressed = kept.contains { existing in
+                MangaPageCoordinateSpace.intersectionOverUnion(
+                    existing.normalizedRect,
+                    candidate.normalizedRect
+                ) > threshold
+            }
+            if !suppressed {
+                kept.append(candidate)
+            }
+        }
+        return kept
     }
 }
