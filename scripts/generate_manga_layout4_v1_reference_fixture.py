@@ -239,7 +239,7 @@ def decode_case(case: dict) -> dict:
                 "total_location_class_count": sum(
                     height * width * 4 for _stride, height, width in LEVELS.values()
                 ),
-                "pre_threshold_topk_count": pre_threshold_topk_count,
+                "pre_threshold_top_k_count": pre_threshold_topk_count,
                 "post_threshold_counts": post_threshold_counts,
                 "post_nms_counts": post_nms_counts,
                 "maximum_scores": maximum_scores,
