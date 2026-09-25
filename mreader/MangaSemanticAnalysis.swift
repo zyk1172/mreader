@@ -19,10 +19,13 @@ nonisolated enum MangaVisionTextROIPlanner {
                 && rect.height >= 0.002
                 && MangaPageCoordinateSpace.area(rect) >= 0.000_02
         }
-        let deduplicated = MangaVisionRegionPostProcessor.deduplicated(
-            usable,
-            iouThreshold: 0.35,
-            containmentThreshold: 0.88
+        let profile = MangaVisionCalibrationProfile.bundled
+        let deduplicated = profile.deduplicated(
+            usable.filter { $0.type == .text },
+            type: .text
+        ) + profile.deduplicated(
+            usable.filter { $0.type == .onomatopoeia },
+            type: .onomatopoeia
         )
         var padded: [CGRect] = []
         for region in MangaReadingGeometry.ordered(
@@ -60,18 +63,17 @@ nonisolated enum MangaSemanticAnalyzer {
         from analysis: MangaPageAnalysis,
         isRightToLeft: Bool
     ) -> MangaSemanticPage {
+        let profile = MangaVisionCalibrationProfile.bundled
         let panels = orderedPanels(
-            MangaVisionRegionPostProcessor.deduplicated(
-                analysis.panels,
-                iouThreshold: 0.35,
-                containmentThreshold: 0.96
-            ),
+            profile.deduplicated(analysis.panels, type: .panel),
             isRightToLeft: isRightToLeft
         )
-        let content = MangaVisionRegionPostProcessor.deduplicated(
-            analysis.texts + analysis.onomatopoeias,
-            iouThreshold: 0.35,
-            containmentThreshold: 0.88
+        let content = profile.deduplicated(
+            analysis.texts,
+            type: .text
+        ) + profile.deduplicated(
+            analysis.onomatopoeias,
+            type: .onomatopoeia
         )
 
         var contentByPanel: [UUID: [MangaVisionRegion]] = [:]
