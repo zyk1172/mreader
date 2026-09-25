@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import UIKit
+import os
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
@@ -410,7 +411,7 @@ actor PanelDetectionService {
 
         if let mangaAnalysis, processed.isEmpty {
             MReaderLog.aiVision.error(
-                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex ?? -1, privacy: .public) model=\(mangaAnalysis.modelIdentifier, privacy: .public)"
+                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex ?? -1, privacy: .public) model=\(mangaAnalysis.modelIdentifier ?? "unknown", privacy: .public)"
             )
         }
 
