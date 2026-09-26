@@ -5,6 +5,8 @@ import os
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
+    /// Decode/test compatibility only. Koharu Guided Panel never invokes a Vision fallback detector.
+    case visionRectangle
     case fullPageFallback
 }
 
