@@ -26,13 +26,13 @@ LEVELS = {
     "p5": (32, 20, 20),
 }
 CLASS_NAMES = ["frame", "text", "balloon", "onomatopoeia"]
-SCORE_THRESHOLDS = {name: 0.05 for name in CLASS_NAMES}
-NMS_THRESHOLDS = {
-    "frame": 0.50,
-    "text": 0.50,
-    "balloon": 0.45,
-    "onomatopoeia": 0.45,
+SCORE_THRESHOLDS = {
+    "frame": 0.65,
+    "text": 0.35,
+    "balloon": 0.30,
+    "onomatopoeia": 0.30,
 }
+NMS_THRESHOLDS = {name: 0.35 for name in CLASS_NAMES}
 PRE_NMS_TOPK = 1200
 MAX_DETECTIONS = 300
 MASK_THRESHOLD = 0.50
@@ -437,8 +437,8 @@ CASES = [
         "source_width": 640,
         "source_height": 640,
         "candidates": [
-            {"level": "p3", "class": "text", "x": 20, "y": 12, "score": 0.51, "distances": [15, 10, 18, 12]},
-            {"level": "p3", "class": "text", "x": 30, "y": 15, "score": 0.49, "distances": [10, 10, 10, 10]},
+            {"level": "p3", "class": "text", "x": 20, "y": 12, "score": 0.36, "distances": [15, 10, 18, 12]},
+            {"level": "p3", "class": "text", "x": 30, "y": 15, "score": 0.34, "distances": [10, 10, 10, 10]},
             {"level": "p3", "class": "onomatopoeia", "x": 40, "y": 20, "score": 0.31, "distances": [12, 14, 16, 18]},
             {"level": "p3", "class": "balloon", "x": 50, "y": 30, "score": 0.29, "distances": [25, 20, 25, 20]},
         ],
