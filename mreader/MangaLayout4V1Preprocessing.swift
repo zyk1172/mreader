@@ -128,6 +128,12 @@ nonisolated enum MangaLayout4V1Preprocessor {
                     bitmapInfo: bitmapInfo
                   ) else { return }
             sourceContext.interpolationQuality = .none
+            // CGImage drawing uses Quartz's bottom-left user space, while the
+            // training pipeline (PIL/NumPy) treats row 0 as the visual top.
+            // Flip the Quartz CTM before reading bitmap rows so CHW y=0 matches
+            // the training/export top-left coordinate contract.
+            sourceContext.translateBy(x: 0, y: CGFloat(image.height))
+            sourceContext.scaleBy(x: 1, y: -1)
             sourceContext.draw(
                 image,
                 in: CGRect(x: 0, y: 0, width: image.width, height: image.height)
