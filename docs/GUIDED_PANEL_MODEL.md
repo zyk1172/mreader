@@ -26,6 +26,12 @@ Business code receives only normalized top-left page coordinates and optional
 mask-derived contours through `MangaPageAnalysis`; raw class indices, model-input
 coordinates, tensor layouts, and mask arithmetic stay inside `MangaVisionKoharuProvider`.
 
+For Guided Panel, `frame` is the navigation authority. text/balloon/SFX detections may
+help reject near-identical cross-class aliases, disambiguate reading order, or conservatively
+recover a missing hole when multiple independent signals agree, but they are never direct
+navigation targets. Camera framing centers the selected frame itself and adds bounded outward
+context so slightly inset frame regression does not crop the printed panel border.
+
 The provider never fabricates a contour. When a mask is rejected (too few active pixels,
 degenerate outline), `MangaVisionRegion.contour` is `nil` and consumers fall back to
 rectangle geometry.
@@ -41,9 +47,10 @@ artifact. The current revision requires:
 - no unexpected outputs.
 
 `MangaVisionKoharuProvider` validates this contract when the compiled model is loaded and
-throws `MangaVisionKoharuError.invalidContract` if the export drifts. Guided Panel then
-follows its existing Vision-rectangle/full-page fallback path rather than interpreting an
-unknown tensor layout.
+throws `MangaVisionKoharuError.invalidContract` if the export drifts. Guided Panel does
+not substitute the legacy Vision rectangle detector on this Koharu branch: an unavailable
+or unusable frame result is exposed as a transient full-page fallback instead of being
+silently replaced by a second detector.
 
 `MangaVisionKoharuOutputContract.revision` is part of `MangaVisionModelManifest.cacheIdentity`,
 so changing the accepted model interface automatically invalidates old Manga Vision cache
