@@ -9,7 +9,7 @@ nonisolated struct GuidedPanelTransform: Sendable, Equatable {
 
 /// Pure geometry for focusing a normalized panel while continuing to render the full page.
 nonisolated enum GuidedPanelViewport {
-    static let defaultContextPadding: CGFloat = 0.045
+    static let defaultContextPadding: CGFloat = 0.07
     static let defaultMaximumScale: CGFloat = 4.8
 
     static func transform(
@@ -70,8 +70,11 @@ nonisolated enum GuidedPanelViewport {
             return unit
         }
         let padding = min(max(contextPadding, 0), 0.25)
-        let dx = source.width * padding
-        let dy = source.height * padding
+        // Frame regressors often land a few pixels inside the printed border.
+        // Use both proportional padding and a small page-relative floor so small
+        // panels still reveal their complete edge instead of magnifying the miss.
+        let dx = max(source.width * padding, 0.008)
+        let dy = max(source.height * padding, 0.008)
         return source.insetBy(dx: -dx, dy: -dy).intersection(unit)
     }
 
