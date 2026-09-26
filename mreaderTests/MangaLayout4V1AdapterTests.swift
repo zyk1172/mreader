@@ -319,27 +319,72 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         )
     }
 
-    func testBundledFormalModelMatchesThirteenOutputContractWhenMaterialized() throws {
-        guard let modelURL = Bundle.main.url(
-            forResource: MangaLayout4V1Provider.modelResourceName,
-            withExtension: "mlmodelc"
-        ) else {
-            let ci = ProcessInfo.processInfo.environment["CI"]
-            if ci == "true" || ci == "1" {
-                throw XCTSkip(
-                    "CI has no formal MangaLayout4V1 artifact; synthetic parity is the available gate"
-                )
-            }
-            XCTFail(
-                "Local app bundle is missing MangaLayout4V1.mlmodelc; model materialization must not be bypassed"
-            )
-            return
-        }
+    func testBundledFormalModelMatchesThirteenOutputContract() throws {
+        let modelURL = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: MangaLayout4V1Provider.modelResourceName,
+                withExtension: "mlmodelc"
+            ),
+            "MangaLayout4V1.mlmodelc must be compiled into every app/test build"
+        )
         let model = try MLModel(contentsOf: modelURL)
         XCTAssertEqual(
             MangaLayout4V1OutputContract.validate(modelDescription: model.modelDescription),
             []
         )
+    }
+
+    func testBundledFormalModelProducesUsableNavigationFramesOnRealMangaPage() async throws {
+        let bundles = [Bundle(for: Self.self), Bundle.main] + Bundle.allBundles
+        let fixtureURL = try XCTUnwrap(
+            bundles.lazy.compactMap { bundle in
+                bundle.url(
+                    forResource: "manga_page_publicdomainq",
+                    withExtension: "png",
+                    subdirectory: "Fixtures"
+                ) ?? bundle.url(
+                    forResource: "manga_page_publicdomainq",
+                    withExtension: "png"
+                )
+            }.first,
+            "real manga fixture must be bundled"
+        )
+        let image = try XCTUnwrap(UIImage(contentsOfFile: fixtureURL.path))
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let identifier = MangaPageIdentifier(
+            scope: "layout4-real-fixture",
+            pageIndex: 0,
+            sourceFingerprint: "manga-page-publicdomainq"
+        )
+
+        let analysis = try await MangaLayout4V1Provider.shared.analyzePage(
+            image: cgImage,
+            sourceImageSize: CGSize(width: cgImage.width, height: cgImage.height),
+            pageIdentifier: identifier
+        )
+
+        XCTAssertFalse(analysis.panels.isEmpty, "real Layout4 inference returned zero frame detections")
+        XCTAssertTrue(analysis.panels.allSatisfy { region in
+            let rect = region.normalizedRect
+            return region.type == .panel
+                && region.confidence >= MangaLayout4V1Configuration().frameScoreThreshold
+                && rect.minX >= 0 && rect.minY >= 0
+                && rect.maxX <= 1 && rect.maxY <= 1
+                && rect.width > 0 && rect.height > 0
+        })
+
+        let navigation = PanelPostProcessor.process(
+            analysis.panels.map {
+                DetectedPanel(
+                    rect: $0.normalizedRect,
+                    confidence: $0.confidence,
+                    source: .coreML,
+                    contour: $0.contour?.cgPoints
+                )
+            }
+        )
+        XCTAssertFalse(navigation.isEmpty, "real Layout4 frames were all removed before Guided Panel")
+        XCTAssertLessThanOrEqual(navigation.count, 20)
     }
 
     private func makeRawOutputs() throws -> [String: MLMultiArray] {
