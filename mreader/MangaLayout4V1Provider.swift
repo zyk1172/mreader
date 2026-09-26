@@ -8,7 +8,7 @@ nonisolated enum MangaLayout4V1ProductionIdentity {
     static let modelVersion = 1
     static let trainingEpoch = 40
     static let validationComposite = 0.7520361892
-    static let postProcessRevision = "manga-layout4-v1-training-postprocess-2026-09-26-v2"
+    static let postProcessRevision = "manga-layout4-v1-full-page-navigation-2026-09-26-v3"
     static let calibrationRevision = "manga-layout4-v1-qfl-score-contract-2026-09-26-v2"
 }
 
@@ -18,7 +18,7 @@ nonisolated struct MangaLayout4V1ProviderDiagnostics: Sendable, Equatable {
     let balloonComponentCounts: [Int]
 }
 
-actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionRuntimeReleasable, MangaVisionManifestProviding {
+actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionSourceImageAnalyzing, MangaVisionRuntimeReleasable, MangaVisionManifestProviding {
     static let shared = MangaLayout4V1Provider()
     static let modelResourceName = MangaLayout4V1ProductionIdentity.modelResourceName
     static let modelIdentifier = MangaLayout4V1ProductionIdentity.modelIdentifier
@@ -60,6 +60,24 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionRuntimeReleasable,
             sourceImageSize: sourceImageSize,
             pageIdentifier: pageIdentifier
         ).analysis
+    }
+
+    /// MangaLayout4 V1 is a full-page model. Accept the reader's largest decoded
+    /// source image so preprocessing performs exactly one letterbox resize, matching
+    /// the training/export contract. Request class affects scheduling only, never
+    /// page geometry.
+    func analyzeSourceImage(
+        image: CGImage,
+        sourceImageSize: CGSize,
+        pageIdentifier: MangaPageIdentifier,
+        requestClass: MangaVisionRequestClass
+    ) async throws -> MangaPageAnalysis {
+        _ = requestClass
+        return try await analyzePage(
+            image: image,
+            sourceImageSize: sourceImageSize,
+            pageIdentifier: pageIdentifier
+        )
     }
 
     func analyzePageWithTiming(
