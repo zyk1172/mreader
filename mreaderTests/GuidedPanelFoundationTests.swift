@@ -122,6 +122,52 @@ struct GuidedPanelFoundationTests {
         #expect(PanelLayoutQuality.isUsable(processed))
     }
 
+    @Test func semanticRecoveryFillsMissingPanelOnlyWithCorroboratingEvidence() {
+        let existing = panel(x: 0.05, y: 0.08, width: 0.38, height: 0.34, confidence: 0.90)
+        let text = MangaVisionRegion(
+            type: .text,
+            normalizedRect: CGRect(x: 0.66, y: 0.16, width: 0.10, height: 0.06),
+            confidence: 0.82
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.62, y: 0.12, width: 0.20, height: 0.16),
+            confidence: 0.78
+        )
+
+        let processed = PanelPostProcessor.process(
+            [existing],
+            semanticRegions: [text, balloon]
+        )
+
+        #expect(processed.count == 2)
+        #expect(processed.contains { $0.rect.midX > 0.55 })
+    }
+
+    @Test func semanticRecoveryNeverPromotesBalloonAloneToPanel() {
+        let existing = panel(x: 0.05, y: 0.08, width: 0.38, height: 0.34, confidence: 0.90)
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.62, y: 0.12, width: 0.20, height: 0.16),
+            confidence: 0.92
+        )
+
+        let processed = PanelPostProcessor.process(
+            [existing],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == existing.rect)
+    }
+
+    @Test func viewportUsesAbsolutePaddingFloorForSmallPanels() {
+        let source = CGRect(x: 0.40, y: 0.40, width: 0.04, height: 0.04)
+        let expanded = GuidedPanelViewport.expandedAndClamped(source)
+        #expect(expanded.width >= source.width + 0.016 - 0.000_001)
+        #expect(expanded.height >= source.height + 0.016 - 0.000_001)
+    }
+
     @Test func cachePathIsStableAndPageBased() {
         let id = UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!
         #expect(
