@@ -98,7 +98,12 @@ nonisolated enum MangaLayout4V1MaskDecoder {
                 height: prototypeSpec.height,
                 threshold: configuration.balloonMaskThreshold
             )
-            let components = connectedComponents(mask)
+            // Keep the Python mask-combination order (prototype -> threshold -> bbox
+            // crop), then remove prototype samples whose centers lie in letterbox
+            // padding before extracting page-space contours. Padding activations do
+            // not represent pixels on the source page and must not clamp to its edges.
+            let pageMask = clippedToPageContent(mask, letterbox: letterbox)
+            let components = connectedComponents(pageMask)
                 .sorted { lhs, rhs in
                     if lhs.indices.count != rhs.indices.count {
                         return lhs.indices.count > rhs.indices.count
@@ -124,14 +129,14 @@ nonisolated enum MangaLayout4V1MaskDecoder {
             let contours = components.compactMap {
                 contour(
                     for: $0,
-                    in: mask,
+                    in: pageMask,
                     letterbox: letterbox
                 )
             }
             return MangaLayout4V1BalloonInstance(
                 confidence: detection.confidence,
                 boundingBox: detection.normalizedRect,
-                mask: mask,
+                mask: pageMask,
                 contours: contours,
                 componentSummaries: summaries
             )
@@ -173,6 +178,56 @@ nonisolated enum MangaLayout4V1MaskDecoder {
             }
         }
         return MangaLayout4V1BinaryMask(width: width, height: height, pixels: pixels)
+    }
+
+    private static func clippedToPageContent(
+        _ mask: MangaLayout4V1BinaryMask,
+        letterbox: MangaLayout4V1Letterbox
+    ) -> MangaLayout4V1BinaryMask {
+        func validPrototypeRange(
+            size: Int,
+            modelScale: CGFloat,
+            contentMin: CGFloat,
+            contentMax: CGFloat
+        ) -> Range<Int> {
+            let first = (0..<size).first { index in
+                (CGFloat(index) + 0.5) * modelScale >= contentMin
+            } ?? size
+            let end = (first..<size).first { index in
+                (CGFloat(index) + 0.5) * modelScale >= contentMax
+            } ?? size
+            return first..<end
+        }
+
+        let modelScaleX = CGFloat(640) / CGFloat(mask.width)
+        let modelScaleY = CGFloat(640) / CGFloat(mask.height)
+        let validX = validPrototypeRange(
+            size: mask.width,
+            modelScale: modelScaleX,
+            contentMin: CGFloat(letterbox.padLeft),
+            contentMax: CGFloat(letterbox.padLeft + letterbox.resizedWidth)
+        )
+        let validY = validPrototypeRange(
+            size: mask.height,
+            modelScale: modelScaleY,
+            contentMin: CGFloat(letterbox.padTop),
+            contentMax: CGFloat(letterbox.padTop + letterbox.resizedHeight)
+        )
+        guard !validX.isEmpty, !validY.isEmpty else {
+            return MangaLayout4V1BinaryMask(
+                width: mask.width,
+                height: mask.height,
+                pixels: [UInt8](repeating: 0, count: mask.pixels.count)
+            )
+        }
+
+        var pixels = mask.pixels
+        for y in 0..<mask.height {
+            for x in 0..<mask.width where !validX.contains(x) || !validY.contains(y) {
+                pixels[y * mask.width + x] = 0
+            }
+        }
+        return MangaLayout4V1BinaryMask(width: mask.width, height: mask.height, pixels: pixels)
     }
 
     /// Eight-connected components keep diagonally touching pixels in one instance contour.
@@ -278,19 +333,17 @@ nonisolated enum MangaLayout4V1MaskDecoder {
             }
         }
 
-        let modelScaleX = CGFloat(640) / CGFloat(mask.width)
-        let modelScaleY = CGFloat(640) / CGFloat(mask.height)
-        var normalized = prototypePoints.map { point in
+        let normalized = prototypePoints.compactMap { point in
             letterbox.sourceNormalizedPoint(
                 fromModelPoint: CGPoint(
-                    x: point.x * modelScaleX,
-                    y: point.y * modelScaleY
+                    x: point.x * CGFloat(640) / CGFloat(mask.width),
+                    y: point.y * CGFloat(640) / CGFloat(mask.height)
                 )
             )
         }
-        normalized = removeConsecutiveDuplicates(normalized)
-        guard normalized.count >= 3 else { return nil }
-        return MangaVisionContour(points: normalized)
+        let uniquePoints = removeConsecutiveDuplicates(normalized)
+        guard uniquePoints.count >= 3 else { return nil }
+        return MangaVisionContour(points: uniquePoints)
     }
 
     private static func removeConsecutiveDuplicates(_ points: [CGPoint]) -> [CGPoint] {

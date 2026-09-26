@@ -14,14 +14,14 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga-layout4-v1-reader-eval-2026-09-26-v3",
+        revision: "manga-layout4-v1-reader-eval-2026-09-26-v5",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.65,
+                confidenceThreshold: 0.40,
                 nmsIOUThreshold: 0.35
             ),
             .text: MangaVisionClassCalibration(
-                confidenceThreshold: 0.35,
+                confidenceThreshold: 0.45,
                 nmsIOUThreshold: 0.35
             ),
             .balloon: MangaVisionClassCalibration(

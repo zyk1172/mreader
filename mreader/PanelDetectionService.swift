@@ -232,10 +232,12 @@ nonisolated enum PanelPostProcessor {
 
             switch region.type {
             case .balloon:
-                // Balloon/frame aliases are the common failure mode: require close
-                // geometry and comparable confidence, never merely "balloon inside frame".
+                // Balloon/frame aliases are the common failure mode. Once the balloon
+                // itself passed its class threshold, close geometry is stronger evidence
+                // than cross-class score comparison: independent sigmoid heads can give
+                // the same physical region very different scores for frame vs balloon.
+                // The geometric guard still preserves a real enclosing panel.
                 return (iou >= 0.48 || (containment >= 0.92 && sizeRatio >= 0.72))
-                    && semanticToFrameScore >= 0.90
             case .text, .onomatopoeia:
                 // Text boxes can legitimately occupy a large fraction of a small frame,
                 // so use a stricter near-identity gate for these classes.

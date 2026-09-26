@@ -7574,6 +7574,10 @@ private struct TranslationSurfaceRenderer: View {
             case .inPlace:
                 TranslationBubbleContourShape(points: contour)
                     .fill(Color.white.opacity(0.94))
+                    .overlay {
+                        TranslationBubbleContourShape(points: contour)
+                            .stroke(Color.black.opacity(0.58), lineWidth: 0.85)
+                    }
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .assistOverlay:
                 TranslationBubbleContourShape(points: contour)
@@ -7584,8 +7588,8 @@ private struct TranslationSurfaceRenderer: View {
                     }
                     .overlay {
                         TranslationBubbleContourShape(points: contour)
-                            .stroke(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                            .stroke(Color.black.opacity(0.58), lineWidth: 0.85)
+                            .shadow(color: .white.opacity(0.32), radius: 0.8, y: 0.6)
                     }
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .annotation:
@@ -7918,4 +7922,3 @@ private struct AppleIntelligenceGlowBorder: View {
         "iPad16,2": 22
     ]
 }
-

@@ -92,7 +92,8 @@ struct MangaVisionLayerTests {
             confidence: 0.95,
             ocrSource: "original:ja",
             estimatedFontScale: 0.03,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            layoutRole: .dialogue
         )
         let leftColumn = TextBlock(
             text: "左",
@@ -100,22 +101,32 @@ struct MangaVisionLayerTests {
             confidence: 0.94,
             ocrSource: "original:ja",
             estimatedFontScale: 0.03,
-            textOrientation: .vertical
+            textOrientation: .vertical,
+            layoutRole: .dialogue
         )
 
         let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
             to: [rightColumn, leftColumn],
             analysis: analysis
         )
+        let tolerance: CGFloat = 0.000_001
+        func approximatelyEquals(_ lhs: CGRect?, _ rhs: CGRect) -> Bool {
+            guard let lhs else { return false }
+            return abs(lhs.minX - rhs.minX) <= tolerance
+                && abs(lhs.minY - rhs.minY) <= tolerance
+                && abs(lhs.width - rhs.width) <= tolerance
+                && abs(lhs.height - rhs.height) <= tolerance
+        }
 
         #expect(enriched.count == 2)
-        #expect(enriched.allSatisfy { $0.bubbleBox == balloonRect })
+        #expect(enriched.allSatisfy { approximatelyEquals($0.bubbleBox, balloonRect) })
         #expect(enriched.allSatisfy { $0.bubblePolygon == balloon.contour?.cgPoints })
 
         let segmentation = MangaTextSegmenter.segment(enriched, isRightToLeft: true)
         #expect(segmentation.bubbles.count == 1)
-        #expect(segmentation.bubbles[0].bubbleBox == balloonRect)
+        #expect(approximatelyEquals(segmentation.bubbles.first?.bubbleBox, balloonRect))
         #expect(segmentation.bubbles[0].sourceLineCount == 2)
+        #expect(segmentation.bubbles[0].bubblePolygon == balloon.contour?.cgPoints)
     }
 
     @Test func mangaBalloonContourFlowsIntoTranslationUnitAndSafeRegion() {

@@ -8,8 +8,11 @@ nonisolated enum MangaLayout4V1ProductionIdentity {
     static let modelVersion = 1
     static let trainingEpoch = 40
     static let validationComposite = 0.7520361892
-    static let postProcessRevision = "manga-layout4-v1-full-page-navigation-2026-09-26-v3"
-    static let calibrationRevision = "manga-layout4-v1-qfl-score-contract-2026-09-26-v2"
+    // This revision also invalidates cached page geometry when the model-input
+    // coordinate contract changes. V4 fixes the duplicated vertical flip in the
+    // CGImage -> CHW preprocessing path.
+    static let postProcessRevision = "manga-layout4-v1-full-page-navigation-2026-09-26-v4"
+    static let calibrationRevision = "manga-layout4-v1-qfl-score-contract-2026-09-26-v4"
 }
 
 nonisolated struct MangaLayout4V1ProviderDiagnostics: Sendable, Equatable {

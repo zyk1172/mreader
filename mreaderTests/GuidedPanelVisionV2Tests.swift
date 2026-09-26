@@ -124,6 +124,32 @@ struct GuidedPanelVisionV2Tests {
         #expect(!processed.map(\.rect).contains(balloonAlias.rect))
     }
 
+    @Test func layout4NavigationRejectsGeometricBalloonAliasWhenFrameScoreIsHigher() {
+        let actualFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.82,
+            source: .coreML
+        )
+        let balloonAlias = DetectedPanel(
+            rect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.66,
+            source: .coreML
+        )
+        let lowerConfidenceBalloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.30
+        )
+
+        let processed = PanelPostProcessor.process(
+            [actualFrame, balloonAlias],
+            semanticRegions: [lowerConfidenceBalloon]
+        )
+
+        #expect(processed.map(\.rect).contains(actualFrame.rect))
+        #expect(!processed.map(\.rect).contains(balloonAlias.rect))
+    }
+
     @Test func layout4NavigationDoesNotRejectRealFrameMerelyBecauseItContainsBalloon() {
         let realFrame = DetectedPanel(
             rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
@@ -161,12 +187,18 @@ struct GuidedPanelVisionV2Tests {
 
         #expect(processed.count == 4)
         #expect(!processed.contains { $0.rect == container.rect })
+        let tolerance: CGFloat = 0.000_001
         for frame in frames {
-            #expect(processed.contains { $0.rect == frame.rect })
+            #expect(processed.contains { candidate in
+                abs(candidate.rect.minX - frame.rect.minX) <= tolerance
+                    && abs(candidate.rect.minY - frame.rect.minY) <= tolerance
+                    && abs(candidate.rect.width - frame.rect.width) <= tolerance
+                    && abs(candidate.rect.height - frame.rect.height) <= tolerance
+            })
         }
     }
 
-    @Test func layout4NavigationDoesNotTurnQFLLowScoreTailIntoExtraStops() {
+    @Test func layout4NavigationDropsCandidatesBelowReaderThreshold() {
         let strong = DetectedPanel(
             rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
             confidence: 0.95,
@@ -179,15 +211,24 @@ struct GuidedPanelVisionV2Tests {
         )
         let lowScoreTail = DetectedPanel(
             rect: CGRect(x: 0.10, y: 0.58, width: 0.35, height: 0.30),
-            confidence: 0.64,
+            confidence: 0.39,
             source: .coreML
         )
 
         let processed = PanelPostProcessor.process([strong, valid, lowScoreTail])
 
-        #expect(processed.map(\.rect).contains(strong.rect))
-        #expect(processed.map(\.rect).contains(valid.rect))
-        #expect(!processed.map(\.rect).contains(lowScoreTail.rect))
+        let tolerance: CGFloat = 0.000_001
+        func containsApproximately(_ rect: CGRect) -> Bool {
+            processed.contains { candidate in
+                abs(candidate.rect.minX - rect.minX) <= tolerance
+                    && abs(candidate.rect.minY - rect.minY) <= tolerance
+                    && abs(candidate.rect.width - rect.width) <= tolerance
+                    && abs(candidate.rect.height - rect.height) <= tolerance
+            }
+        }
+        #expect(containsApproximately(strong.rect))
+        #expect(containsApproximately(valid.rect))
+        #expect(!containsApproximately(lowScoreTail.rect))
     }
 
     @Test func cameraTravelUsesSingleStageLatencyBoundedMotion() {

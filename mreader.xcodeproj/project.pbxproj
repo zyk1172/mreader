@@ -33,7 +33,7 @@
 		788190972FE2DAA6007BDA15 /* mreader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = mreader.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		788190A62FE2DAA8007BDA15 /* mreaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = mreaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		788190B02FE2DAA8007BDA15 /* mreaderUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = mreaderUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		D17E00020000000000000006 /* MangaLayout4V1.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; name = MangaLayout4V1.mlpackage; path = .local-models/MangaLayout4V1.mlpackage; sourceTree = SOURCE_ROOT; };
+		D17E00020000000000000006 /* MangaLayout4V1.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; name = MangaLayout4V1.mlpackage; path = ".local-models/MangaLayout4V1.mlpackage"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -250,7 +250,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
 
 /* Begin PBXSourcesBuildPhase section */
 		788190932FE2DAA6007BDA15 /* Sources */ = {

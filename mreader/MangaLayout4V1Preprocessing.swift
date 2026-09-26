@@ -72,12 +72,26 @@ nonisolated struct MangaLayout4V1Letterbox: Sendable, Equatable {
         return MangaPageCoordinateSpace.clampedNormalizedRect(source)
     }
 
-    func sourceNormalizedPoint(fromModelPoint point: CGPoint) -> CGPoint {
+    func containsModelPoint(_ point: CGPoint) -> Bool {
+        guard point.x.isFinite, point.y.isFinite else { return false }
+        let contentMaxX = CGFloat(padLeft + resizedWidth)
+        let contentMaxY = CGFloat(padTop + resizedHeight)
+        return point.x >= CGFloat(padLeft)
+            && point.x < contentMaxX
+            && point.y >= CGFloat(padTop)
+            && point.y < contentMaxY
+    }
+
+    /// Maps only points inside the resized page content. Padding coordinates are
+    /// rejected instead of clamped onto a page edge, which would invent contour
+    /// geometry along the edge for mask activations in the letterbox.
+    func sourceNormalizedPoint(fromModelPoint point: CGPoint) -> CGPoint? {
+        guard containsModelPoint(point) else { return nil }
         let x = (point.x - CGFloat(padLeft)) / scale / CGFloat(originalWidth)
         let y = (point.y - CGFloat(padTop)) / scale / CGFloat(originalHeight)
         return CGPoint(
-            x: min(max(x, 0), 1),
-            y: min(max(y, 0), 1)
+            x: x,
+            y: y
         )
     }
 
@@ -128,12 +142,9 @@ nonisolated enum MangaLayout4V1Preprocessor {
                     bitmapInfo: bitmapInfo
                   ) else { return }
             sourceContext.interpolationQuality = .none
-            // CGImage drawing uses Quartz's bottom-left user space, while the
-            // training pipeline (PIL/NumPy) treats row 0 as the visual top.
-            // Flip the Quartz CTM before reading bitmap rows so CHW y=0 matches
-            // the training/export top-left coordinate contract.
-            sourceContext.translateBy(x: 0, y: CGFloat(image.height))
-            sourceContext.scaleBy(x: 1, y: -1)
+            // CGImage's provider rows are already consumed in visual top-to-bottom
+            // order by this bitmap context. Keep the raster row order unchanged so
+            // CHW y=0 matches the PIL/NumPy training pipeline's visual top row.
             sourceContext.draw(
                 image,
                 in: CGRect(x: 0, y: 0, width: image.width, height: image.height)

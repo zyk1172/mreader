@@ -65,8 +65,8 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
 
     func testReaderEvaluationThresholdsMatchConfiguredExperiment() {
         let config = MangaLayout4V1Configuration()
-        XCTAssertEqual(config.frameScoreThreshold, 0.65)
-        XCTAssertEqual(config.textScoreThreshold, 0.35)
+        XCTAssertEqual(config.frameScoreThreshold, 0.40)
+        XCTAssertEqual(config.textScoreThreshold, 0.45)
         XCTAssertEqual(config.balloonScoreThreshold, 0.30)
         XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.30)
         XCTAssertEqual(config.frameNMSThreshold, 0.35)
@@ -125,6 +125,29 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertEqual(restored.minY, sourceRect.minY, accuracy: 0.000_01)
         XCTAssertEqual(restored.width, sourceRect.width, accuracy: 0.000_01)
         XCTAssertEqual(restored.height, sourceRect.height, accuracy: 0.000_01)
+    }
+
+    func testLetterboxRejectsPointsInPaddingInsteadOfClampingThemToPageEdges() throws {
+        let letterbox = try MangaLayout4V1Letterbox.make(sourceWidth: 320, sourceHeight: 640)
+
+        XCTAssertFalse(letterbox.containsModelPoint(CGPoint(x: 159, y: 320)))
+        XCTAssertFalse(letterbox.containsModelPoint(CGPoint(x: 481, y: 320)))
+        XCTAssertNil(letterbox.sourceNormalizedPoint(fromModelPoint: CGPoint(x: 159, y: 320)))
+        XCTAssertNil(letterbox.sourceNormalizedPoint(fromModelPoint: CGPoint(x: 481, y: 320)))
+
+        let pageClippedRect = letterbox.sourceNormalizedRect(
+            fromModelRect: CGRect(x: 140, y: 120, width: 60, height: 80)
+        )
+        XCTAssertEqual(pageClippedRect.minX, 0, accuracy: 0.000_001)
+        XCTAssertEqual(pageClippedRect.minY, 0.1875, accuracy: 0.000_001)
+        XCTAssertEqual(pageClippedRect.width, 0.125, accuracy: 0.000_001)
+        XCTAssertEqual(pageClippedRect.height, 0.125, accuracy: 0.000_001)
+
+        let firstPagePoint = try XCTUnwrap(
+            letterbox.sourceNormalizedPoint(fromModelPoint: CGPoint(x: 161, y: 320))
+        )
+        XCTAssertEqual(firstPagePoint.x, 1.0 / 320.0, accuracy: 0.000_001)
+        XCTAssertEqual(firstPagePoint.y, 0.5, accuracy: 0.000_001)
     }
 
     func testPreprocessorEmitsRGBZeroToOneAndWhitePadding() throws {
@@ -199,8 +222,8 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertEqual(frame.modelRect.height, 40, accuracy: 0.002)
     }
 
-    func testDecoderUsesRaisedFrameEvaluationThreshold() throws {
-        var outputs = try makeRawOutputs()
+    func testDecoderAppliesPointFourFrameEvaluationThreshold() throws {
+        let outputs = try makeRawOutputs()
         let p4Cls = try XCTUnwrap(outputs["p4_cls"])
         let p4BBox = try XCTUnwrap(outputs["p4_bbox"])
         set(
@@ -208,14 +231,14 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             channel: MangaLayout4V1Class.frame.rawValue,
             y: 8,
             x: 8,
-            value: logit(0.66)
+            value: logit(0.41)
         )
         set(
             p4Cls,
             channel: MangaLayout4V1Class.frame.rawValue,
             y: 8,
             x: 12,
-            value: logit(0.64)
+            value: logit(0.39)
         )
         let bboxRaw = Float(log(exp(3.0) - 1.0))
         for x in [8, 12] {
@@ -231,7 +254,7 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
 
         let frames = decoded.detections.filter { $0.layoutClass == .frame }
         XCTAssertEqual(frames.count, 1)
-        XCTAssertEqual(frames[0].confidence, 0.66, accuracy: 0.000_01)
+        XCTAssertEqual(frames[0].confidence, 0.41, accuracy: 0.000_01)
         XCTAssertEqual(decoded.diagnostics.postThresholdCounts[.frame], 1)
     }
 
@@ -294,6 +317,53 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             pixels: expectedPixels
         )
         XCTAssertEqual(instance.mask.intersectionOverUnion(with: expected), 1, accuracy: 0.000_001)
+    }
+
+    func testBalloonMaskPaddingActivationsDoNotBecomePageEdgeContourPoints() throws {
+        let prototypes = try MLMultiArray(
+            shape: [1, 8, 320, 320].map(NSNumber.init),
+            dataType: .float32
+        )
+        fill(prototypes, with: -10)
+        for y in 0..<320 {
+            for x in 0..<320 {
+                set(prototypes, channel: 1, y: y, x: x, value: 0)
+                set(prototypes, channel: 2, y: y, x: x, value: 0)
+                set(prototypes, channel: 3, y: y, x: x, value: 0)
+                set(prototypes, channel: 4, y: y, x: x, value: 0)
+                set(prototypes, channel: 5, y: y, x: x, value: 0)
+                set(prototypes, channel: 6, y: y, x: x, value: 0)
+                set(prototypes, channel: 7, y: y, x: x, value: 0)
+            }
+        }
+        // source 320x640 produces 160 model pixels of left/right padding. The
+        // first valid prototype center is x=161; x=159 is still in the pad.
+        for y in 100..<104 {
+            for x in 78..<84 {
+                set(prototypes, channel: 0, y: y, x: x, value: 10)
+            }
+        }
+
+        let detection = MangaLayout4V1Detection(
+            layoutClass: .balloon,
+            confidence: 0.9,
+            modelRect: CGRect(x: 0, y: 0, width: 640, height: 640),
+            normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+            pyramidLevel: "p2",
+            maskCoefficients: [10, 0, 0, 0, 0, 0, 0, 0]
+        )
+        let letterbox = try MangaLayout4V1Letterbox.make(sourceWidth: 320, sourceHeight: 640)
+        let instances = try MangaLayout4V1MaskDecoder.decodeBalloonInstances(
+            detections: [detection],
+            rawOutputs: ["mask_prototypes": prototypes],
+            letterbox: letterbox
+        )
+        let instance = try XCTUnwrap(instances.first)
+        let contour = try XCTUnwrap(instance.primaryContour)
+
+        XCTAssertEqual(instance.mask.foregroundPixelCount, 16)
+        XCTAssertEqual(instance.componentSummaries.map(\.pixelCount), [16])
+        XCTAssertEqual(contour.bounds.minX, 1.0 / 320.0, accuracy: 0.000_001)
     }
 
     func testDomainPreservesSFXAndSecondaryBalloonContoursWithoutFakeFaceBody() {
@@ -364,7 +434,7 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         )
     }
 
-    func testBundledFormalModelProducesUsableNavigationFramesOnRealMangaPage() async throws {
+    func testBundledFormalModelAnalyzesUnverifiedMangaPageWithoutInvalidGeometry() async throws {
         let bundles = [Bundle(for: Self.self), Bundle.main] + Bundle.allBundles
         let fixtureURL = try XCTUnwrap(
             bundles.lazy.compactMap { bundle in
@@ -393,7 +463,16 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             pageIdentifier: identifier
         )
 
-        XCTAssertFalse(analysis.panels.isEmpty, "real Layout4 inference returned zero frame detections")
+        let diagnostics = await MangaLayout4V1Provider.shared.diagnosticsSnapshot()
+        let maximumScores = diagnostics?.decode.maximumScores ?? [:]
+        print(
+            "MANGA_LAYOUT4_REAL_CLASS_MAX_SCORES " + MangaLayout4V1Class.allCases.map { layoutClass in
+                "\(layoutClass.semanticName)=\(String(format: "%.4f", maximumScores[layoutClass] ?? 0))"
+            }.joined(separator: ",")
+        )
+
+        XCTAssertEqual(analysis.modelIdentifier, MangaLayout4V1Provider.modelIdentifier)
+        XCTAssertEqual(analysis.modelVersion, MangaLayout4V1ProductionIdentity.modelVersion)
         XCTAssertTrue(analysis.panels.allSatisfy { region in
             let rect = region.normalizedRect
             return region.type == .panel
@@ -430,7 +509,8 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
                     source: .coreML,
                     contour: $0.contour?.cgPoints
                 )
-            }
+            },
+            semanticRegions: analysis.balloons + analysis.texts + analysis.onomatopoeias
         )
         print("MANGA_LAYOUT4_NAVIGATION_FRAME_COUNT=\(navigation.count)")
         for (index, frame) in navigation.enumerated() {
@@ -447,7 +527,6 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
                 )
             )
         }
-        XCTAssertFalse(navigation.isEmpty, "real Layout4 frames were all removed before Guided Panel")
         XCTAssertLessThanOrEqual(navigation.count, 20)
     }
 

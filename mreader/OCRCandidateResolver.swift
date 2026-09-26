@@ -141,8 +141,11 @@ nonisolated enum OCRCandidateResolver {
     ) -> (box: CGRect, polygon: [CGPoint])? {
         let textArea = area(textRect)
         guard textArea > 0 else { return nil }
-        let toleranceX = max(0.004, textRect.width * 0.10)
-        let toleranceY = max(0.004, textRect.height * 0.10)
+        // Model balloon edges and OCR text boxes can differ by a few pixels after
+        // scale-fit mapping. Keep a small page-relative margin so valid physical
+        // contours survive segmentation when glyph boxes barely spill over an edge.
+        let toleranceX = max(0.006, textRect.width * 0.10)
+        let toleranceY = max(0.006, textRect.height * 0.10)
         return candidates.compactMap { candidate -> (box: CGRect, polygon: [CGPoint])? in
             guard let bubble = candidate.bubbleBox,
                   bubble.width > 0,

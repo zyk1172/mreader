@@ -43,6 +43,12 @@ final class VisualOCRReliabilityTests: XCTestCase {
             estimatedFontScale: 0.08,
             bubbleBox: CGRect(x: 0.28, y: 0.18, width: 0.14, height: 0.30),
             layoutSafeRegion: CGRect(x: 0.29, y: 0.19, width: 0.12, height: 0.28),
+            bubblePolygon: [
+                CGPoint(x: 0.29, y: 0.20),
+                CGPoint(x: 0.40, y: 0.20),
+                CGPoint(x: 0.40, y: 0.46),
+                CGPoint(x: 0.29, y: 0.46)
+            ],
             textOrientation: .vertical,
             layoutRole: .dialogue
         )
@@ -56,6 +62,7 @@ final class VisualOCRReliabilityTests: XCTestCase {
         XCTAssertEqual(reviewed.boundingBox, original.boundingBox)
         XCTAssertEqual(reviewed.bubbleBox, original.bubbleBox)
         XCTAssertEqual(reviewed.layoutSafeRegion, original.layoutSafeRegion)
+        XCTAssertEqual(reviewed.bubblePolygon, original.bubblePolygon)
         XCTAssertEqual(reviewed.textOrientation, original.textOrientation)
         XCTAssertEqual(reviewed.layoutRole, original.layoutRole)
         XCTAssertEqual(reviewed.ocrSource, "visual-review-text")
