@@ -79,12 +79,12 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         let panels = [
             DetectedPanel(
                 rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
-                confidence: 0.09,
+                confidence: 0.69,
                 source: .coreML
             ),
             DetectedPanel(
                 rect: CGRect(x: 0.53, y: 0.05, width: 0.42, height: 0.40),
-                confidence: 0.08,
+                confidence: 0.68,
                 source: .coreML
             )
         ]
@@ -199,7 +199,7 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertEqual(frame.modelRect.height, 40, accuracy: 0.002)
     }
 
-    func testDecoderKeepsQualityFocalFrameAboveFrozenTrainingThreshold() throws {
+    func testDecoderUsesRaisedFrameEvaluationThreshold() throws {
         var outputs = try makeRawOutputs()
         let p4Cls = try XCTUnwrap(outputs["p4_cls"])
         let p4BBox = try XCTUnwrap(outputs["p4_bbox"])
@@ -208,11 +208,20 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             channel: MangaLayout4V1Class.frame.rawValue,
             y: 8,
             x: 8,
-            value: logit(0.06)
+            value: logit(0.66)
+        )
+        set(
+            p4Cls,
+            channel: MangaLayout4V1Class.frame.rawValue,
+            y: 8,
+            x: 12,
+            value: logit(0.64)
         )
         let bboxRaw = Float(log(exp(3.0) - 1.0))
-        for channel in 0..<4 {
-            set(p4BBox, channel: channel, y: 8, x: 8, value: bboxRaw)
+        for x in [8, 12] {
+            for channel in 0..<4 {
+                set(p4BBox, channel: channel, y: 8, x: x, value: bboxRaw)
+            }
         }
 
         let decoded = try MangaLayout4V1Decoder.decode(
@@ -220,8 +229,9 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
             letterbox: MangaLayout4V1Letterbox.make(sourceWidth: 640, sourceHeight: 640)
         )
 
-        let frame = try XCTUnwrap(decoded.detections.first { $0.layoutClass == .frame })
-        XCTAssertEqual(frame.confidence, 0.06, accuracy: 0.000_01)
+        let frames = decoded.detections.filter { $0.layoutClass == .frame }
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0].confidence, 0.66, accuracy: 0.000_01)
         XCTAssertEqual(decoded.diagnostics.postThresholdCounts[.frame], 1)
     }
 
