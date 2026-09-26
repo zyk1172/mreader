@@ -23,13 +23,13 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// It owns page/model cache identity and in-flight coalescing so consumers never
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
-    // This integration branch intentionally bypasses every legacy provider/router
-    // choice. Adaptive inference may add MangaLayout4 tile passes, but every model
-    // pass still uses MangaLayout4V1Provider and failures are never retried with another detector model.
+    // MangaLayout4 V1 was trained and validated on complete pages. Keep the
+    // production path full-page only: crop/tile refinement changes panel geometry
+    // and creates duplicate/partial frame navigation targets.
     static let shared = MangaVisionService(
-        provider: AdaptiveMangaVisionProvider(base: MangaLayout4V1Provider.shared)
+        provider: MangaLayout4V1Provider.shared
     )
-    nonisolated static let analysisRevision = "manga-vision-page-v4-demand-identity"
+    nonisolated static let analysisRevision = "manga-layout4-v1-full-page-v5"
 
     private struct CacheEnvelope: Codable {
         let manifestIdentity: String
