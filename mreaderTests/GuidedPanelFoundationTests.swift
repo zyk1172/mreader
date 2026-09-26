@@ -230,6 +230,30 @@ struct GuidedPanelFoundationTests {
         #expect(processed[0].rect == existing.rect)
     }
 
+    @Test func semanticRecoveryNeverPromotesSFXToPanel() {
+        let existing = panel(x: 0.05, y: 0.08, width: 0.38, height: 0.34, confidence: 0.90)
+        let effects = [
+            MangaVisionRegion(
+                type: .onomatopoeia,
+                normalizedRect: CGRect(x: 0.62, y: 0.12, width: 0.12, height: 0.16),
+                confidence: 0.96
+            ),
+            MangaVisionRegion(
+                type: .onomatopoeia,
+                normalizedRect: CGRect(x: 0.75, y: 0.20, width: 0.12, height: 0.18),
+                confidence: 0.94
+            )
+        ]
+
+        let processed = PanelPostProcessor.process(
+            [existing],
+            semanticRegions: effects
+        )
+
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == existing.rect)
+    }
+
     @Test func viewportUsesAbsolutePaddingFloorForSmallPanels() {
         let source = CGRect(x: 0.40, y: 0.40, width: 0.04, height: 0.04)
         let expanded = GuidedPanelViewport.expandedAndClamped(source)
