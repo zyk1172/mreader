@@ -167,18 +167,18 @@ nonisolated enum MangaLayout4V1OutputContract {
 }
 
 nonisolated struct MangaLayout4V1Configuration: Sendable, Equatable {
-    /// Frozen MangaLayout4 V1 inference defaults. Keep these aligned with
-    /// manga-layout4-training/configs/base.yaml postprocess so Swift does not
-    /// silently suppress Quality-Focal detections that the reference decoder keeps.
-    var frameScoreThreshold: Float = 0.05
-    var textScoreThreshold: Float = 0.05
-    var balloonScoreThreshold: Float = 0.05
-    var onomatopoeiaScoreThreshold: Float = 0.05
+    /// Reader-side experimental thresholds used to evaluate MangaLayout4 V1.
+    /// Keep the raw model outputs unchanged; these values define which detections
+    /// are admitted into the app's post-processing path during this test branch.
+    var frameScoreThreshold: Float = 0.65
+    var textScoreThreshold: Float = 0.35
+    var balloonScoreThreshold: Float = 0.30
+    var onomatopoeiaScoreThreshold: Float = 0.30
 
-    var frameNMSThreshold: Float = 0.50
-    var textNMSThreshold: Float = 0.50
-    var balloonNMSThreshold: Float = 0.45
-    var onomatopoeiaNMSThreshold: Float = 0.45
+    var frameNMSThreshold: Float = 0.35
+    var textNMSThreshold: Float = 0.35
+    var balloonNMSThreshold: Float = 0.35
+    var onomatopoeiaNMSThreshold: Float = 0.35
 
     var balloonMaskThreshold: Float = 0.50
     var preNMSTopKPerLevel: Int = 1_200
