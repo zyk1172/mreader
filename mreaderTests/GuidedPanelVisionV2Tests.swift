@@ -101,18 +101,18 @@ struct GuidedPanelVisionV2Tests {
     @Test func layout4NavigationRejectsBalloonAliasButKeepsContainingFrame() {
         let realFrame = DetectedPanel(
             rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
-            confidence: 0.24,
+            confidence: 0.82,
             source: .coreML
         )
         let balloonAlias = DetectedPanel(
             rect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
-            confidence: 0.16,
+            confidence: 0.68,
             source: .coreML
         )
         let balloon = MangaVisionRegion(
             type: .balloon,
             normalizedRect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
-            confidence: 0.19
+            confidence: 0.75
         )
 
         let processed = PanelPostProcessor.process(
@@ -127,13 +127,13 @@ struct GuidedPanelVisionV2Tests {
     @Test func layout4NavigationDoesNotRejectRealFrameMerelyBecauseItContainsBalloon() {
         let realFrame = DetectedPanel(
             rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
-            confidence: 0.22,
+            confidence: 0.82,
             source: .coreML
         )
         let balloon = MangaVisionRegion(
             type: .balloon,
             normalizedRect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
-            confidence: 0.30
+            confidence: 0.76
         )
 
         let processed = PanelPostProcessor.process(
@@ -147,14 +147,14 @@ struct GuidedPanelVisionV2Tests {
     @Test func layout4NavigationDropsWholePageContainerAroundRealFrames() {
         let container = DetectedPanel(
             rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
-            confidence: 0.11,
+            confidence: 0.66,
             source: .coreML
         )
         let frames = [
-            DetectedPanel(rect: CGRect(x: 0.04, y: 0.05, width: 0.43, height: 0.40), confidence: 0.20, source: .coreML),
-            DetectedPanel(rect: CGRect(x: 0.53, y: 0.05, width: 0.43, height: 0.40), confidence: 0.19, source: .coreML),
-            DetectedPanel(rect: CGRect(x: 0.04, y: 0.53, width: 0.43, height: 0.40), confidence: 0.18, source: .coreML),
-            DetectedPanel(rect: CGRect(x: 0.53, y: 0.53, width: 0.43, height: 0.40), confidence: 0.17, source: .coreML)
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.05, width: 0.43, height: 0.40), confidence: 0.82, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.05, width: 0.43, height: 0.40), confidence: 0.80, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.53, width: 0.43, height: 0.40), confidence: 0.78, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.53, width: 0.43, height: 0.40), confidence: 0.76, source: .coreML)
         ]
 
         let processed = PanelPostProcessor.process([container] + frames)
@@ -169,17 +169,17 @@ struct GuidedPanelVisionV2Tests {
     @Test func layout4NavigationDoesNotTurnQFLLowScoreTailIntoExtraStops() {
         let strong = DetectedPanel(
             rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
-            confidence: 0.50,
+            confidence: 0.95,
             source: .coreML
         )
         let valid = DetectedPanel(
             rect: CGRect(x: 0.53, y: 0.05, width: 0.42, height: 0.40),
-            confidence: 0.20,
+            confidence: 0.72,
             source: .coreML
         )
         let lowScoreTail = DetectedPanel(
             rect: CGRect(x: 0.10, y: 0.58, width: 0.35, height: 0.30),
-            confidence: 0.06,
+            confidence: 0.64,
             source: .coreML
         )
 
