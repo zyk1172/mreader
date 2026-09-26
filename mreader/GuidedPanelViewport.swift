@@ -106,9 +106,9 @@ nonisolated enum GuidedPanelViewport {
 
 /// Builds a conservative content-aware focus inside an already-selected frame.
 ///
-/// Koharu YOLO26s frame detections are the only navigation targets. text, balloon and
-/// onomatopoeia are semantic evidence that may tighten a large frame's viewport. No
-/// legacy face/body/person path exists on this integration branch.
+/// Koharu YOLO26s frame detections are the only navigation targets. text + balloon are
+/// the primary semantic evidence for an optional large-frame crop. onomatopoeia is artwork
+/// lettering and must never create or move a Guided Panel focus.
 nonisolated enum GuidedPanelSemanticViewportPlanner {
     private static let minimumPanelArea: CGFloat = 0.18
     private static let maximumPrimaryCoverage: CGFloat = 0.72
@@ -134,7 +134,7 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
         }
 
         var semanticByPanel: [UUID: [CGRect]] = [:]
-        for region in analysis.balloons + analysis.texts + analysis.onomatopoeias {
+        for region in analysis.balloons + analysis.texts {
             guard let owner = MangaSemanticAnalyzer.owningPanel(
                 for: region.normalizedRect,
                 panels: panelRegions
