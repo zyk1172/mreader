@@ -51,7 +51,7 @@ struct GuidedPanelFoundationTests {
             y: 0.08,
             width: 0.44,
             height: 0.36,
-            confidence: 0.55
+            confidence: 0.75
         )
         let smallInset = panel(
             x: 0.19,
@@ -114,7 +114,7 @@ struct GuidedPanelFoundationTests {
                 y: 0.01 + CGFloat(index / 6) * 0.19,
                 width: 0.13,
                 height: 0.15,
-                confidence: 0.20
+                confidence: 0.70
             )
         }
         let processed = PanelPostProcessor.process(many)
