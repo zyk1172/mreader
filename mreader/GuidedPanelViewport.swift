@@ -9,7 +9,7 @@ nonisolated struct GuidedPanelTransform: Sendable, Equatable {
 
 /// Pure geometry for focusing a normalized panel while continuing to render the full page.
 nonisolated enum GuidedPanelViewport {
-    static let defaultContextPadding: CGFloat = 0.045
+    static let defaultContextPadding: CGFloat = 0.07
     static let defaultMaximumScale: CGFloat = 4.8
 
     static func transform(
@@ -70,8 +70,11 @@ nonisolated enum GuidedPanelViewport {
             return unit
         }
         let padding = min(max(contextPadding, 0), 0.25)
-        let dx = source.width * padding
-        let dy = source.height * padding
+        // Frame regressors often land a few pixels inside the printed border.
+        // Use both proportional padding and a small page-relative floor so small
+        // panels still reveal their complete edge instead of magnifying the miss.
+        let dx = max(source.width * padding, 0.008)
+        let dy = max(source.height * padding, 0.008)
         return source.insetBy(dx: -dx, dy: -dy).intersection(unit)
     }
 
@@ -101,11 +104,11 @@ nonisolated enum GuidedPanelViewport {
 }
 
 
-/// Builds a conservative content-aware focus inside an already-selected panel.
+/// Builds a conservative content-aware focus inside an already-selected frame.
 ///
-/// frame remains the only navigation target. text + balloon are the primary semantic
-/// evidence for tightening a large panel's viewport. onomatopoeia regions are artwork
-/// lettering, not dialogue, so they deliberately never create or expand a focus.
+/// Koharu YOLO26s frame detections are the only navigation targets. text, balloon and
+/// onomatopoeia are semantic evidence that may tighten a large frame's viewport. No
+/// legacy face/body/person path exists on this integration branch.
 nonisolated enum GuidedPanelSemanticViewportPlanner {
     private static let minimumPanelArea: CGFloat = 0.18
     private static let maximumPrimaryCoverage: CGFloat = 0.72
@@ -130,21 +133,21 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
             )
         }
 
-        var primaryByPanel: [UUID: [CGRect]] = [:]
-        for region in analysis.balloons + analysis.texts {
+        var semanticByPanel: [UUID: [CGRect]] = [:]
+        for region in analysis.balloons + analysis.texts + analysis.onomatopoeias {
             guard let owner = MangaSemanticAnalyzer.owningPanel(
                 for: region.normalizedRect,
                 panels: panelRegions
             ) else { continue }
             let clipped = clipped(region.normalizedRect, to: owner.normalizedRect)
             guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { continue }
-            primaryByPanel[owner.id, default: []].append(clipped)
+            semanticByPanel[owner.id, default: []].append(clipped)
         }
 
         return panelRegions.map { panelRegion in
             focusRect(
                 panel: panelRegion.normalizedRect,
-                primaryRects: primaryByPanel[panelRegion.id] ?? []
+                primaryRects: semanticByPanel[panelRegion.id] ?? []
             )
         }
     }
@@ -162,8 +165,7 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
         guard area(primary) / panelArea < maximumPrimaryCoverage else { return nil }
 
         let focus = contextualized(primary, within: panel)
-        guard area(focus) / panelArea < maximumUsefulFocusCoverage else { return nil }
-        return focus
+        return area(focus) / panelArea < maximumUsefulFocusCoverage ? focus : nil
     }
 
     private static func contextualized(_ content: CGRect, within panel: CGRect) -> CGRect {
@@ -189,12 +191,7 @@ nonisolated enum GuidedPanelSemanticViewportPlanner {
             max(center.y - targetHeight / 2, panel.minY),
             panel.maxY - targetHeight
         )
-        return CGRect(
-            x: minX,
-            y: minY,
-            width: targetWidth,
-            height: targetHeight
-        )
+        return CGRect(x: minX, y: minY, width: targetWidth, height: targetHeight)
     }
 
     private static func union(_ rects: [CGRect]) -> CGRect {

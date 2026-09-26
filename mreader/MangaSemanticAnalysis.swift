@@ -8,17 +8,18 @@ nonisolated enum MangaVisionTextROIPlanner {
         from textRegions: [MangaVisionRegion],
         paddingFraction: CGFloat = defaultPaddingFraction
     ) -> [CGRect] {
+        let calibration = MangaVisionCalibrationProfile.bundled.calibration(for: .text)
         let usable = textRegions.filter { region in
-            guard region.type == .text, region.confidence >= 0.12 else { return false }
+            guard region.type == .text,
+                  region.confidence >= calibration.confidenceThreshold else { return false }
             let rect = region.normalizedRect
             return rect.width >= 0.002
                 && rect.height >= 0.002
                 && MangaPageCoordinateSpace.area(rect) >= 0.000_02
         }
-        let deduplicated = MangaVisionRegionPostProcessor.deduplicated(
+        let deduplicated = MangaVisionCalibrationProfile.bundled.deduplicated(
             usable,
-            iouThreshold: 0.58,
-            containmentThreshold: 0.88
+            type: .text
         )
         var padded: [CGRect] = []
         for region in MangaReadingGeometry.ordered(deduplicated, isRightToLeft: false,
@@ -47,23 +48,15 @@ nonisolated enum MangaSemanticAnalyzer {
         from analysis: MangaPageAnalysis,
         isRightToLeft: Bool
     ) -> MangaSemanticPage {
+        let profile = MangaVisionCalibrationProfile.bundled
         let panels = orderedPanels(
-            MangaVisionRegionPostProcessor.deduplicated(
-                analysis.panels,
-                iouThreshold: 0.68,
-                containmentThreshold: 0.96
-            ),
+            profile.deduplicated(analysis.panels, type: .panel),
             isRightToLeft: isRightToLeft
         )
-        let texts = MangaVisionRegionPostProcessor.deduplicated(
-            analysis.texts,
-            iouThreshold: 0.58,
-            containmentThreshold: 0.88
-        )
-        let onomatopoeias = MangaVisionRegionPostProcessor.deduplicated(
+        let texts = profile.deduplicated(analysis.texts, type: .text)
+        let onomatopoeias = profile.deduplicated(
             analysis.onomatopoeias,
-            iouThreshold: 0.58,
-            containmentThreshold: 0.88
+            type: .onomatopoeia
         )
 
         var textsByPanel: [UUID: [MangaVisionRegion]] = [:]
@@ -216,7 +209,8 @@ nonisolated enum MangaSemanticAnalyzer {
             DetectedPanel(
                 rect: $0.normalizedRect,
                 confidence: $0.confidence,
-                source: .coreML
+                source: .coreML,
+                contour: $0.contour?.cgPoints
             )
         }
         let ordered = PanelReadingOrder.ordered(detected, isRightToLeft: isRightToLeft)
