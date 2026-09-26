@@ -162,8 +162,8 @@ actor MangaVisionService {
         let sourceAnalyzer = provider as? any MangaVisionSourceImageAnalyzing
         let analysisImage: CGImage?
         if sourceAnalyzer != nil {
-            // Adaptive providers need the largest already-decoded source image so tiles can
-            // recover detail that would be destroyed by a single 640px full-page shrink.
+            // MangaLayout4 V1 owns its exact full-page letterbox preprocessing.
+            // Pass the largest already-decoded source image and avoid an extra resize.
             analysisImage = image.cgImage
         } else {
             analysisImage = Self.analysisCGImage(
@@ -389,13 +389,14 @@ actor MangaVisionService {
         image: UIImage, manifest: MangaVisionModelManifest,
         requestClass: MangaVisionRequestClass
     ) -> String {
+        _ = image
+        _ = manifest
+        _ = requestClass
+        if provider is MangaLayout4V1Provider {
+            return "layout4-full-page-only"
+        }
         guard provider is any MangaVisionSourceImageAnalyzing else { return "single-pass" }
-        let size = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
-            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
-        return MangaVisionInferencePlanner.cacheDemandIdentity(
-            sourceSize: size, inputSize: manifest.inputSize,
-            requestClass: requestClass, resourceState: .current
-        )
+        return "source-image-single-pass"
     }
 
     func providerDescriptor() async -> MangaVisionProviderDescriptor {
