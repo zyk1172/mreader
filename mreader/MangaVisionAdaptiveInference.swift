@@ -65,17 +65,10 @@ nonisolated struct MangaVisionInferencePlan: Sendable, Equatable {
 }
 
 nonisolated enum MangaVisionInferencePlanner {
-    static let revision = "adaptive-full-plus-overlap-tiles-v2-layout4-qfl"
-    private static let refinementAspectThreshold: CGFloat = 1.65
-    private static let forcedRefinementAspectThreshold: CGFloat = 1.90
-    private static let tileOverlapFraction: CGFloat = 0.18
-    private static let nominalMaximumTileCount = 6
-
-    /// One full-page baseline plus the bounded refinement tiles.
-    /// Regression/performance gates must use this contract instead of duplicating a limit.
-    static var maximumInferencePassCount: Int {
-        1 + nominalMaximumTileCount
-    }
+    static let revision = "manga-layout4-full-page-only-v3"
+    /// MangaLayout4 V1 is trained on complete pages. Cropped refinement passes
+    /// change frame geometry and are intentionally forbidden in the reader.
+    static var maximumInferencePassCount: Int { 1 }
 
     static func plan(
         sourceSize: CGSize,
@@ -83,22 +76,11 @@ nonisolated enum MangaVisionInferencePlanner {
         requestClass: MangaVisionRequestClass,
         resourceState: MangaVisionResourceState
     ) -> MangaVisionInferencePlan {
-        guard sourceSize.width > 0,
-              sourceSize.height > 0,
-              inputSize.width > 0,
-              inputSize.height > 0 else {
-            return MangaVisionInferencePlan(
-                allowsInference: true,
-                requestClass: requestClass,
-                sourceAspectRatio: 1,
-                refinementTiles: [],
-                reason: "invalid-geometry-full-pass-only"
-            )
-        }
-
         let longSide = max(sourceSize.width, sourceSize.height)
         let shortSide = max(min(sourceSize.width, sourceSize.height), 1)
-        let aspectRatio = longSide / shortSide
+        let aspectRatio = sourceSize.width > 0 && sourceSize.height > 0
+            ? longSide / shortSide
+            : 1
 
         if requestClass == .prefetch, resourceState.thermalLevel >= .serious {
             return MangaVisionInferencePlan(
@@ -110,47 +92,12 @@ nonisolated enum MangaVisionInferencePlanner {
             )
         }
 
-        var maximumTileCount = nominalMaximumTileCount
-        if resourceState.thermalLevel >= .serious {
-            maximumTileCount = 0
-        } else if resourceState.thermalLevel == .fair {
-            maximumTileCount = 4
-        }
-        if requestClass == .prefetch, resourceState.lowPowerModeEnabled {
-            maximumTileCount = 0
-        }
-
-        let tiles: [MangaVisionInferenceTile]
-        if maximumTileCount >= 2, aspectRatio >= refinementAspectThreshold {
-            tiles = makeLongAxisTiles(
-                sourceSize: sourceSize,
-                aspectRatio: aspectRatio,
-                maximumTileCount: maximumTileCount,
-                overlapFraction: tileOverlapFraction
-            )
-        } else {
-            tiles = []
-        }
-
-        let reason: String
-        if tiles.isEmpty {
-            if resourceState.thermalLevel >= .serious {
-                reason = "thermal-full-pass-only"
-            } else if requestClass == .prefetch, resourceState.lowPowerModeEnabled {
-                reason = "low-power-background-full-pass-only"
-            } else {
-                reason = "standard-page-full-pass-only"
-            }
-        } else {
-            reason = "long-page-full-pass-plus-tiles"
-        }
-
         return MangaVisionInferencePlan(
             allowsInference: true,
             requestClass: requestClass,
             sourceAspectRatio: aspectRatio,
-            refinementTiles: tiles,
-            reason: reason
+            refinementTiles: [],
+            reason: "layout4-full-page-only"
         )
     }
 
@@ -160,34 +107,22 @@ nonisolated enum MangaVisionInferencePlanner {
         requestClass: MangaVisionRequestClass,
         resourceState: MangaVisionResourceState
     ) -> String {
-        let plan = plan(sourceSize: sourceSize, inputSize: inputSize,
-                        requestClass: requestClass, resourceState: resourceState)
-        let inputMaximum = max(inputSize.width, inputSize.height, 1)
-        let maximumUseful = inputMaximum * CGFloat(max(plan.refinementTiles.count, 1))
-        let available = min(max(sourceSize.width, sourceSize.height), maximumUseful)
-        // Only a few bounded resolution tiers, never one cache entry per display pixel.
-        let tier = max(1, Int(ceil(available / inputMaximum)))
-        return "tiles=\(plan.refinementTiles.count)|sourceTier=\(tier)|allowed=\(plan.allowsInference)"
+        let plan = plan(
+            sourceSize: sourceSize,
+            inputSize: inputSize,
+            requestClass: requestClass,
+            resourceState: resourceState
+        )
+        return "full-page-only|allowed=\(plan.allowsInference)"
     }
 
     static func shouldRefine(
         baseline: MangaPageAnalysis,
         plan: MangaVisionInferencePlan
     ) -> Bool {
-        guard plan.allowsInference, !plan.refinementTiles.isEmpty else { return false }
-        if plan.sourceAspectRatio >= forcedRefinementAspectThreshold { return true }
-        if baseline.panels.count <= 2 { return true }
-        guard !baseline.panels.isEmpty else { return true }
-
-        // Layout4 uses Quality Focal classification, so the previous detector's
-        // absolute confidence scale (for example 0.55) is not a valid signal for
-        // deciding whether to spend extra tile passes. Use page-layout coverage
-        // instead: if the baseline frame boxes cover too little of the page, refine.
-        let coveredArea = baseline.panels.reduce(CGFloat.zero) { partial, panel in
-            let rect = MangaPageCoordinateSpace.clampedNormalizedRect(panel.normalizedRect)
-            return partial + rect.width * rect.height
-        }
-        return coveredArea < 0.22
+        _ = baseline
+        _ = plan
+        return false
     }
 
     static func prefetchMaximumSourceDimension(
@@ -210,54 +145,7 @@ nonisolated enum MangaVisionInferencePlanner {
         return 3
     }
 
-    private static func makeLongAxisTiles(
-        sourceSize: CGSize,
-        aspectRatio: CGFloat,
-        maximumTileCount: Int,
-        overlapFraction: CGFloat
-    ) -> [MangaVisionInferenceTile] {
-        let requestedCount = max(2, Int(ceil(aspectRatio / 1.25)))
-        let count = min(maximumTileCount, requestedCount)
-        guard count >= 2 else { return [] }
 
-        let overlap = min(max(overlapFraction, 0), 0.45)
-        let tileLength = 1 / (1 + CGFloat(count - 1) * (1 - overlap))
-        let step = tileLength * (1 - overlap)
-        let isVertical = sourceSize.height >= sourceSize.width
-
-        let sourceRects: [CGRect] = (0..<count).map { index in
-            let origin = min(CGFloat(index) * step, 1 - tileLength)
-            if isVertical {
-                return CGRect(x: 0, y: origin, width: 1, height: tileLength)
-            }
-            return CGRect(x: origin, y: 0, width: tileLength, height: 1)
-        }
-
-        return sourceRects.enumerated().map { index, rect in
-            if isVertical {
-                let lower = index == 0
-                    ? 0
-                    : (sourceRects[index - 1].maxY + rect.minY) / 2
-                let upper = index == sourceRects.count - 1
-                    ? 1
-                    : (rect.maxY + sourceRects[index + 1].minY) / 2
-                return MangaVisionInferenceTile(
-                    sourceRect: rect,
-                    ownershipRect: CGRect(x: 0, y: lower, width: 1, height: max(upper - lower, 0))
-                )
-            }
-            let lower = index == 0
-                ? 0
-                : (sourceRects[index - 1].maxX + rect.minX) / 2
-            let upper = index == sourceRects.count - 1
-                ? 1
-                : (rect.maxX + sourceRects[index + 1].minX) / 2
-            return MangaVisionInferenceTile(
-                sourceRect: rect,
-                ownershipRect: CGRect(x: lower, y: 0, width: max(upper - lower, 0), height: 1)
-            )
-        }
-    }
 }
 
 nonisolated protocol MangaVisionSourceImageAnalyzing: Sendable {
