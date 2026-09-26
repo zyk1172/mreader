@@ -188,9 +188,8 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
     case all
     case frame
     case text
-    case face
-    case body
     case balloon
+    case onomatopoeia
     case guidedPanel
     case ocr
     case translation
@@ -204,9 +203,8 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
         case .all: "全部"
         case .frame: "Frame"
         case .text: "Text"
-        case .face: "Face"
-        case .body: "Body"
         case .balloon: "Balloon"
+        case .onomatopoeia: "Onomatopoeia"
         case .guidedPanel: "Guided Panel 影响"
         case .ocr: "OCR 影响"
         case .translation: "翻译影响"
@@ -225,12 +223,10 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
             record.feedback.affectedAreas.contains(.frame)
         case .text:
             record.feedback.affectedAreas.contains(.text)
-        case .face:
-            record.feedback.affectedAreas.contains(.face)
-        case .body:
-            record.feedback.affectedAreas.contains(.body)
         case .balloon:
             record.feedback.affectedAreas.contains(.balloon)
+        case .onomatopoeia:
+            record.feedback.affectedAreas.contains(.onomatopoeia)
         case .guidedPanel:
             record.feedback.productImpacts.contains(.guidedPanel)
         case .ocr:
@@ -519,7 +515,7 @@ struct MangaVisionHardCaseDetailView: View {
 
     @State private var feedback: MangaVisionHardCaseFeedback
     @State private var reviewState: MangaVisionHardCaseReviewState
-    @State private var enabledClasses: Set<String> = ["frame", "text", "face", "body", "balloon"]
+    @State private var enabledClasses: Set<String> = ["frame", "text", "balloon", "onomatopoeia"]
     @State private var previewImage: UIImage?
     @State private var showDeleteConfirmation = false
 
@@ -543,7 +539,7 @@ struct MangaVisionHardCaseDetailView: View {
             }
 
             Section("Detection overlay") {
-                ForEach(["frame", "text", "face", "body", "balloon"], id: \.self) { name in
+                ForEach(["frame", "text", "balloon", "onomatopoeia"], id: \.self) { name in
                     Toggle(name, isOn: Binding(
                         get: { enabledClasses.contains(name) },
                         set: { enabled in

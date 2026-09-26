@@ -6,17 +6,29 @@ nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     let modelVersion: Int
     let inputSize: CGSize
     let supportedRegionTypes: Set<MangaRegionType>
+    let supportsBalloonMask: Bool
+
+    init(
+        modelIdentifier: String,
+        modelVersion: Int,
+        inputSize: CGSize,
+        supportedRegionTypes: Set<MangaRegionType>,
+        supportsBalloonMask: Bool = false
+    ) {
+        self.modelIdentifier = modelIdentifier
+        self.modelVersion = modelVersion
+        self.inputSize = inputSize
+        self.supportedRegionTypes = supportedRegionTypes
+        self.supportsBalloonMask = supportsBalloonMask
+    }
 }
 
-/// Capabilities are intentionally separate from semantic class support. V2B5
-/// exposes all five semantic classes as bounding boxes, while contour output is
-/// not part of the active model contract.
+/// Runtime capabilities for the four-class MangaLayout4 V1 contract.
 nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
     let supportsFrame: Bool
     let supportsText: Bool
-    let supportsFace: Bool
-    let supportsBody: Bool
     let supportsBalloon: Bool
+    let supportsOnomatopoeia: Bool
     let supportsBalloonMask: Bool
 
     init(
@@ -25,9 +37,8 @@ nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
     ) {
         supportsFrame = supportedRegionTypes.contains(.panel)
         supportsText = supportedRegionTypes.contains(.text)
-        supportsFace = supportedRegionTypes.contains(.face)
-        supportsBody = supportedRegionTypes.contains(.body)
         supportsBalloon = supportedRegionTypes.contains(.balloon)
+        supportsOnomatopoeia = supportedRegionTypes.contains(.onomatopoeia)
         self.supportsBalloonMask = supportsBalloonMask
     }
 }
@@ -36,7 +47,7 @@ extension MangaVisionProviderDescriptor {
     var capabilities: MangaVisionProviderCapabilities {
         MangaVisionProviderCapabilities(
             supportedRegionTypes: supportedRegionTypes,
-            supportsBalloonMask: false
+            supportsBalloonMask: supportsBalloonMask
         )
     }
 }

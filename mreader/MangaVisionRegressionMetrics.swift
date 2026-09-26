@@ -6,7 +6,6 @@ nonisolated struct MangaVisionRegressionObservation: Sendable, Equatable {
     let predictedRegions: [MangaVisionRegion]
     let expectedOCRRects: [CGRect]
     let predictedOCRRects: [CGRect]
-    let usedFallback: Bool
     let inferenceCount: Int
 
     init(
@@ -14,14 +13,12 @@ nonisolated struct MangaVisionRegressionObservation: Sendable, Equatable {
         predictedRegions: [MangaVisionRegion] = [],
         expectedOCRRects: [CGRect] = [],
         predictedOCRRects: [CGRect] = [],
-        usedFallback: Bool = false,
         inferenceCount: Int = 1
     ) {
         self.expectedRegions = expectedRegions
         self.predictedRegions = predictedRegions
         self.expectedOCRRects = expectedOCRRects
         self.predictedOCRRects = predictedOCRRects
-        self.usedFallback = usedFallback
         self.inferenceCount = max(inferenceCount, 0)
     }
 }
@@ -30,12 +27,9 @@ nonisolated struct MangaVisionRegressionMetrics: Sendable, Equatable {
     let panelRecall: Double?
     let textRecall: Double?
     let balloonRecall: Double?
+    let onomatopoeiaRecall: Double?
     let ocrFinalRecall: Double?
-    let fallbackRate: Double
-    /// Mean model-pass cost across the measured pages.
     let inferenceCountPerPage: Double
-    /// Worst single-page model-pass cost. This protects the adaptive planner's hard budget;
-    /// an inexpensive average must not hide one page that exceeded the contract.
     let maximumInferenceCountOnPage: Int
     let pageCount: Int
 
@@ -43,21 +37,17 @@ nonisolated struct MangaVisionRegressionMetrics: Sendable, Equatable {
         _ observations: [MangaVisionRegressionObservation],
         matchThreshold: CGFloat = 0.50
     ) -> MangaVisionRegressionMetrics {
-        let panel = recall(
-            expected: observations.flatMap { $0.expectedRegions.filter { $0.type == .panel }.map(\.normalizedRect) },
-            predicted: observations.flatMap { $0.predictedRegions.filter { $0.type == .panel }.map(\.normalizedRect) },
-            threshold: matchThreshold
-        )
-        let text = recall(
-            expected: observations.flatMap { $0.expectedRegions.filter { $0.type == .text }.map(\.normalizedRect) },
-            predicted: observations.flatMap { $0.predictedRegions.filter { $0.type == .text }.map(\.normalizedRect) },
-            threshold: matchThreshold
-        )
-        let balloon = recall(
-            expected: observations.flatMap { $0.expectedRegions.filter { $0.type == .balloon }.map(\.normalizedRect) },
-            predicted: observations.flatMap { $0.predictedRegions.filter { $0.type == .balloon }.map(\.normalizedRect) },
-            threshold: matchThreshold
-        )
+        func classRecall(_ type: MangaRegionType) -> Double? {
+            recall(
+                expected: observations.flatMap {
+                    $0.expectedRegions.filter { $0.type == type }.map(\.normalizedRect)
+                },
+                predicted: observations.flatMap {
+                    $0.predictedRegions.filter { $0.type == type }.map(\.normalizedRect)
+                },
+                threshold: matchThreshold
+            )
+        }
         let ocr = recall(
             expected: observations.flatMap(\.expectedOCRRects),
             predicted: observations.flatMap(\.predictedOCRRects),
@@ -65,13 +55,11 @@ nonisolated struct MangaVisionRegressionMetrics: Sendable, Equatable {
         )
         let pages = observations.count
         return MangaVisionRegressionMetrics(
-            panelRecall: panel,
-            textRecall: text,
-            balloonRecall: balloon,
+            panelRecall: classRecall(.panel),
+            textRecall: classRecall(.text),
+            balloonRecall: classRecall(.balloon),
+            onomatopoeiaRecall: classRecall(.onomatopoeia),
             ocrFinalRecall: ocr,
-            fallbackRate: pages == 0
-                ? 0
-                : Double(observations.filter(\.usedFallback).count) / Double(pages),
             inferenceCountPerPage: pages == 0
                 ? 0
                 : Double(observations.reduce(0) { $0 + $1.inferenceCount }) / Double(pages),
@@ -106,48 +94,31 @@ nonisolated struct MangaVisionRegressionGate: Sendable, Equatable {
     let minimumPanelRecall: Double
     let minimumTextRecall: Double
     let minimumBalloonRecall: Double
+    let minimumOnomatopoeiaRecall: Double
     let minimumOCRFinalRecall: Double
-    let maximumFallbackRate: Double
     let maximumInferenceCountPerPage: Double
 
     static let release = MangaVisionRegressionGate(
         minimumPanelRecall: 0.80,
         minimumTextRecall: 0.75,
         minimumBalloonRecall: 0.70,
+        minimumOnomatopoeiaRecall: 0.60,
         minimumOCRFinalRecall: 0.80,
-        maximumFallbackRate: 0.20,
         maximumInferenceCountPerPage: Double(MangaVisionInferencePlanner.maximumInferencePassCount)
     )
 
     func failures(for metrics: MangaVisionRegressionMetrics) -> [String] {
         var failures: [String] = []
+        appendRecallFailure(name: "panel-recall", actual: metrics.panelRecall, minimum: minimumPanelRecall, into: &failures)
+        appendRecallFailure(name: "text-recall", actual: metrics.textRecall, minimum: minimumTextRecall, into: &failures)
+        appendRecallFailure(name: "balloon-recall", actual: metrics.balloonRecall, minimum: minimumBalloonRecall, into: &failures)
         appendRecallFailure(
-            name: "panel-recall",
-            actual: metrics.panelRecall,
-            minimum: minimumPanelRecall,
+            name: "onomatopoeia-recall",
+            actual: metrics.onomatopoeiaRecall,
+            minimum: minimumOnomatopoeiaRecall,
             into: &failures
         )
-        appendRecallFailure(
-            name: "text-recall",
-            actual: metrics.textRecall,
-            minimum: minimumTextRecall,
-            into: &failures
-        )
-        appendRecallFailure(
-            name: "balloon-recall",
-            actual: metrics.balloonRecall,
-            minimum: minimumBalloonRecall,
-            into: &failures
-        )
-        appendRecallFailure(
-            name: "ocr-final-recall",
-            actual: metrics.ocrFinalRecall,
-            minimum: minimumOCRFinalRecall,
-            into: &failures
-        )
-        if metrics.fallbackRate > maximumFallbackRate {
-            failures.append("fallback-rate:\(formatted(metrics.fallbackRate))>\(formatted(maximumFallbackRate))")
-        }
+        appendRecallFailure(name: "ocr-final-recall", actual: metrics.ocrFinalRecall, minimum: minimumOCRFinalRecall, into: &failures)
         if Double(metrics.maximumInferenceCountOnPage) > maximumInferenceCountPerPage {
             failures.append(
                 "maximum-inference-count-on-page:\(metrics.maximumInferenceCountOnPage)>\(formatted(maximumInferenceCountPerPage))"
@@ -162,8 +133,6 @@ nonisolated struct MangaVisionRegressionGate: Sendable, Equatable {
         minimum: Double,
         into failures: inout [String]
     ) {
-        // A metric with no verified labels is not silently treated as 100% or 0%.
-        // Corpus review status decides whether that metric is eligible for gating.
         guard let actual else { return }
         if actual < minimum {
             failures.append("\(name):\(formatted(actual))<\(formatted(minimum))")

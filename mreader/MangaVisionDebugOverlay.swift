@@ -5,8 +5,7 @@ struct MangaVisionDebugOverlayConfiguration: Sendable, Equatable {
     var showsPanels = true
     var showsTexts = true
     var showsBalloons = true
-    var showsFaces = true
-    var showsBodies = true
+    var showsOnomatopoeias = true
     var showsRelations = true
 }
 
@@ -31,11 +30,8 @@ struct MangaVisionDebugOverlay: View {
             if configuration.showsBalloons {
                 regionLayer(analysis.balloons, lineWidth: 1.8)
             }
-            if configuration.showsFaces {
-                regionLayer(analysis.faces, lineWidth: 1.5)
-            }
-            if configuration.showsBodies {
-                regionLayer(analysis.bodies, lineWidth: 1.5)
+            if configuration.showsOnomatopoeias {
+                regionLayer(analysis.onomatopoeias, lineWidth: 1.5)
             }
             if configuration.showsRelations, let semanticPage {
                 relationLayer(semanticPage)
@@ -76,11 +72,9 @@ struct MangaVisionDebugOverlay: View {
                     Text("P\(panelIndex + 1)").font(.system(size: 10, weight: .bold)),
                     at: CGPoint(x: panelRect.minX + 12, y: panelRect.minY + 12)
                 )
-                for person in panel.persons {
-                    let personRect = person.face?.normalizedRect ?? person.body?.normalizedRect
-                    guard let personRect else { continue }
-                    let displayedPerson = displayRect(personRect)
-                    let from = CGPoint(x: displayedPerson.midX, y: displayedPerson.midY)
+                for semanticRegion in panel.texts {
+                    let contentRect = displayRect(semanticRegion.region.normalizedRect)
+                    let from = CGPoint(x: contentRect.midX, y: contentRect.midY)
                     let to = CGPoint(x: panelRect.midX, y: panelRect.midY)
                     var path = Path()
                     path.move(to: from)
@@ -109,8 +103,7 @@ struct MangaVisionDebugOverlay: View {
         case .panel: []
         case .text: [5, 2]
         case .balloon: [10, 2, 2, 2]
-        case .face: [2, 2]
-        case .body: [8, 3]
+        case .onomatopoeia: [3, 2, 8, 2]
         }
     }
 }

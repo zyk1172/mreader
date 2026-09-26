@@ -52,8 +52,6 @@ struct GuidedPanelVisionV2Tests {
                     confidence: 0.96
                 )
             ],
-            faces: [],
-            bodies: [],
             modelIdentifier: "fixture",
             modelVersion: 4
         )
@@ -98,6 +96,139 @@ struct GuidedPanelVisionV2Tests {
         #expect(processed.count == 2)
         #expect(processed.contains { approximatelyEquals($0.rect, parent.rect) })
         #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
+    }
+
+    @Test func layout4NavigationRejectsBalloonAliasButKeepsContainingFrame() {
+        let realFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.82,
+            source: .coreML
+        )
+        let balloonAlias = DetectedPanel(
+            rect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
+            confidence: 0.68,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.75
+        )
+
+        let processed = PanelPostProcessor.process(
+            [realFrame, balloonAlias],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.map(\.rect).contains(realFrame.rect))
+        #expect(!processed.map(\.rect).contains(balloonAlias.rect))
+    }
+
+    @Test func layout4NavigationRejectsGeometricBalloonAliasWhenFrameScoreIsHigher() {
+        let actualFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.82,
+            source: .coreML
+        )
+        let balloonAlias = DetectedPanel(
+            rect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.66,
+            source: .coreML
+        )
+        let lowerConfidenceBalloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.30
+        )
+
+        let processed = PanelPostProcessor.process(
+            [actualFrame, balloonAlias],
+            semanticRegions: [lowerConfidenceBalloon]
+        )
+
+        #expect(processed.map(\.rect).contains(actualFrame.rect))
+        #expect(!processed.map(\.rect).contains(balloonAlias.rect))
+    }
+
+    @Test func layout4NavigationDoesNotRejectRealFrameMerelyBecauseItContainsBalloon() {
+        let realFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.82,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
+            confidence: 0.76
+        )
+
+        let processed = PanelPostProcessor.process(
+            [realFrame],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.map(\.rect) == [realFrame.rect])
+    }
+
+    @Test func layout4NavigationDropsWholePageContainerAroundRealFrames() {
+        let container = DetectedPanel(
+            rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+            confidence: 0.66,
+            source: .coreML
+        )
+        let frames = [
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.05, width: 0.43, height: 0.40), confidence: 0.82, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.05, width: 0.43, height: 0.40), confidence: 0.80, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.53, width: 0.43, height: 0.40), confidence: 0.78, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.53, width: 0.43, height: 0.40), confidence: 0.76, source: .coreML)
+        ]
+
+        let processed = PanelPostProcessor.process([container] + frames)
+
+        #expect(processed.count == 4)
+        #expect(!processed.contains { $0.rect == container.rect })
+        let tolerance: CGFloat = 0.000_001
+        for frame in frames {
+            #expect(processed.contains { candidate in
+                abs(candidate.rect.minX - frame.rect.minX) <= tolerance
+                    && abs(candidate.rect.minY - frame.rect.minY) <= tolerance
+                    && abs(candidate.rect.width - frame.rect.width) <= tolerance
+                    && abs(candidate.rect.height - frame.rect.height) <= tolerance
+            })
+        }
+    }
+
+    @Test func layout4NavigationDropsCandidatesBelowReaderThreshold() {
+        let strong = DetectedPanel(
+            rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
+            confidence: 0.95,
+            source: .coreML
+        )
+        let valid = DetectedPanel(
+            rect: CGRect(x: 0.53, y: 0.05, width: 0.42, height: 0.40),
+            confidence: 0.72,
+            source: .coreML
+        )
+        let lowScoreTail = DetectedPanel(
+            rect: CGRect(x: 0.10, y: 0.58, width: 0.35, height: 0.30),
+            confidence: 0.39,
+            source: .coreML
+        )
+
+        let processed = PanelPostProcessor.process([strong, valid, lowScoreTail])
+
+        let tolerance: CGFloat = 0.000_001
+        func containsApproximately(_ rect: CGRect) -> Bool {
+            processed.contains { candidate in
+                abs(candidate.rect.minX - rect.minX) <= tolerance
+                    && abs(candidate.rect.minY - rect.minY) <= tolerance
+                    && abs(candidate.rect.width - rect.width) <= tolerance
+                    && abs(candidate.rect.height - rect.height) <= tolerance
+            }
+        }
+        #expect(containsApproximately(strong.rect))
+        #expect(containsApproximately(valid.rect))
+        #expect(!containsApproximately(lowScoreTail.rect))
     }
 
     @Test func cameraTravelUsesSingleStageLatencyBoundedMotion() {
@@ -206,16 +337,9 @@ struct GuidedPanelVisionV2Tests {
         #expect(focus.height < panel.height)
     }
 
-    @Test func faceAndBodyCannotCreateGuidedFocusWithoutTextOrBalloonEvidence() {
+    @Test func noLayout4SemanticEvidenceLeavesGuidedFocusUntightened() {
         let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let analysis = semanticAnalysis(
-            faces: [
-                semanticRegion(.face, x: 0.62, y: 0.20, width: 0.11, height: 0.12, confidence: 0.96)
-            ],
-            bodies: [
-                semanticRegion(.body, x: 0.56, y: 0.27, width: 0.24, height: 0.48, confidence: 0.97)
-            ]
-        )
+        let analysis = semanticAnalysis()
 
         let focus = GuidedPanelSemanticViewportPlanner.focusRects(
             panels: [panel],
@@ -226,134 +350,66 @@ struct GuidedPanelVisionV2Tests {
         #expect(focus[0] == nil)
     }
 
-    @Test func bodyOnlyDetectionCannotMoveAnExistingSemanticFocus() throws {
+    @Test func onomatopoeiaCanTightenLargeSelectedFrame() throws {
         let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let balloon = semanticRegion(
-            .balloon,
-            x: 0.56,
-            y: 0.16,
-            width: 0.22,
-            height: 0.18,
+        let sfx = semanticRegion(
+            .onomatopoeia,
+            x: 0.62,
+            y: 0.23,
+            width: 0.14,
+            height: 0.16,
+            confidence: 0.88
+        )
+        let analysis = semanticAnalysis(onomatopoeias: [sfx])
+
+        let focus = try #require(
+            GuidedPanelSemanticViewportPlanner.focusRects(
+                panels: [panel],
+                analysis: analysis
+            ).first ?? nil
+        )
+
+        #expect(panel.contains(focus))
+        #expect(focus.contains(sfx.normalizedRect))
+        #expect(focus.width < panel.width)
+        #expect(focus.height < panel.height)
+    }
+
+    @Test func semanticEvidenceOutsideSelectedFrameCannotRecenterFocus() throws {
+        let selected = CGRect(x: 0.05, y: 0.06, width: 0.42, height: 0.82)
+        let other = CGRect(x: 0.53, y: 0.06, width: 0.42, height: 0.82)
+        let text = semanticRegion(
+            .text,
+            x: 0.14,
+            y: 0.20,
+            width: 0.10,
+            height: 0.12,
             confidence: 0.92
         )
-        let baseline = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(balloons: [balloon])
-            ).first ?? nil
+        let distantSFX = semanticRegion(
+            .onomatopoeia,
+            x: 0.70,
+            y: 0.22,
+            width: 0.14,
+            height: 0.15,
+            confidence: 0.95
         )
-        let withBodyOnly = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(
-                    balloons: [balloon],
-                    bodies: [
-                        semanticRegion(
-                            .body,
-                            x: 0.08,
-                            y: 0.12,
-                            width: 0.30,
-                            height: 0.70,
-                            confidence: 0.99
-                        )
-                    ]
-                )
-            ).first ?? nil
+        let analysis = semanticAnalysis(
+            texts: [text],
+            onomatopoeias: [distantSFX]
         )
 
-        #expect(withBodyOnly == baseline)
-    }
+        let focuses = GuidedPanelSemanticViewportPlanner.focusRects(
+            panels: [selected, other],
+            analysis: analysis
+        )
+        let selectedFocus = try #require(focuses[0])
+        let otherFocus = try #require(focuses[1])
 
-    @Test func nearbyFaceBackedBodyCanOnlyBoundedlyProtectCharacterContext() throws {
-        let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let balloon = semanticRegion(
-            .balloon,
-            x: 0.60,
-            y: 0.16,
-            width: 0.22,
-            height: 0.18,
-            confidence: 0.94
-        )
-        let baseline = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(balloons: [balloon])
-            ).first ?? nil
-        )
-        let assisted = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(
-                    balloons: [balloon],
-                    faces: [
-                        semanticRegion(
-                            .face,
-                            x: 0.27,
-                            y: 0.20,
-                            width: 0.10,
-                            height: 0.11,
-                            confidence: 0.94
-                        )
-                    ],
-                    bodies: [
-                        semanticRegion(
-                            .body,
-                            x: 0.24,
-                            y: 0.27,
-                            width: 0.20,
-                            height: 0.45,
-                            confidence: 0.82
-                        )
-                    ]
-                )
-            ).first ?? nil
-        )
-
-        let baselineArea = baseline.width * baseline.height
-        let assistedArea = assisted.width * assisted.height
-        #expect(assisted.minX < baseline.minX)
-        #expect(assistedArea > baselineArea)
-        #expect(assistedArea <= baselineArea * 1.22 + 0.000_001)
-        #expect(panel.contains(assisted))
-        #expect(assisted.contains(balloon.normalizedRect))
-    }
-
-    @Test func distantFaceCannotRecenterPrimarySemanticViewport() throws {
-        let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let balloon = semanticRegion(
-            .balloon,
-            x: 0.60,
-            y: 0.16,
-            width: 0.22,
-            height: 0.18,
-            confidence: 0.94
-        )
-        let baseline = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(balloons: [balloon])
-            ).first ?? nil
-        )
-        let withDistantFace = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(
-                    balloons: [balloon],
-                    faces: [
-                        semanticRegion(
-                            .face,
-                            x: 0.08,
-                            y: 0.68,
-                            width: 0.11,
-                            height: 0.11,
-                            confidence: 0.99
-                        )
-                    ]
-                )
-            ).first ?? nil
-        )
-
-        #expect(withDistantFace == baseline)
+        #expect(selected.contains(selectedFocus))
+        #expect(!selectedFocus.intersects(distantSFX.normalizedRect))
+        #expect(other.contains(otherFocus))
+        #expect(otherFocus.contains(distantSFX.normalizedRect))
     }
 
     @Test func semanticViewportDoesNotTightenAlreadySmallPanels() {
@@ -443,8 +499,7 @@ struct GuidedPanelVisionV2Tests {
     private func semanticAnalysis(
         texts: [MangaVisionRegion] = [],
         balloons: [MangaVisionRegion] = [],
-        faces: [MangaVisionRegion] = [],
-        bodies: [MangaVisionRegion] = []
+        onomatopoeias: [MangaVisionRegion] = []
     ) -> MangaPageAnalysis {
         MangaPageAnalysis(
             pageIdentifier: MangaPageIdentifier(
@@ -456,10 +511,9 @@ struct GuidedPanelVisionV2Tests {
             panels: [],
             texts: texts,
             balloons: balloons,
-            faces: faces,
-            bodies: bodies,
-            modelIdentifier: "fixture-v2b5",
-            modelVersion: 5
+            onomatopoeias: onomatopoeias,
+            modelIdentifier: MangaLayout4V1Provider.modelIdentifier,
+            modelVersion: 1
         )
     }
 

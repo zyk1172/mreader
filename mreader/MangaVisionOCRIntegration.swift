@@ -23,17 +23,19 @@ nonisolated enum MangaVisionOCRGeometry {
         analysis: MangaPageAnalysis
     ) -> [TextBlock] {
         guard !blocks.isEmpty else { return blocks }
-        let balloons = MangaVisionRegionPostProcessor.deduplicated(
+        let profile = MangaVisionCalibrationProfile.bundled
+        let balloons = profile.deduplicated(
             analysis.balloons.filter(isUsableBalloon),
-            iouThreshold: 0.58,
-            containmentThreshold: 0.90
+            type: .balloon
         )
-        let textRegions = MangaVisionRegionPostProcessor.deduplicated(
-            analysis.texts.filter(isUsableTextRegion),
-            iouThreshold: 0.58,
-            containmentThreshold: 0.88
+        let contentRegions = profile.deduplicated(
+            analysis.texts.filter(isUsableContentRegion),
+            type: .text
+        ) + profile.deduplicated(
+            analysis.onomatopoeias.filter(isUsableContentRegion),
+            type: .onomatopoeia
         )
-        guard !balloons.isEmpty || !textRegions.isEmpty else { return blocks }
+        guard !balloons.isEmpty || !contentRegions.isEmpty else { return blocks }
 
         return blocks.map { block in
             var enriched = block
@@ -97,7 +99,7 @@ nonisolated enum MangaVisionOCRGeometry {
             if enriched.layoutSafeRegion == nil,
                let safeRegion = bestTextSafeRegion(
                     for: enriched.boundingBox,
-                    textRegions: textRegions
+                    textRegions: contentRegions
                ) {
                 enriched.layoutSafeRegion = safeRegion
             }
@@ -141,25 +143,36 @@ nonisolated enum MangaVisionOCRGeometry {
             // substantial text coverage, but allow a center-confirmed partial edge.
             guard containment >= 0.55 || (centerInside && containment >= 0.30) else { return nil }
 
-            // Union only repairs small detector under-coverage so the downstream
-            // validatedBubbleGeometry contract can safely require containment.
-            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect.union(textRect))
-            let fittedArea = MangaPageCoordinateSpace.area(fitted)
-            guard fittedArea > 0,
-                  fittedArea <= 0.55,
-                  fittedArea / textArea <= 600 else { return nil }
+            // Keep the physical model geometry unchanged. Expanding the detected
+            // balloon with each OCR text box makes one real bubble acquire a different
+            // bubbleBox per line, which can split one dialogue into multiple translation
+            // units and makes the rendered contour appear offset from the model output.
+            //
+            // We still validate the small OCR/model disagreement using a temporary union,
+            // but that repaired rectangle is never persisted as balloon geometry.
+            let physicalRect = MangaPageCoordinateSpace.clampedNormalizedRect(rect)
+            let repairedCoverage = MangaPageCoordinateSpace.clampedNormalizedRect(
+                physicalRect.union(textRect)
+            )
+            let repairedArea = MangaPageCoordinateSpace.area(repairedCoverage)
+            guard repairedArea > 0,
+                  repairedArea <= 0.55,
+                  repairedArea / textArea <= 600 else { return nil }
 
-            let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
-            let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
+            let distance = hypot(
+                physicalRect.midX - textRect.midX,
+                physicalRect.midY - textRect.midY
+            )
+            let diagonal = max(hypot(physicalRect.width, physicalRect.height), 0.001)
             let normalizedDistance = distance / diagonal
-            // Prefer the bubble that contains most of the OCR text, then the
+            // Prefer the physical bubble that contains most of the OCR text, then the
             // smaller/closer region. Confidence is deliberately a weak tie-breaker.
             let score = containment * 4.0
                 - normalizedDistance * 0.9
-                - fittedArea * 0.8
+                - MangaPageCoordinateSpace.area(physicalRect) * 0.8
                 + CGFloat(balloon.confidence) * 0.35
             return RegionCandidate(
-                rect: fitted,
+                rect: physicalRect,
                 score: score,
                 polygon: balloon.contour?.cgPoints ?? []
             )
@@ -233,7 +246,10 @@ nonisolated enum MangaVisionOCRGeometry {
     }
 
     private static func isUsableBalloon(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .balloon, region.confidence >= 0.20 else { return false }
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .balloon)
+            .confidenceThreshold
+        guard region.type == .balloon, region.confidence >= threshold else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.004
@@ -242,8 +258,12 @@ nonisolated enum MangaVisionOCRGeometry {
             && area <= 0.55
     }
 
-    private static func isUsableTextRegion(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .text, region.confidence >= 0.18 else { return false }
+    private static func isUsableContentRegion(_ region: MangaVisionRegion) -> Bool {
+        guard region.type == .text || region.type == .onomatopoeia else { return false }
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: region.type)
+            .confidenceThreshold
+        guard region.confidence >= threshold else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.002

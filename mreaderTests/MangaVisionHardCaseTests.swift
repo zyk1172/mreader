@@ -16,12 +16,14 @@ final class HardCaseRecordTests: XCTestCase {
         XCTAssertEqual(MangaVisionHardCaseIssueType.unspecifiedVisualError.rawValue, "unspecified_visual_error")
         XCTAssertEqual(MangaVisionHardCaseAffectedArea.readingOrder.rawValue, "reading_order")
         XCTAssertEqual(MangaVisionHardCaseProductImpact.guidedPanel.rawValue, "guided_panel")
-        XCTAssertEqual(MangaVisionV2B5ProductionIdentity.modelName, "MangaVisionDetectorV2B5")
         XCTAssertEqual(
-            MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256,
-            "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5"
+            MangaLayout4V1ProductionIdentity.modelIdentifier,
+            "manga-layout4-v1-coreml-fp32-640"
         )
-        XCTAssertEqual(MangaVisionV2B5ProductionIdentity.calibrationRevision, "v2b5-calibration-v1")
+        XCTAssertEqual(
+            MangaLayout4V1ProductionIdentity.calibrationRevision,
+            "manga-layout4-v1-validation-f1-candidate-2026-09-25-v1"
+        )
     }
 }
 
@@ -34,16 +36,16 @@ final class HardCaseDeduplicationTests: XCTestCase {
 
         var first = HardCaseFixture.record()
         first.feedback = MangaVisionHardCaseFeedback(
-            affectedAreas: [.body],
-            issueTypes: [.duplicate],
+            affectedAreas: [.balloon],
+            issueTypes: [.balloonMaskError],
             productImpacts: [.translation],
             note: "first"
         )
         var second = HardCaseFixture.record()
         second.feedback = MangaVisionHardCaseFeedback(
-            affectedAreas: [.face],
-            issueTypes: [.wrongPerson],
-            productImpacts: [.personAssociation],
+            affectedAreas: [.onomatopoeia],
+            issueTypes: [.onomatopoeiaClassificationError],
+            productImpacts: [.guidedPanel],
             note: "second"
         )
 
@@ -53,9 +55,13 @@ final class HardCaseDeduplicationTests: XCTestCase {
 
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(merged.feedbackCount, 2)
-        XCTAssertTrue(merged.feedback.affectedAreas.isSuperset(of: [.body, .face]))
-        XCTAssertTrue(merged.feedback.issueTypes.isSuperset(of: [.duplicate, .wrongPerson]))
-        XCTAssertTrue(merged.feedback.productImpacts.isSuperset(of: [.translation, .personAssociation]))
+        XCTAssertTrue(merged.feedback.affectedAreas.isSuperset(of: [.balloon, .onomatopoeia]))
+        XCTAssertTrue(
+            merged.feedback.issueTypes.isSuperset(
+                of: [.balloonMaskError, .onomatopoeiaClassificationError]
+            )
+        )
+        XCTAssertTrue(merged.feedback.productImpacts.isSuperset(of: [.translation, .guidedPanel]))
         XCTAssertTrue(merged.feedback.note.contains("first"))
         XCTAssertTrue(merged.feedback.note.contains("second"))
         XCTAssertEqual(merged.firstSeenAt, first.firstSeenAt)
@@ -96,8 +102,8 @@ final class HardCasePersistenceTests: XCTestCase {
 
 @MainActor
 final class HardCasePredictionSnapshotTests: XCTestCase {
-    func testSnapshotCopiesExistingFiveClassAnalysis() throws {
-        let types: [MangaRegionType] = [.panel, .text, .face, .body, .balloon]
+    func testSnapshotCopiesExistingFourClassLayout4Analysis() throws {
+        let types: [MangaRegionType] = [.panel, .text, .balloon, .onomatopoeia]
         let regions = types.enumerated().map { index, type in
             MangaVisionRegion(
                 type: type,
@@ -120,15 +126,14 @@ final class HardCasePredictionSnapshotTests: XCTestCase {
             panels: regions.filter { $0.type == .panel },
             texts: regions.filter { $0.type == .text },
             balloons: regions.filter { $0.type == .balloon },
-            faces: regions.filter { $0.type == .face },
-            bodies: regions.filter { $0.type == .body },
-            modelIdentifier: MangaVisionV2B5Provider.modelIdentifier,
-            modelVersion: 5
+            onomatopoeias: regions.filter { $0.type == .onomatopoeia },
+            modelIdentifier: MangaLayout4V1Provider.modelIdentifier,
+            modelVersion: 1
         )
 
         let snapshot = MangaVisionHardCaseSnapshotBuilder.detections(from: analysis)
 
-        XCTAssertEqual(snapshot.map(\.detectionClass), ["frame", "text", "balloon", "face", "body"])
+        XCTAssertEqual(snapshot.map(\.detectionClass), ["frame", "text", "balloon", "onomatopoeia"])
         XCTAssertEqual(Set(snapshot.map(\.id)), Set(regions.map(\.id)))
         let frame = try XCTUnwrap(snapshot.first { $0.detectionClass == "frame" })
         XCTAssertEqual(frame.sourceBBox.yMin, 400, accuracy: 0.001)
@@ -224,18 +229,20 @@ final class ReaderFeedbackEntryTests: XCTestCase {
 }
 
 @MainActor
-final class FiveClassIssueTypeTests: XCTestCase {
-    func testFiveModelClassesMapToStableExportNames() {
+final class FourClassIssueTypeTests: XCTestCase {
+    func testFourModelClassesMapToStableExportNames() {
         XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .panel), "frame")
         XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .text), "text")
-        XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .face), "face")
-        XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .body), "body")
         XCTAssertEqual(MangaVisionHardCaseDetection.className(for: .balloon), "balloon")
+        XCTAssertEqual(
+            MangaVisionHardCaseDetection.className(for: .onomatopoeia),
+            "onomatopoeia"
+        )
     }
 
     func testDetectionJSONUsesPortableClassKey() throws {
         let region = MangaVisionRegion(
-            type: .body,
+            type: .onomatopoeia,
             normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
             confidence: 0.88
         )
@@ -248,7 +255,7 @@ final class FiveClassIssueTypeTests: XCTestCase {
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
 
-        XCTAssertEqual(object["class"] as? String, "body")
+        XCTAssertEqual(object["class"] as? String, "onomatopoeia")
         XCTAssertNil(object["detectionClass"])
     }
 
@@ -257,14 +264,12 @@ final class FiveClassIssueTypeTests: XCTestCase {
             .frameMerge,
             .frameSplit,
             .readingOrderError,
-            .wrongPerson,
-            .multipleFacesConfused,
-            .overlappingPersonDuplicate,
             .balloonTextAssociationError,
+            .balloonMaskError,
+            .onomatopoeiaClassificationError,
             .roiError,
             .ocrAffected,
-            .translationContextAffected,
-            .potentialSpeakerAssociationError
+            .translationContextAffected
         ]
         XCTAssertTrue(Set(MangaVisionHardCaseIssueType.allCases).isSuperset(of: required))
     }
@@ -301,10 +306,10 @@ private enum HardCaseFixture {
             pixelWidth: 1000,
             pixelHeight: 2000,
             orientation: 1,
-            provider: "MangaVisionService",
-            modelName: MangaVisionV2B5ProductionIdentity.modelName,
+            provider: MangaLayout4V1Provider.modelIdentifier,
+            modelName: MangaLayout4V1ProductionIdentity.modelIdentifier,
             modelSHA256: modelSHA256,
-            calibrationRevision: "v2b5-calibration-v1",
+            calibrationRevision: MangaLayout4V1ProductionIdentity.calibrationRevision,
             appVersion: "1.1",
             appBuild: "2",
             inferenceMode: inferenceMode,

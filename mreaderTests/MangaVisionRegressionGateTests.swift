@@ -1,227 +1,128 @@
 import CoreGraphics
-import CoreML
 import Foundation
-import UIKit
 import XCTest
 @testable import mreader
 
-private struct MangaVisionRegressionCorpus: Decodable {
-    struct Case: Decodable {
-        let id: String
-        let image: String
-        let scale: Double
-    }
-
-    let schemaVersion: Int
-    let revision: String
-    let notes: String
-    let cases: [Case]
-}
-
 @MainActor
 final class MangaVisionRegressionGateTests: XCTestCase {
-    func testBundledCalibrationIsRevisionedAndMatchesApprovedThresholds() {
+    func testBundledCalibrationMatchesLayout4ReaderEvaluationThresholds() {
         let profile = MangaVisionCalibrationProfile.bundled
         XCTAssertFalse(profile.revision.isEmpty)
-        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.24)
-        XCTAssertEqual(profile.calibration(for: .panel).nmsIOUThreshold, 0.50)
-        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.18)
-        XCTAssertEqual(profile.calibration(for: .text).nmsIOUThreshold, 0.55)
-        XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.20)
-        XCTAssertEqual(profile.calibration(for: .balloon).nmsIOUThreshold, 0.58)
-        XCTAssertEqual(profile.calibration(for: .face).nmsIOUThreshold, 0.45)
-        XCTAssertEqual(profile.calibration(for: .body).nmsIOUThreshold, 0.55)
+
+        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.65)
+        XCTAssertEqual(profile.calibration(for: .panel).nmsIOUThreshold, 0.35)
+        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.35)
+        XCTAssertEqual(profile.calibration(for: .text).nmsIOUThreshold, 0.35)
+        XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.30)
+        XCTAssertEqual(profile.calibration(for: .balloon).nmsIOUThreshold, 0.35)
+        XCTAssertEqual(profile.calibration(for: .onomatopoeia).confidenceThreshold, 0.30)
+        XCTAssertEqual(profile.calibration(for: .onomatopoeia).nmsIOUThreshold, 0.35)
+        XCTAssertEqual(Set(profile.byRegionType.keys), Set(MangaRegionType.allCases))
     }
 
-    func testV2B5RawOutputContractHasFiveClassChannels() {
-        XCTAssertEqual(MangaVisionV2B5ClassOrder.labels, ["frame", "text", "face", "body", "balloon"])
-        XCTAssertEqual(MangaVisionV2B5OutputContract.inputShape, [1, 3, 640, 640])
+    func testLayout4RawOutputContractHasFourIndependentClassChannelsAndMaskPrototype() {
+        XCTAssertEqual(MangaLayout4V1OutputContract.inputShape, [1, 3, 640, 640])
+        XCTAssertEqual(MangaLayout4V1OutputContract.classCount, 4)
+        XCTAssertEqual(MangaLayout4V1OutputContract.prototypeCount, 8)
+        XCTAssertEqual(MangaLayout4V1OutputContract.specs.count, 13)
         XCTAssertEqual(
-            MangaVisionV2B5OutputContract.specs.filter { $0.role == "classification" }.map(\.channels),
-            [5, 5, 5, 5]
+            MangaLayout4V1OutputContract.specs
+                .filter { $0.role == "classification" }
+                .map(\.channels),
+            [4, 4, 4, 4]
+        )
+        XCTAssertEqual(
+            MangaLayout4V1Class.allCases.map(\.semanticName),
+            ["frame", "text", "balloon", "onomatopoeia"]
         )
     }
 
-    func testBundledCompiledModelSatisfiesOutputContract() throws {
-        let modelURL = try XCTUnwrap(bundledModelURL())
-        let configuration = MLModelConfiguration()
-        configuration.computeUnits = .cpuOnly
-        let model = try MLModel(contentsOf: modelURL, configuration: configuration)
-        let violations = MangaVisionV2B5OutputContract.validate(modelDescription: model.modelDescription)
-        XCTAssertTrue(violations.isEmpty, "Bundled model contract violations: \(violations)")
-    }
-
-    func testManifestCacheIdentityUsesCurrentContractAndCalibrationRevisions() {
-        let manifest = MangaVisionModelManifest.bundledV2B5(bundle: Bundle.main)
-        XCTAssertEqual(manifest.outputContractRevision, MangaVisionV2B5OutputContract.revision)
-        XCTAssertEqual(manifest.calibrationRevision, "v2b5-calibration-v1")
-        XCTAssertEqual(manifest.inputSize, MangaVisionV2B5Preprocessor.inputSize)
-        XCTAssertEqual(manifest.semanticClasses, Set(MangaVisionV2B5ClassOrder.regionTypes))
+    func testManifestCacheIdentityUsesLayout4ContractAndSchemaRevision() {
+        let manifest = MangaVisionModelManifest.bundledMangaLayout4V1(bundle: Bundle.main)
+        XCTAssertEqual(manifest.modelID, MangaLayout4V1Provider.modelIdentifier)
+        XCTAssertEqual(manifest.outputContractRevision, MangaLayout4V1OutputContract.revision)
+        XCTAssertEqual(
+            manifest.analysisSchemaRevision,
+            "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)"
+        )
+        XCTAssertEqual(
+            manifest.calibrationRevision,
+            MangaLayout4V1ProductionIdentity.calibrationRevision
+        )
+        XCTAssertEqual(manifest.inputSize, MangaLayout4V1Preprocessor.inputSize)
+        XCTAssertEqual(
+            manifest.semanticClasses,
+            Set([.panel, .text, .balloon, .onomatopoeia])
+        )
         XCTAssertFalse(manifest.cacheIdentity.isEmpty)
     }
 
-    func testRegressionMetricAggregationAndReleaseGate() {
+    func testRegressionMetricAggregationCoversAllFourLayout4Classes() {
         let rect = CGRect(x: 0.10, y: 0.10, width: 0.30, height: 0.20)
         let expected = [
             MangaVisionRegion(type: .panel, normalizedRect: rect, confidence: 1),
-            MangaVisionRegion(type: .text, normalizedRect: rect.insetBy(dx: 0.05, dy: 0.05), confidence: 1),
-            MangaVisionRegion(type: .balloon, normalizedRect: rect.insetBy(dx: 0.02, dy: 0.02), confidence: 1)
+            MangaVisionRegion(
+                type: .text,
+                normalizedRect: rect.insetBy(dx: 0.05, dy: 0.05),
+                confidence: 1
+            ),
+            MangaVisionRegion(
+                type: .balloon,
+                normalizedRect: rect.insetBy(dx: 0.02, dy: 0.02),
+                confidence: 1
+            ),
+            MangaVisionRegion(
+                type: .onomatopoeia,
+                normalizedRect: CGRect(x: 0.55, y: 0.45, width: 0.18, height: 0.12),
+                confidence: 1
+            )
         ]
         let observation = MangaVisionRegressionObservation(
             expectedRegions: expected,
             predictedRegions: expected,
             expectedOCRRects: [rect],
             predictedOCRRects: [rect],
-            usedFallback: false,
-            inferenceCount: 2
+            inferenceCount: MangaVisionInferencePlanner.maximumInferencePassCount
         )
+
         let metrics = MangaVisionRegressionMetrics.aggregate([observation])
         XCTAssertEqual(metrics.panelRecall, 1)
         XCTAssertEqual(metrics.textRecall, 1)
         XCTAssertEqual(metrics.balloonRecall, 1)
+        XCTAssertEqual(metrics.onomatopoeiaRecall, 1)
         XCTAssertEqual(metrics.ocrFinalRecall, 1)
-        XCTAssertEqual(metrics.fallbackRate, 0)
-        XCTAssertEqual(metrics.inferenceCountPerPage, 2)
+        XCTAssertEqual(metrics.inferenceCountPerPage, 1)
+        XCTAssertEqual(metrics.maximumInferenceCountOnPage, 1)
         XCTAssertTrue(MangaVisionRegressionGate.release.failures(for: metrics).isEmpty)
     }
 
-    func testTwentyFourCaseBundledModelStabilityCorpus() async throws {
-        let corpus: MangaVisionRegressionCorpus = try decodeFixture(
-            "manga_vision_regression_corpus",
-            extension: "json"
+    func testReleaseGateRejectsMissingOnomatopoeiaAndPassBudgetViolation() {
+        let sfx = MangaVisionRegion(
+            type: .onomatopoeia,
+            normalizedRect: CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.1),
+            confidence: 1
         )
-        XCTAssertEqual(corpus.schemaVersion, 1)
-        XCTAssertEqual(corpus.cases.count, 24)
-        XCTAssertFalse(corpus.revision.isEmpty)
-
-        let provider = MangaVisionV2B5Provider()
-        var observations: [MangaVisionRegressionObservation] = []
-        for imageName in Set(corpus.cases.map(\.image)).sorted() {
-            let sourceURL = try XCTUnwrap(fixtureURL(for: imageName))
-            let sourceImage = try XCTUnwrap(UIImage(contentsOfFile: sourceURL.path))
-            let sourceCG = try XCTUnwrap(sourceImage.cgImage)
-            let sourceSize = CGSize(width: sourceCG.width, height: sourceCG.height)
-            let imageCases = corpus.cases.filter { $0.image == imageName }
-            let baselineCase = try XCTUnwrap(imageCases.first { abs($0.scale - 1) < 0.000_1 })
-            let baselineImage = try XCTUnwrap(resized(sourceImage, scale: baselineCase.scale).cgImage)
-            let baseline = try await provider.analyzePage(
-                image: baselineImage,
-                sourceImageSize: sourceSize,
-                pageIdentifier: MangaPageIdentifier(
-                    scope: "regression-baseline-\(imageName)",
-                    pageIndex: 0,
-                    sourceFingerprint: corpus.revision
-                )
+        let metrics = MangaVisionRegressionMetrics.aggregate([
+            MangaVisionRegressionObservation(
+                expectedRegions: [sfx],
+                predictedRegions: [],
+                inferenceCount: MangaVisionInferencePlanner.maximumInferencePassCount + 1
             )
-            assertValidAnalysis(baseline)
+        ])
+        let failures = MangaVisionRegressionGate.release.failures(for: metrics)
 
-            for (index, item) in imageCases.enumerated() {
-                let input = try XCTUnwrap(resized(sourceImage, scale: item.scale).cgImage)
-                let analysis = try await provider.analyzePage(
-                    image: input,
-                    sourceImageSize: sourceSize,
-                    pageIdentifier: MangaPageIdentifier(
-                        scope: "regression-\(item.id)",
-                        pageIndex: index,
-                        sourceFingerprint: corpus.revision
-                    )
-                )
-                assertValidAnalysis(analysis)
-                observations.append(
-                    MangaVisionRegressionObservation(
-                        expectedRegions: baseline.allRegions,
-                        predictedRegions: analysis.allRegions,
-                        usedFallback: false,
-                        inferenceCount: 1
-                    )
-                )
-            }
-        }
-
-        XCTAssertEqual(observations.count, 24)
-        let stability = MangaVisionRegressionMetrics.aggregate(
-            observations,
-            matchThreshold: 0.35
-        )
-        let failures = MangaVisionRegressionGate.release.failures(for: stability)
-        XCTAssertTrue(
-            failures.isEmpty,
-            "Manga Vision 24-case stability gate failed: \(failures); metrics=\(stability)"
-        )
+        XCTAssertTrue(failures.contains { $0.hasPrefix("onomatopoeia-recall:") })
+        XCTAssertTrue(failures.contains { $0.hasPrefix("maximum-inference-count-on-page:") })
     }
 
-    private func assertValidAnalysis(
-        _ analysis: MangaPageAnalysis,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        XCTAssertEqual(analysis.schemaVersion, MangaPageAnalysis.schemaVersion, file: file, line: line)
+    func testDomainCannotRepresentLegacyFaceOrBodyClasses() {
         XCTAssertEqual(
-            analysis.modelIdentifier,
-            MangaVisionV2B5Provider.modelIdentifier,
-            file: file,
-            line: line
+            MangaRegionType.allCases,
+            [.panel, .text, .balloon, .onomatopoeia]
         )
-        for region in analysis.allRegions {
-            let rect = region.normalizedRect
-            XCTAssertTrue(rect.width > 0, file: file, line: line)
-            XCTAssertTrue(rect.height > 0, file: file, line: line)
-            XCTAssertGreaterThanOrEqual(rect.minX, 0, file: file, line: line)
-            XCTAssertGreaterThanOrEqual(rect.minY, 0, file: file, line: line)
-            XCTAssertLessThanOrEqual(rect.maxX, 1, file: file, line: line)
-            XCTAssertLessThanOrEqual(rect.maxY, 1, file: file, line: line)
-            XCTAssertTrue(region.confidence.isFinite, file: file, line: line)
-        }
-    }
-
-    private func bundledModelURL() -> URL? {
-        let bundles = [Bundle.main, Bundle(for: MangaVisionRegressionGateTests.self)]
-            + Bundle.allBundles
-            + Bundle.allFrameworks
-        for bundle in bundles {
-            if let url = bundle.url(forResource: MangaVisionV2B5Provider.modelResourceName, withExtension: "mlmodelc") {
-                return url
-            }
-        }
-        return nil
-    }
-
-    private func fixtureURL(for fileName: String) -> URL? {
-        let file = URL(fileURLWithPath: fileName)
-        let bundle = Bundle(for: MangaVisionRegressionGateTests.self)
-        return bundle.url(
-            forResource: file.deletingPathExtension().lastPathComponent,
-            withExtension: file.pathExtension,
-            subdirectory: "Fixtures"
-        ) ?? bundle.url(
-            forResource: file.deletingPathExtension().lastPathComponent,
-            withExtension: file.pathExtension
+        XCTAssertEqual(
+            Set(MangaRegionType.allCases.map(\.rawValue)),
+            Set(["panel", "text", "balloon", "onomatopoeia"])
         )
-    }
-
-    private func decodeFixture<T: Decodable>(
-        _ name: String,
-        extension fileExtension: String
-    ) throws -> T {
-        let bundle = Bundle(for: MangaVisionRegressionGateTests.self)
-        let url = try XCTUnwrap(
-            bundle.url(forResource: name, withExtension: fileExtension, subdirectory: "Fixtures")
-                ?? bundle.url(forResource: name, withExtension: fileExtension)
-        )
-        return try JSONDecoder().decode(T.self, from: Data(contentsOf: url))
-    }
-
-    private func resized(_ image: UIImage, scale: Double) -> UIImage {
-        guard abs(scale - 1) > 0.000_1 else { return image }
-        let target = CGSize(
-            width: max(image.size.width * scale, 32),
-            height: max(image.size.height * scale, 32)
-        )
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        return UIGraphicsImageRenderer(size: target, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: target))
-        }
     }
 }

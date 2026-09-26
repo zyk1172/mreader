@@ -23,10 +23,13 @@ nonisolated struct MangaVisionPerformanceSnapshot: Sendable, Equatable {
 /// It owns page/model cache identity and in-flight coalescing so consumers never
 /// run the Core ML model independently for the same page.
 actor MangaVisionService {
+    // MangaLayout4 V1 was trained and validated on complete pages. Keep the
+    // production path full-page only: crop/tile refinement changes panel geometry
+    // and creates duplicate/partial frame navigation targets.
     static let shared = MangaVisionService(
-        provider: AdaptiveMangaVisionProvider(base: MangaVisionProviderRouter.shared)
+        provider: MangaLayout4V1Provider.shared
     )
-    nonisolated static let analysisRevision = "manga-vision-page-v4-demand-identity"
+    nonisolated static let analysisRevision = "manga-layout4-v1-full-page-v5"
 
     private struct CacheEnvelope: Codable {
         let manifestIdentity: String
@@ -159,8 +162,8 @@ actor MangaVisionService {
         let sourceAnalyzer = provider as? any MangaVisionSourceImageAnalyzing
         let analysisImage: CGImage?
         if sourceAnalyzer != nil {
-            // Adaptive providers need the largest already-decoded source image so tiles can
-            // recover detail that would be destroyed by a single 640px full-page shrink.
+            // MangaLayout4 V1 owns its exact full-page letterbox preprocessing.
+            // Pass the largest already-decoded source image and avoid an extra resize.
             analysisImage = image.cgImage
         } else {
             analysisImage = Self.analysisCGImage(
@@ -386,13 +389,14 @@ actor MangaVisionService {
         image: UIImage, manifest: MangaVisionModelManifest,
         requestClass: MangaVisionRequestClass
     ) -> String {
+        _ = image
+        _ = manifest
+        _ = requestClass
+        if provider is MangaLayout4V1Provider {
+            return "layout4-full-page-only"
+        }
         guard provider is any MangaVisionSourceImageAnalyzing else { return "single-pass" }
-        let size = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
-            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
-        return MangaVisionInferencePlanner.cacheDemandIdentity(
-            sourceSize: size, inputSize: manifest.inputSize,
-            requestClass: requestClass, resourceState: .current
-        )
+        return "source-image-single-pass"
     }
 
     func providerDescriptor() async -> MangaVisionProviderDescriptor {
@@ -501,7 +505,7 @@ actor MangaVisionService {
         } else {
             // Compatibility providers (primarily tests/alternate adapters) still work.
             // Their descriptor is consulted only when they do not implement the static
-            // manifest contract; the bundled V2B5 provider never takes this path.
+            // manifest contract; the MangaLayout4 V1 provider never takes this path.
             let descriptor = await provider.descriptor
             let compatibilityIdentity = "descriptor:\(descriptor.modelIdentifier):\(descriptor.modelVersion)"
             manifest = MangaVisionModelManifest(
@@ -543,7 +547,8 @@ actor MangaVisionService {
                 analysisTotalMilliseconds: totalMS,
                 panelCount: result.panels.count,
                 textCount: result.texts.count,
-                balloonCount: result.balloons.count
+                balloonCount: result.balloons.count,
+            onomatopoeiaCount: result.onomatopoeias.count
             )
             throw MangaVisionServiceError.staleResult
         }
@@ -590,11 +595,12 @@ actor MangaVisionService {
             analysisTotalMilliseconds: totalMS,
             panelCount: result.panels.count,
             textCount: result.texts.count,
-            balloonCount: result.balloons.count
+            balloonCount: result.balloons.count,
+        onomatopoeiaCount: result.onomatopoeias.count
         )
         let inferenceLabel = String(format: "%.1f", inferenceMS)
         MReaderLog.aiVision.debug(
-            "MangaVision analyze model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) balloon=\(result.balloons.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
+            "MangaVision analyze model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) panel=\(result.panels.count, privacy: .public) text=\(result.texts.count, privacy: .public) balloon=\(result.balloons.count, privacy: .public) sfx=\(result.onomatopoeias.count, privacy: .public) inferenceMs=\(inferenceLabel, privacy: .public)"
         )
         return result
     }
@@ -644,7 +650,8 @@ actor MangaVisionService {
             analysisTotalMilliseconds: totalMS,
             panelCount: 0,
             textCount: 0,
-            balloonCount: 0
+            balloonCount: 0,
+        onomatopoeiaCount: 0
         )
         MReaderLog.aiVision.error(
             "MangaVision primary inference failed model=\(manifest.modelID, privacy: .public) build=\(manifest.modelBuildID, privacy: .public) page=\(identity.pageIndex + 1, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) reason=\(reason, privacy: .public)"

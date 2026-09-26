@@ -4,45 +4,33 @@ import Foundation
 nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let confidenceThreshold: Float
     let nmsIOUThreshold: CGFloat
-    let containmentThreshold: CGFloat
 }
 
-/// One revisioned source of truth for detector filtering and same-class deduplication.
-/// Any production threshold change must bump `revision`; the manifest includes this
-/// value in cache identity so cached analyses cannot outlive their calibration.
+/// MangaLayout4 V1 reader-evaluation calibration.
+/// These values intentionally differ from the training/export reference decoder:
+/// the test branch uses stricter product thresholds while preserving raw diagnostics.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let revision: String
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga109-yolo26s-seg-calibration-2026-09-17-v1",
+        revision: "manga-layout4-v1-reader-eval-2026-09-26-v6",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.24,
-                nmsIOUThreshold: 0.50,
-                containmentThreshold: 0.92
+                confidenceThreshold: 0.65,
+                nmsIOUThreshold: 0.35
             ),
             .text: MangaVisionClassCalibration(
-                confidenceThreshold: 0.18,
-                nmsIOUThreshold: 0.55,
-                containmentThreshold: 0.88
+                confidenceThreshold: 0.35,
+                nmsIOUThreshold: 0.35
             ),
             .balloon: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.58,
-                containmentThreshold: 0.90
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35
             ),
-            // Kept explicit for forward-compatible checkpoints even though the
-            // currently bundled checkpoint exports only frame/text/balloon.
-            .face: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.45,
-                containmentThreshold: 0.90
-            ),
-            .body: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.55,
-                containmentThreshold: 0.90
+            .onomatopoeia: MangaVisionClassCalibration(
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35
             )
         ]
     )
@@ -54,19 +42,25 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     }
 
     func calibration(for type: MangaRegionType) -> MangaVisionClassCalibration {
-        byRegionType[type] ?? MangaVisionClassCalibration(
-            confidenceThreshold: 0.20,
-            nmsIOUThreshold: 0.62,
-            containmentThreshold: 0.92
-        )
+        byRegionType[type]!
     }
 
     func deduplicated(_ regions: [MangaVisionRegion], type: MangaRegionType) -> [MangaVisionRegion] {
-        let calibration = calibration(for: type)
-        return MangaVisionRegionPostProcessor.deduplicated(
-            regions,
-            iouThreshold: calibration.nmsIOUThreshold,
-            containmentThreshold: calibration.containmentThreshold
-        )
+        let threshold = calibration(for: type).nmsIOUThreshold
+        var kept: [MangaVisionRegion] = []
+        for candidate in regions
+            .filter({ $0.type == type })
+            .sorted(by: { $0.confidence > $1.confidence }) {
+            let suppressed = kept.contains { existing in
+                MangaPageCoordinateSpace.intersectionOverUnion(
+                    existing.normalizedRect,
+                    candidate.normalizedRect
+                ) > threshold
+            }
+            if !suppressed {
+                kept.append(candidate)
+            }
+        }
+        return kept
     }
 }

@@ -1,11 +1,10 @@
 import CryptoKit
 import Foundation
 import UIKit
-@preconcurrency import Vision
+import os
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
-    case visionRectangle
     case fullPageFallback
 }
 
@@ -53,8 +52,8 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 5
-    static let modelVersion = 4
+    static let schemaVersion = 6
+    static let modelVersion = 5
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -119,211 +118,371 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
     }
 }
 
-nonisolated protocol PanelDetecting: Sendable {
-    var identifier: String { get }
-    func detectPanels(in image: CGImage) throws -> [DetectedPanel]
-}
-
-nonisolated struct VisionRectanglePanelDetector: PanelDetecting {
-    let identifier = "vision-rectangle-v3-bubble-filter"
-
-    func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
-        let request = VNDetectRectanglesRequest()
-        request.maximumObservations = 30
-        request.minimumConfidence = 0.30
-        request.minimumSize = 0.06
-        request.minimumAspectRatio = 0.06
-        request.maximumAspectRatio = 1
-        request.quadratureTolerance = 24
-
-        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        try handler.perform([request])
-
-        return (request.results ?? []).map { observation in
-            let box = observation.boundingBox
-            return DetectedPanel(
-                rect: CGRect(
-                    x: box.minX,
-                    y: 1 - box.maxY,
-                    width: box.width,
-                    height: box.height
-                ),
-                confidence: observation.confidence,
-                source: .visionRectangle
-            )
-        }
-    }
-}
-
 nonisolated enum PanelPostProcessor {
-    private static let smallFloatingAreaThreshold: CGFloat = 0.07
-    private static let substantialPanelAreaThreshold: CGFloat = 0.085
-    private static let structuralAlignmentTolerance: CGFloat = 0.035
-    private static let pageEdgeTolerance: CGFloat = 0.075
+    private static let minimumDimension: CGFloat = 0.025
+    private static let minimumArea: CGFloat = 0.0015
+    private static let relativeScoreFraction: Float = 0.30
+    private static let maximumRelativeFloor: Float = 0.14
+    private static let maximumNavigationPanelCount = 20
 
-    static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
+    /// Converts the high-recall Layout4 frame stream into stable navigation targets.
+    ///
+    /// The model/reference decoder intentionally keeps QFL candidates down to 0.05.
+    /// Guided Panel is a precision-sensitive consumer: blindly turning every retained
+    /// candidate into a navigation stop produces repeated/partial frames and can make
+    /// one page feel endless. Keep this product selection separate from model decoding.
+    static func process(
+        _ candidates: [DetectedPanel],
+        semanticRegions: [MangaVisionRegion] = [],
+        contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    ) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let filtered = candidates.compactMap { panel -> DetectedPanel? in
-            let rect = panel.rect.standardized.intersection(unit)
-            guard !rect.isNull,
-                  rect.width >= 0.055,
-                  rect.height >= 0.045 else {
+        let absoluteThreshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .panel)
+            .confidenceThreshold
+
+        let normalized = candidates.compactMap { panel -> DetectedPanel? in
+            guard panel.source == .coreML,
+                  panel.confidence >= absoluteThreshold else {
                 return nil
             }
-            let area = rect.width * rect.height
-            guard area >= 0.012,
-                  area <= (panel.source == .coreML ? 1.0 : 0.94),
-                  panel.confidence >= 0.24 else {
+            let rect = panel.rect.standardized.intersection(unit)
+            guard !rect.isNull,
+                  rect.width >= minimumDimension,
+                  rect.height >= minimumDimension,
+                  area(rect) >= minimumArea else {
                 return nil
             }
             return DetectedPanel(
                 rect: rect,
                 confidence: panel.confidence,
-                source: panel.source,
+                source: .coreML,
                 contour: panel.contour
             )
         }
+        guard !normalized.isEmpty else { return [] }
 
-        var kept: [DetectedPanel] = []
-        for candidate in filtered.sorted(by: preferredCandidate) {
-            if let duplicateIndex = kept.firstIndex(where: { areDuplicates($0, candidate) }) {
-                let existing = kept[duplicateIndex]
-                if shouldPrefer(candidate, over: existing) {
-                    kept[duplicateIndex] = candidate
-                }
+        let bestScore = normalized.map(\.confidence).max() ?? absoluteThreshold
+        let navigationFloor = max(
+            absoluteThreshold,
+            min(maximumRelativeFloor, bestScore * relativeScoreFraction)
+        )
+        let scoreFiltered = normalized.filter { $0.confidence >= navigationFloor }
+        let withoutSemanticAliases = scoreFiltered.filter { candidate in
+            !isLikelySemanticAlias(candidate, semanticRegions: semanticRegions)
+        }
+
+        // Recover a missing frame only when multiple independent Layout4 semantic
+        // detections agree that meaningful content exists in a hole left between
+        // valid frame detections. A balloon alone can never create a panel.
+        let recoveryBase = withoutSemanticAliases.filter { area($0.rect) < 0.78 }
+        let recovered = recoverSemanticHoles(
+            among: recoveryBase,
+            semanticRegions: semanticRegions,
+            contentBounds: contentBounds,
+            minimumConfidence: absoluteThreshold
+        )
+        let augmented = withoutSemanticAliases + recovered
+        let withoutContainers = augmented.filter { candidate in
+            !isLikelyWholePageContainer(candidate, among: augmented)
+        }
+
+        var deduplicated: [DetectedPanel] = []
+        for candidate in withoutContainers.sorted(by: preferred) {
+            if deduplicated.contains(where: { isNavigationDuplicate($0, candidate) }) {
+                continue
+            }
+            deduplicated.append(candidate)
+        }
+
+        if deduplicated.count <= maximumNavigationPanelCount {
+            return deduplicated
+        }
+        return Array(
+            deduplicated
+                .sorted(by: preferred)
+                .prefix(maximumNavigationPanelCount)
+        )
+    }
+
+    private static func recoverSemanticHoles(
+        among panels: [DetectedPanel],
+        semanticRegions: [MangaVisionRegion],
+        contentBounds: CGRect,
+        minimumConfidence: Float
+    ) -> [DetectedPanel] {
+        // Do not invent an entire panel layout from semantics alone. Recovery is
+        // intentionally limited to filling holes in an otherwise usable frame layout.
+        guard !panels.isEmpty else { return [] }
+
+        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let safeBounds = contentBounds.standardized.intersection(unit)
+        let pageBounds = (!safeBounds.isNull && safeBounds.width > 0.1 && safeBounds.height > 0.1)
+            ? safeBounds
+            : unit
+
+        let evidence = semanticRegions.filter { region in
+            guard region.type == .text
+                    || region.type == .balloon
+                    || region.type == .onomatopoeia else {
+                return false
+            }
+            let threshold = MangaVisionCalibrationProfile.bundled
+                .calibration(for: region.type)
+                .confidenceThreshold
+            guard region.confidence >= threshold else { return false }
+            let rect = region.normalizedRect.standardized.intersection(pageBounds)
+            return !rect.isNull
+                && rect.width >= 0.004
+                && rect.height >= 0.004
+                && area(rect) >= 0.000_04
+                && !panels.contains { semanticRectIsCovered(rect, by: $0.rect) }
+        }
+        guard !evidence.isEmpty else { return [] }
+
+        var clusters: [[MangaVisionRegion]] = []
+        for region in evidence.sorted(by: semanticPreferred) {
+            if let index = clusters.firstIndex(where: {
+                semanticCluster($0, accepts: region)
+            }) {
+                clusters[index].append(region)
             } else {
-                kept.append(candidate)
+                clusters.append([region])
             }
         }
 
-        return suppressLikelyDialogueBoxes(in: kept)
+        return clusters.compactMap { cluster in
+            let hasText = cluster.contains { $0.type == .text }
+            let hasSFX = cluster.contains { $0.type == .onomatopoeia }
+            let hasBalloon = cluster.contains { $0.type == .balloon }
+            guard hasText || hasSFX else { return nil }
+
+            let evidenceScore = cluster.reduce(CGFloat.zero) { partial, region in
+                let weight: CGFloat
+                switch region.type {
+                case .text: weight = 1.0
+                case .balloon: weight = 0.75
+                case .onomatopoeia: weight = 0.45
+                case .panel: weight = 0
+                }
+                return partial + CGFloat(region.confidence) * weight
+            }
+            let corroboratedDialogue = hasText && hasBalloon
+            guard corroboratedDialogue || evidenceScore >= 1.05 else { return nil }
+
+            let semanticBounds = cluster
+                .map { $0.normalizedRect.standardized }
+                .dropFirst()
+                .reduce(cluster[0].normalizedRect.standardized) { $0.union($1) }
+                .intersection(pageBounds)
+            guard !semanticBounds.isNull,
+                  semanticBounds.width > 0,
+                  semanticBounds.height > 0 else {
+                return nil
+            }
+
+            // The recovered box is deliberately contextual, not a tight text/balloon
+            // crop. Guided Panel adds another display-only margin afterwards.
+            let dx = max(semanticBounds.width * 0.55, 0.040)
+            let dy = max(semanticBounds.height * 0.55, 0.040)
+            let recoveredRect = semanticBounds
+                .insetBy(dx: -dx, dy: -dy)
+                .intersection(pageBounds)
+            let recoveredArea = area(recoveredRect)
+            guard !recoveredRect.isNull,
+                  recoveredRect.width >= 0.08,
+                  recoveredRect.height >= 0.08,
+                  recoveredArea >= 0.012,
+                  recoveredArea <= 0.48,
+                  recoveredArea >= area(semanticBounds) * 1.35 else {
+                return nil
+            }
+
+            // Never create a second stop that substantially covers an existing frame.
+            let maximumExistingCoverage = panels.reduce(CGFloat.zero) { current, panel in
+                let overlap = recoveredRect.intersection(panel.rect)
+                guard !overlap.isNull else { return current }
+                return max(current, area(overlap) / max(recoveredArea, 0.000_001))
+            }
+            guard maximumExistingCoverage < 0.34 else { return nil }
+
+            let strongest = cluster.map(\.confidence).max() ?? minimumConfidence
+            let confidence = max(
+                minimumConfidence,
+                min(strongest * 0.95, 0.90)
+            )
+            return DetectedPanel(
+                rect: recoveredRect,
+                confidence: confidence,
+                source: .coreML
+            )
+        }
     }
 
-    /// Vision rectangle detection sees both comic panels and speech balloons as rectangles.
-    /// A balloon is commonly a much smaller box fully contained by a real panel. In that
-    /// case confidence is not a useful tie-breaker: Vision can assign the balloon a higher
-    /// confidence than the panel border. Prefer the containing box when the area difference
-    /// is large, while preserving confidence-based NMS for genuinely near-identical boxes.
-    private static func shouldPrefer(_ candidate: DetectedPanel, over existing: DetectedPanel) -> Bool {
-        let intersection = existing.rect.intersection(candidate.rect)
-        if !intersection.isNull {
+    private static func semanticRectIsCovered(
+        _ semanticRect: CGRect,
+        by panelRect: CGRect
+    ) -> Bool {
+        let intersection = semanticRect.intersection(panelRect)
+        guard !intersection.isNull else { return false }
+        let semanticArea = area(semanticRect)
+        guard semanticArea > 0 else { return false }
+        let containment = area(intersection) / semanticArea
+        let center = CGPoint(x: semanticRect.midX, y: semanticRect.midY)
+        return containment >= 0.62
+            || (panelRect.insetBy(dx: -0.004, dy: -0.004).contains(center)
+                && containment >= 0.45)
+    }
+
+    private static func semanticCluster(
+        _ cluster: [MangaVisionRegion],
+        accepts region: MangaVisionRegion
+    ) -> Bool {
+        guard let first = cluster.first else { return true }
+        let bounds = cluster.dropFirst().reduce(first.normalizedRect.standardized) {
+            $0.union($1.normalizedRect.standardized)
+        }
+        let rect = region.normalizedRect.standardized
+        let xOverlap = max(
+            min(bounds.maxX, rect.maxX) - max(bounds.minX, rect.minX),
+            0
+        ) / max(min(bounds.width, rect.width), 0.000_001)
+        let yOverlap = max(
+            min(bounds.maxY, rect.maxY) - max(bounds.minY, rect.minY),
+            0
+        ) / max(min(bounds.height, rect.height), 0.000_001)
+        let horizontalGap = max(
+            max(bounds.minX - rect.maxX, rect.minX - bounds.maxX),
+            0
+        )
+        let verticalGap = max(
+            max(bounds.minY - rect.maxY, rect.minY - bounds.maxY),
+            0
+        )
+
+        if xOverlap >= 0.20 && verticalGap <= 0.055 { return true }
+        if yOverlap >= 0.20 && horizontalGap <= 0.055 { return true }
+
+        let centerDistance = hypot(bounds.midX - rect.midX, bounds.midY - rect.midY)
+        let merged = bounds.union(rect)
+        return centerDistance <= 0.09 && area(merged) <= 0.16
+    }
+
+    private static func semanticPreferred(
+        _ lhs: MangaVisionRegion,
+        _ rhs: MangaVisionRegion
+    ) -> Bool {
+        if lhs.normalizedRect.minY != rhs.normalizedRect.minY {
+            return lhs.normalizedRect.minY < rhs.normalizedRect.minY
+        }
+        if lhs.normalizedRect.minX != rhs.normalizedRect.minX {
+            return lhs.normalizedRect.minX < rhs.normalizedRect.minX
+        }
+        return lhs.confidence > rhs.confidence
+    }
+
+    /// Layout4 intentionally exposes the raw high-recall per-class stream. A single
+    /// location can therefore survive as both `frame` and a semantic class. Guided
+    /// Panel is precision-sensitive, so reject only near-identical cross-class aliases
+    /// here while preserving the raw decoder output for model evaluation/diagnostics.
+    private static func isLikelySemanticAlias(
+        _ candidate: DetectedPanel,
+        semanticRegions: [MangaVisionRegion]
+    ) -> Bool {
+        let frameRect = candidate.rect.standardized
+        let frameArea = area(frameRect)
+        guard frameArea > 0 else { return false }
+
+        return semanticRegions.contains { region in
+            guard region.type == .balloon
+                    || region.type == .text
+                    || region.type == .onomatopoeia else {
+                return false
+            }
+            let calibration = MangaVisionCalibrationProfile.bundled.calibration(for: region.type)
+            guard region.confidence >= calibration.confidenceThreshold else {
+                return false
+            }
+
+            let semanticRect = region.normalizedRect.standardized
+            let semanticArea = area(semanticRect)
+            guard semanticArea > 0 else { return false }
+            let intersection = frameRect.intersection(semanticRect)
+            guard !intersection.isNull else { return false }
+
             let intersectionArea = area(intersection)
-            let existingArea = area(existing.rect)
-            let candidateArea = area(candidate.rect)
-            let smallerArea = min(existingArea, candidateArea)
-            let largerArea = max(existingArea, candidateArea)
-            let containment = intersectionArea / max(smallerArea, 0.0001)
-            let sizeRatio = smallerArea / max(largerArea, 0.0001)
+            let unionArea = max(frameArea + semanticArea - intersectionArea, 0.000_001)
+            let iou = intersectionArea / unionArea
+            let smallerArea = max(min(frameArea, semanticArea), 0.000_001)
+            let containment = intersectionArea / smallerArea
+            let sizeRatio = smallerArea / max(frameArea, semanticArea)
+            let semanticToFrameScore = CGFloat(region.confidence)
+                / max(CGFloat(candidate.confidence), 0.000_1)
 
-            if (candidate.source == .visionRectangle || existing.source == .visionRectangle),
-               containment >= 0.90,
-               sizeRatio <= 0.58 {
-                return candidateArea > existingArea
+            switch region.type {
+            case .balloon:
+                // Balloon/frame aliases are the common failure mode. Once the balloon
+                // itself passed its class threshold, close geometry is stronger evidence
+                // than cross-class score comparison: independent sigmoid heads can give
+                // the same physical region very different scores for frame vs balloon.
+                // The geometric guard still preserves a real enclosing panel.
+                return (iou >= 0.48 || (containment >= 0.92 && sizeRatio >= 0.72))
+            case .text, .onomatopoeia:
+                // Text boxes can legitimately occupy a large fraction of a small frame,
+                // so use a stricter near-identity gate for these classes.
+                return (iou >= 0.66 || (containment >= 0.97 && sizeRatio >= 0.84))
+                    && semanticToFrameScore >= 1.00
+            case .panel:
+                return false
             }
         }
-
-        if candidate.confidence != existing.confidence {
-            return candidate.confidence > existing.confidence
-        }
-        return area(candidate.rect) > area(existing.rect)
     }
 
-    private static func areDuplicates(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
+    private static func isLikelyWholePageContainer(
+        _ candidate: DetectedPanel,
+        among panels: [DetectedPanel]
+    ) -> Bool {
+        let candidateArea = area(candidate.rect)
+        guard candidateArea >= 0.78 else { return false }
+
+        let children = panels.filter { other in
+            guard other != candidate else { return false }
+            let center = CGPoint(x: other.rect.midX, y: other.rect.midY)
+            return candidate.rect.contains(center)
+                && area(other.rect) <= candidateArea * 0.60
+        }
+        let requiredChildren = candidateArea >= 0.90 ? 2 : 3
+        guard children.count >= requiredChildren else { return false }
+
+        let childArea = children.reduce(CGFloat.zero) { $0 + area($1.rect) }
+        guard childArea >= 0.20 else { return false }
+        let strongestChild = children.map(\.confidence).max() ?? 0
+        return candidateArea >= 0.90
+            || candidate.confidence <= strongestChild * 1.25
+    }
+
+    private static func isNavigationDuplicate(
+        _ lhs: DetectedPanel,
+        _ rhs: DetectedPanel
+    ) -> Bool {
         let intersection = lhs.rect.intersection(rhs.rect)
         guard !intersection.isNull else { return false }
         let intersectionArea = area(intersection)
         let lhsArea = area(lhs.rect)
         let rhsArea = area(rhs.rect)
-        let unionArea = max(lhsArea + rhsArea - intersectionArea, 0.0001)
-        let iou = intersectionArea / unionArea
-        let smallerArea = min(lhsArea, rhsArea)
-        let largerArea = max(lhsArea, rhsArea)
-        let containment = intersectionArea / max(smallerArea, 0.0001)
-        let sizeRatio = smallerArea / max(largerArea, 0.0001)
-        if lhs.source == .coreML, rhs.source == .coreML {
-            // The segmentation model already separates frame from balloon. Preserve
-            // real inset panels instead of treating containment alone as duplication.
-            return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
-        }
-        return iou >= 0.58 || containment >= 0.82
+        let union = max(lhsArea + rhsArea - intersectionArea, 0.000_001)
+        let iou = intersectionArea / union
+        let smaller = min(lhsArea, rhsArea)
+        let larger = max(lhsArea, rhsArea)
+        let containment = intersectionArea / max(smaller, 0.000_001)
+        let sizeRatio = smaller / max(larger, 0.000_001)
+
+        // Preserve genuine inset panels. Only collapse boxes that describe
+        // essentially the same frame geometry.
+        return iou >= 0.75 || (containment >= 0.96 && sizeRatio >= 0.82)
     }
 
-    /// Reject small floating Vision rectangles once the page already contains convincing
-    /// panel-sized geometry. This is deliberately conservative: a small box is retained if
-    /// it aligns with another panel edge or sits on the page boundary, both common traits of
-    /// legitimate small panels and uncommon traits of dialogue balloons.
-    private static func suppressLikelyDialogueBoxes(in panels: [DetectedPanel]) -> [DetectedPanel] {
-        guard panels.count >= 2 else { return panels }
-        let hasSubstantialVisionPanel = panels.contains {
-            $0.source == .visionRectangle && area($0.rect) >= substantialPanelAreaThreshold
-        }
-
-        return panels.filter { candidate in
-            guard candidate.source == .visionRectangle else { return true }
-            let candidateArea = area(candidate.rect)
-            guard candidateArea < smallFloatingAreaThreshold else { return true }
-            guard !hasStructuralSupport(candidate, among: panels) else { return true }
-
-            let containedByLargerPanel = panels.contains { other in
-                guard other != candidate else { return false }
-                let otherArea = area(other.rect)
-                guard otherArea >= candidateArea * 1.8 else { return false }
-                let intersection = other.rect.intersection(candidate.rect)
-                guard !intersection.isNull else { return false }
-                return area(intersection) / max(candidateArea, 0.0001) >= 0.86
-            }
-            if containedByLargerPanel {
-                return false
-            }
-
-            return !hasSubstantialVisionPanel
-        }
-    }
-
-    /// A Vision-only result should look like a page layout, not a collection of floating
-    /// dialogue boxes. Large panels are self-supporting; small panels need edge/gutter
-    /// alignment with peers or a page-edge relationship.
-    static func hasVisionPanelStructure(_ panels: [DetectedPanel]) -> Bool {
-        guard !panels.isEmpty else { return false }
-        guard panels.allSatisfy({ $0.source == .visionRectangle }) else { return true }
-
-        let supportedCount = panels.filter { panel in
-            area(panel.rect) >= smallFloatingAreaThreshold
-                || hasStructuralSupport(panel, among: panels)
-        }.count
-        let requiredCount = max(2, Int(ceil(Double(panels.count) * 0.60)))
-        return supportedCount >= requiredCount
-    }
-
-    private static func hasStructuralSupport(
-        _ candidate: DetectedPanel,
-        among panels: [DetectedPanel]
-    ) -> Bool {
-        if touchesPageEdge(candidate.rect) {
-            return true
-        }
-
-        return panels.contains { other in
-            guard other != candidate else { return false }
-            return edgesAlign(candidate.rect, other.rect)
-        }
-    }
-
-    private static func touchesPageEdge(_ rect: CGRect) -> Bool {
-        rect.minX <= pageEdgeTolerance
-            || rect.minY <= pageEdgeTolerance
-            || rect.maxX >= 1 - pageEdgeTolerance
-            || rect.maxY >= 1 - pageEdgeTolerance
-    }
-
-    private static func edgesAlign(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-        abs(lhs.minX - rhs.minX) <= structuralAlignmentTolerance
-            || abs(lhs.maxX - rhs.maxX) <= structuralAlignmentTolerance
-            || abs(lhs.minY - rhs.minY) <= structuralAlignmentTolerance
-            || abs(lhs.maxY - rhs.maxY) <= structuralAlignmentTolerance
-    }
-
-    private static func preferredCandidate(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
+    private static func preferred(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
         if lhs.confidence != rhs.confidence {
             return lhs.confidence > rhs.confidence
         }
@@ -337,35 +496,15 @@ nonisolated enum PanelPostProcessor {
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
-        if panels.count == 1, let panel = panels.first, panel.source == .coreML {
-            return panel.confidence >= 0.5 && panel.rect.width * panel.rect.height >= 0.22
+        let threshold = MangaVisionCalibrationProfile.bundled
+            .calibration(for: .panel)
+            .confidenceThreshold
+        return !panels.isEmpty && panels.allSatisfy { panel in
+            panel.source == .coreML
+                && panel.confidence >= threshold
+                && panel.rect.width > 0
+                && panel.rect.height > 0
         }
-        guard (2...maximumPanelCount).contains(panels.count) else { return false }
-        let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
-        guard averageConfidence >= 0.34 else { return false }
-        guard PanelPostProcessor.hasVisionPanelStructure(panels) else { return false }
-
-        let totalArea = panels.reduce(CGFloat.zero) { partial, panel in
-            partial + panel.rect.width * panel.rect.height
-        }
-        guard totalArea >= 0.22, totalArea <= 1.65 else { return false }
-
-        var excessiveOverlapPairs = 0
-        for lhsIndex in panels.indices {
-            for rhsIndex in panels.indices where rhsIndex > lhsIndex {
-                let lhs = panels[lhsIndex].rect
-                let rhs = panels[rhsIndex].rect
-                let intersection = lhs.intersection(rhs)
-                guard !intersection.isNull else { continue }
-                let intersectionArea = intersection.width * intersection.height
-                let smallerArea = min(lhs.width * lhs.height, rhs.width * rhs.height)
-                if intersectionArea / max(smallerArea, 0.0001) > 0.45 {
-                    excessiveOverlapPairs += 1
-                }
-            }
-        }
-        return excessiveOverlapPairs <= max(1, panels.count / 4)
     }
 }
 
@@ -380,7 +519,6 @@ actor PanelDetectionService {
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
     private let visionService: MangaVisionService
-    private let fallbackDetector: any PanelDetecting
     private var memoryCache: [String: PanelPageLayout] = [:]
     private var memoryOrder: [String] = []
     private var generation = UUID()
@@ -389,13 +527,11 @@ actor PanelDetectionService {
     private var lastDiskPruneAt = Date.distantPast
 
     init(
-        visionService: MangaVisionService = .shared,
-        fallbackDetector: any PanelDetecting = VisionRectanglePanelDetector()
+        visionService: MangaVisionService = .shared
     ) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
         self.visionService = visionService
-        self.fallbackDetector = fallbackDetector
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
@@ -479,7 +615,7 @@ actor PanelDetectionService {
         isRightToLeft: Bool
     ) -> [CGRect] {
         let candidates = rects.map {
-            DetectedPanel(rect: $0, confidence: 1, source: .visionRectangle)
+            DetectedPanel(rect: $0, confidence: 1, source: .coreML)
         }
         return PanelReadingOrder.ordered(candidates, isRightToLeft: isRightToLeft).map(\.rect)
     }
@@ -563,13 +699,19 @@ actor PanelDetectionService {
             )
         }
         if mangaAnalysis == nil {
-            mangaAnalysis = try? await visionService.analysis(
-                comicID: comicID,
-                pageIndex: pageIndex,
-                pageURL: pageURL,
-                image: image,
-                requestClass: requestClass
-            )
+            do {
+                mangaAnalysis = try await visionService.analysis(
+                    comicID: comicID,
+                    pageIndex: pageIndex,
+                    pageURL: pageURL,
+                    image: image,
+                    requestClass: requestClass
+                )
+            } catch {
+                MReaderLog.aiVision.error(
+                    "Guided Panel MangaLayout4 analysis failed page=\(pageIndex ?? -1, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         guard epoch == generation, !Task.isCancelled else {
             var temporary = Self.fullPageLayout(
@@ -614,17 +756,23 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        var processed = PanelPostProcessor.process(primaryPanels)
-        var detectorIdentifier = primaryIdentifier
+        let processed = PanelPostProcessor.process(
+            primaryPanels,
+            semanticRegions: (mangaAnalysis?.balloons ?? [])
+                + (mangaAnalysis?.texts ?? [])
+                + (mangaAnalysis?.onomatopoeias ?? []),
+            contentBounds: contentBounds
+        )
+        let detectorIdentifier = primaryIdentifier
 
-        if !PanelLayoutQuality.isUsable(processed) {
-            let fallbackPanels = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
-            let fallbackProcessed = PanelPostProcessor.process(fallbackPanels)
-            if PanelLayoutQuality.isUsable(fallbackProcessed) {
-                processed = fallbackProcessed
-                detectorIdentifier = fallbackDetector.identifier
-            }
+        if let mangaAnalysis, processed.isEmpty {
+            MReaderLog.aiVision.error(
+                "Guided Panel MangaLayout4 returned zero frames page=\(pageIndex ?? -1, privacy: .public) model=\(mangaAnalysis.modelIdentifier ?? "unknown", privacy: .public)"
+            )
         }
+
+        // This Layout4 integration branch must expose model failures directly.
+        // Do not substitute Vision rectangle detection when Layout4 frame output is unusable.
 
         var result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
@@ -638,10 +786,6 @@ actor PanelDetectionService {
                 isRightToLeft: isRightToLeft,
                 structure: structure
             )
-            let semanticFocusRects = GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: readingPlan.panels.map(\.rect),
-                analysis: mangaAnalysis
-            )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
@@ -654,7 +798,7 @@ actor PanelDetectionService {
                         confidence: panel.confidence,
                         source: panel.source,
                         contour: panel.contour.map { MangaVisionContour(points: $0) },
-                        semanticFocusRect: semanticFocusRects[index].map { NormalizedRect($0) }
+                        semanticFocusRect: nil
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
@@ -670,7 +814,7 @@ actor PanelDetectionService {
             )
         }
 
-        result.isTransient = mangaAnalysis == nil || detectorIdentifier != primaryIdentifier || result.usedFallback
+        result.isTransient = mangaAnalysis == nil || result.usedFallback
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }

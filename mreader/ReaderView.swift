@@ -1162,7 +1162,6 @@ struct ReaderView: View {
     @State private var showControls: Bool = false
     @State private var showComicSettings = false
     @State private var showMangaVisionFeedbackSheet = false
-    @State private var pendingMangaVisionHardCaseFeedback: MangaVisionHardCaseFeedback?
     @State private var mangaVisionHardCaseToast: String?
     @State private var mangaVisionHardCaseToastToken = UUID()
     @State private var showOfflineTranslationStart = false
@@ -1547,16 +1546,9 @@ struct ReaderView: View {
         .sheet(isPresented: $showComicSettings) {
             comicSettingsSheet
         }
-        .sheet(
-            isPresented: $showMangaVisionFeedbackSheet,
-            onDismiss: {
-                guard let feedback = pendingMangaVisionHardCaseFeedback else { return }
-                pendingMangaVisionHardCaseFeedback = nil
-                captureMangaVisionHardCase(feedback)
-            }
-        ) {
+        .sheet(isPresented: $showMangaVisionFeedbackSheet) {
             MangaVisionHardCaseFeedbackSheet { feedback in
-                pendingMangaVisionHardCaseFeedback = feedback
+                captureMangaVisionHardCase(feedback)
             }
         }
         .sheet(isPresented: $showOfflineTranslationStart) {
@@ -5530,8 +5522,6 @@ struct LocalImageView: View {
     @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
     @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
     @AppStorage("manga_vision_debug_texts") private var mangaVisionDebugTexts = true
-    @AppStorage("manga_vision_debug_faces") private var mangaVisionDebugFaces = true
-    @AppStorage("manga_vision_debug_bodies") private var mangaVisionDebugBodies = true
     @AppStorage("manga_vision_debug_relations") private var mangaVisionDebugRelations = true
 #endif
     @State private var isLoadingImage = true
@@ -6059,8 +6049,8 @@ struct LocalImageView: View {
                 configuration: MangaVisionDebugOverlayConfiguration(
                     showsPanels: mangaVisionDebugPanels,
                     showsTexts: mangaVisionDebugTexts,
-                    showsFaces: mangaVisionDebugFaces,
-                    showsBodies: mangaVisionDebugBodies,
+                    showsBalloons: true,
+                    showsOnomatopoeias: true,
                     showsRelations: mangaVisionDebugRelations
                 )
             )
@@ -7584,6 +7574,10 @@ private struct TranslationSurfaceRenderer: View {
             case .inPlace:
                 TranslationBubbleContourShape(points: contour)
                     .fill(Color.white.opacity(0.94))
+                    .overlay {
+                        TranslationBubbleContourShape(points: contour)
+                            .stroke(Color.black.opacity(0.58), lineWidth: 0.85)
+                    }
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .assistOverlay:
                 TranslationBubbleContourShape(points: contour)
@@ -7594,8 +7588,8 @@ private struct TranslationSurfaceRenderer: View {
                     }
                     .overlay {
                         TranslationBubbleContourShape(points: contour)
-                            .stroke(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                            .stroke(Color.black.opacity(0.58), lineWidth: 0.85)
+                            .shadow(color: .white.opacity(0.32), radius: 0.8, y: 0.6)
                     }
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .annotation:
@@ -7928,4 +7922,3 @@ private struct AppleIntelligenceGlowBorder: View {
         "iPad16,2": 22
     ]
 }
-

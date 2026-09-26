@@ -234,6 +234,7 @@ nonisolated struct MangaVisionDiagnosticRecord: Sendable, Equatable {
     let panelCount: Int
     let textCount: Int
     let balloonCount: Int
+    let onomatopoeiaCount: Int
 }
 
 nonisolated enum MangaVisionServiceError: Error, Sendable, Equatable {

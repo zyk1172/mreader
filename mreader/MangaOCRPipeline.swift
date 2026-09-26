@@ -342,7 +342,7 @@ nonisolated enum MangaOCRPipeline {
         let candidateResult = try await OCRROICoverageRecognizer.recognizeCandidatesWithReference(
             in: image,
             options: options,
-            visionTextRegions: mangaAnalysis?.texts ?? []
+            visionTextRegions: mangaAnalysis.map { $0.texts + $0.onomatopoeias } ?? []
         )
         let visionBlocks = candidateResult.blocks
         let verticalBlocks = await JapaneseVerticalOCRService.recognizeIfNeeded(
