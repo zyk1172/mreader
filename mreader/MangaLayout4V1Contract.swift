@@ -170,8 +170,8 @@ nonisolated struct MangaLayout4V1Configuration: Sendable, Equatable {
     /// Reader-side experimental thresholds used to evaluate MangaLayout4 V1.
     /// Keep the raw model outputs unchanged; these values define which detections
     /// are admitted into the app's post-processing path during this test branch.
-    var frameScoreThreshold: Float = 0.40
-    var textScoreThreshold: Float = 0.45
+    var frameScoreThreshold: Float = 0.65
+    var textScoreThreshold: Float = 0.35
     var balloonScoreThreshold: Float = 0.30
     var onomatopoeiaScoreThreshold: Float = 0.30
 
