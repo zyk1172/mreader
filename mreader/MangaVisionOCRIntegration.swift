@@ -143,25 +143,36 @@ nonisolated enum MangaVisionOCRGeometry {
             // substantial text coverage, but allow a center-confirmed partial edge.
             guard containment >= 0.55 || (centerInside && containment >= 0.30) else { return nil }
 
-            // Union only repairs small detector under-coverage so the downstream
-            // validatedBubbleGeometry contract can safely require containment.
-            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect.union(textRect))
-            let fittedArea = MangaPageCoordinateSpace.area(fitted)
-            guard fittedArea > 0,
-                  fittedArea <= 0.55,
-                  fittedArea / textArea <= 600 else { return nil }
+            // Keep the physical model geometry unchanged. Expanding the detected
+            // balloon with each OCR text box makes one real bubble acquire a different
+            // bubbleBox per line, which can split one dialogue into multiple translation
+            // units and makes the rendered contour appear offset from the model output.
+            //
+            // We still validate the small OCR/model disagreement using a temporary union,
+            // but that repaired rectangle is never persisted as balloon geometry.
+            let physicalRect = MangaPageCoordinateSpace.clampedNormalizedRect(rect)
+            let repairedCoverage = MangaPageCoordinateSpace.clampedNormalizedRect(
+                physicalRect.union(textRect)
+            )
+            let repairedArea = MangaPageCoordinateSpace.area(repairedCoverage)
+            guard repairedArea > 0,
+                  repairedArea <= 0.55,
+                  repairedArea / textArea <= 600 else { return nil }
 
-            let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
-            let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
+            let distance = hypot(
+                physicalRect.midX - textRect.midX,
+                physicalRect.midY - textRect.midY
+            )
+            let diagonal = max(hypot(physicalRect.width, physicalRect.height), 0.001)
             let normalizedDistance = distance / diagonal
-            // Prefer the bubble that contains most of the OCR text, then the
+            // Prefer the physical bubble that contains most of the OCR text, then the
             // smaller/closer region. Confidence is deliberately a weak tie-breaker.
             let score = containment * 4.0
                 - normalizedDistance * 0.9
-                - fittedArea * 0.8
+                - MangaPageCoordinateSpace.area(physicalRect) * 0.8
                 + CGFloat(balloon.confidence) * 0.35
             return RegionCandidate(
-                rect: fitted,
+                rect: physicalRect,
                 score: score,
                 polygon: balloon.contour?.cgPoints ?? []
             )
