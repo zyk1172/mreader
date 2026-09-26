@@ -131,7 +131,10 @@ nonisolated enum PanelPostProcessor {
     /// Guided Panel is a precision-sensitive consumer: blindly turning every retained
     /// candidate into a navigation stop produces repeated/partial frames and can make
     /// one page feel endless. Keep this product selection separate from model decoding.
-    static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
+    static func process(
+        _ candidates: [DetectedPanel],
+        semanticRegions: [MangaVisionRegion] = []
+    ) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let absoluteThreshold = MangaVisionCalibrationProfile.bundled
             .calibration(for: .panel)
@@ -164,8 +167,11 @@ nonisolated enum PanelPostProcessor {
             min(maximumRelativeFloor, bestScore * relativeScoreFraction)
         )
         let scoreFiltered = normalized.filter { $0.confidence >= navigationFloor }
-        let withoutContainers = scoreFiltered.filter { candidate in
-            !isLikelyWholePageContainer(candidate, among: scoreFiltered)
+        let withoutSemanticAliases = scoreFiltered.filter { candidate in
+            !isLikelySemanticAlias(candidate, semanticRegions: semanticRegions)
+        }
+        let withoutContainers = withoutSemanticAliases.filter { candidate in
+            !isLikelyWholePageContainer(candidate, among: withoutSemanticAliases)
         }
 
         var deduplicated: [DetectedPanel] = []
@@ -184,6 +190,61 @@ nonisolated enum PanelPostProcessor {
                 .sorted(by: preferred)
                 .prefix(maximumNavigationPanelCount)
         )
+    }
+
+    /// Layout4 intentionally exposes the raw high-recall per-class stream. A single
+    /// location can therefore survive as both `frame` and a semantic class. Guided
+    /// Panel is precision-sensitive, so reject only near-identical cross-class aliases
+    /// here while preserving the raw decoder output for model evaluation/diagnostics.
+    private static func isLikelySemanticAlias(
+        _ candidate: DetectedPanel,
+        semanticRegions: [MangaVisionRegion]
+    ) -> Bool {
+        let frameRect = candidate.rect.standardized
+        let frameArea = area(frameRect)
+        guard frameArea > 0 else { return false }
+
+        return semanticRegions.contains { region in
+            guard region.type == .balloon
+                    || region.type == .text
+                    || region.type == .onomatopoeia else {
+                return false
+            }
+            let calibration = MangaVisionCalibrationProfile.bundled.calibration(for: region.type)
+            guard region.confidence >= calibration.confidenceThreshold else {
+                return false
+            }
+
+            let semanticRect = region.normalizedRect.standardized
+            let semanticArea = area(semanticRect)
+            guard semanticArea > 0 else { return false }
+            let intersection = frameRect.intersection(semanticRect)
+            guard !intersection.isNull else { return false }
+
+            let intersectionArea = area(intersection)
+            let unionArea = max(frameArea + semanticArea - intersectionArea, 0.000_001)
+            let iou = intersectionArea / unionArea
+            let smallerArea = max(min(frameArea, semanticArea), 0.000_001)
+            let containment = intersectionArea / smallerArea
+            let sizeRatio = smallerArea / max(frameArea, semanticArea)
+            let semanticToFrameScore = CGFloat(region.confidence)
+                / max(CGFloat(candidate.confidence), 0.000_1)
+
+            switch region.type {
+            case .balloon:
+                // Balloon/frame aliases are the common failure mode: require close
+                // geometry and comparable confidence, never merely "balloon inside frame".
+                return (iou >= 0.48 || (containment >= 0.92 && sizeRatio >= 0.72))
+                    && semanticToFrameScore >= 0.90
+            case .text, .onomatopoeia:
+                // Text boxes can legitimately occupy a large fraction of a small frame,
+                // so use a stricter near-identity gate for these classes.
+                return (iou >= 0.66 || (containment >= 0.97 && sizeRatio >= 0.84))
+                    && semanticToFrameScore >= 1.00
+            case .panel:
+                return false
+            }
+        }
     }
 
     private static func isLikelyWholePageContainer(
@@ -504,7 +565,12 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        let processed = PanelPostProcessor.process(primaryPanels)
+        let processed = PanelPostProcessor.process(
+            primaryPanels,
+            semanticRegions: (mangaAnalysis?.balloons ?? [])
+                + (mangaAnalysis?.texts ?? [])
+                + (mangaAnalysis?.onomatopoeias ?? [])
+        )
         let detectorIdentifier = primaryIdentifier
 
         if let mangaAnalysis, processed.isEmpty {
