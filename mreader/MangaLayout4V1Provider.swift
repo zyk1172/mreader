@@ -11,8 +11,8 @@ nonisolated enum MangaLayout4V1ProductionIdentity {
     // This revision also invalidates cached page geometry when the model-input
     // coordinate contract changes. V4 fixes the duplicated vertical flip in the
     // CGImage -> CHW preprocessing path.
-    static let postProcessRevision = "manga-layout4-v1-full-page-navigation-2026-09-26-v4"
-    static let calibrationRevision = "manga-layout4-v1-qfl-score-contract-2026-09-26-v4"
+    static let postProcessRevision = "manga-layout4-v1-region-refinement-2026-09-26-v5"
+    static let calibrationRevision = "manga-layout4-v1-qfl-score-contract-2026-09-26-v5"
 }
 
 nonisolated struct MangaLayout4V1ProviderDiagnostics: Sendable, Equatable {
@@ -157,7 +157,11 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionSourceImageAnalyzi
                 balloonRegions.append(
                     MangaVisionRegion(
                         type: .balloon,
-                        normalizedRect: detection.normalizedRect,
+                        normalizedRect: MangaLayout4V1RegionRefiner.refinedBalloonRect(
+                            rawRect: detection.normalizedRect,
+                            primaryContour: instance.primaryContour,
+                            secondaryContours: instance.secondaryContours
+                        ),
                         confidence: detection.confidence,
                         contour: instance.primaryContour,
                         secondaryContours: instance.secondaryContours
@@ -166,9 +170,13 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionSourceImageAnalyzi
                 continue
             }
 
+            let regionType = detection.layoutClass.regionType
             let region = MangaVisionRegion(
-                type: detection.layoutClass.regionType,
-                normalizedRect: detection.normalizedRect,
+                type: regionType,
+                normalizedRect: MangaLayout4V1RegionRefiner.refinedSemanticRect(
+                    detection.normalizedRect,
+                    type: regionType
+                ),
                 confidence: detection.confidence
             )
             switch detection.layoutClass {
@@ -255,6 +263,88 @@ actor MangaLayout4V1Provider: MangaVisionProvider, MangaVisionSourceImageAnalyzi
         let components = duration.components
         return Double(components.seconds) * 1_000
             + Double(components.attoseconds) / 1_000_000_000_000_000
+    }
+}
+
+nonisolated enum MangaLayout4V1RegionRefiner {
+    private static let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+    /// Product-level geometry refinement only. Raw decoder diagnostics remain untouched.
+    /// Text/SFX boxes receive a very small safety margin so OCR does not crop glyph strokes.
+    static func refinedSemanticRect(
+        _ rect: CGRect,
+        type: MangaRegionType
+    ) -> CGRect {
+        let source = rect.standardized.intersection(unit)
+        guard !source.isNull, source.width > 0, source.height > 0 else { return rect }
+        let fraction: CGFloat
+        let absoluteFloor: CGFloat
+        switch type {
+        case .text:
+            fraction = 0.04
+            absoluteFloor = 0.0015
+        case .onomatopoeia:
+            fraction = 0.06
+            absoluteFloor = 0.002
+        case .panel, .balloon:
+            return source
+        }
+        let dx = max(source.width * fraction, absoluteFloor)
+        let dy = max(source.height * fraction, absoluteFloor)
+        return source.insetBy(dx: -dx, dy: -dy).intersection(unit)
+    }
+
+    /// The mask is usually a better description of the visible balloon than the raw
+    /// regression box. Use it only when it agrees geometrically with the detection,
+    /// then add a tiny margin so the tail/outline is not clipped.
+    static func refinedBalloonRect(
+        rawRect: CGRect,
+        primaryContour: MangaVisionContour?,
+        secondaryContours: [MangaVisionContour]
+    ) -> CGRect {
+        let raw = rawRect.standardized.intersection(unit)
+        guard !raw.isNull, raw.width > 0, raw.height > 0 else { return rawRect }
+
+        let contours = ([primaryContour].compactMap { $0 } + secondaryContours)
+            .filter { !$0.points.isEmpty }
+        guard let first = contours.first else { return raw }
+        let envelope = contours.dropFirst().reduce(first.bounds) { $0.union($1.bounds) }
+            .standardized
+            .intersection(unit)
+        guard !envelope.isNull, envelope.width > 0, envelope.height > 0 else { return raw }
+
+        let rawArea = area(raw)
+        let maskArea = area(envelope)
+        guard rawArea > 0,
+              maskArea >= rawArea * 0.08,
+              maskArea <= rawArea * 1.35 else {
+            return raw
+        }
+
+        let intersection = raw.intersection(envelope)
+        guard !intersection.isNull else { return raw }
+        let maskContainment = area(intersection) / max(maskArea, 0.000_001)
+        guard maskContainment >= 0.60 else { return raw }
+
+        let dx = max(envelope.width * 0.06, 0.003)
+        let dy = max(envelope.height * 0.06, 0.003)
+        let paddedMask = envelope.insetBy(dx: -dx, dy: -dy).intersection(unit)
+        let allowed = raw.insetBy(
+            dx: -max(raw.width * 0.08, 0.004),
+            dy: -max(raw.height * 0.08, 0.004)
+        ).intersection(unit)
+        let refined = paddedMask.intersection(allowed)
+        guard !refined.isNull,
+              refined.width > 0,
+              refined.height > 0,
+              area(refined) >= rawArea * 0.10 else {
+            return raw
+        }
+        return refined
+    }
+
+    private static func area(_ rect: CGRect) -> CGFloat {
+        max(rect.width, 0) * max(rect.height, 0)
     }
 }
 
