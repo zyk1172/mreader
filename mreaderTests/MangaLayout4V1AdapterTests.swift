@@ -63,15 +63,16 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         )
     }
 
-    func testFrozenTrainingPostprocessThresholdsMatchReferenceDecoder() {
+    func testReaderEvaluationThresholdsMatchConfiguredExperiment() {
         let config = MangaLayout4V1Configuration()
-        for layoutClass in MangaLayout4V1Class.allCases {
-            XCTAssertEqual(config.scoreThreshold(for: layoutClass), 0.05)
-        }
-        XCTAssertEqual(config.frameNMSThreshold, 0.50)
-        XCTAssertEqual(config.textNMSThreshold, 0.50)
-        XCTAssertEqual(config.balloonNMSThreshold, 0.45)
-        XCTAssertEqual(config.onomatopoeiaNMSThreshold, 0.45)
+        XCTAssertEqual(config.frameScoreThreshold, 0.65)
+        XCTAssertEqual(config.textScoreThreshold, 0.35)
+        XCTAssertEqual(config.balloonScoreThreshold, 0.30)
+        XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.30)
+        XCTAssertEqual(config.frameNMSThreshold, 0.35)
+        XCTAssertEqual(config.textNMSThreshold, 0.35)
+        XCTAssertEqual(config.balloonNMSThreshold, 0.35)
+        XCTAssertEqual(config.onomatopoeiaNMSThreshold, 0.35)
     }
 
     func testGuidedPanelAcceptsQualityFocalFrameScoresKeptByLayout4() {
