@@ -150,6 +150,118 @@ struct GuidedPanelVisionV2Tests {
         #expect(!processed.map(\.rect).contains(balloonAlias.rect))
     }
 
+    @Test func layout4NavigationKeepsDistinctFrameAroundBalloonWithoutOtherText() {
+        let actualFrame = DetectedPanel(
+            rect: CGRect(x: 0.35, y: 0.32, width: 0.30, height: 0.30),
+            confidence: 0.58,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.47, y: 0.395, width: 0.22, height: 0.15),
+            confidence: 0.57
+        )
+
+        let processed = PanelPostProcessor.process(
+            [actualFrame],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.count == 1)
+        #expect(abs((processed.first?.rect.minX ?? 0) - actualFrame.rect.minX) < 0.000_001)
+        #expect(abs((processed.first?.rect.minY ?? 0) - actualFrame.rect.minY) < 0.000_001)
+        #expect(abs((processed.first?.rect.width ?? 0) - actualFrame.rect.width) < 0.000_001)
+        #expect(abs((processed.first?.rect.height ?? 0) - actualFrame.rect.height) < 0.000_001)
+    }
+
+    @Test func layout4NavigationKeepsBalloonDominatedFrameWithIndependentContent() {
+        let actualFrame = DetectedPanel(
+            rect: CGRect(x: 0.35, y: 0.32, width: 0.30, height: 0.30),
+            confidence: 0.72,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.47, y: 0.395, width: 0.22, height: 0.15),
+            confidence: 0.57
+        )
+        let independentText = MangaVisionRegion(
+            type: .text,
+            normalizedRect: CGRect(x: 0.39, y: 0.56, width: 0.10, height: 0.045),
+            confidence: 0.83
+        )
+
+        let processed = PanelPostProcessor.process(
+            [actualFrame],
+            semanticRegions: [balloon, independentText]
+        )
+
+        #expect(processed.count == 1)
+        #expect(abs((processed.first?.rect.width ?? 0) - actualFrame.rect.width) < 0.000_001)
+        #expect(abs((processed.first?.rect.height ?? 0) - actualFrame.rect.height) < 0.000_001)
+    }
+
+    @Test func layout4NavigationKeepsFrameLargerThanBalloonAndItsContainedText() {
+        let unrelatedFrame = DetectedPanel(
+            rect: CGRect(x: 0.04, y: 0.04, width: 0.30, height: 0.32),
+            confidence: 0.82,
+            source: .coreML
+        )
+        let balloonSizedFrame = DetectedPanel(
+            rect: CGRect(x: 0.35, y: 0.32, width: 0.30, height: 0.30),
+            confidence: 0.58,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.47, y: 0.395, width: 0.22, height: 0.15),
+            confidence: 0.57
+        )
+        let containedText = MangaVisionRegion(
+            type: .text,
+            normalizedRect: CGRect(x: 0.51, y: 0.43, width: 0.08, height: 0.04),
+            confidence: 0.82
+        )
+
+        let processed = PanelPostProcessor.process(
+            [unrelatedFrame, balloonSizedFrame],
+            semanticRegions: [balloon, containedText]
+        )
+
+        #expect(processed.count == 2)
+        #expect(processed.contains { abs($0.rect.minX - unrelatedFrame.rect.minX) < 0.000_001 })
+        #expect(processed.contains { abs($0.rect.minX - balloonSizedFrame.rect.minX) < 0.000_001 })
+    }
+
+    @Test func layout4NavigationClipsOuterPageMarginsAndDropsMarginOnlyFrames() {
+        let pageFrame = DetectedPanel(
+            rect: CGRect(x: 0.02, y: 0.10, width: 0.40, height: 0.40),
+            confidence: 0.82,
+            source: .coreML,
+            contour: [
+                CGPoint(x: 0.02, y: 0.10),
+                CGPoint(x: 0.42, y: 0.10),
+                CGPoint(x: 0.42, y: 0.50),
+                CGPoint(x: 0.02, y: 0.50)
+            ]
+        )
+        let marginOnlyFrame = DetectedPanel(
+            rect: CGRect(x: 0.01, y: 0.05, width: 0.04, height: 0.18),
+            confidence: 0.80,
+            source: .coreML
+        )
+        let contentBounds = CGRect(x: 0.08, y: 0.04, width: 0.86, height: 0.92)
+
+        let processed = PanelPostProcessor.process(
+            [pageFrame, marginOnlyFrame],
+            contentBounds: contentBounds
+        )
+
+        #expect(processed.count == 1)
+        #expect(processed.first?.rect == CGRect(x: 0.08, y: 0.10, width: 0.34, height: 0.40))
+        #expect(processed.first?.contour == nil)
+    }
+
     @Test func layout4NavigationDoesNotRejectRealFrameMerelyBecauseItContainsBalloon() {
         let realFrame = DetectedPanel(
             rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),

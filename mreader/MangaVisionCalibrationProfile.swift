@@ -7,17 +7,17 @@ nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
 }
 
 /// MangaLayout4 V1 reader-evaluation calibration.
-/// These values intentionally differ from the training/export reference decoder:
-/// the test branch uses stricter product thresholds while preserving raw diagnostics.
+/// These are provisional visual-review operating points, not gold-label optima;
+/// raw model scores and diagnostics remain available for further calibration.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let revision: String
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga-layout4-v1-reader-eval-2026-09-26-v6",
+        revision: "manga-layout4-v1-reader-eval-2026-09-27-v7",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.65,
+                confidenceThreshold: 0.40,
                 nmsIOUThreshold: 0.35
             ),
             .text: MangaVisionClassCalibration(
@@ -25,11 +25,11 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
                 nmsIOUThreshold: 0.35
             ),
             .balloon: MangaVisionClassCalibration(
-                confidenceThreshold: 0.30,
+                confidenceThreshold: 0.27,
                 nmsIOUThreshold: 0.35
             ),
             .onomatopoeia: MangaVisionClassCalibration(
-                confidenceThreshold: 0.30,
+                confidenceThreshold: 0.25,
                 nmsIOUThreshold: 0.35
             )
         ]

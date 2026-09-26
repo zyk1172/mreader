@@ -1214,6 +1214,34 @@ nonisolated enum OCRBubbleLayoutEngine {
         } ?? clampedOriginal
     }
 
+    /// Tries a smaller text surface before accepting a collision. The caller is
+    /// responsible for scaling the font and verifying the full text still fits.
+    static func collisionFreePlacement(
+        _ original: CGRect,
+        scale: CGFloat,
+        anchor: CGPoint,
+        occupiedRects: [CGRect],
+        bounds: CGRect,
+        margin: CGFloat = 0
+    ) -> CGRect? {
+        guard scale.isFinite, scale > 0, scale <= 1,
+              original.width > 0, original.height > 0 else { return nil }
+        let candidate = CGRect(
+            x: original.midX - original.width * scale / 2,
+            y: original.midY - original.height * scale / 2,
+            width: original.width * scale,
+            height: original.height * scale
+        )
+        let placed = nonOverlappingRect(
+            candidate,
+            anchor: anchor,
+            occupiedRects: occupiedRects,
+            bounds: bounds,
+            margin: margin
+        )
+        return occupiedRects.contains(where: { $0.intersects(placed) }) ? nil : placed
+    }
+
     private static func layoutScore(
         _ rect: CGRect,
         anchor: CGPoint,
@@ -1227,4 +1255,3 @@ nonisolated enum OCRBubbleLayoutEngine {
         return hypot(rect.midX - anchor.x, rect.midY - anchor.y) + overlapPenalty
     }
 }
-

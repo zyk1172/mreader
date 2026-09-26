@@ -6285,6 +6285,17 @@ struct LocalImageView: View {
             detectedBubble: usableBubbleBounds,
             pageBounds: imageBounds
         )
+        let bubbleSurface = mappedTranslationBubbleSurface(
+            for: block,
+            usableBubbleBounds: usableBubbleBounds,
+            using: transform
+        )
+        let contourInterior = bubbleSurface.flatMap { surface in
+            OCRCoordinateMapper.interiorRect(for: OCRDisplayPolygon(
+                rect: surface.rect,
+                localPoints: surface.polygon
+            ))
+        }
         let fallbackBounds: CGRect
         if OCRBubbleLayoutEngine.usesStandaloneLayout(for: block) {
             fallbackBounds = OCRBubbleLayoutEngine.standaloneTranslationBounds(
@@ -6297,9 +6308,35 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds = resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
+        let rectangularAllowedBounds = resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
+        let allowedBounds: CGRect
+        if let contourInterior {
+            let suggestedInterior = rectangularAllowedBounds.intersection(contourInterior)
+            // layoutSafeRegion is a hint. When it misses the contour's usable core,
+            // keep the physical balloon as the hard boundary and fit the text there.
+            allowedBounds = suggestedInterior.isNull
+                    || suggestedInterior.width <= 0
+                    || suggestedInterior.height <= 0
+                ? contourInterior
+                : suggestedInterior
+        } else {
+            allowedBounds = rectangularAllowedBounds
+        }
+        let layoutAnchorRect: CGRect
+        if hasReliableBubble, allowedBounds.width > 0, allowedBounds.height > 0 {
+            let anchorWidth = min(max(textRect.width, 1), allowedBounds.width)
+            let anchorHeight = min(max(textRect.height, 1), allowedBounds.height)
+            layoutAnchorRect = CGRect(
+                x: allowedBounds.midX - anchorWidth / 2,
+                y: allowedBounds.midY - anchorHeight / 2,
+                width: anchorWidth,
+                height: anchorHeight
+            )
+        } else {
+            layoutAnchorRect = textRect
+        }
         let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
-            around: textRect,
+            around: layoutAnchorRect,
             within: allowedBounds,
             imageBounds: imageBounds
         )
@@ -6329,18 +6366,13 @@ struct LocalImageView: View {
             translation: effectiveTranslation,
             translationLines: translation.isEmpty ? [] : validatedTranslationLines(for: block),
             sourceFontSize: requestedFontSize,
-            sourceRect: textRect,
+            sourceRect: layoutAnchorRect,
             allowedBounds: layoutBounds,
             lineSpacing: 2,
             textOrientation: translationOrientation,
             // detected bubble 沿用真实气泡范围；measuredText 只按译文测量结果排版。
             geometryStrategy: hasReliableBubble ? .detectedBubble : .measuredText,
             minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
-        )
-        let bubbleSurface = mappedTranslationBubbleSurface(
-            for: block,
-            usableBubbleBounds: usableBubbleBounds,
-            using: transform
         )
         let surfaceRect = bubbleSurface?.rect ?? choice.layout.rect
         let surfacePolygon = bubbleSurface?.polygon ?? []
@@ -6380,25 +6412,17 @@ struct LocalImageView: View {
         usableBubbleBounds: CGRect?,
         using transform: OCRDisplayTransform
     ) -> (rect: CGRect, polygon: [CGPoint])? {
-        guard let surfaceRect = usableBubbleBounds,
+        guard usableBubbleBounds != nil,
               block.bubblePolygon.count >= 3 else {
             return nil
         }
-        let mapped = block.bubblePolygon.map {
-            OCRCoordinateMapper.displayPoint(
-                forNormalizedPagePoint: $0,
-                using: transform
-            )
-        }.filter { $0.x.isFinite && $0.y.isFinite }
-        guard mapped.count >= 3 else { return nil }
-
-        let local = mapped.map {
-            CGPoint(
-                x: $0.x - surfaceRect.minX,
-                y: $0.y - surfaceRect.minY
-            )
-        }
-        return (surfaceRect, local)
+        guard let polygon = OCRCoordinateMapper.displayPolygon(
+            forNormalizedPagePoints: block.bubblePolygon,
+            using: transform
+        ) else { return nil }
+        // The mask contour, rather than a separately regressed bubbleBox, defines
+        // the surface frame. This prevents clipping when the two sources differ.
+        return (polygon.rect, polygon.localPoints)
     }
 
     private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
@@ -6517,21 +6541,74 @@ struct LocalImageView: View {
 
         for item in initialItems {
             let original = item.rect
-            let sourceRect = item.blocks.reduce(CGRect.null) { $0.union($1.boundingBox) }
-            let mappedSourceRect = OCRCoordinateMapper.displayRect(
-                forNormalizedPageRect: sourceRect,
-                using: transform
-            )
             let boundedMovement = item.allowedBounds.intersection(transform.imageRect)
             let movementBounds = boundedMovement.isNull || boundedMovement.width <= 0 || boundedMovement.height <= 0
                 ? transform.imageRect
                 : boundedMovement
-            let rect = OCRBubbleLayoutEngine.nonOverlappingRect(
+            // Use the already fitted in-bubble layout center. The raw OCR text box can
+            // be off-center inside the detected balloon and must not pull collision
+            // avoidance back toward its original Japanese glyphs.
+            let anchor = CGPoint(x: original.midX, y: original.midY)
+            let translationText = item.displayText ?? item.blocks.compactMap {
+                let value = displayTranslation(for: $0)
+                return value.isEmpty ? nil : value
+            }.joined(separator: "\n\n")
+            var resolvedRect: CGRect?
+            var resolvedFontSize = item.fontSize
+            var resolvedContentPadding = item.contentPadding
+            let collisionScales: [CGFloat] = [
+                1, 0.92, 0.84, 0.76, 0.68, 0.60,
+                0.52, 0.44, 0.36, 0.28, 0.20, 0.14
+            ]
+
+            if !occupiedRects.contains(where: { $0.intersects(original) }) {
+                resolvedRect = OCRBubbleLayoutEngine.nonOverlappingRect(
+                    original,
+                    anchor: anchor,
+                    occupiedRects: occupiedRects,
+                    bounds: movementBounds,
+                    margin: 0
+                )
+            } else {
+                for scale in collisionScales {
+                    guard let candidate = OCRBubbleLayoutEngine.collisionFreePlacement(
+                        original,
+                        scale: scale,
+                        anchor: anchor,
+                        occupiedRects: occupiedRects,
+                        // A detected bubble's safe region is a hard movement boundary.
+                        // Unmatched text stays in its local fallback region.
+                        bounds: movementBounds,
+                        margin: 0
+                    ) else { continue }
+
+                    let fontSize = max(item.fontSize * scale, 1)
+                    let contentPadding = item.contentPadding * scale
+                    let contentSize = CGSize(
+                        width: max(candidate.width - contentPadding * 2, 1),
+                        height: max(candidate.height - contentPadding * 2, 1)
+                    )
+                    let measurement = TranslationTypesetter.measurement(
+                        text: translationText,
+                        fontSize: fontSize,
+                        bounds: contentSize,
+                        orientation: item.textOrientation,
+                        lineSpacing: 2
+                    )
+                    guard measurement.fitsAllText else { continue }
+                    resolvedRect = candidate
+                    resolvedFontSize = fontSize
+                    resolvedContentPadding = contentPadding
+                    break
+                }
+            }
+
+            // If no collision-free readable size exists in this legal region,
+            // retain the current measured layout and use the minimum-overlap fallback.
+            let rect = resolvedRect ?? OCRBubbleLayoutEngine.nonOverlappingRect(
                 original,
-                anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
+                anchor: anchor,
                 occupiedRects: occupiedRects,
-                // Reliable bubbles are now a hard movement boundary. Measured
-                // text keeps its local fallback region as the anchor boundary.
                 bounds: movementBounds,
                 margin: 0
             )
@@ -6548,8 +6625,8 @@ struct LocalImageView: View {
                 surfaceRect: item.surfaceRect,
                 surfacePolygon: item.surfacePolygon,
                 allowedBounds: item.allowedBounds,
-                fontSize: item.fontSize,
-                contentPadding: item.contentPadding,
+                fontSize: resolvedFontSize,
+                contentPadding: resolvedContentPadding,
                 displayText: item.displayText,
                 textOrientation: item.textOrientation,
                 layoutRole: item.layoutRole,
@@ -7438,7 +7515,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 3
+    static let layoutRevision = 5
 
     struct Key: Equatable {
         let scope: String

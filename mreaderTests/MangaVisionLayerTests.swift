@@ -7,6 +7,22 @@ import UIKit
 @Suite(.serialized)
 @MainActor
 struct MangaVisionLayerTests {
+    @Test func persistedBalloonContourRetainsEnoughVerticesForCurvedMasks() {
+        let points = (0..<128).map { index in
+            let angle = CGFloat(index) / 128 * 2 * .pi
+            return CGPoint(
+                x: 0.5 + 0.3 * cos(angle),
+                y: 0.5 + 0.4 * sin(angle)
+            )
+        }
+
+        let contour = MangaVisionContour(points: points)
+
+        #expect(contour.cgPoints.count == 64)
+        #expect(contour.bounds.width > 0.59)
+        #expect(contour.bounds.height > 0.79)
+    }
+
     @Test func mangaBalloonGeometryCombinesVerticalColumnsIntoOneTranslationUnit() {
         let balloon = region(
             .balloon,

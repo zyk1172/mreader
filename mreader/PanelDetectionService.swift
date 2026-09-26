@@ -32,8 +32,8 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
     let confidence: Float
     let source: PanelDetectionSource
     let contour: MangaVisionContour?
-    /// Optional content-aware viewport inside this panel. Navigation still targets the
-    /// panel itself; this rect only changes how an already-selected large panel is framed.
+    /// Legacy content-aware crop retained for cache compatibility. Guided navigation always
+    /// centers the actual detected frame so off-center text/balloons cannot pull the camera.
     let semanticFocusRect: NormalizedRect?
 
     init(
@@ -53,7 +53,7 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     static let schemaVersion = 6
-    static let modelVersion = 5
+    static let modelVersion = 6
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -92,7 +92,7 @@ nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
 
     func focusRect(at index: Int) -> CGRect {
         guard panels.indices.contains(index) else { return contentBounds.cgRect }
-        return panels[index].semanticFocusRect?.cgRect ?? panels[index].rect.cgRect
+        return panels[index].rect.cgRect
     }
 
     var orderingStrategy: PanelReadingOrderStrategy {
@@ -121,6 +121,7 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
 nonisolated enum PanelPostProcessor {
     private static let minimumDimension: CGFloat = 0.025
     private static let minimumArea: CGFloat = 0.0015
+    private static let minimumContentRetention: CGFloat = 0.45
     private static let relativeScoreFraction: Float = 0.30
     private static let maximumRelativeFloor: Float = 0.14
     private static let maximumNavigationPanelCount = 20
@@ -137,6 +138,12 @@ nonisolated enum PanelPostProcessor {
         contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     ) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let clippedContentBounds = contentBounds.standardized.intersection(unit)
+        let pageBounds = !clippedContentBounds.isNull
+                && clippedContentBounds.width >= 0.1
+                && clippedContentBounds.height >= 0.1
+            ? clippedContentBounds
+            : unit
         let absoluteThreshold = MangaVisionCalibrationProfile.bundled
             .calibration(for: .panel)
             .confidenceThreshold
@@ -146,8 +153,12 @@ nonisolated enum PanelPostProcessor {
                   panel.confidence >= absoluteThreshold else {
                 return nil
             }
-            let rect = panel.rect.standardized.intersection(unit)
+            let modelRect = panel.rect.standardized.intersection(unit)
+            guard !modelRect.isNull, area(modelRect) > 0 else { return nil }
+            let rect = modelRect.intersection(pageBounds)
+            let retainedContentFraction = area(rect) / area(modelRect)
             guard !rect.isNull,
+                  retainedContentFraction >= minimumContentRetention,
                   rect.width >= minimumDimension,
                   rect.height >= minimumDimension,
                   area(rect) >= minimumArea else {
@@ -157,7 +168,7 @@ nonisolated enum PanelPostProcessor {
                 rect: rect,
                 confidence: panel.confidence,
                 source: .coreML,
-                contour: panel.contour
+                contour: rect == modelRect ? panel.contour : nil
             )
         }
         guard !normalized.isEmpty else { return [] }
@@ -179,7 +190,7 @@ nonisolated enum PanelPostProcessor {
         let recovered = recoverSemanticHoles(
             among: recoveryBase,
             semanticRegions: semanticRegions,
-            contentBounds: contentBounds,
+            contentBounds: pageBounds,
             minimumConfidence: absoluteThreshold
         )
         let augmented = withoutSemanticAliases + recovered
@@ -256,6 +267,40 @@ nonisolated enum PanelPostProcessor {
             let hasSFX = cluster.contains { $0.type == .onomatopoeia }
             let hasBalloon = cluster.contains { $0.type == .balloon }
             guard hasText || hasSFX else { return nil }
+
+            let clusterBalloons = cluster.filter { $0.type == .balloon }
+            if hasBalloon {
+                let hasContentOutsideBalloon = cluster.contains { region in
+                    guard region.type == .text || region.type == .onomatopoeia else {
+                        return false
+                    }
+                    let center = CGPoint(
+                        x: region.normalizedRect.midX,
+                        y: region.normalizedRect.midY
+                    )
+                    return !clusterBalloons.contains { balloon in
+                        balloon.normalizedRect.standardized
+                            .insetBy(dx: -0.012, dy: -0.012)
+                            .contains(center)
+                    }
+                }
+                let hasSeparateBalloon = clusterBalloons.indices.contains { firstIndex in
+                    clusterBalloons.indices.contains { secondIndex in
+                        guard secondIndex > firstIndex else { return false }
+                        let first = clusterBalloons[firstIndex].normalizedRect.standardized
+                        let second = clusterBalloons[secondIndex].normalizedRect.standardized
+                        let overlap = first.intersection(second)
+                        let overlapFraction = overlap.isNull
+                            ? 0
+                            : area(overlap) / max(min(area(first), area(second)), 0.000_001)
+                        return overlapFraction < 0.50
+                            && hypot(first.midX - second.midX, first.midY - second.midY) > 0.04
+                    }
+                }
+                // A cluster made only from one balloon and text inside it is dialogue,
+                // not enough evidence to synthesize a navigation panel.
+                guard hasContentOutsideBalloon || hasSeparateBalloon else { return nil }
+            }
 
             let evidenceScore = cluster.reduce(CGFloat.zero) { partial, region in
                 let weight: CGFloat
@@ -421,12 +466,20 @@ nonisolated enum PanelPostProcessor {
 
             switch region.type {
             case .balloon:
-                // Balloon/frame aliases are the common failure mode. Once the balloon
-                // itself passed its class threshold, close geometry is stronger evidence
-                // than cross-class score comparison: independent sigmoid heads can give
-                // the same physical region very different scores for frame vs balloon.
-                // The geometric guard still preserves a real enclosing panel.
-                return (iou >= 0.48 || (containment >= 0.92 && sizeRatio >= 0.72))
+                // A panel commonly contains one large balloon and may have no other
+                // text/SFX detections. Only remove a frame candidate when its box is
+                // nearly the same object as the balloon; treating ordinary containment
+                // as an alias drops real dialogue panels, especially in dense lower rows.
+                let balloonIsNearIdentical = iou >= 0.70
+                    && containment >= 0.94
+                    && sizeRatio >= 0.65
+                    && semanticToFrameScore >= 1.00
+                return balloonIsNearIdentical
+                    && !hasIndependentSemanticSupport(
+                        inside: frameRect,
+                        excluding: semanticRect,
+                        semanticRegions: semanticRegions
+                    )
             case .text, .onomatopoeia:
                 // Text boxes can legitimately occupy a large fraction of a small frame,
                 // so use a stricter near-identity gate for these classes.
@@ -435,6 +488,41 @@ nonisolated enum PanelPostProcessor {
             case .panel:
                 return false
             }
+        }
+    }
+
+    private static func hasIndependentSemanticSupport(
+        inside frameRect: CGRect,
+        excluding matchedBalloonRect: CGRect,
+        semanticRegions: [MangaVisionRegion]
+    ) -> Bool {
+        let expandedBalloonRect = matchedBalloonRect.insetBy(dx: -0.012, dy: -0.012)
+        return semanticRegions.contains { region in
+            guard region.type == .balloon
+                    || region.type == .text
+                    || region.type == .onomatopoeia else {
+                return false
+            }
+            let threshold = MangaVisionCalibrationProfile.bundled
+                .calibration(for: region.type)
+                .confidenceThreshold
+            guard region.confidence >= threshold else { return false }
+
+            let semanticRect = region.normalizedRect.standardized
+            let semanticArea = area(semanticRect)
+            guard semanticArea > 0 else { return false }
+            let inFrame = semanticRect.intersection(frameRect)
+            guard !inFrame.isNull,
+                  area(inFrame) / semanticArea >= 0.50 else {
+                return false
+            }
+
+            let matchedOverlap = semanticRect.intersection(matchedBalloonRect)
+            let matchedCoverage = matchedOverlap.isNull
+                ? 0
+                : area(matchedOverlap) / semanticArea
+            let center = CGPoint(x: semanticRect.midX, y: semanticRect.midY)
+            return matchedCoverage < 0.50 && !expandedBalloonRect.contains(center)
         }
     }
 
@@ -1019,4 +1107,3 @@ actor PanelDetectionService {
             .joined()
     }
 }
-

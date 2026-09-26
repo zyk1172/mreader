@@ -25,7 +25,7 @@ nonisolated struct MangaVisionPoint: Codable, Sendable, Hashable {
 /// Compact normalized contour distilled from an instance-segmentation mask.
 /// The provider caps the point count so persisted Manga Vision cache entries stay small.
 nonisolated struct MangaVisionContour: Codable, Sendable, Hashable {
-    static let maximumPointCount = 32
+    static let maximumPointCount = 64
 
     let points: [MangaVisionPoint]
 

@@ -65,10 +65,10 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
 
     func testReaderEvaluationThresholdsMatchConfiguredExperiment() {
         let config = MangaLayout4V1Configuration()
-        XCTAssertEqual(config.frameScoreThreshold, 0.65)
+        XCTAssertEqual(config.frameScoreThreshold, 0.40)
         XCTAssertEqual(config.textScoreThreshold, 0.35)
-        XCTAssertEqual(config.balloonScoreThreshold, 0.30)
-        XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.30)
+        XCTAssertEqual(config.balloonScoreThreshold, 0.27)
+        XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.25)
         XCTAssertEqual(config.frameNMSThreshold, 0.35)
         XCTAssertEqual(config.textNMSThreshold, 0.35)
         XCTAssertEqual(config.balloonNMSThreshold, 0.35)
