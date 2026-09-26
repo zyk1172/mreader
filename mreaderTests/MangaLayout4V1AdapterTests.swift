@@ -143,6 +143,25 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
         XCTAssertEqual(value(prepared.array, channel: 2, y: 320, x: 200), 0, accuracy: 0.000_001)
     }
 
+    func testPreprocessorPreservesVisualTopToBottomOrientation() throws {
+        let image = try makeImage(
+            width: 2,
+            height: 2,
+            rows: [
+                [255, 0, 0, 255, 255, 0, 0, 255],
+                [0, 0, 255, 255, 0, 0, 255, 255]
+            ]
+        )
+        let prepared = try MangaLayout4V1Preprocessor.makeInput(from: image)
+
+        // 2x2 square fills the 640x640 model canvas. Sample well inside each
+        // resized half so bilinear interpolation cannot blur across the boundary.
+        XCTAssertGreaterThan(value(prepared.array, channel: 0, y: 100, x: 320), 0.95)
+        XCTAssertLessThan(value(prepared.array, channel: 2, y: 100, x: 320), 0.05)
+        XCTAssertLessThan(value(prepared.array, channel: 0, y: 540, x: 320), 0.05)
+        XCTAssertGreaterThan(value(prepared.array, channel: 2, y: 540, x: 320), 0.95)
+    }
+
     func testDecoderAppliesIndependentSigmoidPerClassAndSameClassNMSOnly() throws {
         var outputs = try makeRawOutputs()
         let p2Cls = try XCTUnwrap(outputs["p2_cls"])
@@ -438,6 +457,36 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
 
     private func logit(_ probability: Float) -> Float {
         log(probability / (1 - probability))
+    }
+
+    private func makeImage(
+        width: Int,
+        height: Int,
+        rows: [[UInt8]]
+    ) throws -> CGImage {
+        XCTAssertEqual(rows.count, height)
+        XCTAssertTrue(rows.allSatisfy { $0.count == width * 4 })
+        let pixels = rows.flatMap { $0 }
+        let provider = try XCTUnwrap(
+            CGDataProvider(data: Data(pixels) as CFData)
+        )
+        return try XCTUnwrap(
+            CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(
+                    rawValue: CGImageAlphaInfo.premultipliedLast.rawValue
+                ),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: false,
+                intent: .defaultIntent
+            )
+        )
     }
 
     private func makeSolidImage(
