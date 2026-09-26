@@ -60,6 +60,64 @@ struct MangaVisionLayerTests {
         #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
     }
 
+    @Test func mangaBalloonMatchingPreservesPhysicalGeometryWhenOCRSpillsPastEdge() {
+        let balloonRect = CGRect(x: 0.48, y: 0.16, width: 0.28, height: 0.42)
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: balloonRect,
+            confidence: 0.92,
+            contour: MangaVisionContour(points: [
+                CGPoint(x: 0.49, y: 0.18),
+                CGPoint(x: 0.74, y: 0.18),
+                CGPoint(x: 0.75, y: 0.56),
+                CGPoint(x: 0.49, y: 0.56)
+            ])
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "balloon-spill-test",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let rightColumn = TextBlock(
+            text: "右",
+            boundingBox: CGRect(x: 0.735, y: 0.24, width: 0.030, height: 0.18),
+            confidence: 0.95,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.03,
+            textOrientation: .vertical
+        )
+        let leftColumn = TextBlock(
+            text: "左",
+            boundingBox: CGRect(x: 0.475, y: 0.23, width: 0.030, height: 0.20),
+            confidence: 0.94,
+            ocrSource: "original:ja",
+            estimatedFontScale: 0.03,
+            textOrientation: .vertical
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [rightColumn, leftColumn],
+            analysis: analysis
+        )
+
+        #expect(enriched.count == 2)
+        #expect(enriched.allSatisfy { $0.bubbleBox == balloonRect })
+        #expect(enriched.allSatisfy { $0.bubblePolygon == balloon.contour?.cgPoints })
+
+        let segmentation = MangaTextSegmenter.segment(enriched, isRightToLeft: true)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == balloonRect)
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
+    }
+
     @Test func mangaBalloonContourFlowsIntoTranslationUnitAndSafeRegion() {
         let contourPoints = [
             CGPoint(x: 0.50, y: 0.18),
