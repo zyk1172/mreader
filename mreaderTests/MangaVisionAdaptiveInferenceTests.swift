@@ -19,10 +19,10 @@ struct MangaVisionAdaptiveInferenceTests {
 
         #expect(plan.allowsInference)
         #expect(plan.refinementTiles.isEmpty)
-        #expect(plan.reason == "standard-page-full-pass-only")
+        #expect(plan.reason == "layout4-full-page-only")
     }
 
-    @Test func longStripBuildsBoundedOverlappingCoverage() {
+    @Test func longStripStillUsesOneCompletePagePass() {
         let plan = MangaVisionInferencePlanner.plan(
             sourceSize: CGSize(width: 1_200, height: 7_200),
             inputSize: CGSize(width: 640, height: 640),
@@ -34,17 +34,9 @@ struct MangaVisionAdaptiveInferenceTests {
         )
 
         #expect(plan.allowsInference)
-        #expect(plan.refinementTiles.count == 5)
-        #expect(plan.refinementTiles.count <= 6)
-        #expect(abs(plan.refinementTiles.first!.sourceRect.minY) < 0.000_001)
-        #expect(abs(plan.refinementTiles.last!.sourceRect.maxY - 1) < 0.000_001)
-
-        for index in 1..<plan.refinementTiles.count {
-            let previous = plan.refinementTiles[index - 1]
-            let current = plan.refinementTiles[index]
-            #expect(previous.sourceRect.maxY > current.sourceRect.minY)
-            #expect(abs(previous.ownershipRect.maxY - current.ownershipRect.minY) < 0.000_001)
-        }
+        #expect(plan.refinementTiles.isEmpty)
+        #expect(plan.reason == "layout4-full-page-only")
+        #expect(MangaVisionInferencePlanner.maximumInferencePassCount == 1)
     }
 
     @Test func lowPowerPrefetchKeepsOnlyCheapBaseline() {
@@ -61,7 +53,7 @@ struct MangaVisionAdaptiveInferenceTests {
 
         #expect(plan.allowsInference)
         #expect(plan.refinementTiles.isEmpty)
-        #expect(plan.reason == "low-power-background-full-pass-only")
+        #expect(plan.reason == "layout4-full-page-only")
         #expect(
             MangaVisionInferencePlanner.prefetchMaximumSourceDimension(
                 inputSize: CGSize(width: 640, height: 640),
@@ -93,7 +85,7 @@ struct MangaVisionAdaptiveInferenceTests {
         #expect(background.reason == "background-deferred-thermal")
         #expect(interactive.allowsInference)
         #expect(interactive.refinementTiles.isEmpty)
-        #expect(interactive.reason == "thermal-full-pass-only")
+        #expect(interactive.reason == "layout4-full-page-only")
         #expect(
             MangaVisionInferencePlanner.prefetchMaximumSourceDimension(
                 inputSize: CGSize(width: 640, height: 640),
@@ -137,7 +129,7 @@ struct MangaVisionAdaptiveInferenceTests {
         #expect(await recorder.values() == ["interactive", "prefetch"])
     }
 
-    @Test func adaptiveProviderRunsBaselineThenBoundedTileRefinement() async throws {
+    @Test func adaptiveCompatibilityProviderCannotReintroduceTileRefinement() async throws {
         let manifest = MangaVisionModelManifest(
             modelID: "adaptive-fake",
             modelBuildID: "build-1",
@@ -171,8 +163,8 @@ struct MangaVisionAdaptiveInferenceTests {
             requestClass: .interactive
         )
 
-        #expect(await base.inferenceCalls() == 5)
-        #expect(result.panels.count >= 2)
+        #expect(await base.inferenceCalls() == 1)
+        #expect(result.panels.count == 1)
         let adaptiveManifest = await provider.mangaVisionManifest()
         #expect(adaptiveManifest.postProcessRevision.contains(MangaVisionInferencePlanner.revision))
     }
