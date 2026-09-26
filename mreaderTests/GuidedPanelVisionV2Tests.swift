@@ -98,6 +98,52 @@ struct GuidedPanelVisionV2Tests {
         #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
     }
 
+    @Test func layout4NavigationDropsWholePageContainerAroundRealFrames() {
+        let container = DetectedPanel(
+            rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+            confidence: 0.11,
+            source: .coreML
+        )
+        let frames = [
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.05, width: 0.43, height: 0.40), confidence: 0.20, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.05, width: 0.43, height: 0.40), confidence: 0.19, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.04, y: 0.53, width: 0.43, height: 0.40), confidence: 0.18, source: .coreML),
+            DetectedPanel(rect: CGRect(x: 0.53, y: 0.53, width: 0.43, height: 0.40), confidence: 0.17, source: .coreML)
+        ]
+
+        let processed = PanelPostProcessor.process([container] + frames)
+
+        #expect(processed.count == 4)
+        #expect(!processed.contains { $0.rect == container.rect })
+        for frame in frames {
+            #expect(processed.contains { $0.rect == frame.rect })
+        }
+    }
+
+    @Test func layout4NavigationDoesNotTurnQFLLowScoreTailIntoExtraStops() {
+        let strong = DetectedPanel(
+            rect: CGRect(x: 0.05, y: 0.05, width: 0.42, height: 0.40),
+            confidence: 0.50,
+            source: .coreML
+        )
+        let valid = DetectedPanel(
+            rect: CGRect(x: 0.53, y: 0.05, width: 0.42, height: 0.40),
+            confidence: 0.20,
+            source: .coreML
+        )
+        let lowScoreTail = DetectedPanel(
+            rect: CGRect(x: 0.10, y: 0.58, width: 0.35, height: 0.30),
+            confidence: 0.06,
+            source: .coreML
+        )
+
+        let processed = PanelPostProcessor.process([strong, valid, lowScoreTail])
+
+        #expect(processed.map(\.rect).contains(strong.rect))
+        #expect(processed.map(\.rect).contains(valid.rect))
+        #expect(!processed.map(\.rect).contains(lowScoreTail.rect))
+    }
+
     @Test func cameraTravelUsesSingleStageLatencyBoundedMotion() {
         let source = CGRect(x: 0.60, y: 0.05, width: 0.30, height: 0.24)
         let sameRow = CGRect(x: 0.18, y: 0.06, width: 0.30, height: 0.24)
