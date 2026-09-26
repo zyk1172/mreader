@@ -133,7 +133,8 @@ nonisolated enum PanelPostProcessor {
     /// one page feel endless. Keep this product selection separate from model decoding.
     static func process(
         _ candidates: [DetectedPanel],
-        semanticRegions: [MangaVisionRegion] = []
+        semanticRegions: [MangaVisionRegion] = [],
+        contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     ) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let absoluteThreshold = MangaVisionCalibrationProfile.bundled
@@ -170,8 +171,20 @@ nonisolated enum PanelPostProcessor {
         let withoutSemanticAliases = scoreFiltered.filter { candidate in
             !isLikelySemanticAlias(candidate, semanticRegions: semanticRegions)
         }
-        let withoutContainers = withoutSemanticAliases.filter { candidate in
-            !isLikelyWholePageContainer(candidate, among: withoutSemanticAliases)
+
+        // Recover a missing frame only when multiple independent Layout4 semantic
+        // detections agree that meaningful content exists in a hole left between
+        // valid frame detections. A balloon alone can never create a panel.
+        let recoveryBase = withoutSemanticAliases.filter { area($0.rect) < 0.78 }
+        let recovered = recoverSemanticHoles(
+            among: recoveryBase,
+            semanticRegions: semanticRegions,
+            contentBounds: contentBounds,
+            minimumConfidence: absoluteThreshold
+        )
+        let augmented = withoutSemanticAliases + recovered
+        let withoutContainers = augmented.filter { candidate in
+            !isLikelyWholePageContainer(candidate, among: augmented)
         }
 
         var deduplicated: [DetectedPanel] = []
@@ -190,6 +203,182 @@ nonisolated enum PanelPostProcessor {
                 .sorted(by: preferred)
                 .prefix(maximumNavigationPanelCount)
         )
+    }
+
+    private static func recoverSemanticHoles(
+        among panels: [DetectedPanel],
+        semanticRegions: [MangaVisionRegion],
+        contentBounds: CGRect,
+        minimumConfidence: Float
+    ) -> [DetectedPanel] {
+        // Do not invent an entire panel layout from semantics alone. Recovery is
+        // intentionally limited to filling holes in an otherwise usable frame layout.
+        guard !panels.isEmpty else { return [] }
+
+        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let safeBounds = contentBounds.standardized.intersection(unit)
+        let pageBounds = (!safeBounds.isNull && safeBounds.width > 0.1 && safeBounds.height > 0.1)
+            ? safeBounds
+            : unit
+
+        let evidence = semanticRegions.filter { region in
+            guard region.type == .text
+                    || region.type == .balloon
+                    || region.type == .onomatopoeia else {
+                return false
+            }
+            let threshold = MangaVisionCalibrationProfile.bundled
+                .calibration(for: region.type)
+                .confidenceThreshold
+            guard region.confidence >= threshold else { return false }
+            let rect = region.normalizedRect.standardized.intersection(pageBounds)
+            return !rect.isNull
+                && rect.width >= 0.004
+                && rect.height >= 0.004
+                && area(rect) >= 0.000_04
+                && !panels.contains { semanticRectIsCovered(rect, by: $0.rect) }
+        }
+        guard !evidence.isEmpty else { return [] }
+
+        var clusters: [[MangaVisionRegion]] = []
+        for region in evidence.sorted(by: semanticPreferred) {
+            if let index = clusters.firstIndex(where: {
+                semanticCluster($0, accepts: region)
+            }) {
+                clusters[index].append(region)
+            } else {
+                clusters.append([region])
+            }
+        }
+
+        return clusters.compactMap { cluster in
+            let hasText = cluster.contains { $0.type == .text }
+            let hasSFX = cluster.contains { $0.type == .onomatopoeia }
+            let hasBalloon = cluster.contains { $0.type == .balloon }
+            guard hasText || hasSFX else { return nil }
+
+            let evidenceScore = cluster.reduce(CGFloat.zero) { partial, region in
+                let weight: CGFloat
+                switch region.type {
+                case .text: weight = 1.0
+                case .balloon: weight = 0.75
+                case .onomatopoeia: weight = 0.45
+                case .panel: weight = 0
+                }
+                return partial + CGFloat(region.confidence) * weight
+            }
+            let corroboratedDialogue = hasText && hasBalloon
+            guard corroboratedDialogue || evidenceScore >= 1.05 else { return nil }
+
+            let semanticBounds = cluster
+                .map { $0.normalizedRect.standardized }
+                .dropFirst()
+                .reduce(cluster[0].normalizedRect.standardized) { $0.union($1) }
+                .intersection(pageBounds)
+            guard !semanticBounds.isNull,
+                  semanticBounds.width > 0,
+                  semanticBounds.height > 0 else {
+                return nil
+            }
+
+            // The recovered box is deliberately contextual, not a tight text/balloon
+            // crop. Guided Panel adds another display-only margin afterwards.
+            let dx = max(semanticBounds.width * 0.55, 0.040)
+            let dy = max(semanticBounds.height * 0.55, 0.040)
+            let recoveredRect = semanticBounds
+                .insetBy(dx: -dx, dy: -dy)
+                .intersection(pageBounds)
+            let recoveredArea = area(recoveredRect)
+            guard !recoveredRect.isNull,
+                  recoveredRect.width >= 0.08,
+                  recoveredRect.height >= 0.08,
+                  recoveredArea >= 0.012,
+                  recoveredArea <= 0.48,
+                  recoveredArea >= area(semanticBounds) * 1.35 else {
+                return nil
+            }
+
+            // Never create a second stop that substantially covers an existing frame.
+            let maximumExistingCoverage = panels.reduce(CGFloat.zero) { current, panel in
+                let overlap = recoveredRect.intersection(panel.rect)
+                guard !overlap.isNull else { return current }
+                return max(current, area(overlap) / max(recoveredArea, 0.000_001))
+            }
+            guard maximumExistingCoverage < 0.34 else { return nil }
+
+            let strongest = cluster.map(\.confidence).max() ?? minimumConfidence
+            let confidence = max(
+                minimumConfidence,
+                min(strongest * 0.95, 0.90)
+            )
+            return DetectedPanel(
+                rect: recoveredRect,
+                confidence: confidence,
+                source: .coreML
+            )
+        }
+    }
+
+    private static func semanticRectIsCovered(
+        _ semanticRect: CGRect,
+        by panelRect: CGRect
+    ) -> Bool {
+        let intersection = semanticRect.intersection(panelRect)
+        guard !intersection.isNull else { return false }
+        let semanticArea = area(semanticRect)
+        guard semanticArea > 0 else { return false }
+        let containment = area(intersection) / semanticArea
+        let center = CGPoint(x: semanticRect.midX, y: semanticRect.midY)
+        return containment >= 0.62
+            || (panelRect.insetBy(dx: -0.004, dy: -0.004).contains(center)
+                && containment >= 0.45)
+    }
+
+    private static func semanticCluster(
+        _ cluster: [MangaVisionRegion],
+        accepts region: MangaVisionRegion
+    ) -> Bool {
+        guard let first = cluster.first else { return true }
+        let bounds = cluster.dropFirst().reduce(first.normalizedRect.standardized) {
+            $0.union($1.normalizedRect.standardized)
+        }
+        let rect = region.normalizedRect.standardized
+        let xOverlap = max(
+            min(bounds.maxX, rect.maxX) - max(bounds.minX, rect.minX),
+            0
+        ) / max(min(bounds.width, rect.width), 0.000_001)
+        let yOverlap = max(
+            min(bounds.maxY, rect.maxY) - max(bounds.minY, rect.minY),
+            0
+        ) / max(min(bounds.height, rect.height), 0.000_001)
+        let horizontalGap = max(
+            max(bounds.minX - rect.maxX, rect.minX - bounds.maxX),
+            0
+        )
+        let verticalGap = max(
+            max(bounds.minY - rect.maxY, rect.minY - bounds.maxY),
+            0
+        )
+
+        if xOverlap >= 0.20 && verticalGap <= 0.055 { return true }
+        if yOverlap >= 0.20 && horizontalGap <= 0.055 { return true }
+
+        let centerDistance = hypot(bounds.midX - rect.midX, bounds.midY - rect.midY)
+        let merged = bounds.union(rect)
+        return centerDistance <= 0.09 && area(merged) <= 0.16
+    }
+
+    private static func semanticPreferred(
+        _ lhs: MangaVisionRegion,
+        _ rhs: MangaVisionRegion
+    ) -> Bool {
+        if lhs.normalizedRect.minY != rhs.normalizedRect.minY {
+            return lhs.normalizedRect.minY < rhs.normalizedRect.minY
+        }
+        if lhs.normalizedRect.minX != rhs.normalizedRect.minX {
+            return lhs.normalizedRect.minX < rhs.normalizedRect.minX
+        }
+        return lhs.confidence > rhs.confidence
     }
 
     /// Layout4 intentionally exposes the raw high-recall per-class stream. A single
@@ -571,7 +760,8 @@ actor PanelDetectionService {
             primaryPanels,
             semanticRegions: (mangaAnalysis?.balloons ?? [])
                 + (mangaAnalysis?.texts ?? [])
-                + (mangaAnalysis?.onomatopoeias ?? [])
+                + (mangaAnalysis?.onomatopoeias ?? []),
+            contentBounds: contentBounds
         )
         let detectorIdentifier = primaryIdentifier
 
