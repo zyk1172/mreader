@@ -38,16 +38,16 @@ struct ArchitectureAuditRegressionTests {
         #expect(restored.result.detectedLanguage == "ja")
     }
 
-    @Test func layout4FrameAtOrAboveQFLThresholdIsUsable() {
+    @Test func layout4FrameAtOrAboveReaderThresholdIsUsable() {
         let panel = DetectedPanel(
             rect: CGRect(x: 0, y: 0, width: 1, height: 1),
-            confidence: 0.09,
+            confidence: 0.69,
             source: .coreML
         )
         #expect(PanelLayoutQuality.isUsable(PanelPostProcessor.process([panel])))
         #expect(
             !PanelLayoutQuality.isUsable([
-                DetectedPanel(rect: panel.rect, confidence: 0.04, source: .coreML)
+                DetectedPanel(rect: panel.rect, confidence: 0.64, source: .coreML)
             ])
         )
     }
