@@ -65,14 +65,41 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
 
     func testReaderEvaluationThresholdsMatchConfiguredExperiment() {
         let config = MangaLayout4V1Configuration()
-        XCTAssertEqual(config.frameScoreThreshold, 0.40)
-        XCTAssertEqual(config.textScoreThreshold, 0.45)
+        XCTAssertEqual(config.frameScoreThreshold, 0.65)
+        XCTAssertEqual(config.textScoreThreshold, 0.35)
         XCTAssertEqual(config.balloonScoreThreshold, 0.30)
         XCTAssertEqual(config.onomatopoeiaScoreThreshold, 0.30)
         XCTAssertEqual(config.frameNMSThreshold, 0.35)
         XCTAssertEqual(config.textNMSThreshold, 0.35)
         XCTAssertEqual(config.balloonNMSThreshold, 0.35)
         XCTAssertEqual(config.onomatopoeiaNMSThreshold, 0.35)
+    }
+
+    func testRegionRefinerUsesMaskEnvelopeForBalloonGeometry() {
+        let raw = CGRect(x: 0.10, y: 0.10, width: 0.40, height: 0.30)
+        let contour = MangaVisionContour(points: [
+            CGPoint(x: 0.18, y: 0.16),
+            CGPoint(x: 0.40, y: 0.16),
+            CGPoint(x: 0.40, y: 0.32),
+            CGPoint(x: 0.18, y: 0.32)
+        ])
+        let refined = MangaLayout4V1RegionRefiner.refinedBalloonRect(
+            rawRect: raw,
+            primaryContour: contour,
+            secondaryContours: []
+        )
+        XCTAssertLessThan(refined.width, raw.width)
+        XCTAssertLessThan(refined.height, raw.height)
+        XCTAssertTrue(refined.contains(CGPoint(x: 0.29, y: 0.24)))
+    }
+
+    func testRegionRefinerAddsSmallSafetyMarginToText() {
+        let raw = CGRect(x: 0.40, y: 0.40, width: 0.08, height: 0.04)
+        let refined = MangaLayout4V1RegionRefiner.refinedSemanticRect(raw, type: .text)
+        XCTAssertLessThan(refined.minX, raw.minX)
+        XCTAssertLessThan(refined.minY, raw.minY)
+        XCTAssertGreaterThan(refined.maxX, raw.maxX)
+        XCTAssertGreaterThan(refined.maxY, raw.maxY)
     }
 
     func testGuidedPanelAcceptsQualityFocalFrameScoresKeptByLayout4() {
