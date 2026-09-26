@@ -234,9 +234,7 @@ nonisolated enum PanelPostProcessor {
             : unit
 
         let evidence = semanticRegions.filter { region in
-            guard region.type == .text
-                    || region.type == .balloon
-                    || region.type == .onomatopoeia else {
+            guard region.type == .text || region.type == .balloon else {
                 return false
             }
             let threshold = MangaVisionCalibrationProfile.bundled
@@ -265,16 +263,13 @@ nonisolated enum PanelPostProcessor {
 
         return clusters.compactMap { cluster in
             let hasText = cluster.contains { $0.type == .text }
-            let hasSFX = cluster.contains { $0.type == .onomatopoeia }
             let hasBalloon = cluster.contains { $0.type == .balloon }
-            guard hasText || hasSFX else { return nil }
+            guard hasText else { return nil }
 
             let clusterBalloons = cluster.filter { $0.type == .balloon }
             if hasBalloon {
                 let hasContentOutsideBalloon = cluster.contains { region in
-                    guard region.type == .text || region.type == .onomatopoeia else {
-                        return false
-                    }
+                    guard region.type == .text else { return false }
                     let center = CGPoint(
                         x: region.normalizedRect.midX,
                         y: region.normalizedRect.midY
@@ -308,7 +303,7 @@ nonisolated enum PanelPostProcessor {
                 switch region.type {
                 case .text: weight = 1.0
                 case .balloon: weight = 0.75
-                case .onomatopoeia: weight = 0.45
+                case .onomatopoeia: weight = 0
                 case .panel: weight = 0
                 }
                 return partial + CGFloat(region.confidence) * weight
