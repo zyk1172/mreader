@@ -6,32 +6,31 @@ nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let nmsIOUThreshold: CGFloat
 }
 
-/// MangaLayout4 V1-only adaptive merge calibration. These defaults mirror the
-/// frozen training/export postprocess contract. Quality-Focal confidence is not
-/// comparable to the previous detector's probability scale, so downstream
-/// consumers must not re-introduce the old high confidence gates.
+/// MangaLayout4 V1 reader-evaluation calibration.
+/// These values intentionally differ from the training/export reference decoder:
+/// the test branch uses stricter product thresholds while preserving raw diagnostics.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let revision: String
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga-layout4-v1-training-postprocess-2026-09-26-v2",
+        revision: "manga-layout4-v1-reader-eval-2026-09-26-v3",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.50
+                confidenceThreshold: 0.65,
+                nmsIOUThreshold: 0.35
             ),
             .text: MangaVisionClassCalibration(
-                confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.50
+                confidenceThreshold: 0.35,
+                nmsIOUThreshold: 0.35
             ),
             .balloon: MangaVisionClassCalibration(
-                confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.45
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35
             ),
             .onomatopoeia: MangaVisionClassCalibration(
-                confidenceThreshold: 0.05,
-                nmsIOUThreshold: 0.45
+                confidenceThreshold: 0.30,
+                nmsIOUThreshold: 0.35
             )
         ]
     )
