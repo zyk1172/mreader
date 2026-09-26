@@ -26,11 +26,12 @@ Business code receives only normalized top-left page coordinates and optional
 mask-derived contours through `MangaPageAnalysis`; raw class indices, model-input
 coordinates, tensor layouts, and mask arithmetic stay inside `MangaVisionKoharuProvider`.
 
-For Guided Panel, `frame` is the navigation authority. text/balloon/SFX detections may
-help reject near-identical cross-class aliases, disambiguate reading order, or conservatively
-recover a missing hole when multiple independent signals agree, but they are never direct
-navigation targets. Camera framing centers the selected frame itself and adds bounded outward
-context so slightly inset frame regression does not crop the printed panel border.
+For Guided Panel, `frame` is the navigation authority. text/balloon detections may
+disambiguate reading order or conservatively recover a missing hole when multiple independent
+signals agree. SFX may help reject a near-identical cross-class alias, but it never synthesizes
+a panel or moves the camera. None of the semantic classes is a direct navigation target.
+Camera framing centers the selected frame itself and adds bounded outward context so slightly
+inset frame regression does not crop the printed panel border.
 
 The provider never fabricates a contour. When a mask is rejected (too few active pixels,
 degenerate outline), `MangaVisionRegion.contour` is `nil` and consumers fall back to
