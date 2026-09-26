@@ -52,8 +52,8 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 5
-    static let modelVersion = 4
+    static let schemaVersion = 6
+    static let modelVersion = 5
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -119,19 +119,34 @@ nonisolated struct NormalizedRect: Codable, Sendable, Equatable {
 }
 
 nonisolated enum PanelPostProcessor {
+    private static let minimumDimension: CGFloat = 0.025
+    private static let minimumArea: CGFloat = 0.0015
+    private static let relativeScoreFraction: Float = 0.30
+    private static let maximumRelativeFloor: Float = 0.14
+    private static let maximumNavigationPanelCount = 20
+
+    /// Converts the high-recall Layout4 frame stream into stable navigation targets.
+    ///
+    /// The model/reference decoder intentionally keeps QFL candidates down to 0.05.
+    /// Guided Panel is a precision-sensitive consumer: blindly turning every retained
+    /// candidate into a navigation stop produces repeated/partial frames and can make
+    /// one page feel endless. Keep this product selection separate from model decoding.
     static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let threshold = MangaVisionCalibrationProfile.bundled
+        let absoluteThreshold = MangaVisionCalibrationProfile.bundled
             .calibration(for: .panel)
             .confidenceThreshold
 
-        return candidates.compactMap { panel in
+        let normalized = candidates.compactMap { panel -> DetectedPanel? in
             guard panel.source == .coreML,
-                  panel.confidence >= threshold else {
+                  panel.confidence >= absoluteThreshold else {
                 return nil
             }
             let rect = panel.rect.standardized.intersection(unit)
-            guard !rect.isNull, rect.width > 0, rect.height > 0 else {
+            guard !rect.isNull,
+                  rect.width >= minimumDimension,
+                  rect.height >= minimumDimension,
+                  area(rect) >= minimumArea else {
                 return nil
             }
             return DetectedPanel(
@@ -141,6 +156,89 @@ nonisolated enum PanelPostProcessor {
                 contour: panel.contour
             )
         }
+        guard !normalized.isEmpty else { return [] }
+
+        let bestScore = normalized.map(\.confidence).max() ?? absoluteThreshold
+        let navigationFloor = max(
+            absoluteThreshold,
+            min(maximumRelativeFloor, bestScore * relativeScoreFraction)
+        )
+        let scoreFiltered = normalized.filter { $0.confidence >= navigationFloor }
+        let withoutContainers = scoreFiltered.filter { candidate in
+            !isLikelyWholePageContainer(candidate, among: scoreFiltered)
+        }
+
+        var deduplicated: [DetectedPanel] = []
+        for candidate in withoutContainers.sorted(by: preferred) {
+            if deduplicated.contains(where: { isNavigationDuplicate($0, candidate) }) {
+                continue
+            }
+            deduplicated.append(candidate)
+        }
+
+        if deduplicated.count <= maximumNavigationPanelCount {
+            return deduplicated
+        }
+        return Array(
+            deduplicated
+                .sorted(by: preferred)
+                .prefix(maximumNavigationPanelCount)
+        )
+    }
+
+    private static func isLikelyWholePageContainer(
+        _ candidate: DetectedPanel,
+        among panels: [DetectedPanel]
+    ) -> Bool {
+        let candidateArea = area(candidate.rect)
+        guard candidateArea >= 0.78 else { return false }
+
+        let children = panels.filter { other in
+            guard other != candidate else { return false }
+            let center = CGPoint(x: other.rect.midX, y: other.rect.midY)
+            return candidate.rect.contains(center)
+                && area(other.rect) <= candidateArea * 0.60
+        }
+        let requiredChildren = candidateArea >= 0.90 ? 2 : 3
+        guard children.count >= requiredChildren else { return false }
+
+        let childArea = children.reduce(CGFloat.zero) { $0 + area($1.rect) }
+        guard childArea >= 0.20 else { return false }
+        let strongestChild = children.map(\.confidence).max() ?? 0
+        return candidateArea >= 0.90
+            || candidate.confidence <= strongestChild * 1.25
+    }
+
+    private static func isNavigationDuplicate(
+        _ lhs: DetectedPanel,
+        _ rhs: DetectedPanel
+    ) -> Bool {
+        let intersection = lhs.rect.intersection(rhs.rect)
+        guard !intersection.isNull else { return false }
+        let intersectionArea = area(intersection)
+        let lhsArea = area(lhs.rect)
+        let rhsArea = area(rhs.rect)
+        let union = max(lhsArea + rhsArea - intersectionArea, 0.000_001)
+        let iou = intersectionArea / union
+        let smaller = min(lhsArea, rhsArea)
+        let larger = max(lhsArea, rhsArea)
+        let containment = intersectionArea / max(smaller, 0.000_001)
+        let sizeRatio = smaller / max(larger, 0.000_001)
+
+        // Preserve genuine inset panels. Only collapse boxes that describe
+        // essentially the same frame geometry.
+        return iou >= 0.75 || (containment >= 0.96 && sizeRatio >= 0.82)
+    }
+
+    private static func preferred(_ lhs: DetectedPanel, _ rhs: DetectedPanel) -> Bool {
+        if lhs.confidence != rhs.confidence {
+            return lhs.confidence > rhs.confidence
+        }
+        return area(lhs.rect) > area(rhs.rect)
+    }
+
+    private static func area(_ rect: CGRect) -> CGFloat {
+        max(rect.width, 0) * max(rect.height, 0)
     }
 }
 
@@ -430,10 +528,6 @@ actor PanelDetectionService {
                 isRightToLeft: isRightToLeft,
                 structure: structure
             )
-            let semanticFocusRects = GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: readingPlan.panels.map(\.rect),
-                analysis: mangaAnalysis
-            )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
@@ -446,7 +540,7 @@ actor PanelDetectionService {
                         confidence: panel.confidence,
                         source: panel.source,
                         contour: panel.contour.map { MangaVisionContour(points: $0) },
-                        semanticFocusRect: semanticFocusRects[index].map { NormalizedRect($0) }
+                        semanticFocusRect: nil
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
