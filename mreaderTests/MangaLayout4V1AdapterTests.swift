@@ -392,6 +392,25 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
                 && rect.width > 0 && rect.height > 0
         })
 
+        let rawFrames = analysis.panels.sorted { $0.confidence > $1.confidence }
+        print(
+            "MANGA_LAYOUT4_REAL_FRAME_DIAGNOSTICS raw=\(rawFrames.count) scores=\(rawFrames.prefix(30).map { String(format: "%.4f", $0.confidence) }.joined(separator: ","))"
+        )
+        for (index, frame) in rawFrames.prefix(30).enumerated() {
+            let rect = frame.normalizedRect
+            print(
+                String(
+                    format: "MANGA_LAYOUT4_RAW_FRAME[%02d] score=%.4f rect=(%.4f,%.4f,%.4f,%.4f)",
+                    index,
+                    frame.confidence,
+                    rect.minX,
+                    rect.minY,
+                    rect.width,
+                    rect.height
+                )
+            )
+        }
+
         let navigation = PanelPostProcessor.process(
             analysis.panels.map {
                 DetectedPanel(
@@ -402,6 +421,21 @@ final class MangaLayout4V1AdapterTests: XCTestCase {
                 )
             }
         )
+        print("MANGA_LAYOUT4_NAVIGATION_FRAME_COUNT=\(navigation.count)")
+        for (index, frame) in navigation.enumerated() {
+            let rect = frame.rect
+            print(
+                String(
+                    format: "MANGA_LAYOUT4_NAV_FRAME[%02d] score=%.4f rect=(%.4f,%.4f,%.4f,%.4f)",
+                    index,
+                    frame.confidence,
+                    rect.minX,
+                    rect.minY,
+                    rect.width,
+                    rect.height
+                )
+            )
+        }
         XCTAssertFalse(navigation.isEmpty, "real Layout4 frames were all removed before Guided Panel")
         XCTAssertLessThanOrEqual(navigation.count, 20)
     }
