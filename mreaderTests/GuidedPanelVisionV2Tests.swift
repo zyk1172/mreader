@@ -98,6 +98,52 @@ struct GuidedPanelVisionV2Tests {
         #expect(processed.contains { approximatelyEquals($0.rect, inset.rect) })
     }
 
+    @Test func layout4NavigationRejectsBalloonAliasButKeepsContainingFrame() {
+        let realFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.24,
+            source: .coreML
+        )
+        let balloonAlias = DetectedPanel(
+            rect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
+            confidence: 0.16,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.555, y: 0.175, width: 0.205, height: 0.17),
+            confidence: 0.19
+        )
+
+        let processed = PanelPostProcessor.process(
+            [realFrame, balloonAlias],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.map(\.rect).contains(realFrame.rect))
+        #expect(!processed.map(\.rect).contains(balloonAlias.rect))
+    }
+
+    @Test func layout4NavigationDoesNotRejectRealFrameMerelyBecauseItContainsBalloon() {
+        let realFrame = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.78, height: 0.72),
+            confidence: 0.22,
+            source: .coreML
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.56, y: 0.18, width: 0.20, height: 0.16),
+            confidence: 0.30
+        )
+
+        let processed = PanelPostProcessor.process(
+            [realFrame],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.map(\.rect) == [realFrame.rect])
+    }
+
     @Test func layout4NavigationDropsWholePageContainerAroundRealFrames() {
         let container = DetectedPanel(
             rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
