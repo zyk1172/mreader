@@ -45,22 +45,22 @@ struct GuidedPanelFoundationTests {
         #expect(processed.contains { abs($0.confidence - 0.91) < 0.001 })
     }
 
-    @Test func postProcessorPrefersContainingPanelOverHighConfidenceDialogueBox() {
-        let realPanel = panel(
+    @Test func layout4NavigationDoesNotReclassifyFrameCandidatesByShape() {
+        let large = panel(
             x: 0.08,
             y: 0.08,
             width: 0.44,
             height: 0.36,
             confidence: 0.55
         )
-        let dialogueBox = panel(
+        let smallInset = panel(
             x: 0.19,
             y: 0.16,
             width: 0.17,
             height: 0.11,
             confidence: 0.99
         )
-        let neighborPanel = panel(
+        let neighbor = panel(
             x: 0.56,
             y: 0.08,
             width: 0.36,
@@ -68,22 +68,24 @@ struct GuidedPanelFoundationTests {
             confidence: 0.80
         )
 
-        let processed = PanelPostProcessor.process([dialogueBox, realPanel, neighborPanel])
+        let processed = PanelPostProcessor.process([smallInset, large, neighbor])
 
-        #expect(processed.contains { abs($0.rect.width - realPanel.rect.width) < 0.0001 })
-        #expect(!processed.contains { abs($0.rect.width - dialogueBox.rect.width) < 0.0001 })
+        #expect(processed.count == 3)
+        #expect(processed.contains { $0.rect == smallInset.rect })
+        #expect(processed.contains { $0.rect == large.rect })
+        #expect(processed.contains { $0.rect == neighbor.rect })
     }
 
-    @Test func visionLayoutRejectsFloatingDialogueBoxPattern() {
-        let dialogueBoxes = [
+    @Test func layout4SelectedFramesAreUsableWithoutLegacyVisionShapeHeuristics() {
+        let frames = [
             panel(x: 0.13, y: 0.12, width: 0.24, height: 0.23),
             panel(x: 0.55, y: 0.27, width: 0.25, height: 0.22),
             panel(x: 0.22, y: 0.53, width: 0.23, height: 0.24),
             panel(x: 0.61, y: 0.69, width: 0.24, height: 0.23)
         ]
-        let processed = PanelPostProcessor.process(dialogueBoxes)
+        let processed = PanelPostProcessor.process(frames)
 
-        #expect(!PanelLayoutQuality.isUsable(processed))
+        #expect(PanelLayoutQuality.isUsable(processed))
     }
 
     @Test func visionLayoutKeepsStructurallyAlignedSmallPanels() {
@@ -99,20 +101,25 @@ struct GuidedPanelFoundationTests {
         #expect(PanelLayoutQuality.isUsable(processed))
     }
 
-    @Test func layoutQualityRejectsImplausibleResults() {
+    @Test func layoutQualityUsesAlreadySelectedLayout4NavigationFrames() {
         #expect(!PanelLayoutQuality.isUsable([]))
-        #expect(!PanelLayoutQuality.isUsable([panel(x: 0.05, y: 0.05, width: 0.9, height: 0.9)]))
+        #expect(PanelLayoutQuality.isUsable([panel(x: 0.05, y: 0.05, width: 0.9, height: 0.9)]))
         #expect(PanelLayoutQuality.isUsable(twoByTwoPanels()))
+    }
 
-        let tooMany = (0..<13).map { index in
+    @Test func navigationSelectionCapsPathologicalFrameCounts() {
+        let many = (0..<30).map { index in
             panel(
-                x: 0.02 + CGFloat(index % 4) * 0.24,
-                y: 0.02 + CGFloat(index / 4) * 0.24,
-                width: 0.20,
-                height: 0.20
+                x: 0.01 + CGFloat(index % 6) * 0.16,
+                y: 0.01 + CGFloat(index / 6) * 0.19,
+                width: 0.13,
+                height: 0.15,
+                confidence: 0.20
             )
         }
-        #expect(!PanelLayoutQuality.isUsable(tooMany))
+        let processed = PanelPostProcessor.process(many)
+        #expect(processed.count == 20)
+        #expect(PanelLayoutQuality.isUsable(processed))
     }
 
     @Test func cachePathIsStableAndPageBased() {
