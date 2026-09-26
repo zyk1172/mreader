@@ -82,7 +82,7 @@ final class MangaVisionRegressionGateTests: XCTestCase {
             predictedRegions: expected,
             expectedOCRRects: [rect],
             predictedOCRRects: [rect],
-            inferenceCount: 2
+            inferenceCount: MangaVisionInferencePlanner.maximumInferencePassCount
         )
 
         let metrics = MangaVisionRegressionMetrics.aggregate([observation])
@@ -91,7 +91,8 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         XCTAssertEqual(metrics.balloonRecall, 1)
         XCTAssertEqual(metrics.onomatopoeiaRecall, 1)
         XCTAssertEqual(metrics.ocrFinalRecall, 1)
-        XCTAssertEqual(metrics.inferenceCountPerPage, 2)
+        XCTAssertEqual(metrics.inferenceCountPerPage, 1)
+        XCTAssertEqual(metrics.maximumInferenceCountOnPage, 1)
         XCTAssertTrue(MangaVisionRegressionGate.release.failures(for: metrics).isEmpty)
     }
 
