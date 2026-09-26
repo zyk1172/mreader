@@ -123,18 +123,15 @@ struct MangaVisionPostRemediationIntegrationTests {
         )
     }
 
-    @Test func lowAverageCannotHideSinglePageInferenceBudgetViolation() {
+    @Test func anySecondLayout4PassViolatesFullPageOnlyBudget() {
         let maximumPassCount = MangaVisionInferencePlanner.maximumInferencePassCount
-        let observations = [
-            MangaVisionRegressionObservation(inferenceCount: 1),
-            MangaVisionRegressionObservation(inferenceCount: 1),
-            MangaVisionRegressionObservation(inferenceCount: 1),
-            MangaVisionRegressionObservation(inferenceCount: maximumPassCount + 1)
-        ]
-        let metrics = MangaVisionRegressionMetrics.aggregate(observations)
+        #expect(maximumPassCount == 1)
 
-        #expect(metrics.inferenceCountPerPage < Double(maximumPassCount))
-        #expect(metrics.maximumInferenceCountOnPage == maximumPassCount + 1)
+        let metrics = MangaVisionRegressionMetrics.aggregate([
+            MangaVisionRegressionObservation(inferenceCount: maximumPassCount + 1)
+        ])
+
+        #expect(metrics.maximumInferenceCountOnPage == 2)
         #expect(
             MangaVisionRegressionGate.release.failures(for: metrics).contains {
                 $0.hasPrefix("maximum-inference-count-on-page:")
