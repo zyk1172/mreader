@@ -2,10 +2,10 @@
 
 ## Purpose
 
-MReader uses the production MangaVision V2B5 five-class detector as shared geometry for
-Guided Panel, OCR, translation, and semantic analysis. Random dataset growth is not enough
-to improve product behavior: the most valuable failures are pages observed during normal
-reading.
+MReader uses the production MangaVision Koharu YOLO26s-seg four-class detector as shared
+geometry for Guided Panel, OCR, translation, and semantic analysis. Random dataset growth is
+not enough to improve product behavior: the most valuable failures are pages observed during
+normal reading.
 
 The Hard Case collection system records those pages with the detector output that already
 exists at the moment of feedback. It is deliberately separate from annotation and model
@@ -19,7 +19,7 @@ The collection flow is:
 read
   -> notice a recognition problem
   -> mark the current page
-  -> save the current V2B5 snapshot and metadata
+  -> save the current detector snapshot and metadata
   -> continue reading
   -> review/export later
   -> annotate outside the reader
@@ -79,27 +79,30 @@ It contains:
 Export-facing enum values use stable machine-readable names such as
 `unspecified_visual_error`, `reading_order`, and `guided_panel`.
 
-The five model classes export as:
+The four model classes export as:
 
-| V2B5 domain type | Export class |
+| Domain type | Export class |
 | --- | --- |
 | panel | frame |
-| text | text |
-| face | face |
-| body | body |
+| text | dialogue_text |
 | balloon | balloon |
+| onomatopoeia | onomatopoeia_text |
 
 Training/export identity is obtained from the single code-level
-`MangaVisionV2B5ProductionIdentity` source:
+`MangaVisionKoharuProductionIdentity` source:
 
-- model: `MangaVisionDetectorV2B5`
-- Core ML source-tree SHA-256: `ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5`
-- calibration: `v2b5-calibration-v1`
+- model: `KoharuYOLO26S`
+- calibration: the bundled `MangaVisionCalibrationProfile.revision`
 
-The existing `MangaVisionModelManifest` remains the runtime/cache identity source; its
-compiled-model hash is intentionally not substituted for the frozen source artifact hash
-in exported training metadata. Calibration revision is shared from the production
-identity source rather than hardcoded again in Hard Case code.
+Unlike the retired detector, the bundled artifact has no frozen source-tree SHA-256
+constant. The compiled-model hash is computed at runtime from the compiled
+`KoharuYOLO26S.mlmodelc` directory and carried through `MangaVisionModelManifest.modelFileHash`,
+which is what Hard Case records store. That keeps the recorded hash correct even when the
+model is replaced, instead of pinning a constant that silently goes stale.
+
+The existing `MangaVisionModelManifest` remains the runtime/cache identity source. Calibration
+revision is shared from the production identity source rather than hardcoded again in Hard Case
+code.
 
 ## Prediction Snapshot
 
@@ -109,7 +112,7 @@ That API checks only the existing in-memory/disk MangaVision cache. It does **no
 the provider when the analysis is absent. Therefore feedback never causes a new detector
 inference.
 
-When a cached `MangaPageAnalysis` exists, all five classes are copied into the record.
+When a cached `MangaPageAnalysis` exists, all four classes are copied into the record.
 When it does not exist, the record is still valid, with:
 
 ```text
@@ -171,10 +174,10 @@ Settings -> Developer / MangaVision -> Hard Cases provides:
 
 - Total / Unreviewed / Reviewed / Annotated / Exported counts;
 - storage use;
-- filters for all five classes;
+- filters for all four classes;
 - Guided Panel, OCR, and Translation impact filters;
 - review-state filters;
-- page preview with the frozen V2B5 detection overlay;
+- page preview with the bundled detection overlay;
 - per-class overlay toggles;
 - editable issue/impact/note metadata;
 - Mark reviewed, Reject, Delete, and Export candidate;
@@ -239,9 +242,9 @@ feature and must not be silently reused as training data.
 
 This implementation does not change:
 
-- V2B5 model weights or artifact;
+- bundled model weights or artifact;
 - confidence thresholds;
-- NMS;
+- detector de-duplication;
 - adaptive inference planning or timing;
 - OCR recognition policy;
 - translation behavior;

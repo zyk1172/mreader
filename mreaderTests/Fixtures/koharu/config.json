@@ -1,0 +1,18 @@
+{
+  "architectures": [
+    "YOLO26s-seg"
+  ],
+  "library_name": "ultralytics",
+  "task": "instance-segmentation",
+  "image_size": 1280,
+  "num_classes": 4,
+  "names": {
+    "0": "frame",
+    "1": "dialogue_text",
+    "2": "balloon",
+    "3": "onomatopoeia_text"
+  },
+  "weights": "model.safetensors",
+  "model_config": "yolo26s-seg.yaml",
+  "ultralytics_version": "8.4.43"
+}

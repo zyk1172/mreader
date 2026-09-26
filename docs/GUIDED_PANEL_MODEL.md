@@ -1,64 +1,103 @@
 # Guided Panel / Manga Vision Core ML model
 
-The bundled `mreader/PanelDetector.mlpackage` is an FP16 Core ML export of `ShadowB/Manga109-panel-balloon-text-yolov26-segmentation` (`best.pt`).
+The bundled detector is **Koharu YOLO26s-seg**, exported to `mreader/KoharuYOLO26S.mlpackage`
+and compiled by Xcode into `KoharuYOLO26S.mlmodelc`.
 
-- Upstream model: https://huggingface.co/ShadowB/Manga109-panel-balloon-text-yolov26-segmentation
-- Upstream checkpoint SHA-256: `0b4376e426fa96af3976afa6a2602421dacf2dec96ef87b4a44f5e8d4971cb6f`
-- Architecture: YOLO26s instance segmentation
-- Classes: `frame`, `text`, `balloon`
-- App export: Core ML ML Program, static 640x640 image input, batch 1, FP16, NMS-free/end-to-end detection output plus segmentation output
-- Runtime model ID: `manga109-yolo26s-seg-coreml-fp16-640-v2-manga-vision`
-- Upstream model repository declares MIT. Dataset and Ultralytics terms remain independently applicable; review them before redistribution/commercial release.
-
-The original PyTorch checkpoint is not bundled in the app. Xcode compiles the `.mlpackage` into `PanelDetector.mlmodelc` for the application bundle.
+Model identity, the SAFETENSORS → Core ML export pipeline, the FP32 precision rationale,
+the raw tensor contract, and the mask decoder are documented in
+[`KOHARU_YOLO26S_INTEGRATION.md`](KOHARU_YOLO26S_INTEGRATION.md). This file covers how the
+rest of the app consumes that output.
 
 ## Runtime semantics
 
-Manga Vision consumes all three bundled semantic classes. The model is a shared page-analysis layer rather than a Guided Panel-only detector:
+Manga Vision is a shared page-analysis layer, not a Guided Panel-only detector. All four
+bundled semantic classes are consumed:
 
-- `frame` -> `MangaRegionType.panel`, consumed by Guided Panel and page-structure analysis.
-- `text` -> `MangaRegionType.text`, used as an OCR ROI/performance hint. OCR recall is independently protected by the ROI coverage guard, so a detector miss does not automatically become an OCR miss.
-- `balloon` -> `MangaRegionType.balloon`, used for physical speech-balloon geometry and text grouping/layout hints.
+- `frame` → `MangaRegionType.panel`, used by Guided Panel and page-structure analysis.
+- `dialogue_text` → `MangaRegionType.text`, used as an OCR ROI/performance hint. OCR recall
+  is independently protected by the ROI coverage guard, so a detector miss does not
+  automatically become an OCR miss.
+- `balloon` → `MangaRegionType.balloon`, used for physical speech-balloon geometry,
+  text grouping, and the reader's bubble-shaped translation surfaces.
+- `onomatopoeia_text` → `MangaRegionType.onomatopoeia`, kept separate from translatable
+  dialogue. Effect lettering never creates or expands a Guided Panel focus.
 
-Business code receives only normalized top-left page coordinates through `MangaPageAnalysis`; raw class IDs, model-input coordinates, tensor layouts, and mask decoding remain inside `YOLOMangaVisionProvider`.
+Business code receives only normalized top-left page coordinates and optional
+mask-derived contours through `MangaPageAnalysis`; raw class indices, model-input
+coordinates, tensor layouts, and mask arithmetic stay inside `MangaVisionKoharuProvider`.
+
+The provider never fabricates a contour. When a mask is rejected (too few active pixels,
+degenerate outline), `MangaVisionRegion.contour` is `nil` and consumers fall back to
+rectangle geometry.
 
 ## Versioned output contract
 
-`MangaVisionOutputContract` is the executable boundary for the bundled Core ML artifact. The current revision requires:
+`MangaVisionKoharuOutputContract` is the executable boundary for the bundled Core ML
+artifact. The current revision requires:
 
-- one 640x640 image input;
-- a supported rank-3 detection tensor in either `[1, instances, features]` or `[1, features, instances]` form;
-- at least one compatible rank-4 segmentation tensor;
-- effective semantic labels covering `panel`, `text`, and `balloon`.
+- one `1280x1280` RGB image input, matching the compiled `MLImageConstraint`;
+- a `detections` multi-array of shape `[1, 300, 38]`;
+- a `protos` multi-array of shape `[1, 32, 320, 320]`;
+- no unexpected outputs.
 
-The provider validates this contract when the compiled model is loaded and throws `MangaVisionProviderError.unsupportedOutput` if the export drifts. Guided Panel then follows its existing Vision-rectangle/full-page fallback path rather than interpreting an unknown tensor layout.
+`MangaVisionKoharuProvider` validates this contract when the compiled model is loaded and
+throws `MangaVisionKoharuError.invalidContract` if the export drifts. Guided Panel then
+follows its existing Vision-rectangle/full-page fallback path rather than interpreting an
+unknown tensor layout.
 
-`MangaVisionOutputContract.revision` is part of `MangaVisionModelManifest.cacheIdentity`. Changing the accepted model interface therefore invalidates old Manga Vision cache entries automatically.
+`MangaVisionKoharuOutputContract.revision` is part of `MangaVisionModelManifest.cacheIdentity`,
+so changing the accepted model interface automatically invalidates old Manga Vision cache
+entries. `MangaPageAnalysis.schemaVersion` (currently 5) is checked independently when a
+cached analysis is read.
 
 ## Versioned calibration
 
-`MangaVisionCalibrationProfile.bundled` is the single production source for confidence filtering and same-class deduplication parameters. The same profile is used both by the base YOLO provider and when adaptive full-page/tile results are merged. The current profile keeps confidence thresholds at:
+`MangaVisionCalibrationProfile.bundled` is the single production source for confidence
+filtering and same-class de-duplication. The same profile is used by the base provider and
+when adaptive full-page/tile results are merged.
 
-| Semantic class | Confidence | NMS IoU | Containment |
+`MangaVisionKoharuProvider` applies the profile's per-class de-duplication to its own
+output, because the end-to-end head can still emit two rows for one instance. The adaptive
+merge applies the same profile, so de-duplication has exactly one source of truth. The
+decoder performs no de-duplication of its own.
+
+| Semantic class | Confidence | Merge IoU | Containment |
 | --- | ---: | ---: | ---: |
-| panel/frame | 0.24 | 0.50 | 0.92 |
-| text | 0.18 | 0.55 | 0.88 |
-| balloon | 0.20 | 0.58 | 0.90 |
-| face (forward-compatible) | 0.20 | 0.45 | 0.90 |
-| body (forward-compatible) | 0.20 | 0.55 | 0.90 |
+| panel/frame | 0.25 | 0.68 | 0.96 |
+| text/dialogue_text | 0.25 | 0.58 | 0.88 |
+| balloon | 0.25 | 0.62 | 0.90 |
+| onomatopoeia/onomatopoeia_text | 0.25 | 0.58 | 0.88 |
 
-The bundled checkpoint currently exports only `frame/text/balloon`; face/body values are retained for compatible future checkpoints. The profile revision is also part of the cache identity, so threshold changes cannot reuse stale detector results.
+The confidence column is the checkpoint's own recommended operating point. The IoU column
+is **not** a detector NMS parameter: the bundled head is end-to-end and NMS-free, so it only
+governs de-duplicating overlapping rows and merging a full-page pass with overlapping
+refinement tiles. The profile revision is part of the cache identity, so threshold changes
+cannot reuse stale detector results.
 
 ## Regression and quality gate
 
-`MangaVisionRegressionGateTests` performs two different kinds of checks and keeps them deliberately separate:
+`MangaVisionRegressionGateTests` performs four deliberately separate checks:
 
-1. **Artifact/contract gate**: loads the real compiled `PanelDetector.mlmodelc`, validates its input/output contract, and executes real inference.
-2. **24-case runtime stability corpus**: two pinned repository image fixtures are rendered at twelve deterministic source resolutions each and passed through the real bundled model. The gate verifies normalized geometry and compares each image family against its 1.0x baseline using Panel/Text/Balloon stability recall.
+1. **Calibration/contract gate**: asserts the revisioned profile, the frozen class order, and
+   the raw output shapes.
+2. **Artifact gate**: loads the real compiled `KoharuYOLO26S.mlmodelc`, validates its
+   input/output contract, and executes real inference.
+3. **24-case runtime stability corpus**: two pinned repository image fixtures are rendered at
+   twelve deterministic source resolutions each and passed through the real bundled model. The
+   gate verifies normalized geometry and compares each image family against its 1.0x baseline
+   using panel/balloon stability recall.
+4. **Release policy gate**: asserts `MangaVisionRegressionGate.release` still carries the
+   reviewed accuracy thresholds, so the stability corpus cannot silently re-tune them.
 
-The 24 cases are listed in `mreaderTests/Fixtures/manga_vision_regression_corpus.json`. They are regression inputs, not 24 independently human-annotated pages.
+The 24 cases are listed in `mreaderTests/Fixtures/manga_vision_regression_corpus.json`. They
+are regression inputs, not 24 independently human-annotated pages. The corpus has **no
+verified labels** — its expected set is the model's own 1.0x output — so it gates on a
+recorded stability floor (balloon >= 0.95, panel >= 0.70; measured 1.000 and 0.750) rather
+than on the accuracy release gate. The release gate is reserved for a corpus with verified
+expected regions.
 
-`MangaVisionRegressionMetrics` exposes the release metrics required for a future fully verified accuracy corpus:
+`MangaVisionRegressionMetrics` exposes the release metrics required for a future fully
+verified accuracy corpus:
 
 - panel recall;
 - text recall;
@@ -68,8 +107,20 @@ The 24 cases are listed in `mreaderTests/Fixtures/manga_vision_regression_corpus
 - average inference count per page;
 - maximum inference count observed on any page.
 
-The release gate does **not** convert missing ground-truth labels into a fake pass or failure. Recall dimensions are gated only when verified expected regions exist. Existing translation/OCR gold files that remain `candidate` are not represented as human-verified accuracy truth.
+The release gate does **not** convert missing ground-truth labels into a fake pass or
+failure. Recall dimensions are gated only when verified expected regions exist. Existing
+translation/OCR gold files that remain `candidate` are not represented as human-verified
+accuracy truth.
 
-The adaptive inference budget is owned by `MangaVisionInferencePlanner`: one full-page baseline plus at most six refinement tiles, so a single page may legitimately perform up to seven model passes. The release gate imports that planner-owned hard limit instead of maintaining another numeric copy. It gates the **maximum observed single-page count**, while the average remains a reporting metric; therefore a cheap corpus average cannot hide a page that exceeded the planner contract.
+The adaptive inference budget is owned by `MangaVisionInferencePlanner`: one full-page
+baseline plus at most six refinement tiles, so a single page may legitimately perform up to
+seven model passes. The release gate imports that planner-owned hard limit instead of
+maintaining another numeric copy. It gates the **maximum observed single-page count**, while
+the average remains a reporting metric; therefore a cheap corpus average cannot hide a page
+that exceeded the planner contract.
 
-The default release thresholds are panel recall >= 0.80, text recall >= 0.75, balloon recall >= 0.70, final OCR recall >= 0.80, fallback rate <= 0.20, and maximum model passes on any page <= `MangaVisionInferencePlanner.maximumInferencePassCount` (currently 7). Changing these thresholds or the planner budget should be treated as a reviewed quality-policy change rather than a test workaround.
+The default release thresholds are panel recall >= 0.80, text recall >= 0.75, balloon recall
+>= 0.70, final OCR recall >= 0.80, fallback rate <= 0.20, and maximum model passes on any
+page <= `MangaVisionInferencePlanner.maximumInferencePassCount` (currently 7). Changing these
+thresholds or the planner budget should be treated as a reviewed quality-policy change
+rather than a test workaround.

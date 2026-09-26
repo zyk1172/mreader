@@ -21,9 +21,9 @@ final class mreaderUITests: XCTestCase {
         return app
     }
 
-    private func launchV2B5ReaderFixture() -> XCUIApplication {
+    private func launchBundledDetectorReaderFixture() -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments += ["-mreader-ui-testing", "-mreader-v2b5-provider"]
+        app.launchArguments += ["-mreader-ui-testing", "-mreader-koharu-yolo26s-provider"]
         app.launch()
         return app
     }
@@ -32,7 +32,7 @@ final class mreaderUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += [
             "-mreader-ui-testing",
-            "-mreader-v2b5-provider",
+            "-mreader-koharu-yolo26s-provider",
             "-mangavision_hard_case_feedback_shortcut",
             "YES"
         ]
@@ -147,12 +147,12 @@ final class mreaderUITests: XCTestCase {
         feedback.tap()
         XCTAssertTrue(element("mreader.hardCase.feedback.sheet", in: app).waitForExistence(timeout: timeout))
 
-        let body = hardCaseFeedbackRow(
-            "mreader.hardCase.feedback.area.body",
+        let onomatopoeia = hardCaseFeedbackRow(
+            "mreader.hardCase.feedback.area.onomatopoeia",
             in: app
         )
-        XCTAssertTrue(body.exists && body.isHittable)
-        body.tap()
+        XCTAssertTrue(onomatopoeia.exists && onomatopoeia.isHittable)
+        onomatopoeia.tap()
 
         let duplicate = hardCaseFeedbackRow(
             "mreader.hardCase.feedback.issue.duplicate",
@@ -228,8 +228,8 @@ final class mreaderUITests: XCTestCase {
     }
 
     @MainActor
-    func testV2B5ProviderReaderGuidedPanelAndOCRControls() throws {
-        let app = launchV2B5ReaderFixture()
+    func testBundledDetectorReaderGuidedPanelAndOCRControls() throws {
+        let app = launchBundledDetectorReaderFixture()
         let openReader = element("mreader.shelf.uiTestingFixture", in: app)
         XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
         openReader.tap()
@@ -241,7 +241,7 @@ final class mreaderUITests: XCTestCase {
         guidedPanel.tap()
 
         // The action must enter the real GuidedPanelReader path and remain
-        // responsive while PanelDetectionService performs V2B5 inference.
+        // responsive while PanelDetectionService performs detector inference.
         XCTAssertTrue(guidedPanel.waitForExistence(timeout: timeout))
         let ocr = element("mreader.reader.ocrAction", in: app)
         XCTAssertTrue(ocr.waitForExistence(timeout: 45))
@@ -250,18 +250,18 @@ final class mreaderUITests: XCTestCase {
     }
 
     @MainActor
-    func testV2B5PhysicalFinalReaderGuidedPanelAndOCRSmoke() throws {
-#if V2B5_PHYSICAL_FINAL_GATE
+    func testPhysicalFinalReaderGuidedPanelAndOCRSmoke() throws {
+#if PHYSICAL_FINAL_UI_GATE
         let enabledByCompileFlag = true
 #else
         let enabledByCompileFlag = false
 #endif
-        let enabledByEnvironment = ProcessInfo.processInfo.environment["MREADER_V2B5_PHYSICAL_FINAL_GATE"] == "1"
+        let enabledByEnvironment = ProcessInfo.processInfo.environment["MREADER_PHYSICAL_FINAL_UI_GATE"] == "1"
         guard enabledByCompileFlag || enabledByEnvironment else {
-            throw XCTSkip("Set V2B5_PHYSICAL_FINAL_GATE for the one-time physical final UI smoke")
+            throw XCTSkip("Set MREADER_PHYSICAL_FINAL_UI_GATE for the one-time physical final UI smoke")
         }
 
-        let app = launchV2B5ReaderFixture()
+        let app = launchBundledDetectorReaderFixture()
         let openReader = element("mreader.shelf.uiTestingFixture", in: app)
         XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
         openReader.tap()
@@ -296,7 +296,7 @@ final class mreaderUITests: XCTestCase {
         ocr.tap()
         XCTAssertTrue(reader.waitForExistence(timeout: timeout))
 
-        print("MREADER_V2B5_PHYSICAL_UI_JSON={\"status\":\"PASS\",\"reader_pages\":5,\"reader_swipes\":6,\"guided_panel_transitions\":2,\"ocr_entry\":true,\"crashes\":0}")
+        print("MREADER_PHYSICAL_UI_JSON={\"status\":\"PASS\",\"reader_pages\":5,\"reader_swipes\":6,\"guided_panel_transitions\":2,\"ocr_entry\":true,\"crashes\":0}")
     }
 
     private func hardCaseFeedbackRow(_ identifier: String, in app: XCUIApplication) -> XCUIElement {

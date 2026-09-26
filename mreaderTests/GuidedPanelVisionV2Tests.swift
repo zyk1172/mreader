@@ -52,8 +52,7 @@ struct GuidedPanelVisionV2Tests {
                     confidence: 0.96
                 )
             ],
-            faces: [],
-            bodies: [],
+            onomatopoeias: [],
             modelIdentifier: "fixture",
             modelVersion: 4
         )
@@ -206,14 +205,13 @@ struct GuidedPanelVisionV2Tests {
         #expect(focus.height < panel.height)
     }
 
-    @Test func faceAndBodyCannotCreateGuidedFocusWithoutTextOrBalloonEvidence() {
+    @Test func onomatopoeiaAloneCannotCreateGuidedFocus() {
         let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
+        // Effect lettering is artwork, not dialogue, so it must never establish a
+        // semantic focus by itself.
         let analysis = semanticAnalysis(
-            faces: [
-                semanticRegion(.face, x: 0.62, y: 0.20, width: 0.11, height: 0.12, confidence: 0.96)
-            ],
-            bodies: [
-                semanticRegion(.body, x: 0.56, y: 0.27, width: 0.24, height: 0.48, confidence: 0.97)
+            onomatopoeias: [
+                semanticRegion(.onomatopoeia, x: 0.56, y: 0.27, width: 0.24, height: 0.48)
             ]
         )
 
@@ -226,7 +224,7 @@ struct GuidedPanelVisionV2Tests {
         #expect(focus[0] == nil)
     }
 
-    @Test func bodyOnlyDetectionCannotMoveAnExistingSemanticFocus() throws {
+    @Test func onomatopoeiaCannotMoveAnExistingSemanticFocus() throws {
         let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
         let balloon = semanticRegion(
             .balloon,
@@ -242,14 +240,14 @@ struct GuidedPanelVisionV2Tests {
                 analysis: semanticAnalysis(balloons: [balloon])
             ).first ?? nil
         )
-        let withBodyOnly = try #require(
+        let withEffect = try #require(
             GuidedPanelSemanticViewportPlanner.focusRects(
                 panels: [panel],
                 analysis: semanticAnalysis(
                     balloons: [balloon],
-                    bodies: [
+                    onomatopoeias: [
                         semanticRegion(
-                            .body,
+                            .onomatopoeia,
                             x: 0.08,
                             y: 0.12,
                             width: 0.30,
@@ -261,99 +259,7 @@ struct GuidedPanelVisionV2Tests {
             ).first ?? nil
         )
 
-        #expect(withBodyOnly == baseline)
-    }
-
-    @Test func nearbyFaceBackedBodyCanOnlyBoundedlyProtectCharacterContext() throws {
-        let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let balloon = semanticRegion(
-            .balloon,
-            x: 0.60,
-            y: 0.16,
-            width: 0.22,
-            height: 0.18,
-            confidence: 0.94
-        )
-        let baseline = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(balloons: [balloon])
-            ).first ?? nil
-        )
-        let assisted = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(
-                    balloons: [balloon],
-                    faces: [
-                        semanticRegion(
-                            .face,
-                            x: 0.27,
-                            y: 0.20,
-                            width: 0.10,
-                            height: 0.11,
-                            confidence: 0.94
-                        )
-                    ],
-                    bodies: [
-                        semanticRegion(
-                            .body,
-                            x: 0.24,
-                            y: 0.27,
-                            width: 0.20,
-                            height: 0.45,
-                            confidence: 0.82
-                        )
-                    ]
-                )
-            ).first ?? nil
-        )
-
-        let baselineArea = baseline.width * baseline.height
-        let assistedArea = assisted.width * assisted.height
-        #expect(assisted.minX < baseline.minX)
-        #expect(assistedArea > baselineArea)
-        #expect(assistedArea <= baselineArea * 1.22 + 0.000_001)
-        #expect(panel.contains(assisted))
-        #expect(assisted.contains(balloon.normalizedRect))
-    }
-
-    @Test func distantFaceCannotRecenterPrimarySemanticViewport() throws {
-        let panel = CGRect(x: 0.05, y: 0.06, width: 0.90, height: 0.82)
-        let balloon = semanticRegion(
-            .balloon,
-            x: 0.60,
-            y: 0.16,
-            width: 0.22,
-            height: 0.18,
-            confidence: 0.94
-        )
-        let baseline = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(balloons: [balloon])
-            ).first ?? nil
-        )
-        let withDistantFace = try #require(
-            GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: [panel],
-                analysis: semanticAnalysis(
-                    balloons: [balloon],
-                    faces: [
-                        semanticRegion(
-                            .face,
-                            x: 0.08,
-                            y: 0.68,
-                            width: 0.11,
-                            height: 0.11,
-                            confidence: 0.99
-                        )
-                    ]
-                )
-            ).first ?? nil
-        )
-
-        #expect(withDistantFace == baseline)
+        #expect(withEffect == baseline)
     }
 
     @Test func semanticViewportDoesNotTightenAlreadySmallPanels() {
@@ -443,8 +349,7 @@ struct GuidedPanelVisionV2Tests {
     private func semanticAnalysis(
         texts: [MangaVisionRegion] = [],
         balloons: [MangaVisionRegion] = [],
-        faces: [MangaVisionRegion] = [],
-        bodies: [MangaVisionRegion] = []
+        onomatopoeias: [MangaVisionRegion] = []
     ) -> MangaPageAnalysis {
         MangaPageAnalysis(
             pageIdentifier: MangaPageIdentifier(
@@ -456,10 +361,9 @@ struct GuidedPanelVisionV2Tests {
             panels: [],
             texts: texts,
             balloons: balloons,
-            faces: faces,
-            bodies: bodies,
-            modelIdentifier: "fixture-v2b5",
-            modelVersion: 5
+            onomatopoeias: onomatopoeias,
+            modelIdentifier: MangaVisionKoharuProvider.modelIdentifier,
+            modelVersion: MangaVisionKoharuProvider.modelVersionNumber
         )
     }
 

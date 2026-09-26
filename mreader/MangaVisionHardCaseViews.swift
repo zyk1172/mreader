@@ -188,9 +188,8 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
     case all
     case frame
     case text
-    case face
-    case body
     case balloon
+    case onomatopoeia
     case guidedPanel
     case ocr
     case translation
@@ -204,9 +203,8 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
         case .all: "全部"
         case .frame: "Frame"
         case .text: "Text"
-        case .face: "Face"
-        case .body: "Body"
         case .balloon: "Balloon"
+        case .onomatopoeia: "Onomatopoeia"
         case .guidedPanel: "Guided Panel 影响"
         case .ocr: "OCR 影响"
         case .translation: "翻译影响"
@@ -225,12 +223,10 @@ nonisolated enum MangaVisionHardCaseManagerFilter: String, CaseIterable, Sendabl
             record.feedback.affectedAreas.contains(.frame)
         case .text:
             record.feedback.affectedAreas.contains(.text)
-        case .face:
-            record.feedback.affectedAreas.contains(.face)
-        case .body:
-            record.feedback.affectedAreas.contains(.body)
         case .balloon:
             record.feedback.affectedAreas.contains(.balloon)
+        case .onomatopoeia:
+            record.feedback.affectedAreas.contains(.onomatopoeia)
         case .guidedPanel:
             record.feedback.productImpacts.contains(.guidedPanel)
         case .ocr:

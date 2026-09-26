@@ -13,15 +13,15 @@ struct MangaVisionPostRemediationIntegrationTests {
             pageIndex: 0,
             sourceFingerprint: "fixture"
         )
-        let baselineFace = MangaVisionRegion(
+        let baselineEffect = MangaVisionRegion(
             id: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
-            type: .face,
+            type: .onomatopoeia,
             normalizedRect: CGRect(x: 0.10, y: 0.10, width: 0.30, height: 0.20),
             confidence: 0.92
         )
-        let refinementFace = MangaVisionRegion(
+        let refinementEffect = MangaVisionRegion(
             id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
-            type: .face,
+            type: .onomatopoeia,
             normalizedRect: CGRect(x: 0.195, y: 0.10, width: 0.30, height: 0.20),
             confidence: 0.84
         )
@@ -40,12 +40,12 @@ struct MangaVisionPostRemediationIntegrationTests {
         let baseline = analysis(
             identifier: identifier,
             balloons: [baselineBalloon],
-            faces: [baselineFace]
+            onomatopoeias: [baselineEffect]
         )
         let refinement = analysis(
             identifier: identifier,
             balloons: [refinementBalloon],
-            faces: [refinementFace]
+            onomatopoeias: [refinementEffect]
         )
 
         let merged = MangaVisionAnalysisComposer.merge(
@@ -53,9 +53,9 @@ struct MangaVisionPostRemediationIntegrationTests {
             refinements: [refinement]
         )
         let profile = MangaVisionCalibrationProfile.bundled
-        let expectedFaces = profile.deduplicated(
-            [baselineFace, refinementFace],
-            type: .face
+        let expectedEffects = profile.deduplicated(
+            [baselineEffect, refinementEffect],
+            type: .onomatopoeia
         )
         let expectedBalloons = profile.deduplicated(
             [baselineBalloon, refinementBalloon],
@@ -64,9 +64,9 @@ struct MangaVisionPostRemediationIntegrationTests {
 
         // These geometries intentionally sit between the old adaptive thresholds and
         // the revisioned profile so a copied/hard-coded threshold set fails this test.
-        #expect(expectedFaces.count == 1)
+        #expect(expectedEffects.count == 1)
         #expect(expectedBalloons.count == 2)
-        #expect(merged.faces == expectedFaces)
+        #expect(merged.onomatopoeias == expectedEffects)
         #expect(merged.balloons == expectedBalloons)
     }
 
@@ -164,7 +164,7 @@ struct MangaVisionPostRemediationIntegrationTests {
     private func analysis(
         identifier: MangaPageIdentifier,
         balloons: [MangaVisionRegion] = [],
-        faces: [MangaVisionRegion] = []
+        onomatopoeias: [MangaVisionRegion] = []
     ) -> MangaPageAnalysis {
         MangaPageAnalysis(
             pageIdentifier: identifier,
@@ -172,8 +172,7 @@ struct MangaVisionPostRemediationIntegrationTests {
             panels: [],
             texts: [],
             balloons: balloons,
-            faces: faces,
-            bodies: [],
+            onomatopoeias: onomatopoeias,
             modelIdentifier: "post-remediation-fixture",
             modelVersion: 1
         )
@@ -218,8 +217,7 @@ private actor MangaVisionPassCountingFakeProvider: MangaVisionProvider {
             panels: [],
             texts: [],
             balloons: [],
-            faces: [],
-            bodies: [],
+            onomatopoeias: [],
             modelIdentifier: "post-remediation-pass-counting-fake",
             modelVersion: 1
         )

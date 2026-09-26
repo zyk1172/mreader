@@ -1,41 +1,40 @@
 import CoreGraphics
 import Foundation
 
-/// The active development and production router expose only the frozen V2B5
-/// provider. The previous OLD and COMPARE selectors remain recoverable through
-/// the archive tag, not through active runtime state.
+/// The active development and production router exposes only the bundled Koharu
+/// YOLO26s-seg provider. The retired V2B5 five-class detector and the older
+/// Vision-based `PanelDetector` are recoverable through the archive tag, not through
+/// active runtime state.
 nonisolated enum MangaVisionProviderMode: String, CaseIterable, Sendable {
-    case v2b5 = "V2B5"
+    case koharuYOLO26S = "KoharuYOLO26S"
 
-    static let productionDefault: Self = .v2b5
+    static let productionDefault: Self = .koharuYOLO26S
 
     static var currentForDiagnostics: Self {
-        .v2b5
+        .koharuYOLO26S
     }
 }
 
 actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProviding, MangaVisionRuntimeReleasable {
-    static let shared = MangaVisionProviderRouter(
-        v2b5: MangaVisionV2B5Provider.shared
-    )
+    static let shared = MangaVisionProviderRouter(base: MangaVisionKoharuProvider.shared)
 
-    private let v2b5: any MangaVisionProvider
+    private let base: any MangaVisionProvider
 
-    init(v2b5: any MangaVisionProvider) {
-        self.v2b5 = v2b5
+    init(base: any MangaVisionProvider) {
+        self.base = base
     }
 
     var descriptor: MangaVisionProviderDescriptor {
         get async {
-            await v2b5.descriptor
+            await base.descriptor
         }
     }
 
     func mangaVisionManifest() async -> MangaVisionModelManifest {
-        if let manifestProvider = v2b5 as? any MangaVisionManifestProviding {
+        if let manifestProvider = base as? any MangaVisionManifestProviding {
             return await manifestProvider.mangaVisionManifest()
         }
-        let descriptor = await v2b5.descriptor
+        let descriptor = await base.descriptor
         return MangaVisionModelManifest(
             modelID: descriptor.modelIdentifier,
             modelVersion: descriptor.modelVersion,
@@ -55,7 +54,7 @@ actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProvidi
         sourceImageSize: CGSize,
         pageIdentifier: MangaPageIdentifier
     ) async throws -> MangaPageAnalysis {
-        try await v2b5.analyzePage(
+        try await base.analyzePage(
             image: image,
             sourceImageSize: sourceImageSize,
             pageIdentifier: pageIdentifier
@@ -63,7 +62,7 @@ actor MangaVisionProviderRouter: MangaVisionProvider, MangaVisionManifestProvidi
     }
 
     func releaseRuntimeMemory() async {
-        if let releasable = v2b5 as? any MangaVisionRuntimeReleasable {
+        if let releasable = base as? any MangaVisionRuntimeReleasable {
             await releasable.releaseRuntimeMemory()
         }
     }

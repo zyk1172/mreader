@@ -11,10 +11,7 @@ build/
 # macOS
 .DS_Store
 
-# Local-only V2B5 physical-device benchmark resources and scratch output.
+# Local-only physical-device benchmark resources and scratch output.
 .local-bench/
 mreaderTests/BenchModels/
 mreaderTests/V2B5ValSamples/
-
-# Private Manga Vision weight: materialized locally from manga-vision-training.
-mreader/MangaVisionV2B5.mlpackage/Data/com.apple.CoreML/weights/weight.bin

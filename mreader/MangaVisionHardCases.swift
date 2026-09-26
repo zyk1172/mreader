@@ -37,9 +37,8 @@ nonisolated enum MangaVisionHardCaseImageRetentionPolicy: String, Codable, CaseI
 nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable, Sendable, Hashable {
     case frame
     case text
-    case face
-    case body
     case balloon
+    case onomatopoeia
     case readingOrder = "reading_order"
     case ocrTranslation = "ocr_translation"
     case other
@@ -48,12 +47,28 @@ nonisolated enum MangaVisionHardCaseAffectedArea: String, Codable, CaseIterable,
         switch self {
         case .frame: "Frame"
         case .text: "Text"
-        case .face: "Face"
-        case .body: "Body"
         case .balloon: "Balloon"
+        case .onomatopoeia: "Onomatopoeia"
         case .readingOrder: "阅读顺序"
         case .ocrTranslation: "OCR / 翻译"
         case .other: "其他"
+        }
+    }
+
+    /// The retired detector exposed `face` and `body` areas. Locally captured hard-case
+    /// records may still carry those raw values, so they decode to `.other` instead of
+    /// failing the whole store.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "face", "body":
+            self = .other
+        default:
+            guard let value = MangaVisionHardCaseAffectedArea(rawValue: raw) else {
+                self = .other
+                return
+            }
+            self = value
         }
     }
 }
@@ -69,14 +84,21 @@ nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Se
     case frameMerge = "frame_merge"
     case frameSplit = "frame_split"
     case readingOrderError = "reading_order_error"
-    case wrongPerson = "wrong_person"
-    case multipleFacesConfused = "multiple_faces_confused"
-    case overlappingPersonDuplicate = "overlapping_person_duplicate"
     case balloonTextAssociationError = "balloon_text_association_error"
+    case onomatopoeiaTranslationError = "onomatopoeia_translation_error"
     case roiError = "roi_error"
     case ocrAffected = "ocr_affected"
     case translationContextAffected = "translation_context_affected"
-    case potentialSpeakerAssociationError = "potential_speaker_association_error"
+
+    /// Person-relation issue types belonged to the retired five-class detector and can no
+    /// longer be produced. Legacy raw values decode to `.unspecifiedVisualError` so
+    /// existing local diagnostics stay readable.
+    private static let retiredRawValues: Set<String> = [
+        "wrong_person",
+        "multiple_faces_confused",
+        "overlapping_person_duplicate",
+        "potential_speaker_association_error"
+    ]
 
     var displayName: String {
         switch self {
@@ -90,15 +112,25 @@ nonisolated enum MangaVisionHardCaseIssueType: String, Codable, CaseIterable, Se
         case .frameMerge: "分镜合并"
         case .frameSplit: "分镜拆分"
         case .readingOrderError: "阅读顺序错误"
-        case .wrongPerson: "错人物"
-        case .multipleFacesConfused: "多人脸混淆"
-        case .overlappingPersonDuplicate: "人物重叠重复"
         case .balloonTextAssociationError: "气泡与文字对应错误"
+        case .onomatopoeiaTranslationError: "拟声词处理错误"
         case .roiError: "ROI 错误"
         case .ocrAffected: "OCR 受影响"
         case .translationContextAffected: "翻译上下文受影响"
-        case .potentialSpeakerAssociationError: "潜在说话人关联错误"
         }
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if Self.retiredRawValues.contains(raw) {
+            self = .unspecifiedVisualError
+            return
+        }
+        guard let value = MangaVisionHardCaseIssueType(rawValue: raw) else {
+            self = .unspecifiedVisualError
+            return
+        }
+        self = value
     }
 }
 
@@ -107,7 +139,6 @@ nonisolated enum MangaVisionHardCaseProductImpact: String, Codable, CaseIterable
     case guidedPanel = "guided_panel"
     case ocr
     case translation
-    case personAssociation = "person_association"
     case none
 
     var displayName: String {
@@ -116,9 +147,23 @@ nonisolated enum MangaVisionHardCaseProductImpact: String, Codable, CaseIterable
         case .guidedPanel: "Guided Panel"
         case .ocr: "OCR"
         case .translation: "翻译"
-        case .personAssociation: "人物关联"
         case .none: "没明显影响"
         }
+    }
+
+    /// Person-association impact belonged to the retired person classes. Legacy raw
+    /// values decode to `.none` so existing local diagnostics stay readable.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if raw == "person_association" {
+            self = .none
+            return
+        }
+        guard let value = MangaVisionHardCaseProductImpact(rawValue: raw) else {
+            self = .none
+            return
+        }
+        self = value
     }
 }
 
@@ -184,13 +229,7 @@ nonisolated struct MangaVisionHardCaseDetection: Codable, Sendable, Hashable, Id
     }
 
     static func className(for type: MangaRegionType) -> String {
-        switch type {
-        case .panel: "frame"
-        case .text: "text"
-        case .face: "face"
-        case .body: "body"
-        case .balloon: "balloon"
-        }
+        type.modelClassName
     }
 }
 
@@ -694,13 +733,13 @@ nonisolated enum MangaVisionHardCaseCaptureService {
             ?? .zero
         let now = Date()
         let snapshotModelIdentifier = analysis?.modelIdentifier ?? manifest.modelID
-        let isV2B5 = snapshotModelIdentifier == MangaVisionV2B5Provider.modelIdentifier
-        let capturedModelName = isV2B5
-            ? MangaVisionV2B5ProductionIdentity.modelName
+        let capturesBundledModel = snapshotModelIdentifier == MangaVisionKoharuProvider.modelIdentifier
+        let capturedModelName = capturesBundledModel
+            ? MangaVisionKoharuProductionIdentity.modelName
             : snapshotModelIdentifier
-        let capturedModelSHA256 = isV2B5
-            ? MangaVisionV2B5ProductionIdentity.coreMLTreeSHA256
-            : manifest.modelFileHash
+        // The bundled package hash is computed from the compiled artifact, so there is no
+        // frozen constant to fall back to when the model is replaced.
+        let capturedModelSHA256 = manifest.modelFileHash
 
         let record = MangaVisionHardCaseRecord(
             id: UUID(),

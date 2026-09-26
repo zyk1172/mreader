@@ -8,27 +8,27 @@ nonisolated struct MangaVisionProviderDescriptor: Sendable, Equatable {
     let supportedRegionTypes: Set<MangaRegionType>
 }
 
-/// Capabilities are intentionally separate from semantic class support. V2B5
-/// exposes all five semantic classes as bounding boxes, while contour output is
-/// not part of the active model contract.
+/// Capabilities are separate from semantic class support. The bundled Koharu
+/// YOLO26s-seg detector exposes four semantic classes and a real instance mask for
+/// every detection it keeps, so `supportsRegionMask` is true for all four.
 nonisolated struct MangaVisionProviderCapabilities: Sendable, Equatable {
     let supportsFrame: Bool
     let supportsText: Bool
-    let supportsFace: Bool
-    let supportsBody: Bool
     let supportsBalloon: Bool
-    let supportsBalloonMask: Bool
+    let supportsOnomatopoeia: Bool
+    /// True when the provider derives `MangaVisionRegion.contour` from a model mask
+    /// rather than leaving it nil.
+    let supportsRegionMask: Bool
 
     init(
         supportedRegionTypes: Set<MangaRegionType>,
-        supportsBalloonMask: Bool
+        supportsRegionMask: Bool
     ) {
         supportsFrame = supportedRegionTypes.contains(.panel)
         supportsText = supportedRegionTypes.contains(.text)
-        supportsFace = supportedRegionTypes.contains(.face)
-        supportsBody = supportedRegionTypes.contains(.body)
         supportsBalloon = supportedRegionTypes.contains(.balloon)
-        self.supportsBalloonMask = supportsBalloonMask
+        supportsOnomatopoeia = supportedRegionTypes.contains(.onomatopoeia)
+        self.supportsRegionMask = supportsRegionMask
     }
 }
 
@@ -36,7 +36,7 @@ extension MangaVisionProviderDescriptor {
     var capabilities: MangaVisionProviderCapabilities {
         MangaVisionProviderCapabilities(
             supportedRegionTypes: supportedRegionTypes,
-            supportsBalloonMask: false
+            supportsRegionMask: true
         )
     }
 }

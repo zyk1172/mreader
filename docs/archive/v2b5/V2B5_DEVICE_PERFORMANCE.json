@@ -1,0 +1,170 @@
+{
+  "format": "manga-vision-v2b5-iphone-device-performance-v1",
+  "date": "2026-09-18",
+  "device": {
+    "marketing_name": "iPhone 16 Pro",
+    "model_identifier": "iPhone17,1",
+    "core_device_identifier": "58D88C5D-1CAE-59E4-A1F8-819DC5E8046D",
+    "hardware_udid": "00008140-000A6D6A2143801C",
+    "reality": "physical",
+    "cpu_architecture": "arm64e",
+    "processor_count": 6,
+    "ios": "27.0",
+    "os_build": "24A437",
+    "low_power_mode": false,
+    "initial_thermal": "nominal"
+  },
+  "candidate": {
+    "model": "MangaVisionDetectorV2B5",
+    "variant": "Full FP32",
+    "checkpoint_sha256": "cb8947236e62bcf0fb516cd777886fce96f7cea52a29414d1408d0666edaf63f",
+    "artifact": "exports/coreml/diagnostic/MangaVisionV2B5_FP32.mlpackage",
+    "artifact_tree_sha256": "ebde3f514e2fb84e48f73bd194041da671337f7b770e3baeae637ed8c5dba4c5",
+    "artifact_size_bytes": 5908245,
+    "classes": ["frame", "text", "face", "body", "balloon"],
+    "input": "1x3x640x640 float32",
+    "input_seed": 109
+  },
+  "benchmark": {
+    "scope": "model.prediction only; image decode, preprocessing, decoder and postprocess excluded",
+    "warmup": 10,
+    "iterations": 100,
+    "timing": "ContinuousClock",
+    "memory": "application-side sampled TASK_VM_INFO physical footprint; not an Instruments instantaneous peak",
+    "signposts": ["model_load", "prediction"]
+  },
+  "output_contract": {
+    "v2b5_count": 12,
+    "levels": ["P2", "P3", "P4", "P5"],
+    "roles": ["classification logits: 5 channels", "bbox: 4 channels", "centerness: 1 channel"],
+    "shapes": {
+      "P2": {"classification": [1, 5, 160, 160], "bbox": [1, 4, 160, 160], "centerness": [1, 1, 160, 160]},
+      "P3": {"classification": [1, 5, 80, 80], "bbox": [1, 4, 80, 80], "centerness": [1, 1, 80, 80]},
+      "P4": {"classification": [1, 5, 40, 40], "bbox": [1, 4, 40, 40], "centerness": [1, 1, 40, 40]},
+      "P5": {"classification": [1, 5, 20, 20], "bbox": [1, 4, 20, 20], "centerness": [1, 1, 20, 20]}
+    }
+  },
+  "full_fp32": {
+    "all": {
+      "configured_compute_units": "all",
+      "load_ms": 155.819792,
+      "latency_ms": {"mean": 18.760062, "median": 18.757083, "p50": 18.757083, "p90": 19.330958, "p95": 19.486917, "p99": 20.125584, "min": 16.079167, "max": 20.243250, "stddev": 0.602608},
+      "memory_mb": {"before_load": 54.939415, "after_load": 57.642563, "after_warmup": 205.314484, "after_benchmark": 202.658234, "sampled_max": 205.314484, "sampled_max_delta": 150.375069},
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    },
+    "cpuAndNeuralEngine": {
+      "configured_compute_units": "cpuAndNeuralEngine",
+      "load_ms": 153.311750,
+      "latency_ms": {"mean": 38.257165, "median": 38.141042, "p50": 38.141042, "p90": 39.496375, "p95": 39.643167, "p99": 40.124375, "min": 36.341584, "max": 40.158459, "stddev": 0.863517},
+      "memory_mb": {"before_load": 50.970665, "after_load": 73.767563, "after_warmup": 66.564484, "after_benchmark": 66.564484, "sampled_max": 73.767563, "sampled_max_delta": 22.796898},
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    },
+    "cpuAndGPU": {
+      "configured_compute_units": "cpuAndGPU",
+      "load_ms": 96.796667,
+      "latency_ms": {"mean": 17.882420, "median": 17.886291, "p50": 17.886291, "p90": 18.361250, "p95": 18.461583, "p99": 18.850709, "min": 15.824709, "max": 18.932541, "stddev": 0.449304},
+      "memory_mb": {"before_load": 50.611290, "after_load": 65.205063, "after_warmup": 209.626984, "after_benchmark": 201.939484, "sampled_max": 209.626984, "sampled_max_delta": 159.015694},
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    },
+    "cpuOnly": {
+      "configured_compute_units": "cpuOnly",
+      "load_ms": 78.959042,
+      "latency_ms": {"mean": 39.621608, "median": 39.504958, "p50": 39.504958, "p90": 40.896791, "p95": 41.010292, "p99": 41.762042, "min": 37.909417, "max": 42.256583, "stddev": 0.872344},
+      "memory_mb": {"before_load": 51.001915, "after_load": 63.814438, "after_warmup": 65.689484, "after_benchmark": 65.689484, "sampled_max": 65.689484, "sampled_max_delta": 14.687569},
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    }
+  },
+  "variant_reference": {
+    "MP5": {
+      "compute_units": "all",
+      "artifact_tree_sha256": "66d748301674aac1b9510a8d6c5695ccbe537b380f9aa9dda53a8ff2107f9426",
+      "size_bytes": 4098956,
+      "load_ms": 399.900833,
+      "latency_ms": {"mean": 19.172873, "median": 18.953208, "p95": 20.687333, "p99": 20.864209},
+      "sampled_max_footprint_mb": 204.142632,
+      "sampled_max_delta_mb": 151.343842,
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    },
+    "FP16": {
+      "compute_units": "all",
+      "artifact_tree_sha256": "4f8722d22e4ad049b990b56a02c075c806ebd2e366277f04aef796ed60dba638",
+      "size_bytes": 3165210,
+      "load_ms": 683.394250,
+      "latency_ms": {"mean": 3.300670, "median": 3.282125, "p95": 3.403291, "p99": 3.466333},
+      "sampled_max_footprint_mb": 101.017586,
+      "sampled_max_delta_mb": 50.437546,
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "output_contract": "PASS"
+    },
+    "OLD_PRODUCTION": {
+      "compute_units": "all",
+      "resource": "PanelDetector.mlmodelc",
+      "bundled_resource_tree_sha256": "45ba82cebbcda37e108108ff9a3069a9587f779812f859bb269df2c5b5cb9567",
+      "bundled_resource_size_bytes": 21061392,
+      "input": "640x640 image pixel buffer",
+      "output_shapes": [[1, 300, 38], [1, 32, 160, 160]],
+      "load_ms": 1110.940375,
+      "latency_ms": {"mean": 4.725980, "median": 4.707042, "p95": 4.846084, "p99": 4.904959},
+      "sampled_max_footprint_mb": 108.814461,
+      "sampled_max_delta_mb": 55.609421,
+      "thermal": {"before": "nominal", "after": "nominal"},
+      "prediction_failures": 0,
+      "note": "Latency/memory reference only; output contract is not comparable to V2B5."
+    }
+  },
+  "sustained_short_run": {
+    "model": "FULL_FP32",
+    "compute_units": "all",
+    "first_20_median_ms": 18.803375,
+    "last_20_median_ms": 18.628083,
+    "drift_percent": -0.932237,
+    "thermal_before": "nominal",
+    "thermal_after": "nominal"
+  },
+  "stability": {
+    "benchmark_processes": 7,
+    "benchmark_tests_passed": 7,
+    "benchmark_tests_failed": 0,
+    "prediction_failures": 0,
+    "v2b5_contract": "12 outputs and all P2/P3/P4/P5 shapes PASS",
+    "memory": "No monotonic growth observed over 100 predictions; warmup allocation was stable afterward.",
+    "thermal": "All runs started and ended nominal."
+  },
+  "correctness_scope": {
+    "this_report": "device load/prediction performance and stability only",
+    "prior_correctness_evidence": "Core ML Full FP32 correctness was already established on 40 val-only pages: 4666/4666 matched, class agreement 100%, mean IoU 0.999999, min IoU 0.999994.",
+    "compute_unit_interpretation": "MLComputeUnits is the configured allowed set; no actual op placement or ANE percentage is claimed without Instruments/Core ML profiler evidence."
+  },
+  "test_split": {
+    "manga109s_test_images_accessed": "NO",
+    "test_inference": "NO",
+    "val_images_accessed": "NO"
+  },
+  "tests": {
+    "device_benchmark": "7 selected physical-device benchmark tests passed, 0 failed",
+    "build_for_testing_without_install": "PASS",
+    "ordinary_mreader_test_suite": "not rerun in this gate to avoid another device deployment"
+  },
+  "decision": {
+    "code": "A",
+    "label": "FULL_FP32_DEVICE_ACCEPTABLE — READY FOR MREADER INTEGRATION",
+    "basis": [
+      "Full FP32 .all loaded and predicted successfully on physical iPhone 16 Pro.",
+      "100 predictions completed with zero failures and nominal thermal state.",
+      "Full FP32 .all median 18.757 ms and p95 19.487 ms.",
+      "MP5 .all was effectively the same speed, so it does not justify sacrificing the Full FP32 correctness margin.",
+      "This is a readiness result only; no mReader provider or product default was changed."
+    ]
+  }
+}

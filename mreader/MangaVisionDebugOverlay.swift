@@ -5,9 +5,7 @@ struct MangaVisionDebugOverlayConfiguration: Sendable, Equatable {
     var showsPanels = true
     var showsTexts = true
     var showsBalloons = true
-    var showsFaces = true
-    var showsBodies = true
-    var showsRelations = true
+    var showsOnomatopoeias = true
 }
 
 /// Developer-only overlay for inspecting the shared Manga Vision analysis.
@@ -16,7 +14,6 @@ struct MangaVisionDebugOverlayConfiguration: Sendable, Equatable {
 /// letterboxing, zoom and the existing reader coordinate system.
 struct MangaVisionDebugOverlay: View {
     let analysis: MangaPageAnalysis
-    let semanticPage: MangaSemanticPage?
     let imageRect: CGRect
     let configuration: MangaVisionDebugOverlayConfiguration
 
@@ -31,14 +28,11 @@ struct MangaVisionDebugOverlay: View {
             if configuration.showsBalloons {
                 regionLayer(analysis.balloons, lineWidth: 1.8)
             }
-            if configuration.showsFaces {
-                regionLayer(analysis.faces, lineWidth: 1.5)
+            if configuration.showsOnomatopoeias {
+                regionLayer(analysis.onomatopoeias, lineWidth: 1.5)
             }
-            if configuration.showsBodies {
-                regionLayer(analysis.bodies, lineWidth: 1.5)
-            }
-            if configuration.showsRelations, let semanticPage {
-                relationLayer(semanticPage)
+            if configuration.showsPanels {
+                contourLayer(analysis.panels)
             }
         }
         .allowsHitTesting(false)
@@ -67,30 +61,21 @@ struct MangaVisionDebugOverlay: View {
         }
     }
 
+    /// Draws the mask-derived outline that the segmentation model produces for every
+    /// region. A missing outline means the mask was rejected, not that the model is
+    /// bounding-box-only.
     @ViewBuilder
-    private func relationLayer(_ page: MangaSemanticPage) -> some View {
-        Canvas { context, _ in
-            for (panelIndex, panel) in page.panels.enumerated() {
-                let panelRect = displayRect(panel.panel.normalizedRect)
-                context.draw(
-                    Text("P\(panelIndex + 1)").font(.system(size: 10, weight: .bold)),
-                    at: CGPoint(x: panelRect.minX + 12, y: panelRect.minY + 12)
-                )
-                for person in panel.persons {
-                    let personRect = person.face?.normalizedRect ?? person.body?.normalizedRect
-                    guard let personRect else { continue }
-                    let displayedPerson = displayRect(personRect)
-                    let from = CGPoint(x: displayedPerson.midX, y: displayedPerson.midY)
-                    let to = CGPoint(x: panelRect.midX, y: panelRect.midY)
-                    var path = Path()
-                    path.move(to: from)
-                    path.addLine(to: to)
-                    context.stroke(
-                        path,
-                        with: .foreground,
-                        style: StrokeStyle(lineWidth: 0.6, dash: [3, 3])
-                    )
+    private func contourLayer(_ regions: [MangaVisionRegion]) -> some View {
+        ForEach(regions) { region in
+            if let contour = region.contour, contour.points.count >= 3 {
+                Path { path in
+                    let points = contour.cgPoints.map(displayPoint)
+                    guard let first = points.first else { return }
+                    path.move(to: first)
+                    for point in points.dropFirst() { path.addLine(to: point) }
+                    path.closeSubpath()
                 }
+                .stroke(Color.accentColor.opacity(0.85), lineWidth: 0.8)
             }
         }
     }
@@ -104,13 +89,19 @@ struct MangaVisionDebugOverlay: View {
         )
     }
 
+    private func displayPoint(_ normalized: CGPoint) -> CGPoint {
+        CGPoint(
+            x: imageRect.minX + normalized.x * imageRect.width,
+            y: imageRect.minY + normalized.y * imageRect.height
+        )
+    }
+
     private func dash(for type: MangaRegionType) -> [CGFloat] {
         switch type {
         case .panel: []
         case .text: [5, 2]
         case .balloon: [10, 2, 2, 2]
-        case .face: [2, 2]
-        case .body: [8, 3]
+        case .onomatopoeia: [2, 2]
         }
     }
 }

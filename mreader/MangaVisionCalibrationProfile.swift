@@ -3,11 +3,19 @@ import Foundation
 
 nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let confidenceThreshold: Float
-    let nmsIOUThreshold: CGFloat
+    let iouThreshold: CGFloat
     let containmentThreshold: CGFloat
 }
 
 /// One revisioned source of truth for detector filtering and same-class deduplication.
+///
+/// The bundled Koharu YOLO26s-seg checkpoint has an end-to-end, NMS-free head: it
+/// ranks and de-duplicates its own output, so `iouThreshold` is **not** a detector NMS
+/// parameter. It is the merge threshold applied when a long page is analysed as a
+/// full-page pass plus overlapping refinement tiles, and when semantic consumers
+/// collapse near-identical regions. `confidenceThreshold` records the checkpoint's
+/// recommended operating point.
+///
 /// Any production threshold change must bump `revision`; the manifest includes this
 /// value in cache identity so cached analyses cannot outlive their calibration.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
@@ -15,34 +23,27 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga109-yolo26s-seg-calibration-2026-09-17-v1",
+        revision: MangaVisionKoharuProductionIdentity.calibrationRevision,
         byRegionType: [
             .panel: MangaVisionClassCalibration(
-                confidenceThreshold: 0.24,
-                nmsIOUThreshold: 0.50,
-                containmentThreshold: 0.92
+                confidenceThreshold: MangaVisionKoharuDecoder.scoreThreshold,
+                iouThreshold: 0.68,
+                containmentThreshold: 0.96
             ),
             .text: MangaVisionClassCalibration(
-                confidenceThreshold: 0.18,
-                nmsIOUThreshold: 0.55,
+                confidenceThreshold: MangaVisionKoharuDecoder.scoreThreshold,
+                iouThreshold: 0.58,
                 containmentThreshold: 0.88
             ),
             .balloon: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.58,
+                confidenceThreshold: MangaVisionKoharuDecoder.scoreThreshold,
+                iouThreshold: 0.62,
                 containmentThreshold: 0.90
             ),
-            // Kept explicit for forward-compatible checkpoints even though the
-            // currently bundled checkpoint exports only frame/text/balloon.
-            .face: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.45,
-                containmentThreshold: 0.90
-            ),
-            .body: MangaVisionClassCalibration(
-                confidenceThreshold: 0.20,
-                nmsIOUThreshold: 0.55,
-                containmentThreshold: 0.90
+            .onomatopoeia: MangaVisionClassCalibration(
+                confidenceThreshold: MangaVisionKoharuDecoder.scoreThreshold,
+                iouThreshold: 0.58,
+                containmentThreshold: 0.88
             )
         ]
     )
@@ -55,8 +56,8 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
 
     func calibration(for type: MangaRegionType) -> MangaVisionClassCalibration {
         byRegionType[type] ?? MangaVisionClassCalibration(
-            confidenceThreshold: 0.20,
-            nmsIOUThreshold: 0.62,
+            confidenceThreshold: MangaVisionKoharuDecoder.scoreThreshold,
+            iouThreshold: 0.62,
             containmentThreshold: 0.92
         )
     }
@@ -65,7 +66,7 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
         let calibration = calibration(for: type)
         return MangaVisionRegionPostProcessor.deduplicated(
             regions,
-            iouThreshold: calibration.nmsIOUThreshold,
+            iouThreshold: calibration.iouThreshold,
             containmentThreshold: calibration.containmentThreshold
         )
     }

@@ -5530,9 +5530,8 @@ struct LocalImageView: View {
     @State private var mangaVisionDebugAnalysis: MangaPageAnalysis?
     @AppStorage("manga_vision_debug_panels") private var mangaVisionDebugPanels = true
     @AppStorage("manga_vision_debug_texts") private var mangaVisionDebugTexts = true
-    @AppStorage("manga_vision_debug_faces") private var mangaVisionDebugFaces = true
-    @AppStorage("manga_vision_debug_bodies") private var mangaVisionDebugBodies = true
-    @AppStorage("manga_vision_debug_relations") private var mangaVisionDebugRelations = true
+    @AppStorage("manga_vision_debug_balloons") private var mangaVisionDebugBalloons = true
+    @AppStorage("manga_vision_debug_onomatopoeias") private var mangaVisionDebugOnomatopoeias = true
 #endif
     @State private var isLoadingImage = true
     @State private var loadFailed = false
@@ -6051,17 +6050,12 @@ struct LocalImageView: View {
         if ocrShowDebugBoxes, let analysis = mangaVisionDebugAnalysis {
             MangaVisionDebugOverlay(
                 analysis: analysis,
-                semanticPage: MangaSemanticAnalyzer.makeSemanticPage(
-                    from: analysis,
-                    isRightToLeft: isRightToLeftReading
-                ),
                 imageRect: ocrDisplayTransform(in: size).imageRect,
                 configuration: MangaVisionDebugOverlayConfiguration(
                     showsPanels: mangaVisionDebugPanels,
                     showsTexts: mangaVisionDebugTexts,
-                    showsFaces: mangaVisionDebugFaces,
-                    showsBodies: mangaVisionDebugBodies,
-                    showsRelations: mangaVisionDebugRelations
+                    showsBalloons: mangaVisionDebugBalloons,
+                    showsOnomatopoeias: mangaVisionDebugOnomatopoeias
                 )
             )
         }
