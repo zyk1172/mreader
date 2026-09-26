@@ -9,9 +9,9 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         let profile = MangaVisionCalibrationProfile.bundled
         XCTAssertFalse(profile.revision.isEmpty)
 
-        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.40)
+        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.65)
         XCTAssertEqual(profile.calibration(for: .panel).nmsIOUThreshold, 0.35)
-        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.45)
+        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.35)
         XCTAssertEqual(profile.calibration(for: .text).nmsIOUThreshold, 0.35)
         XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.30)
         XCTAssertEqual(profile.calibration(for: .balloon).nmsIOUThreshold, 0.35)
