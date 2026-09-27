@@ -164,6 +164,36 @@ struct GuidedPanelFoundationTests {
         #expect(PanelLayoutQuality.isUsable(processed))
     }
 
+    @Test func peripheralMarginStripWithoutSemanticsIsRejected() {
+        let margin = panel(x: 0.0, y: 0.02, width: 0.07, height: 0.92, confidence: 0.82)
+        let real = panel(x: 0.12, y: 0.08, width: 0.78, height: 0.36, confidence: 0.76)
+        let processed = PanelPostProcessor.process(
+            [margin, real],
+            contentBounds: CGRect(x: 0, y: 0, width: 0.96, height: 0.98)
+        )
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == real.rect)
+    }
+
+    @Test func balloonLikeFrameAliasIsRejectedButContainingPanelSurvives() {
+        let balloonRect = CGRect(x: 0.60, y: 0.12, width: 0.21, height: 0.17)
+        let alias = panel(x: 0.595, y: 0.115, width: 0.22, height: 0.18, confidence: 0.66)
+        let real = panel(x: 0.50, y: 0.06, width: 0.42, height: 0.34, confidence: 0.61)
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: balloonRect,
+            confidence: 0.72
+        )
+
+        let processed = PanelPostProcessor.process(
+            [alias, real],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.contains { $0.rect == real.rect })
+        #expect(!processed.contains { $0.rect == alias.rect })
+    }
+
     @Test func semanticRecoveryRejectsTextContainedOnlyByOneBalloon() {
         let existing = panel(x: 0.05, y: 0.08, width: 0.38, height: 0.34, confidence: 0.90)
         let text = MangaVisionRegion(
