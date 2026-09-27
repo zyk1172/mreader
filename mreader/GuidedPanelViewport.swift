@@ -73,8 +73,13 @@ nonisolated enum GuidedPanelViewport {
         // Frame regressors often land a few pixels inside the printed border.
         // Use both proportional padding and a small page-relative floor so small
         // panels still reveal their complete edge instead of magnifying the miss.
-        let dx = max(source.width * padding, 0.008)
-        let dy = max(source.height * padding, 0.008)
+        //
+        // The floor only applies when expansion was actually requested: `contextPadding`
+        // of 0 has to keep meaning "no expansion", otherwise callers that deliberately ask
+        // for the raw panel rect (GuidedPanelFocusGeometry with `expansionRatio: 0`) silently
+        // get a padded one.
+        let dx = padding > 0 ? max(source.width * padding, 0.008) : 0
+        let dy = padding > 0 ? max(source.height * padding, 0.008) : 0
         return source.insetBy(dx: -dx, dy: -dy).intersection(unit)
     }
 

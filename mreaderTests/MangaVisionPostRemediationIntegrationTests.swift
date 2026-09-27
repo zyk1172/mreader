@@ -19,10 +19,13 @@ struct MangaVisionPostRemediationIntegrationTests {
             normalizedRect: CGRect(x: 0.10, y: 0.10, width: 0.30, height: 0.20),
             confidence: 0.92
         )
+        // Offset chosen so the two effect boxes overlap at IoU 0.60: above the bundled
+        // onomatopoeia threshold (0.58) but below MangaVisionRegionPostProcessor's default
+        // (0.62), which is what makes a hard-coded/default threshold set fail this test.
         let refinementEffect = MangaVisionRegion(
             id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
             type: .onomatopoeia,
-            normalizedRect: CGRect(x: 0.195, y: 0.10, width: 0.30, height: 0.20),
+            normalizedRect: CGRect(x: 0.175, y: 0.10, width: 0.30, height: 0.20),
             confidence: 0.84
         )
         let baselineBalloon = MangaVisionRegion(
