@@ -3,6 +3,87 @@ import Foundation
 
 /// Bridges page-level Manga Vision regions into the existing TextBlock contract.
 /// The Core ML model owns only geometry; OCR remains the source of text/confidence.
+nonisolated enum MangaVisionPolygonLayout {
+    static func interiorSafeRect(
+        polygon rawPolygon: [CGPoint],
+        bounds rawBounds: CGRect,
+        preferredPoint: CGPoint?
+    ) -> CGRect? {
+        let polygon = rawPolygon.filter { $0.x.isFinite && $0.y.isFinite }
+        let bounds = rawBounds.standardized
+        guard polygon.count >= 3, bounds.width > 0, bounds.height > 0 else { return nil }
+
+        let rowCount = 48
+        let stepY = bounds.height / CGFloat(rowCount)
+        guard stepY > 0 else { return nil }
+        let preferredX = preferredPoint?.x ?? bounds.midX
+        var rows: [(y: CGFloat, minX: CGFloat, maxX: CGFloat)] = []
+
+        for row in 0..<rowCount {
+            let y = bounds.minY + (CGFloat(row) + 0.5) * stepY
+            var intersections: [CGFloat] = []
+            for index in polygon.indices {
+                let first = polygon[index]
+                let second = polygon[(index + 1) % polygon.count]
+                if abs(first.y - second.y) < 0.000_000_1 { continue }
+                let lower = min(first.y, second.y)
+                let upper = max(first.y, second.y)
+                guard y >= lower, y < upper else { continue }
+                let t = (y - first.y) / (second.y - first.y)
+                intersections.append(first.x + (second.x - first.x) * t)
+            }
+            intersections.sort()
+            var intervals: [(CGFloat, CGFloat)] = []
+            var index = 0
+            while index + 1 < intersections.count {
+                let left = max(intersections[index], bounds.minX)
+                let right = min(intersections[index + 1], bounds.maxX)
+                if right > left { intervals.append((left, right)) }
+                index += 2
+            }
+            guard !intervals.isEmpty else { continue }
+            let selected = intervals
+                .filter { preferredX >= $0.0 && preferredX <= $0.1 }
+                .max(by: { ($0.1 - $0.0) < ($1.1 - $1.0) })
+                ?? intervals.max(by: { ($0.1 - $0.0) < ($1.1 - $1.0) })!
+            rows.append((y, selected.0, selected.1))
+        }
+        guard !rows.isEmpty else { return nil }
+
+        var best: CGRect?
+        var bestScore = -CGFloat.greatestFiniteMagnitude
+        for start in rows.indices {
+            var left = rows[start].minX
+            var right = rows[start].maxX
+            for end in start..<rows.count {
+                if end > start, rows[end].y - rows[end - 1].y > stepY * 1.6 { break }
+                left = max(left, rows[end].minX)
+                right = min(right, rows[end].maxX)
+                guard right > left else { break }
+                let minY = max(rows[start].y - stepY / 2, bounds.minY)
+                let maxY = min(rows[end].y + stepY / 2, bounds.maxY)
+                let raw = CGRect(x: left, y: minY, width: right - left, height: maxY - minY)
+                let insetX = max(raw.width * 0.045, bounds.width * 0.012)
+                let insetY = max(raw.height * 0.045, bounds.height * 0.012)
+                let candidate = raw.insetBy(dx: insetX, dy: insetY)
+                guard candidate.width > 0, candidate.height > 0 else { continue }
+                let area = candidate.width * candidate.height
+                let distance = preferredPoint.map {
+                    hypot(candidate.midX - $0.x, candidate.midY - $0.y)
+                } ?? 0
+                let containsPreferred = preferredPoint.map { candidate.contains($0) } ?? false
+                let score = area * (containsPreferred ? 1.35 : 1.0)
+                    - distance * max(bounds.width, bounds.height) * 0.08
+                if score > bestScore {
+                    bestScore = score
+                    best = candidate
+                }
+            }
+        }
+        return best
+    }
+}
+
 nonisolated enum MangaVisionOCRGeometry {
     private struct RegionCandidate {
         let rect: CGRect
@@ -141,9 +222,9 @@ nonisolated enum MangaVisionOCRGeometry {
             // substantial text coverage, but allow a center-confirmed partial edge.
             guard containment >= 0.55 || (centerInside && containment >= 0.30) else { return nil }
 
-            // Union only repairs small detector under-coverage so the downstream
-            // validatedBubbleGeometry contract can safely require containment.
-            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect.union(textRect))
+            // Keep the physical model balloon intact. Unioning an OCR text box into
+            // it makes the rendered surface drift away from the original mask.
+            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect)
             let fittedArea = MangaPageCoordinateSpace.area(fitted)
             guard fittedArea > 0,
                   fittedArea <= 0.55,
@@ -186,20 +267,20 @@ nonisolated enum MangaVisionOCRGeometry {
         _ balloon: RegionCandidate,
         textRect: CGRect
     ) -> CGRect {
-        guard balloon.polygon.count >= 3 else { return balloon.rect }
+        if balloon.polygon.count >= 3,
+           let interior = MangaVisionPolygonLayout.interiorSafeRect(
+               polygon: balloon.polygon,
+               bounds: balloon.rect,
+               preferredPoint: CGPoint(x: textRect.midX, y: textRect.midY)
+           ) {
+            return interior
+        }
 
-        // Bounding boxes include the empty corners around oval/irregular balloons.
-        // Reserve a small contour-aware margin for typography while never excluding
-        // the actual OCR text that must remain visible in the translated surface.
         let inset = balloon.rect.insetBy(
-            dx: balloon.rect.width * 0.06,
-            dy: balloon.rect.height * 0.06
+            dx: balloon.rect.width * 0.08,
+            dy: balloon.rect.height * 0.08
         )
-        guard inset.width > 0, inset.height > 0 else { return balloon.rect }
-        let safe = inset.union(textRect).intersection(balloon.rect)
-        return safe.isNull || safe.width <= 0 || safe.height <= 0
-            ? balloon.rect
-            : safe
+        return inset.width > 0 && inset.height > 0 ? inset : balloon.rect
     }
 
     private static func bestTextSafeRegion(
