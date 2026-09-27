@@ -48,4 +48,24 @@ struct TranslationOverlayCollisionTests {
 
         #expect(first == second)
     }
+    @Test func largestAvailableRectNeverOverlapsOccupiedTranslation() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 220, height: 140)
+        let occupied = [
+            CGRect(x: 70, y: 0, width: 80, height: 90),
+            CGRect(x: 0, y: 100, width: 90, height: 40)
+        ]
+        let free = try #require(
+            OCRBubbleLayoutEngine.largestAvailableRect(
+                in: bounds,
+                avoiding: occupied,
+                anchor: CGPoint(x: 180, y: 100)
+            )
+        )
+        #expect(bounds.contains(free))
+        for blocker in occupied {
+            let overlap = free.intersection(blocker)
+            #expect(overlap.isNull || overlap.width <= 0.5 || overlap.height <= 0.5)
+        }
+    }
+
 }
