@@ -302,11 +302,42 @@ final class mreaderUITests: XCTestCase {
     private func hardCaseFeedbackRow(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         let row = app.buttons[identifier].firstMatch
         let form = app.collectionViews.firstMatch
+        let window = app.windows.firstMatch
 
-        for _ in 0..<8 {
-            if row.waitForExistence(timeout: semanticFallbackTimeout), row.isHittable {
-                return row
+        for _ in 0..<10 {
+            if row.waitForExistence(timeout: semanticFallbackTimeout) {
+                let frame = row.frame
+                let windowFrame = window.frame
+                let formFrame = form.exists ? form.frame : windowFrame
+                let visibleTop = max(formFrame.minY + 6, windowFrame.minY + 70)
+                let visibleBottom = min(formFrame.maxY - 6, windowFrame.maxY - 12)
+                let hasUsableFrame = frame.width > 1
+                    && frame.height > 1
+                    && frame.maxY > visibleTop
+                    && frame.minY < visibleBottom
+
+                // Only ask XCUI for hittability after geometry says the element is
+                // actually on-screen. On iOS 26 an off-screen SwiftUI row can exist
+                // in the accessibility tree but querying isHittable records a test
+                // failure because it has no valid activation point.
+                if hasUsableFrame, row.isHittable {
+                    return row
+                }
+
+                if form.exists {
+                    if frame.maxY <= visibleTop {
+                        form.swipeDown()
+                    } else {
+                        form.swipeUp()
+                    }
+                } else if frame.maxY <= visibleTop {
+                    app.swipeDown()
+                } else {
+                    app.swipeUp()
+                }
+                continue
             }
+
             if form.exists {
                 form.swipeUp()
             } else {
