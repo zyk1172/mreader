@@ -502,12 +502,22 @@ nonisolated enum MangaTextSegmenter {
         let proposedSafeRegion: CGRect? = safeCandidates.isEmpty
             ? nil
             : safeCandidates.dropFirst().reduce(safeCandidates[0]) { $0.union($1) }
-        let mergedSafeRegion = TranslationRegionPolicy.resolvedLayoutSafeRegion(
-            sourceTextRegion: bounds,
-            proposedSafeRegion: proposedSafeRegion,
-            detectedBubble: selectedBubble?.box,
-            pageBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
-        ) ?? selectedBubble?.box
+        let polygonSafeRegion = selectedBubble.flatMap { bubble -> CGRect? in
+            guard bubble.polygon.count >= 3 else { return nil }
+            return MangaVisionPolygonLayout.interiorSafeRect(
+                polygon: bubble.polygon,
+                bounds: bubble.box,
+                preferredPoint: CGPoint(x: bounds.midX, y: bounds.midY)
+            )
+        }
+        let mergedSafeRegion = polygonSafeRegion
+            ?? TranslationRegionPolicy.resolvedLayoutSafeRegion(
+                sourceTextRegion: bounds,
+                proposedSafeRegion: proposedSafeRegion,
+                detectedBubble: selectedBubble?.box,
+                pageBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
+            )
+            ?? selectedBubble?.box
 
         return TextBlock(
             id: ordered[0].id,
