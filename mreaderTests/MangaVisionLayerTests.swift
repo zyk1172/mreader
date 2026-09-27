@@ -306,6 +306,30 @@ struct MangaVisionLayerTests {
         #expect(result.contains { $0.id == effect.id })
     }
 
+    @Test func balloonPolygonSafeRectStaysInsideIrregularBody() throws {
+        let polygon = [
+            CGPoint(x: 0.20, y: 0.20),
+            CGPoint(x: 0.72, y: 0.20),
+            CGPoint(x: 0.78, y: 0.42),
+            CGPoint(x: 0.62, y: 0.58),
+            CGPoint(x: 0.55, y: 0.80),
+            CGPoint(x: 0.47, y: 0.60),
+            CGPoint(x: 0.22, y: 0.55)
+        ]
+        let bounds = CGRect(x: 0.20, y: 0.20, width: 0.58, height: 0.60)
+        let safe = try #require(
+            MangaVisionPolygonLayout.interiorSafeRect(
+                polygon: polygon,
+                bounds: bounds,
+                preferredPoint: CGPoint(x: 0.46, y: 0.38)
+            )
+        )
+        #expect(bounds.contains(safe))
+        #expect(safe.maxY < 0.70)
+        #expect(safe.width > 0.20)
+        #expect(safe.height > 0.12)
+    }
+
     @Test func textROIPaddingDeduplicatesAndClampsAtPageEdges() {
         let first = region(.text, x: 0.0, y: 0.0, width: 0.20, height: 0.10, confidence: 0.9)
         let duplicate = region(.text, x: 0.01, y: 0.005, width: 0.19, height: 0.095, confidence: 0.7)
