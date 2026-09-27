@@ -1138,6 +1138,69 @@ nonisolated enum OCRBubbleLayoutEngine {
         )
     }
 
+    static func largestAvailableRect(
+        in rawBounds: CGRect,
+        avoiding occupiedRects: [CGRect],
+        anchor: CGPoint,
+        minimumSize: CGSize = CGSize(width: 4, height: 4)
+    ) -> CGRect? {
+        let bounds = rawBounds.standardized
+        guard bounds.width >= minimumSize.width, bounds.height >= minimumSize.height else {
+            return nil
+        }
+        let blockers = occupiedRects.compactMap { occupied -> CGRect? in
+            let clipped = occupied.standardized.intersection(bounds)
+            return clipped.isNull || clipped.width <= 0 || clipped.height <= 0 ? nil : clipped
+        }
+        guard !blockers.isEmpty else { return bounds }
+
+        var xs = [bounds.minX, bounds.maxX]
+        var ys = [bounds.minY, bounds.maxY]
+        for blocker in blockers {
+            xs.append(max(blocker.minX, bounds.minX))
+            xs.append(min(blocker.maxX, bounds.maxX))
+            ys.append(max(blocker.minY, bounds.minY))
+            ys.append(min(blocker.maxY, bounds.maxY))
+        }
+        xs = Array(Set(xs)).sorted()
+        ys = Array(Set(ys)).sorted()
+
+        var best: CGRect?
+        var bestScore = -CGFloat.greatestFiniteMagnitude
+        for leftIndex in 0..<(xs.count - 1) {
+            for rightIndex in (leftIndex + 1)..<xs.count {
+                let width = xs[rightIndex] - xs[leftIndex]
+                guard width >= minimumSize.width else { continue }
+                for topIndex in 0..<(ys.count - 1) {
+                    for bottomIndex in (topIndex + 1)..<ys.count {
+                        let height = ys[bottomIndex] - ys[topIndex]
+                        guard height >= minimumSize.height else { continue }
+                        let candidate = CGRect(
+                            x: xs[leftIndex],
+                            y: ys[topIndex],
+                            width: width,
+                            height: height
+                        )
+                        guard !blockers.contains(where: { blocker in
+                            let overlap = blocker.intersection(candidate)
+                            return !overlap.isNull && overlap.width > 0.5 && overlap.height > 0.5
+                        }) else { continue }
+
+                        let area = candidate.width * candidate.height
+                        let distance = hypot(candidate.midX - anchor.x, candidate.midY - anchor.y)
+                        let score = area - distance * max(bounds.width, bounds.height) * 0.12
+                            + (candidate.contains(anchor) ? area * 0.20 : 0)
+                        if score > bestScore {
+                            bestScore = score
+                            best = candidate
+                        }
+                    }
+                }
+            }
+        }
+        return best
+    }
+
     static func nonOverlappingRect(
         _ original: CGRect,
         anchor: CGPoint,
