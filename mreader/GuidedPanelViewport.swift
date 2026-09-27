@@ -17,7 +17,8 @@ nonisolated enum GuidedPanelViewport {
         imageAspectRatio: CGFloat,
         viewportSize: CGSize,
         contextPadding: CGFloat = defaultContextPadding,
-        maximumScale: CGFloat = defaultMaximumScale
+        maximumScale: CGFloat = defaultMaximumScale,
+        contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     ) -> GuidedPanelTransform {
         guard imageAspectRatio > 0,
               viewportSize.width > 0,
@@ -27,7 +28,8 @@ nonisolated enum GuidedPanelViewport {
 
         let paddedPanel = expandedAndClamped(
             normalizedPanel,
-            contextPadding: contextPadding
+            contextPadding: contextPadding,
+            contentBounds: contentBounds
         )
         let imageRect = aspectFitRect(
             aspectRatio: imageAspectRatio,
@@ -62,12 +64,19 @@ nonisolated enum GuidedPanelViewport {
 
     static func expandedAndClamped(
         _ rect: CGRect,
-        contextPadding: CGFloat = defaultContextPadding
+        contextPadding: CGFloat = defaultContextPadding,
+        contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     ) -> CGRect {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let source = rect.standardized.intersection(unit)
+        let requestedBounds = contentBounds.standardized.intersection(unit)
+        let safeBounds = !requestedBounds.isNull
+                && requestedBounds.width > 0
+                && requestedBounds.height > 0
+            ? requestedBounds
+            : unit
+        let source = rect.standardized.intersection(safeBounds)
         guard !source.isNull, source.width > 0, source.height > 0 else {
-            return unit
+            return safeBounds
         }
         let padding = min(max(contextPadding, 0), 0.25)
         // Frame regressors often land a few pixels inside the printed border.
@@ -80,7 +89,7 @@ nonisolated enum GuidedPanelViewport {
         // get a padded one.
         let dx = padding > 0 ? max(source.width * padding, 0.008) : 0
         let dy = padding > 0 ? max(source.height * padding, 0.008) : 0
-        return source.insetBy(dx: -dx, dy: -dy).intersection(unit)
+        return source.insetBy(dx: -dx, dy: -dy).intersection(safeBounds)
     }
 
     static func aspectFitRect(
