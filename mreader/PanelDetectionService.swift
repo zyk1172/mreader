@@ -180,7 +180,14 @@ nonisolated enum PanelPostProcessor {
             min(maximumRelativeFloor, bestScore * relativeScoreFraction)
         )
         let scoreFiltered = normalized.filter { $0.confidence >= navigationFloor }
-        let withoutSemanticAliases = scoreFiltered.filter { candidate in
+        let withoutPeripheralMargins = scoreFiltered.filter { candidate in
+            !isLikelyPeripheralMargin(
+                candidate,
+                contentBounds: pageBounds,
+                semanticRegions: semanticRegions
+            )
+        }
+        let withoutSemanticAliases = withoutPeripheralMargins.filter { candidate in
             !isLikelySemanticAlias(candidate, semanticRegions: semanticRegions)
         }
 
@@ -215,6 +222,45 @@ nonisolated enum PanelPostProcessor {
                 .sorted(by: preferred)
                 .prefix(maximumNavigationPanelCount)
         )
+    }
+
+    private static func isLikelyPeripheralMargin(
+        _ candidate: DetectedPanel,
+        contentBounds: CGRect,
+        semanticRegions: [MangaVisionRegion]
+    ) -> Bool {
+        let page = contentBounds.standardized
+        let rect = candidate.rect.standardized.intersection(page)
+        guard !rect.isNull, page.width > 0, page.height > 0 else { return true }
+
+        let widthFraction = rect.width / page.width
+        let heightFraction = rect.height / page.height
+        let stripLike = (widthFraction <= 0.12 && heightFraction >= 0.45)
+            || (heightFraction <= 0.12 && widthFraction >= 0.45)
+        guard stripLike else { return false }
+
+        let tolerance = max(min(page.width, page.height) * 0.018, 0.006)
+        let touchesEdge = rect.minX <= page.minX + tolerance
+            || rect.maxX >= page.maxX - tolerance
+            || rect.minY <= page.minY + tolerance
+            || rect.maxY >= page.maxY - tolerance
+        guard touchesEdge else { return false }
+
+        let hasSemanticEvidence = semanticRegions.contains { region in
+            guard region.type != .panel else { return false }
+            let threshold = MangaVisionCalibrationProfile.bundled
+                .calibration(for: region.type)
+                .confidenceThreshold
+            guard region.confidence >= threshold else { return false }
+            let semantic = region.normalizedRect.standardized
+            let semanticArea = area(semantic)
+            guard semanticArea > 0 else { return false }
+            let overlap = rect.intersection(semantic)
+            guard !overlap.isNull else { return false }
+            let center = CGPoint(x: semantic.midX, y: semantic.midY)
+            return rect.contains(center) || area(overlap) / semanticArea >= 0.55
+        }
+        return !hasSemanticEvidence
     }
 
     private static func recoverSemanticHoles(
@@ -465,11 +511,12 @@ nonisolated enum PanelPostProcessor {
                 // text/SFX detections. Only remove a frame candidate when its box is
                 // nearly the same object as the balloon; treating ordinary containment
                 // as an alias drops real dialogue panels, especially in dense lower rows.
-                let balloonIsNearIdentical = iou >= 0.70
-                    && containment >= 0.94
-                    && sizeRatio >= 0.65
-                    && semanticToFrameScore >= 1.00
-                return balloonIsNearIdentical
+                let balloonIsNearIdentical =
+                    (iou >= 0.55 && containment >= 0.88 && sizeRatio >= 0.55)
+                    || (containment >= 0.96 && sizeRatio >= 0.70)
+                let balloonDominatesFrame = balloonIsNearIdentical
+                    && semanticToFrameScore >= 0.85
+                return balloonDominatesFrame
                     && !hasIndependentSemanticSupport(
                         inside: frameRect,
                         excluding: semanticRect,
