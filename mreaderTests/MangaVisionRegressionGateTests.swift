@@ -24,17 +24,66 @@ final class MangaVisionRegressionGateTests: XCTestCase {
         let profile = MangaVisionCalibrationProfile.bundled
         XCTAssertFalse(profile.revision.isEmpty)
         XCTAssertEqual(profile.revision, MangaVisionKoharuProductionIdentity.calibrationRevision)
-        // The end-to-end head ships one operating point for every class.
+
+        // Per-class operating points. These are hard filters read by PanelDetectionService,
+        // so they must stay at or above the decoder's admission floor.
+        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.10)
+        XCTAssertEqual(profile.calibration(for: .text).confidenceThreshold, 0.18)
+        XCTAssertEqual(profile.calibration(for: .balloon).confidenceThreshold, 0.20)
+        XCTAssertEqual(profile.calibration(for: .onomatopoeia).confidenceThreshold, 0.20)
         for type in MangaRegionType.allCases {
-            XCTAssertEqual(
+            XCTAssertGreaterThanOrEqual(
                 profile.calibration(for: type).confidenceThreshold,
-                MangaVisionKoharuDecoder.scoreThreshold
+                MangaVisionKoharuDecoder.scoreThreshold,
+                "\(type.rawValue) operating point is below the admission floor"
             )
         }
-        XCTAssertEqual(profile.calibration(for: .panel).iouThreshold, 0.68)
+
+        // The panel operating point must not sit above PanelPostProcessor's relative floor,
+        // otherwise that floor can never engage.
+        XCTAssertLessThanOrEqual(profile.calibration(for: .panel).confidenceThreshold, 0.14)
+
+        // Panel de-duplication is near-identity only, with a size floor so inset panels are
+        // preserved for PanelDetectionService's own merge policy.
+        XCTAssertEqual(profile.calibration(for: .panel).iouThreshold, 0.90)
+        XCTAssertEqual(profile.calibration(for: .panel).containmentThreshold, 0.97)
+        XCTAssertEqual(profile.calibration(for: .panel).minimumSizeRatio, CGFloat(0.82))
         XCTAssertEqual(profile.calibration(for: .text).iouThreshold, 0.58)
         XCTAssertEqual(profile.calibration(for: .balloon).iouThreshold, 0.62)
         XCTAssertEqual(profile.calibration(for: .onomatopoeia).iouThreshold, 0.58)
+        XCTAssertNil(profile.calibration(for: .text).minimumSizeRatio)
+    }
+
+    func testPanelCalibrationPreservesInsetPanelsButCollapsesDuplicateRows() {
+        let profile = MangaVisionCalibrationProfile.bundled
+        let outer = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.90),
+            confidence: 0.95
+        )
+        // A small frame nested inside a large one is a real inset panel.
+        let inset = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.20, y: 0.20, width: 0.20, height: 0.20),
+            confidence: 0.60
+        )
+        XCTAssertEqual(profile.deduplicated([outer, inset], type: .panel).count, 2)
+
+        // Two rows describing the same instance must still collapse.
+        let duplicate = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.052, y: 0.052, width: 0.898, height: 0.898),
+            confidence: 0.55
+        )
+        XCTAssertEqual(profile.deduplicated([outer, duplicate], type: .panel).count, 1)
+
+        // Adjacent panels that merely touch must never merge.
+        let neighbour = MangaVisionRegion(
+            type: .panel,
+            normalizedRect: CGRect(x: 0.55, y: 0.05, width: 0.40, height: 0.90),
+            confidence: 0.70
+        )
+        XCTAssertEqual(profile.deduplicated([outer, neighbour], type: .panel).count, 2)
     }
 
     func testCalibrationOnlyCoversBundledClasses() {

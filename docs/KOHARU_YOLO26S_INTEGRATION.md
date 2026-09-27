@@ -106,8 +106,12 @@ protos     : [1, 32, 320, 320] mask prototypes at 1/4 of the input resolution.
 
 Decoding:
 
-1. Keep rows with `confidence >= 0.25` (the checkpoint's own recommended operating
-   point).
+1. Keep rows with `confidence >= MangaVisionKoharuDecoder.scoreThreshold` (0.10). This is an
+   *admission floor*, deliberately permissive: the retired detector admitted at 0.05 and let
+   the revisioned calibration profile do the per-class precision filtering. This checkpoint
+   scores large full-bleed panels low (measured 0.135 on a real four-panel page), so admitting
+   only at its recommended reporting confidence of 0.25 dropped real panels before any
+   downstream stage could see them.
 2. Map each box through the saved letterbox `(value - padding) / gain` transform into
    page-normalized coordinates.
 3. Evaluate the instance mask **only inside the detection's own box**, in prototype
@@ -195,3 +199,15 @@ two `frame` rows describing the same panel at IoU ~0.97 (confidences 0.56 and 0.
 so the revisioned calibration profile is the single source of truth for same-class
 de-duplication on both the base path and the adaptive merge path. The decoder itself
 stays a pure tensor-to-region translation and performs no de-duplication.
+
+Because that runs *inside the provider*, it happens before every consumer sees the
+analysis. It is therefore limited to **near-identity** matches: for panels, `IoU >= 0.90`
+or containment `>= 0.97` with a size ratio of at least `0.82`. Without the size floor the
+containment test also deleted genuinely nested inset panels, because a small frame fully
+inside a large one is 100% contained.
+
+Panel merging for *navigation* is a separate, wider policy owned by
+`PanelDetectionService.isNavigationDuplicate` (`IoU >= 0.75`, or containment with a size
+floor). Keeping the provider gate strictly tighter than that consumer's means the
+provider only removes true duplicates, and the consumer still applies its own judgement —
+which is where adjacent and inset panels were being lost before.

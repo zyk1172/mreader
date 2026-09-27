@@ -69,18 +69,26 @@ output, because the end-to-end head can still emit two rows for one instance. Th
 merge applies the same profile, so de-duplication has exactly one source of truth. The
 decoder performs no de-duplication of its own.
 
-| Semantic class | Confidence | Merge IoU | Containment |
-| --- | ---: | ---: | ---: |
-| panel/frame | 0.25 | 0.68 | 0.96 |
-| text/dialogue_text | 0.25 | 0.58 | 0.88 |
-| balloon | 0.25 | 0.62 | 0.90 |
-| onomatopoeia/onomatopoeia_text | 0.25 | 0.58 | 0.88 |
+| Semantic class | Confidence | Merge IoU | Containment | Size ratio |
+| --- | ---: | ---: | ---: | ---: |
+| panel/frame | 0.10 | 0.90 | 0.97 | 0.82 |
+| text/dialogue_text | 0.18 | 0.58 | 0.88 | — |
+| balloon | 0.20 | 0.62 | 0.90 | — |
+| onomatopoeia/onomatopoeia_text | 0.20 | 0.58 | 0.88 | — |
 
-The confidence column is the checkpoint's own recommended operating point. The IoU column
-is **not** a detector NMS parameter: the bundled head is end-to-end and NMS-free, so it only
-governs de-duplicating overlapping rows and merging a full-page pass with overlapping
-refinement tiles. The profile revision is part of the cache identity, so threshold changes
-cannot reuse stale detector results.
+The confidence column is an **app-level operating point**, not a reporting artefact: it is a
+hard filter read by `PanelDetectionService`. It must stay at or above the decoder's admission
+floor (0.10), and the panel value must stay at or below `PanelPostProcessor`'s relative floor
+(0.14) or that floor can never engage. Raising the panel value back to the checkpoint's
+recommended reporting confidence (0.25) is what previously made Guided Panel drop large
+full-bleed panels before any of its own logic ran.
+
+The IoU/containment/size-ratio columns are **not** detector NMS parameters — the bundled head is
+end-to-end and NMS-free. They govern collapsing duplicate rows and merging a full-page pass with
+overlapping refinement tiles. For panels the gate is deliberately near-identity plus a size
+floor (0.82) so nested inset panels survive: navigation-level panel merging is a separate,
+wider policy owned by `PanelDetectionService.isNavigationDuplicate` (`IoU >= 0.75` or
+containment with `sizeRatio >= 0.82`), and the profile must not pre-empt it.
 
 ## Regression and quality gate
 

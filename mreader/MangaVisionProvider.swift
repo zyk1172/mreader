@@ -76,23 +76,40 @@ nonisolated struct MangaVisionTimedAnalysis: Sendable {
 }
 
 nonisolated enum MangaVisionRegionPostProcessor {
+    /// Collapses same-class regions that describe one instance.
+    ///
+    /// `minimumSizeRatio` gates the containment tests. Two boxes only describe the same
+    /// instance when they are comparable in size; a small region fully inside a much
+    /// larger one is a real nested region (an inset panel, a balloon inside a panel),
+    /// not a duplicate. Callers that can produce nesting — panels — pass a floor, and
+    /// callers that cannot leave it `nil` and keep the legacy containment behaviour.
     static func deduplicated(
         _ regions: [MangaVisionRegion],
         iouThreshold: CGFloat = 0.62,
-        containmentThreshold: CGFloat = 0.92
+        containmentThreshold: CGFloat = 0.92,
+        minimumSizeRatio: CGFloat? = nil
     ) -> [MangaVisionRegion] {
         var kept: [MangaVisionRegion] = []
         for candidate in regions.sorted(by: { $0.confidence > $1.confidence }) {
+            let candidateArea = MangaPageCoordinateSpace.area(candidate.normalizedRect)
             let duplicate = kept.contains { existing in
                 guard existing.type == candidate.type else { return false }
-                return MangaPageCoordinateSpace.intersectionOverUnion(
+                if MangaPageCoordinateSpace.intersectionOverUnion(
                     existing.normalizedRect,
                     candidate.normalizedRect
-                ) >= iouThreshold
-                    || MangaPageCoordinateSpace.containment(
-                        of: candidate.normalizedRect,
-                        in: existing.normalizedRect
-                    ) >= containmentThreshold
+                ) >= iouThreshold {
+                    return true
+                }
+                if let minimumSizeRatio {
+                    let existingArea = MangaPageCoordinateSpace.area(existing.normalizedRect)
+                    let smaller = min(existingArea, candidateArea)
+                    let larger = max(existingArea, candidateArea)
+                    guard larger > 0, smaller / larger >= minimumSizeRatio else { return false }
+                }
+                return MangaPageCoordinateSpace.containment(
+                    of: candidate.normalizedRect,
+                    in: existing.normalizedRect
+                ) >= containmentThreshold
                     || MangaPageCoordinateSpace.containment(
                         of: existing.normalizedRect,
                         in: candidate.normalizedRect

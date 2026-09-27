@@ -108,7 +108,7 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
         let detections = try Self.makeDetections(rows: [
             (0, 200, 600, 800, 0.91, 0),
             (220, 210, 470, 545, 0.88, 2),
-            (300, 300, 340, 350, 0.10, 1)
+            (300, 300, 340, 350, 0.04, 1)
         ])
         let protos = try Self.makeProtos(maskRect: nil)
         let letterbox = MangaVisionKoharuLetterbox.make(
@@ -130,7 +130,7 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
             letterbox: letterbox
         )
 
-        // Row three is below the checkpoint's recommended 0.25 operating point.
+        // Row three sits below the decoder's admission floor.
         XCTAssertEqual(decoded.count, 2)
         XCTAssertEqual(decoded[0].type, .panel)
         XCTAssertEqual(decoded[0].confidence, 0.91, accuracy: 0.000_1)

@@ -224,8 +224,16 @@ nonisolated struct MangaVisionKoharuDetection: Sendable, Equatable {
 }
 
 nonisolated enum MangaVisionKoharuDecoder {
-    /// The checkpoint's own recommended operating point (`config.json` / model card).
-    static let scoreThreshold: Float = 0.25
+    /// Admission floor for raw detections, not the app's operating point.
+    ///
+    /// The retired decoder admitted at 0.05 and let `MangaVisionCalibrationProfile` do the
+    /// per-class precision filtering. Raising admission to the checkpoint's recommended
+    /// reporting confidence (0.25) collapsed those two stages into one and starved every
+    /// downstream consumer: real frames scored by this checkpoint below 0.25 — notably
+    /// large full-bleed panels — never reached `PanelPostProcessor` or its semantic
+    /// recovery. Admission stays permissive; the profile and `PanelDetectionService` decide
+    /// what is actually usable.
+    static let scoreThreshold: Float = 0.10
     static let maximumDetections = 300
     /// Mask probability above which a prototype pixel belongs to the instance.
     /// Strictly greater: `sigmoid(0) == 0.5` must not count as foreground, which is
@@ -428,7 +436,10 @@ nonisolated enum MangaVisionKoharuDecoder {
 
 nonisolated enum MangaVisionKoharuProductionIdentity {
     static let modelName = "KoharuYOLO26S"
-    static let calibrationRevision = "koharu-yolo26s-seg-calibration-2026-09-27-v1"
+    /// v2 lowers the admission floor to 0.10 and restores per-class operating points in
+    /// `MangaVisionCalibrationProfile`. The revision is part of `cacheIdentity`, so cached
+    /// analyses produced under the v1 thresholds are discarded rather than reused.
+    static let calibrationRevision = "koharu-yolo26s-seg-calibration-2026-09-27-v2"
 }
 
 nonisolated struct MangaVisionKoharuPreparedInput {
@@ -765,10 +776,16 @@ actor MangaVisionKoharuProvider: MangaVisionProvider, MangaVisionRuntimeReleasab
         )
         let grouped = Dictionary(grouping: detections, by: \.type)
         // The one-to-one head is trained to be duplicate-free, but that is a learned
-        // property, not a guarantee: a page can produce two nearly identical rows for
-        // one panel (observed at IoU ~0.97). The revisioned calibration profile is the
-        // single source of truth for same-class de-duplication, so it is applied here
-        // as well as in the adaptive merge instead of only at merge time.
+        // property, not a guarantee: a page can produce two nearly identical rows for one
+        // panel (observed at IoU ~0.97). The revisioned calibration profile is the single
+        // source of truth for same-class de-duplication, so it is applied here as well as
+        // in the adaptive merge instead of only at merge time.
+        //
+        // This runs before every consumer sees the analysis, so it is deliberately limited
+        // to near-identity matches. Panel merging for navigation is a separate, wider
+        // policy owned by PanelDetectionService.isNavigationDuplicate; applying that policy
+        // here would delete adjacent and inset panels before Guided Panel could evaluate
+        // them.
         let profile = MangaVisionCalibrationProfile.bundled
         func regions(for type: MangaRegionType) -> [MangaVisionRegion] {
             profile.deduplicated(

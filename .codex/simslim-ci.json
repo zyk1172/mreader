@@ -1,0 +1,16 @@
+{
+  "name": "mreader-ui-memory",
+  "except": [
+    "siri",
+    "search",
+    "icloud",
+    "store",
+    "pim",
+    "web",
+    "photos",
+    "connectivity",
+    "telemetry",
+    "other"
+  ],
+  "keep": []
+}
