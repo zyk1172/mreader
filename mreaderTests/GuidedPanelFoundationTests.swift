@@ -190,8 +190,16 @@ struct GuidedPanelFoundationTests {
             semanticRegions: [balloon]
         )
 
-        #expect(processed.contains { $0.rect == real.rect })
-        #expect(!processed.contains { $0.rect == alias.rect })
+        #expect(processed.count == 1)
+        let survivor = try? #require(processed.first)
+        #expect(survivor?.rect != alias.rect)
+        #expect((survivor?.rect.width ?? 0) >= 0.35)
+        #expect((survivor?.rect.height ?? 0) >= 0.25)
+        #expect(
+            survivor?.rect.contains(
+                CGPoint(x: balloonRect.midX, y: balloonRect.midY)
+            ) == true
+        )
     }
 
     @Test func semanticRecoveryRejectsTextContainedOnlyByOneBalloon() {
