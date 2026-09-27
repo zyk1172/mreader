@@ -315,10 +315,10 @@ nonisolated enum MangaVisionKoharuDecoder {
         }
     }
 
-    /// Decodes one instance mask and distils it into a compact normalized outline.
-    ///
-    /// Masks are only evaluated inside the detection's own box, so a page with many
-    /// detections still performs a small, bounded amount of work.
+    /// Decodes one instance mask and traces the outer boundary of its largest
+    /// connected component. Keeping the real mask outline is important for speech
+    /// balloons: a scanline envelope erases tails/concavities and later makes text
+    /// layout believe the empty corners of the bounding box are usable.
     private static func contour(
         forRow row: Int,
         detections: MangaVisionKoharuTensorReader,
@@ -342,9 +342,6 @@ nonisolated enum MangaVisionKoharuDecoder {
         let box = rawBox.intersection(
             CGRect(x: 0, y: 0, width: prototypeWidth, height: prototypeHeight)
         )
-        // A null intersection would make `Int(box.minX)` trap on infinity; the caller
-        // already clips to the input bounds, but a mask decode must never be able to
-        // crash the detector.
         guard !box.isNull, box.width > 0, box.height > 0 else { return nil }
         let startX = Int(box.minX)
         let startY = Int(box.minY)
@@ -360,7 +357,7 @@ nonisolated enum MangaVisionKoharuDecoder {
             coefficients[index] = detections.detection(row: row, channel: 6 + index)
         }
 
-        var mask = [Float](repeating: 0, count: regionWidth * regionHeight)
+        var foreground = [Bool](repeating: false, count: regionWidth * regionHeight)
         var activePixelCount = 0
         for y in 0..<regionHeight {
             for x in 0..<regionWidth {
@@ -369,59 +366,184 @@ nonisolated enum MangaVisionKoharuDecoder {
                     accumulator += coefficients[channel]
                         * protos.prototype(channel: channel, y: startY + y, x: startX + x)
                 }
-                let probability = sigmoid(accumulator)
-                mask[y * regionWidth + x] = probability
-                if probability > maskProbabilityThreshold { activePixelCount += 1 }
+                if sigmoid(accumulator) > maskProbabilityThreshold {
+                    foreground[y * regionWidth + x] = true
+                    activePixelCount += 1
+                }
             }
         }
         guard activePixelCount >= minimumMaskPixelCount else { return nil }
 
-        // Row extents give a cheap, stable outline for both rectangular panels and
-        // rounded balloons, and are far cheaper than boundary tracing.
-        var rows: [Int] = []
-        var leftEdges: [Int] = []
-        var rightEdges: [Int] = []
-        rows.reserveCapacity(regionHeight)
-        for y in 0..<regionHeight {
-            var left = Int.max
-            var right = Int.min
-            for x in 0..<regionWidth where mask[y * regionWidth + x] > maskProbabilityThreshold {
-                if x < left { left = x }
-                if x > right { right = x }
+        let component = largestConnectedComponent(
+            foreground,
+            width: regionWidth,
+            height: regionHeight
+        )
+        guard component.count >= minimumMaskPixelCount else { return nil }
+        let outline = outerBoundary(
+            component: component,
+            width: regionWidth,
+            height: regionHeight
+        )
+        guard outline.count >= 4 else { return nil }
+
+        let points = outline.map { vertex in
+            let inputPoint = CGPoint(
+                x: CGFloat(startX + vertex.x) * inputPixelsPerPrototypeX,
+                y: CGFloat(startY + vertex.y) * inputPixelsPerPrototypeY
+            )
+            return letterbox.sourceNormalizedPoint(fromInputPoint: inputPoint)
+        }
+        return MangaVisionContour(points: points)
+    }
+
+    private struct MaskVertex: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    private struct MaskEdge: Hashable {
+        let start: MaskVertex
+        let end: MaskVertex
+    }
+
+    private static func largestConnectedComponent(
+        _ foreground: [Bool],
+        width: Int,
+        height: Int
+    ) -> Set<Int> {
+        guard width > 0, height > 0, foreground.count == width * height else { return [] }
+        var visited = [Bool](repeating: false, count: foreground.count)
+        var best = Set<Int>()
+        let offsets = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
+        for seed in foreground.indices where foreground[seed] && !visited[seed] {
+            var stack = [seed]
+            visited[seed] = true
+            var component = Set<Int>()
+            while let index = stack.popLast() {
+                component.insert(index)
+                let x = index % width
+                let y = index / width
+                for (dx, dy) in offsets {
+                    let nx = x + dx
+                    let ny = y + dy
+                    guard nx >= 0, nx < width, ny >= 0, ny < height else { continue }
+                    let neighbor = ny * width + nx
+                    guard foreground[neighbor], !visited[neighbor] else { continue }
+                    visited[neighbor] = true
+                    stack.append(neighbor)
+                }
             }
-            guard right >= left else { continue }
-            rows.append(y)
-            leftEdges.append(left)
-            rightEdges.append(right)
+            if component.count > best.count { best = component }
         }
-        guard rows.count >= 2 else { return nil }
+        return best
+    }
 
-        let sampleCount = min(contourSampleRowCount, rows.count)
-        let step = Double(rows.count) / Double(sampleCount)
-        var leftPoints: [CGPoint] = []
-        var rightPoints: [CGPoint] = []
-        leftPoints.reserveCapacity(sampleCount)
-        rightPoints.reserveCapacity(sampleCount)
-        for index in 0..<sampleCount {
-            let position = min(Int((Double(index) * step).rounded(.down)), rows.count - 1)
-            let y = rows[position]
-            let left = CGPoint(
-                x: CGFloat(startX + leftEdges[position]) * inputPixelsPerPrototypeX,
-                y: CGFloat(startY + y) * inputPixelsPerPrototypeY
-            )
-            // The right vertex is offset by one prototype pixel so the ring encloses
-            // the final masked pixel instead of cutting through its center.
-            let right = CGPoint(
-                x: CGFloat(startX + rightEdges[position] + 1) * inputPixelsPerPrototypeX,
-                y: CGFloat(startY + y + 1) * inputPixelsPerPrototypeY
-            )
-            leftPoints.append(letterbox.sourceNormalizedPoint(fromInputPoint: left))
-            rightPoints.append(letterbox.sourceNormalizedPoint(fromInputPoint: right))
+    private static func outerBoundary(
+        component: Set<Int>,
+        width: Int,
+        height: Int
+    ) -> [MaskVertex] {
+        guard !component.isEmpty else { return [] }
+        func contains(_ x: Int, _ y: Int) -> Bool {
+            guard x >= 0, x < width, y >= 0, y < height else { return false }
+            return component.contains(y * width + x)
         }
-        guard leftPoints.count >= 2, rightPoints.count >= 2 else { return nil }
 
-        // Walk the left edge downwards, then the right edge upwards, to close the ring.
-        return MangaVisionContour(points: leftPoints + rightPoints.reversed())
+        var edges = Set<MaskEdge>()
+        for index in component {
+            let x = index % width
+            let y = index / width
+            if !contains(x, y - 1) {
+                edges.insert(MaskEdge(start: MaskVertex(x: x, y: y),
+                                      end: MaskVertex(x: x + 1, y: y)))
+            }
+            if !contains(x + 1, y) {
+                edges.insert(MaskEdge(start: MaskVertex(x: x + 1, y: y),
+                                      end: MaskVertex(x: x + 1, y: y + 1)))
+            }
+            if !contains(x, y + 1) {
+                edges.insert(MaskEdge(start: MaskVertex(x: x + 1, y: y + 1),
+                                      end: MaskVertex(x: x, y: y + 1)))
+            }
+            if !contains(x - 1, y) {
+                edges.insert(MaskEdge(start: MaskVertex(x: x, y: y + 1),
+                                      end: MaskVertex(x: x, y: y)))
+            }
+        }
+        guard !edges.isEmpty else { return [] }
+
+        var adjacency: [MaskVertex: [MaskEdge]] = [:]
+        for edge in edges { adjacency[edge.start, default: []].append(edge) }
+        var unused = edges
+        var bestLoop: [MaskVertex] = []
+        var bestArea: CGFloat = 0
+
+        func direction(_ edge: MaskEdge) -> Int {
+            let dx = edge.end.x - edge.start.x
+            let dy = edge.end.y - edge.start.y
+            if dx > 0 { return 0 }
+            if dy > 0 { return 1 }
+            if dx < 0 { return 2 }
+            return 3
+        }
+        func turnRank(from current: MaskEdge, to next: MaskEdge) -> Int {
+            switch (direction(next) - direction(current) + 4) % 4 {
+            case 1: return 0
+            case 0: return 1
+            case 3: return 2
+            default: return 3
+            }
+        }
+        func signedArea(_ vertices: [MaskVertex]) -> CGFloat {
+            guard vertices.count >= 3 else { return 0 }
+            var value: CGFloat = 0
+            for index in vertices.indices {
+                let next = vertices[(index + 1) % vertices.count]
+                value += CGFloat(vertices[index].x * next.y - next.x * vertices[index].y)
+            }
+            return value / 2
+        }
+
+        while !unused.isEmpty {
+            guard let seed = unused.min(by: {
+                if $0.start.y != $1.start.y { return $0.start.y < $1.start.y }
+                if $0.start.x != $1.start.x { return $0.start.x < $1.start.x }
+                return direction($0) < direction($1)
+            }) else { break }
+
+            var edge = seed
+            var loop: [MaskVertex] = [seed.start]
+            var closed = false
+            for _ in 0...edges.count {
+                guard unused.remove(edge) != nil else { break }
+                loop.append(edge.end)
+                if edge.end == seed.start {
+                    closed = true
+                    break
+                }
+                let candidates = (adjacency[edge.end] ?? []).filter { unused.contains($0) }
+                guard let next = candidates.min(by: {
+                    let lhs = turnRank(from: edge, to: $0)
+                    let rhs = turnRank(from: edge, to: $1)
+                    if lhs != rhs { return lhs < rhs }
+                    if $0.end.y != $1.end.y { return $0.end.y < $1.end.y }
+                    return $0.end.x < $1.end.x
+                }) else { break }
+                edge = next
+            }
+
+            if closed {
+                if loop.last == loop.first { loop.removeLast() }
+                let area = abs(signedArea(loop))
+                if area > bestArea {
+                    bestArea = area
+                    bestLoop = loop
+                }
+            }
+        }
+        return bestLoop
     }
 
     @inline(__always)
