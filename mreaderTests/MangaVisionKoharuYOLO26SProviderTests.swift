@@ -189,6 +189,34 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
         XCTAssertEqual(bounds.maxY, 280 / 1280, accuracy: 0.01)
     }
 
+    func testMaskContourUsesLargestConnectedComponent() throws {
+        let detections = try Self.makeDetections(rows: [
+            (64, 64, 512, 512, 0.94, 2)
+        ])
+        let protos = try Self.makeProtos(maskRects: [
+            CGRect(x: 20, y: 20, width: 55, height: 55),
+            CGRect(x: 105, y: 105, width: 10, height: 10)
+        ])
+        let decoded = try MangaVisionKoharuDecoder.decode(
+            detections: MangaVisionKoharuTensorReader(
+                array: detections,
+                name: "detections",
+                expectedShape: MangaVisionKoharuOutputContract.detectionsShape
+            ),
+            protos: MangaVisionKoharuTensorReader(
+                array: protos,
+                name: "protos",
+                expectedShape: MangaVisionKoharuOutputContract.protosShape
+            ),
+            letterbox: MangaVisionKoharuLetterbox.make(
+                sourceSize: CGSize(width: 1280, height: 1280)
+            )
+        )
+        let bounds = try XCTUnwrap(decoded.first?.contour?.bounds)
+        XCTAssertLessThan(bounds.maxX, 0.30)
+        XCTAssertLessThan(bounds.maxY, 0.30)
+    }
+
     func testLetterboxUsesUltralyticsScaleRoundAndOffsetPolicy() {
         // A 4096x3053 page scaled into 1280 square: 954 tall, padded top and bottom.
         let tall = MangaVisionKoharuLetterbox.make(
@@ -415,6 +443,10 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
 
     /// Builds a `protos` tensor whose first channel is a high-probability rectangle.
     private static func makeProtos(maskRect: CGRect?) throws -> MLMultiArray {
+        try makeProtos(maskRects: maskRect.map { [$0] } ?? [])
+    }
+
+    private static func makeProtos(maskRects: [CGRect]) throws -> MLMultiArray {
         let shape = MangaVisionKoharuOutputContract.protosShape
         let array = try MLMultiArray(shape: shape as [NSNumber], dataType: .float32)
         let pointer = array.dataPointer.assumingMemoryBound(to: Float32.self)
@@ -422,12 +454,12 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
         let height = shape[2]
         let width = shape[3]
         for index in 0..<(channels * height * width) { pointer[index] = 0 }
-        guard let maskRect else { return array }
-        for y in Int(maskRect.minY)..<Int(maskRect.maxY) {
-            for x in Int(maskRect.minX)..<Int(maskRect.maxX) {
-                guard y >= 0, y < height, x >= 0, x < width else { continue }
-                // sigmoid(6) is comfortably above the 0.5 mask threshold.
-                pointer[y * width + x] = 6
+        for maskRect in maskRects {
+            for y in Int(maskRect.minY)..<Int(maskRect.maxY) {
+                for x in Int(maskRect.minX)..<Int(maskRect.maxX) {
+                    guard y >= 0, y < height, x >= 0, x < width else { continue }
+                    pointer[y * width + x] = 6
+                }
             }
         }
         return array
