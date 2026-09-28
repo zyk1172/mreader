@@ -380,24 +380,28 @@ struct GuidedPanelFoundationTests {
         #expect(independent.guidedPanelReadingDirectionRaw == ReadingDirection.rightToLeft.rawValue)
     }
 
-    @Test func viewportAddsContextWithoutLeavingPageBounds() {
-        let expanded = GuidedPanelViewport.expandedAndClamped(
-            CGRect(x: 0.0, y: 0.0, width: 0.30, height: 0.25)
+    @Test func viewportUsesExactPanelBoundsWithoutPercentageExpansion() {
+        let panel = CGRect(x: 0.08, y: 0.10, width: 0.30, height: 0.25)
+        let exact = GuidedPanelViewport.expandedAndClamped(
+            panel,
+            contextPadding: 0.20
         )
-        #expect(expanded.minX == 0)
-        #expect(expanded.minY == 0)
-        #expect(expanded.maxX <= 1)
-        #expect(expanded.maxY <= 1)
+        #expect(exact == panel)
 
         let transform = GuidedPanelViewport.transform(
-            normalizedPanel: CGRect(x: 0.55, y: 0.08, width: 0.36, height: 0.28),
+            normalizedPanel: panel,
             imageAspectRatio: 0.70,
-            viewportSize: CGSize(width: 390, height: 844)
+            viewportSize: CGSize(width: 390, height: 844),
+            contextPadding: 0.20
         )
-        #expect(transform.scale >= 1)
-        #expect(transform.scale <= GuidedPanelViewport.defaultMaximumScale)
-        #expect(transform.focusedRect.width > 0)
-        #expect(transform.focusedRect.height > 0)
+        let imageRect = GuidedPanelViewport.aspectFitRect(
+            aspectRatio: 0.70,
+            in: CGRect(x: 0, y: 0, width: 390, height: 844)
+        )
+        #expect(abs(transform.focusedRect.minX - (imageRect.minX + panel.minX * imageRect.width)) < 0.0001)
+        #expect(abs(transform.focusedRect.minY - (imageRect.minY + panel.minY * imageRect.height)) < 0.0001)
+        #expect(abs(transform.focusedRect.width - panel.width * imageRect.width) < 0.0001)
+        #expect(abs(transform.focusedRect.height - panel.height * imageRect.height) < 0.0001)
     }
 
     private func expectRowCenters(_ ordered: [DetectedPanel]) {
