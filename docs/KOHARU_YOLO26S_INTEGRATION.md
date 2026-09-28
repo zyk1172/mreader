@@ -112,14 +112,16 @@ Decoding:
    scores large full-bleed panels low (measured 0.135 on a real four-panel page), so admitting
    only at its recommended reporting confidence of 0.25 dropped real panels before any
    downstream stage could see them.
-2. Map each box through the saved letterbox `(value - padding) / gain` transform into
-   page-normalized coordinates.
-3. Evaluate the instance mask **only inside the detection's own box**, in prototype
-   space. `mask = sigmoid(coefficients · protos)`.
-4. Threshold the mask at 0.5 and distil a row-extent outline: sample rows across the
-   mask, take the left edge walking down and the right edge walking back up, and cap
-   the ring at `MangaVisionContour.maximumPointCount` (32). A mask is rejected when it
-   has fewer than 12 active pixels or fewer than two usable rows.
+2. Clip detections to the actual non-padding letterbox content rectangle before mapping.
+   The inverse transform uses the same rounded raster dimensions that were copied into the
+   Core ML input, then converts to top-left page-normalized coordinates.
+3. Evaluate the instance mask **only inside the detection's own content-clipped box**, in
+   prototype space. `mask = sigmoid(coefficients · protos)`.
+4. Threshold the mask at 0.5, keep the largest four-connected component, trace its real outer
+   cell boundary, and compact the ring to at most
+   `MangaVisionContour.maximumPointCount` (64) vertices. This preserves speech-balloon tails
+   and concavities instead of replacing the mask with a scanline envelope. A mask is rejected
+   when it has fewer than 12 active pixels or no usable closed boundary.
 
 ## Why the export is FP32
 
