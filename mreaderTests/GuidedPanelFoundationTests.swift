@@ -164,6 +164,51 @@ struct GuidedPanelFoundationTests {
         #expect(PanelLayoutQuality.isUsable(processed))
     }
 
+    @Test func calibratedLowScoreFrameSurvivesBesideHighScoreFrame() {
+        let lowButValid = panel(
+            x: 0.08,
+            y: 0.08,
+            width: 0.38,
+            height: 0.34,
+            confidence: 0.11
+        )
+        let high = panel(
+            x: 0.54,
+            y: 0.08,
+            width: 0.38,
+            height: 0.34,
+            confidence: 0.92
+        )
+
+        let processed = PanelPostProcessor.process([lowButValid, high])
+
+        #expect(processed.contains { $0.rect == lowButValid.rect })
+        #expect(processed.contains { $0.rect == high.rect })
+    }
+
+    @Test func largeBalloonOverlapDoesNotDeleteRealPanelUnlessNearlyIdentical() {
+        let frame = panel(
+            x: 0.48,
+            y: 0.22,
+            width: 0.44,
+            height: 0.52,
+            confidence: 0.42
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: CGRect(x: 0.53, y: 0.18, width: 0.34, height: 0.28),
+            confidence: 0.88
+        )
+
+        let processed = PanelPostProcessor.process(
+            [frame],
+            semanticRegions: [balloon]
+        )
+
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == frame.rect)
+    }
+
     @Test func peripheralMarginStripWithoutSemanticsIsRejected() {
         let margin = panel(x: 0.0, y: 0.02, width: 0.07, height: 0.92, confidence: 0.82)
         let real = panel(x: 0.12, y: 0.08, width: 0.78, height: 0.36, confidence: 0.76)
