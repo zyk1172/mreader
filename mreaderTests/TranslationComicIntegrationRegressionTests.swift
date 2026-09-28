@@ -100,6 +100,25 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(resolved, bubble)
     }
 
+    func testPhysicalBubbleSafeRegionSurvivesOffsetOCRAnchor() {
+        let text = CGRect(x: 86, y: 52, width: 12, height: 10)
+        let bubble = CGRect(x: 30, y: 25, width: 70, height: 55)
+        let physicalInterior = CGRect(x: 42, y: 34, width: 34, height: 28)
+        let page = CGRect(x: 0, y: 0, width: 200, height: 200)
+
+        // OCR may land near the balloon tail/edge and therefore not intersect the
+        // conservative polygon-derived interior. The physical safe region must win.
+        XCTAssertFalse(physicalInterior.intersects(text))
+        let resolved = TranslationRegionPolicy.resolvedLayoutSafeRegion(
+            sourceTextRegion: text,
+            proposedSafeRegion: physicalInterior,
+            detectedBubble: bubble,
+            pageBounds: page
+        )
+
+        XCTAssertEqual(resolved, physicalInterior)
+    }
+
     func testStandaloneSafeRegionDoesNotCreatePhysicalBubble() {
         let text = CGRect(x: 40, y: 40, width: 20, height: 12)
         let safe = CGRect(x: 34, y: 32, width: 42, height: 30)
