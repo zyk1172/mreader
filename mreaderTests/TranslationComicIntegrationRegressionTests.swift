@@ -207,6 +207,63 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(restored.layoutSafeRegion, source.layoutSafeRegion)
     }
 
+
+    func testKoharuContourOverridesDisplacedLegacyBubbleGeometry() throws {
+        let textRect = CGRect(x: 0.24, y: 0.24, width: 0.12, height: 0.07)
+        let staleLegacyBubble = CGRect(x: 0.62, y: 0.18, width: 0.20, height: 0.16)
+        let modelBubble = CGRect(x: 0.18, y: 0.16, width: 0.28, height: 0.23)
+        let contour = MangaVisionContour(points: [
+            CGPoint(x: 0.20, y: 0.18),
+            CGPoint(x: 0.43, y: 0.18),
+            CGPoint(x: 0.45, y: 0.27),
+            CGPoint(x: 0.40, y: 0.37),
+            CGPoint(x: 0.22, y: 0.37),
+            CGPoint(x: 0.18, y: 0.27)
+        ])
+        let block = TextBlock(
+            text: "source",
+            boundingBox: textRect,
+            confidence: 0.95,
+            ocrSource: "legacy-vision:dialogue",
+            bubbleBox: staleLegacyBubble,
+            layoutSafeRegion: staleLegacyBubble,
+            textOrientation: .horizontal,
+            layoutRole: .dialogue
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "translation-koharu-authority",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [],
+            balloons: [
+                MangaVisionRegion(
+                    type: .balloon,
+                    normalizedRect: modelBubble,
+                    confidence: 0.93,
+                    contour: contour
+                )
+            ],
+            modelIdentifier: MangaVisionKoharuProvider.modelIdentifier,
+            modelVersion: MangaVisionKoharuProvider.modelVersionNumber
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+        let result = try XCTUnwrap(enriched.first)
+
+        XCTAssertEqual(result.bubbleBox, modelBubble)
+        XCTAssertEqual(result.bubblePolygon, contour.cgPoints)
+        let safe = try XCTUnwrap(result.layoutSafeRegion)
+        XCTAssertTrue(modelBubble.insetBy(dx: -0.000_1, dy: -0.000_1).contains(safe))
+        XCTAssertFalse(staleLegacyBubble.intersects(result.bubbleBox ?? .zero))
+    }
+
     @MainActor
     func testVisionSliceBoundariesAreStableAcrossViewportAspect() {
         let format = UIGraphicsImageRendererFormat()

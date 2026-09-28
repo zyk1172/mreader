@@ -119,35 +119,26 @@ nonisolated enum MangaVisionOCRGeometry {
         return blocks.map { block in
             var enriched = block
 
-            // OCR/VLM may already carry approximate bubble geometry. Once Koharu
-            // finds the same physical balloon with an instance contour, do not mix the
-            // old box with the new polygon: box, polygon and layout-safe region must all
-            // come from the same model instance or their local coordinate origins diverge
-            // during rendering.
+            // A Koharu balloon selected from the source text is stronger geometry than a
+            // stale OCR/VLM bubble rectangle. The old implementation required the legacy
+            // bubble and Koharu bubble to overlap before accepting the model contour; a bad
+            // legacy rectangle could therefore veto the exact mask and leave translation on
+            // a translucent rectangular card. Once the text itself matches a contoured
+            // Koharu instance, replace box, polygon and safe region as one atomic geometry.
             if let existingBubble = enriched.bubbleBox {
-                if let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
-                    let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
-                        existingBubble,
-                        matched.rect
+                if let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons),
+                   matched.polygon.count >= 3 {
+                    enriched.bubbleBox = matched.rect
+                    enriched.bubblePolygon = matched.polygon
+                    enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                        matched,
+                        textRect: enriched.boundingBox
                     )
-                    let containment = max(
-                        MangaPageCoordinateSpace.containment(of: existingBubble, in: matched.rect),
-                        MangaPageCoordinateSpace.containment(of: matched.rect, in: existingBubble)
-                    )
-                    if (overlap >= 0.35 || containment >= 0.70),
-                       matched.polygon.count >= 3 {
-                        enriched.bubbleBox = matched.rect
-                        enriched.bubblePolygon = matched.polygon
-                        enriched.layoutSafeRegion = balloonLayoutSafeRegion(
-                            matched,
-                            textRect: enriched.boundingBox
-                        )
-                        return enriched
-                    }
+                    return enriched
                 }
 
-                // No reliable Koharu contour: retain the existing source consistently
-                // rather than attaching a polygon belonging to a different rectangle.
+                // If the model has no usable contour, keep the legacy source internally
+                // consistent instead of attaching a polygon from a different instance.
                 if enriched.layoutSafeRegion == nil {
                     enriched.layoutSafeRegion = existingBubble
                 }
@@ -157,15 +148,13 @@ nonisolated enum MangaVisionOCRGeometry {
             if enriched.layoutRole == .dialogue,
                let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
                 enriched.bubbleBox = balloon.rect
-                if enriched.bubblePolygon.isEmpty {
-                    enriched.bubblePolygon = balloon.polygon
-                }
-                if enriched.layoutSafeRegion == nil {
-                    enriched.layoutSafeRegion = balloonLayoutSafeRegion(
-                        balloon,
-                        textRect: enriched.boundingBox
-                    )
-                }
+                // Model box and model polygon are one geometry source. Do not retain a
+                // polygon that may have been produced by an earlier OCR/VLM pass.
+                enriched.bubblePolygon = balloon.polygon
+                enriched.layoutSafeRegion = balloonLayoutSafeRegion(
+                    balloon,
+                    textRect: enriched.boundingBox
+                )
                 return enriched
             }
 

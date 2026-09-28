@@ -347,6 +347,84 @@ struct GuidedPanelVisionV2Tests {
         #expect(comic.readingDirectionRaw == ReadingDirection.leftToRight.rawValue)
     }
 
+
+    @Test func semanticHoleRecoveryRestoresAMissedFrameFromCorroboratedKoharuEvidence() {
+        let existing = DetectedPanel(
+            rect: CGRect(x: 0.05, y: 0.05, width: 0.38, height: 0.32),
+            confidence: 0.91,
+            source: .coreML
+        )
+        let balloon = semanticRegion(
+            .balloon,
+            x: 0.58,
+            y: 0.12,
+            width: 0.18,
+            height: 0.14,
+            confidence: 0.91
+        )
+        let textInsideBalloon = semanticRegion(
+            .text,
+            x: 0.62,
+            y: 0.15,
+            width: 0.08,
+            height: 0.05,
+            confidence: 0.94
+        )
+        let independentText = semanticRegion(
+            .text,
+            x: 0.59,
+            y: 0.29,
+            width: 0.12,
+            height: 0.05,
+            confidence: 0.90
+        )
+
+        let processed = PanelPostProcessor.process(
+            [existing],
+            semanticRegions: [balloon, textInsideBalloon, independentText]
+        )
+
+        #expect(processed.count == 2)
+        #expect(processed.contains { $0.rect == existing.rect })
+        #expect(processed.contains {
+            $0.rect.midX > 0.50
+                && $0.rect.contains(CGPoint(x: independentText.normalizedRect.midX,
+                                           y: independentText.normalizedRect.midY))
+        })
+    }
+
+    @Test func semanticHoleRecoveryDoesNotTurnOneSpeechBalloonIntoAPanel() {
+        let existing = DetectedPanel(
+            rect: CGRect(x: 0.05, y: 0.05, width: 0.38, height: 0.32),
+            confidence: 0.91,
+            source: .coreML
+        )
+        let balloon = semanticRegion(
+            .balloon,
+            x: 0.58,
+            y: 0.12,
+            width: 0.18,
+            height: 0.14,
+            confidence: 0.94
+        )
+        let containedText = semanticRegion(
+            .text,
+            x: 0.62,
+            y: 0.15,
+            width: 0.08,
+            height: 0.05,
+            confidence: 0.95
+        )
+
+        let processed = PanelPostProcessor.process(
+            [existing],
+            semanticRegions: [balloon, containedText]
+        )
+
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == existing.rect)
+    }
+
     private func semanticAnalysis(
         texts: [MangaVisionRegion] = [],
         balloons: [MangaVisionRegion] = [],

@@ -6951,7 +6951,7 @@ struct LocalImageView: View {
         guard shouldDisplayOfflineTranslation,
               let comic,
               let pageIndex,
-              uiImage != nil else {
+              let image = uiImage else {
             return false
         }
         offlineTranslationTask?.cancel()
@@ -6977,7 +6977,28 @@ struct LocalImageView: View {
         offlineTranslationTask = nil
         switch result {
         case .displayed(let blocks, _):
-            textBlocks = blocks
+            // Persisted translations may have been generated before the current Koharu
+            // geometry adapter. Re-attach today's model balloon instances at display time
+            // without retranslating text, so old OCR/VLM rectangles cannot keep bypassing
+            // the physical contour and one model balloon still collapses to one render unit.
+            let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: comic.id,
+                pageIndex: pageIndex,
+                pageURL: pageURL,
+                image: image
+            )
+            let displayBlocks = analysis.map {
+                MangaVisionOCRGeometry.applyingDetectedGeometry(
+                    to: blocks,
+                    analysis: $0
+                )
+            } ?? blocks
+            guard !Task.isCancelled,
+                  self.url == pageURL,
+                  self.comic?.id == comic.id else {
+                return false
+            }
+            textBlocks = displayBlocks
             isOfflineTranslationDisplayed = true
             return true
         case .confirmedNoText:
@@ -7662,7 +7683,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 5
+    static let layoutRevision = 6
 
     struct Key: Equatable {
         let scope: String
@@ -7814,21 +7835,36 @@ private struct TranslationSurfaceRenderer: View {
             switch displayMode {
             case .inPlace:
                 RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
-                    .fill(Color.white.opacity(0.94))
+                    .fill(Color.white.opacity(surfaceStyle == .detectedBubble ? 1 : 0.94))
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .assistOverlay:
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-                    }
-                    .frame(width: layoutSize.width, height: layoutSize.height)
+                if surfaceStyle == .detectedBubble {
+                    // A detected speech balloon is replacement geometry even when its
+                    // instance contour is unavailable. Never fall back to translucent
+                    // material here: the source lettering would bleed through the Chinese
+                    // translation exactly like a second, overlapping text layer.
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(Color.white)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                                .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                                .shadow(color: .black.opacity(0.22), radius: 0.7, y: 0.5)
+                        }
+                        .frame(width: layoutSize.width, height: layoutSize.height)
+                } else {
+                    RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                                .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
+                                .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
+                                .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                        }
+                        .frame(width: layoutSize.width, height: layoutSize.height)
+                }
             case .annotation:
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(.thinMaterial)
