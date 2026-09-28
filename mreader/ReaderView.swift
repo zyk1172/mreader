@@ -7795,21 +7795,16 @@ private struct TranslationSurfaceRenderer: View {
         // its normal inline surface. Never draw the legacy grey preview card.
         if usesPhysicalContour {
             switch displayMode {
-            case .inPlace:
+            case .inPlace, .assistOverlay:
+                // A physical speech balloon is replacement geometry, not a translucent
+                // annotation card. Keep it opaque so the source lettering cannot bleed
+                // through and visually overlap the translated text.
                 TranslationBubbleContourShape(points: contour)
-                    .fill(Color.white.opacity(0.94))
-                    .frame(width: layoutSize.width, height: layoutSize.height)
-            case .assistOverlay:
-                TranslationBubbleContourShape(points: contour)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        TranslationBubbleContourShape(points: contour)
-                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                    }
+                    .fill(Color.white)
                     .overlay {
                         TranslationBubbleContourShape(points: contour)
                             .stroke(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
+                            .shadow(color: .black.opacity(0.22), radius: 0.7, y: 0.5)
                     }
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .annotation:
