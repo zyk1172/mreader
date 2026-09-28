@@ -1070,7 +1070,7 @@ extension MangaVisionModelManifest {
             semanticClasses: Set(MangaVisionKoharuClassOrder.regionTypes),
             outputContractRevision: MangaVisionKoharuOutputContract.revision,
             analysisSchemaRevision: "manga-page-analysis-v\(MangaPageAnalysis.schemaVersion)",
-            postProcessRevision: "manga-vision-koharu-yolo26s-end2end-postprocess-v1",
+            postProcessRevision: "manga-vision-koharu-yolo26s-end2end-postprocess-v2",
             calibrationRevision: MangaVisionKoharuProductionIdentity.calibrationRevision
         )
     }
