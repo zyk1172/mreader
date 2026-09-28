@@ -25,6 +25,7 @@ struct TranslationSurfacePolicyTests {
         text: String = "译文",
         rect: CGRect,
         bubbleBox: CGRect? = nil,
+        bubblePolygon: [CGPoint] = [],
         orientation: TextOrientation = .horizontal,
         layoutRole: TranslationLayoutRole = .dialogue
     ) -> TextBlock {
@@ -33,6 +34,9 @@ struct TranslationSurfacePolicyTests {
             boundingBox: normalized(rect),
             ocrSource: "vision",
             bubbleBox: bubbleBox.map(normalized),
+            bubblePolygon: bubblePolygon.map {
+                CGPoint(x: $0.x / imageBounds.width, y: $0.y / imageBounds.height)
+            },
             textOrientation: orientation,
             layoutRole: layoutRole
         )
@@ -109,6 +113,45 @@ struct TranslationSurfacePolicyTests {
         #expect(TranslationSurfacePolicy.surfaceStyle(hasReliableBubble: true) == .detectedBubble)
         #expect(TranslationSurfaceStyle.detectedBubble.drawsBackground)
         #expect(TranslationSurfaceStyle.detectedBubble.borderOpacity > 0)
+    }
+
+    @Test func physicalContourRemainsReliableWhenOCRBoxIsSlightlyDisplaced() {
+        let bubble = CGRect(x: 110, y: 220, width: 130, height: 105)
+        let polygon = [
+            CGPoint(x: 120, y: 225),
+            CGPoint(x: 230, y: 228),
+            CGPoint(x: 238, y: 275),
+            CGPoint(x: 205, y: 318),
+            CGPoint(x: 128, y: 312),
+            CGPoint(x: 112, y: 270)
+        ]
+        // Deliberately outside the bubble's right edge. This simulates OCR geometry
+        // drift while the Koharu instance mask still identifies the physical balloon.
+        let block = Self.block(
+            text: "偏移 OCR",
+            rect: CGRect(x: 232, y: 255, width: 22, height: 28),
+            bubbleBox: bubble,
+            bubblePolygon: polygon
+        )
+        let textRect = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: Self.transform
+        )
+
+        #expect(
+            OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) != nil
+        )
+        #expect(
+            OCRBubbleLayoutEngine.translationSurfaceStyle(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) == .detectedBubble
+        )
     }
 
     @Test func invalidBubbleFallsBackToMeasuredText() {
