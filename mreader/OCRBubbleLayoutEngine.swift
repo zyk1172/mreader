@@ -272,7 +272,8 @@ nonisolated enum OCRBubbleLayoutEngine {
             textRect: textRect,
             imageBounds: imageBounds,
             toleranceX: max(2, imageBounds.width * 0.005),
-            toleranceY: max(2, imageBounds.height * 0.005)
+            toleranceY: max(2, imageBounds.height * 0.005),
+            requiresTextContainment: block.bubblePolygon.count < 3
         )
     }
 
@@ -772,7 +773,8 @@ nonisolated enum OCRBubbleLayoutEngine {
         textRect: CGRect,
         imageBounds: CGRect,
         toleranceX: CGFloat,
-        toleranceY: CGFloat
+        toleranceY: CGFloat,
+        requiresTextContainment: Bool = true
     ) -> CGRect? {
         let safeImageBounds = imageBounds.standardized
         guard let bubbleRect,
@@ -790,13 +792,16 @@ nonisolated enum OCRBubbleLayoutEngine {
               safeImageBounds.insetBy(
                   dx: -max(toleranceX, 0),
                   dy: -max(toleranceY, 0)
-              ).contains(safeBubble),
-              acceptsTranslationTextRect(
-                  safeTextRect,
-                  in: safeBubble,
-                  toleranceX: toleranceX,
-                  toleranceY: toleranceY
-              ) else {
+              ).contains(safeBubble) else {
+            return nil
+        }
+        if requiresTextContainment,
+           !acceptsTranslationTextRect(
+               safeTextRect,
+               in: safeBubble,
+               toleranceX: toleranceX,
+               toleranceY: toleranceY
+           ) {
             return nil
         }
 
@@ -815,19 +820,25 @@ nonisolated enum OCRBubbleLayoutEngine {
         )
         // 这些是“允许自动字号”的保守上限，而不是气泡绘制上限；超过任一
         // 条件就回退到无气泡字号，避免一个异常大框重新放大译文。
-        guard bubbleToPageAreaRatio <= 0.72,
-              bubbleToTextAreaRatio <= 48,
-              maximumAxisExpansion <= 18 else {
-            return nil
-        }
+        guard bubbleToPageAreaRatio <= 0.72 else { return nil }
 
-        let centerDistance = hypot(
-            safeBubble.midX - safeTextRect.midX,
-            safeBubble.midY - safeTextRect.midY
-        )
-        let maximumCenterDistance = hypot(safeBubble.width, safeBubble.height) * 0.55
-            + max(toleranceX, toleranceY)
-        guard centerDistance <= maximumCenterDistance else { return nil }
+        // A model instance contour is stronger physical evidence than OCR placement.
+        // Text-dependent size and center heuristics remain useful only for legacy
+        // box-only bubbles; otherwise they can incorrectly discard a valid Koharu mask.
+        if requiresTextContainment {
+            guard bubbleToTextAreaRatio <= 48,
+                  maximumAxisExpansion <= 18 else {
+                return nil
+            }
+
+            let centerDistance = hypot(
+                safeBubble.midX - safeTextRect.midX,
+                safeBubble.midY - safeTextRect.midY
+            )
+            let maximumCenterDistance = hypot(safeBubble.width, safeBubble.height) * 0.55
+                + max(toleranceX, toleranceY)
+            guard centerDistance <= maximumCenterDistance else { return nil }
+        }
 
         let clipped = safeBubble.intersection(safeImageBounds)
         return clipped.width > 0 && clipped.height > 0 ? clipped : nil
