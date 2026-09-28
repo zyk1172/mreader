@@ -269,7 +269,7 @@ struct GuidedPanelFoundationTests {
         #expect(processed[0].rect == existing.rect)
     }
 
-    @Test func semanticRecoveryFillsGapWhenBalloonHasIndependentContentOutsideIt() {
+    @Test func semanticEvidenceNeverSynthesizesMissingFrame() {
         let existing = panel(x: 0.05, y: 0.08, width: 0.38, height: 0.34, confidence: 0.90)
         let textInsideBalloon = MangaVisionRegion(
             type: .text,
@@ -292,8 +292,8 @@ struct GuidedPanelFoundationTests {
             semanticRegions: [textInsideBalloon, textOutsideBalloon, balloon]
         )
 
-        #expect(processed.count == 2)
-        #expect(processed.contains { $0.rect.midX > 0.55 })
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == existing.rect)
     }
 
     @Test func semanticRecoveryNeverPromotesBalloonAloneToPanel() {
@@ -337,11 +337,13 @@ struct GuidedPanelFoundationTests {
         #expect(processed[0].rect == existing.rect)
     }
 
-    @Test func viewportUsesAbsolutePaddingFloorForSmallPanels() {
+    @Test func viewportNeverExpandsSmallPanels() {
         let source = CGRect(x: 0.40, y: 0.40, width: 0.04, height: 0.04)
-        let expanded = GuidedPanelViewport.expandedAndClamped(source)
-        #expect(expanded.width >= source.width + 0.016 - 0.000_001)
-        #expect(expanded.height >= source.height + 0.016 - 0.000_001)
+        let focused = GuidedPanelViewport.expandedAndClamped(
+            source,
+            contextPadding: 0.25
+        )
+        #expect(focused == source)
     }
 
     @Test func cachePathIsStableAndPageBased() {
