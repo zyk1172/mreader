@@ -6080,11 +6080,9 @@ struct LocalImageView: View {
         let bubblePolygon = lhsHasRicherBubble ? lhs.bubblePolygon : rhs.bubblePolygon
         let translation = uniqueJoined(
             [lhs.translation ?? "", rhs.translation ?? ""],
-            separator: "
-"
+            separator: "\n"
         )
-        let source = uniqueJoined([lhs.text, rhs.text], separator: "
-")
+        let source = uniqueJoined([lhs.text, rhs.text], separator: "\n")
         let orientation: TextOrientation = lhs.textOrientation == rhs.textOrientation
             ? lhs.textOrientation
             : .horizontal
