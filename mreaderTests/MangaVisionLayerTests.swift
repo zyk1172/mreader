@@ -222,6 +222,58 @@ struct MangaVisionLayerTests {
         #expect((enriched[0].layoutSafeRegion?.width ?? 0) > block.boundingBox.width)
     }
 
+    @Test func koharuContourReplacesApproximateExistingBubbleAsOneGeometry() {
+        let visualBubble = CGRect(x: 0.12, y: 0.12, width: 0.24, height: 0.20)
+        let modelBubble = CGRect(x: 0.10, y: 0.10, width: 0.30, height: 0.26)
+        let contour = MangaVisionContour(points: [
+            CGPoint(x: 0.12, y: 0.11),
+            CGPoint(x: 0.37, y: 0.12),
+            CGPoint(x: 0.39, y: 0.24),
+            CGPoint(x: 0.32, y: 0.34),
+            CGPoint(x: 0.18, y: 0.34),
+            CGPoint(x: 0.11, y: 0.24)
+        ])
+        let block = TextBlock(
+            text: "already grouped",
+            boundingBox: CGRect(x: 0.16, y: 0.16, width: 0.12, height: 0.05),
+            confidence: 0.95,
+            ocrSource: "visual-dialogue",
+            bubbleBox: visualBubble,
+            layoutSafeRegion: visualBubble,
+            textOrientation: .horizontal
+        )
+        let balloon = MangaVisionRegion(
+            type: .balloon,
+            normalizedRect: modelBubble,
+            confidence: 0.92,
+            contour: contour
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "koharu-authoritative-bubble",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1000, height: 1600),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            onomatopoeias: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [block],
+            analysis: analysis
+        )
+
+        #expect(enriched[0].bubbleBox == modelBubble)
+        #expect(enriched[0].bubblePolygon == contour.cgPoints)
+        #expect(enriched[0].layoutSafeRegion != visualBubble)
+        #expect(modelBubble.contains(enriched[0].layoutSafeRegion ?? .zero))
+    }
+
     @Test func mangaBalloonGeometryDoesNotOverwriteExistingVisualBubble() {
         let visualBubble = CGRect(x: 0.12, y: 0.12, width: 0.24, height: 0.20)
         let block = TextBlock(
