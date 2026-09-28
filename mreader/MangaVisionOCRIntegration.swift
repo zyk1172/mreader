@@ -119,11 +119,12 @@ nonisolated enum MangaVisionOCRGeometry {
         return blocks.map { block in
             var enriched = block
 
-            // A real bubble supplied by another OCR/VLM path is authoritative.
-            // Keep its box, but allow the local segmentation model to fill in a
-            // missing contour when both geometries clearly describe the same bubble.
+            // OCR/VLM may already carry approximate bubble geometry. Once Koharu
+            // finds the same physical balloon with an instance contour, do not mix the
+            // old box with the new polygon: box, polygon and layout-safe region must all
+            // come from the same model instance or their local coordinate origins diverge
+            // during rendering.
             if let existingBubble = enriched.bubbleBox {
-                var matchedPhysicalBalloon: RegionCandidate?
                 if let matched = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
                     let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
                         existingBubble,
@@ -133,26 +134,22 @@ nonisolated enum MangaVisionOCRGeometry {
                         MangaPageCoordinateSpace.containment(of: existingBubble, in: matched.rect),
                         MangaPageCoordinateSpace.containment(of: matched.rect, in: existingBubble)
                     )
-                    if overlap >= 0.35 || containment >= 0.70 {
-                        matchedPhysicalBalloon = RegionCandidate(
-                            rect: existingBubble,
-                            score: matched.score,
-                            polygon: matched.polygon
-                        )
-                        if enriched.bubblePolygon.isEmpty, !matched.polygon.isEmpty {
-                            enriched.bubblePolygon = matched.polygon
-                        }
-                    }
-                }
-                if enriched.layoutSafeRegion == nil {
-                    if let matchedPhysicalBalloon, !matchedPhysicalBalloon.polygon.isEmpty {
+                    if (overlap >= 0.35 || containment >= 0.70),
+                       matched.polygon.count >= 3 {
+                        enriched.bubbleBox = matched.rect
+                        enriched.bubblePolygon = matched.polygon
                         enriched.layoutSafeRegion = balloonLayoutSafeRegion(
-                            matchedPhysicalBalloon,
+                            matched,
                             textRect: enriched.boundingBox
                         )
-                    } else {
-                        enriched.layoutSafeRegion = existingBubble
+                        return enriched
                     }
+                }
+
+                // No reliable Koharu contour: retain the existing source consistently
+                // rather than attaching a polygon belonging to a different rectangle.
+                if enriched.layoutSafeRegion == nil {
+                    enriched.layoutSafeRegion = existingBubble
                 }
                 return enriched
             }
