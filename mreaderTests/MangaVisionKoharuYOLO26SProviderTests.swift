@@ -217,6 +217,61 @@ final class MangaVisionKoharuYOLO26SProviderTests: XCTestCase {
         XCTAssertLessThan(bounds.maxY, 0.30)
     }
 
+    func testDecoderRejectsDetectionsLivingInLetterboxPadding() throws {
+        let letterbox = MangaVisionKoharuLetterbox.make(
+            sourceSize: CGSize(width: 640, height: 1280)
+        )
+        XCTAssertEqual(letterbox.contentRect.minX, 320, accuracy: 0.001)
+        XCTAssertEqual(letterbox.contentRect.maxX, 960, accuracy: 0.001)
+
+        let detections = try Self.makeDetections(rows: [
+            (20, 120, 280, 700, 0.92, 0),   // entirely in left padding
+            (340, 120, 700, 700, 0.91, 0)   // real page content
+        ])
+        let decoded = try MangaVisionKoharuDecoder.decode(
+            detections: MangaVisionKoharuTensorReader(
+                array: detections,
+                name: "detections",
+                expectedShape: MangaVisionKoharuOutputContract.detectionsShape
+            ),
+            protos: MangaVisionKoharuTensorReader(
+                array: try Self.makeProtos(maskRect: nil),
+                name: "protos",
+                expectedShape: MangaVisionKoharuOutputContract.protosShape
+            ),
+            letterbox: letterbox
+        )
+
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].type, .panel)
+        XCTAssertGreaterThan(decoded[0].normalizedRect.minX, 0)
+        XCTAssertLessThan(decoded[0].normalizedRect.maxX, 1)
+    }
+
+    func testLetterboxRoundTripUsesActualRoundedRasterSize() {
+        let letterbox = MangaVisionKoharuLetterbox.make(
+            sourceSize: CGSize(width: 4097, height: 3053)
+        )
+        XCTAssertEqual(
+            letterbox.resizedSize.width,
+            (4097.0 * letterbox.scale).rounded(),
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            letterbox.resizedSize.height,
+            (3053.0 * letterbox.scale).rounded(),
+            accuracy: 0.000_001
+        )
+
+        let source = CGRect(x: 0.137, y: 0.219, width: 0.413, height: 0.327)
+        let input = letterbox.inputRect(fromSourceNormalizedRect: source)
+        let restored = letterbox.sourceNormalizedRect(fromInputRect: input)
+        XCTAssertEqual(restored.minX, source.minX, accuracy: 0.000_001)
+        XCTAssertEqual(restored.minY, source.minY, accuracy: 0.000_001)
+        XCTAssertEqual(restored.width, source.width, accuracy: 0.000_001)
+        XCTAssertEqual(restored.height, source.height, accuracy: 0.000_001)
+    }
+
     func testLetterboxUsesUltralyticsScaleRoundAndOffsetPolicy() {
         // A 4096x3053 page scaled into 1280 square: 954 tall, padded top and bottom.
         let tall = MangaVisionKoharuLetterbox.make(
