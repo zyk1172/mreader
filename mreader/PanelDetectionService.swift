@@ -124,8 +124,6 @@ nonisolated enum PanelPostProcessor {
     private static let minimumDimension: CGFloat = 0.025
     private static let minimumArea: CGFloat = 0.0015
     private static let minimumContentRetention: CGFloat = 0.45
-    private static let relativeScoreFraction: Float = 0.30
-    private static let maximumRelativeFloor: Float = 0.14
     private static let maximumNavigationPanelCount = 20
 
     /// Converts the calibrated Koharu frame stream into stable navigation targets.
@@ -174,12 +172,10 @@ nonisolated enum PanelPostProcessor {
         }
         guard !normalized.isEmpty else { return [] }
 
-        let bestScore = normalized.map(\.confidence).max() ?? absoluteThreshold
-        let navigationFloor = max(
-            absoluteThreshold,
-            min(maximumRelativeFloor, bestScore * relativeScoreFraction)
-        )
-        let scoreFiltered = normalized.filter { $0.confidence >= navigationFloor }
+        // The Koharu frame class is calibrated down to 0.10 because valid large and
+        // low-contrast panels frequently score below 0.14. Do not silently re-raise
+        // that operating point relative to the page's highest-scoring frame.
+        let scoreFiltered = normalized.filter { $0.confidence >= absoluteThreshold }
         let withoutPeripheralMargins = scoreFiltered.filter { candidate in
             !isLikelyPeripheralMargin(
                 candidate,
@@ -368,8 +364,8 @@ nonisolated enum PanelPostProcessor {
                 return nil
             }
 
-            // The recovered box is deliberately contextual, not a tight text/balloon
-            // crop. Guided Panel adds another display-only margin afterwards.
+            // The recovered box is deliberately contextual rather than a tight
+            // text/balloon crop. Guided Panel itself no longer adds frame padding.
             let dx = max(semanticBounds.width * 0.55, 0.040)
             let dy = max(semanticBounds.height * 0.55, 0.040)
             let recoveredRect = semanticBounds
@@ -511,11 +507,14 @@ nonisolated enum PanelPostProcessor {
                 // text/SFX detections. Only remove a frame candidate when its box is
                 // nearly the same object as the balloon; treating ordinary containment
                 // as an alias drops real dialogue panels, especially in dense lower rows.
+                // Balloons can legitimately cross or dominate a small panel. Reject the
+                // frame only when both detections are effectively describing the same
+                // object, not merely because a large balloon overlaps the panel.
                 let balloonIsNearIdentical =
-                    (iou >= 0.55 && containment >= 0.88 && sizeRatio >= 0.55)
-                    || (containment >= 0.96 && sizeRatio >= 0.70)
+                    (iou >= 0.72 && containment >= 0.95 && sizeRatio >= 0.68)
+                    || (containment >= 0.985 && sizeRatio >= 0.82)
                 let balloonDominatesFrame = balloonIsNearIdentical
-                    && semanticToFrameScore >= 0.85
+                    && semanticToFrameScore >= 0.95
                 return balloonDominatesFrame
                     && !hasIndependentSemanticSupport(
                         inside: frameRect,
