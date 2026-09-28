@@ -39,9 +39,9 @@ final class MangaVisionRegressionGateTests: XCTestCase {
             )
         }
 
-        // The panel operating point must not sit above PanelPostProcessor's relative floor,
-        // otherwise that floor can never engage.
-        XCTAssertLessThanOrEqual(profile.calibration(for: .panel).confidenceThreshold, 0.14)
+        // PanelPostProcessor must honor this operating point directly; it no longer
+        // raises the threshold relative to another frame on the same page.
+        XCTAssertEqual(profile.calibration(for: .panel).confidenceThreshold, 0.10)
 
         // Panel de-duplication is near-identity only, with a size floor so inset panels are
         // preserved for PanelDetectionService's own merge policy.
