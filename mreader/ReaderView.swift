@@ -5993,9 +5993,126 @@ struct LocalImageView: View {
         let candidates = textBlocks.filter {
             ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
-        return AITranslator.sortedTextBlocks(
+        let ordered = AITranslator.sortedTextBlocks(
             candidates,
             isRightToLeft: isRightToLeftReading
+        )
+        return canonicalTranslationBlocksForRendering(ordered)
+    }
+
+    /// Rendering must have one translation unit per physical speech balloon. OCR/VLM
+    /// recovery can occasionally leave two translated blocks carrying the same Koharu
+    /// bubble geometry; drawing both produces the stacked text seen in real pages.
+    private func canonicalTranslationBlocksForRendering(
+        _ blocks: [TextBlock]
+    ) -> [TextBlock] {
+        var result: [TextBlock] = []
+        for block in blocks {
+            guard block.layoutRole == .dialogue, block.bubbleBox != nil else {
+                result.append(block)
+                continue
+            }
+            if let index = result.firstIndex(where: {
+                samePhysicalTranslationBubble($0, block)
+            }) {
+                result[index] = mergedTranslationBubbleBlock(result[index], block)
+            } else {
+                result.append(block)
+            }
+        }
+        return result
+    }
+
+    private func samePhysicalTranslationBubble(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock
+    ) -> Bool {
+        guard lhs.layoutRole == .dialogue,
+              rhs.layoutRole == .dialogue,
+              let left = lhs.bubbleBox,
+              let right = rhs.bubbleBox else {
+            return false
+        }
+        let iou = MangaPageCoordinateSpace.intersectionOverUnion(left, right)
+        let containment = max(
+            MangaPageCoordinateSpace.containment(of: left, in: right),
+            MangaPageCoordinateSpace.containment(of: right, in: left)
+        )
+        let centerDistance = hypot(left.midX - right.midX, left.midY - right.midY)
+        let diagonal = max(
+            min(hypot(left.width, left.height), hypot(right.width, right.height)),
+            0.000_1
+        )
+        return iou >= 0.82 || (containment >= 0.94 && centerDistance / diagonal <= 0.08)
+    }
+
+    private func mergedTranslationBubbleBlock(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock
+    ) -> TextBlock {
+        func uniqueJoined(_ values: [String], separator: String) -> String {
+            var seen = Set<String>()
+            return values.compactMap { raw -> String? in
+                let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty, seen.insert(value).inserted else { return nil }
+                return value
+            }.joined(separator: separator)
+        }
+        func conservativeSafeRegion(_ first: CGRect?, _ second: CGRect?) -> CGRect? {
+            switch (first, second) {
+            case let (a?, b?):
+                let intersection = a.standardized.intersection(b.standardized)
+                if !intersection.isNull, intersection.width > 0, intersection.height > 0 {
+                    return intersection
+                }
+                return MangaPageCoordinateSpace.area(a) <= MangaPageCoordinateSpace.area(b) ? a : b
+            case let (a?, nil):
+                return a
+            case let (nil, b?):
+                return b
+            case (nil, nil):
+                return nil
+            }
+        }
+
+        let lhsHasRicherBubble = lhs.bubblePolygon.count >= rhs.bubblePolygon.count
+        let bubbleBox = lhsHasRicherBubble ? lhs.bubbleBox : rhs.bubbleBox
+        let bubblePolygon = lhsHasRicherBubble ? lhs.bubblePolygon : rhs.bubblePolygon
+        let translation = uniqueJoined(
+            [lhs.translation ?? "", rhs.translation ?? ""],
+            separator: "
+"
+        )
+        let source = uniqueJoined([lhs.text, rhs.text], separator: "
+")
+        let orientation: TextOrientation = lhs.textOrientation == rhs.textOrientation
+            ? lhs.textOrientation
+            : .horizontal
+
+        return TextBlock(
+            id: lhs.id,
+            text: source,
+            boundingBox: MangaPageCoordinateSpace.clampedNormalizedRect(
+                lhs.boundingBox.union(rhs.boundingBox)
+            ),
+            translation: translation,
+            confidence: max(lhs.confidence, rhs.confidence),
+            ocrSource: lhs.ocrSource,
+            isFiltered: false,
+            filterReason: nil,
+            estimatedFontScale: min(lhs.estimatedFontScale, rhs.estimatedFontScale),
+            textColorHex: lhs.textColorHex ?? rhs.textColorHex,
+            bubbleBox: bubbleBox,
+            layoutSafeRegion: conservativeSafeRegion(
+                lhs.layoutSafeRegion,
+                rhs.layoutSafeRegion
+            ),
+            polygon: lhs.polygon + rhs.polygon,
+            bubblePolygon: bubblePolygon,
+            translationLines: [],
+            textOrientation: orientation,
+            layoutRole: .dialogue,
+            sourceLineCount: lhs.sourceLineCount + rhs.sourceLineCount
         )
     }
 
@@ -6408,7 +6525,7 @@ struct LocalImageView: View {
         usableBubbleBounds: CGRect?,
         using transform: OCRDisplayTransform
     ) -> (rect: CGRect, polygon: [CGPoint])? {
-        guard let surfaceRect = usableBubbleBounds,
+        guard usableBubbleBounds != nil,
               block.bubblePolygon.count >= 3 else {
             return nil
         }
@@ -6418,15 +6535,40 @@ struct LocalImageView: View {
                 using: transform
             )
         }.filter { $0.x.isFinite && $0.y.isFinite }
-        guard mapped.count >= 3 else { return nil }
+        guard mapped.count >= 3,
+              let first = mapped.first else { return nil }
 
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in mapped.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        let polygonRect = CGRect(
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        ).intersection(transform.imageRect)
+        guard !polygonRect.isNull,
+              polygonRect.width > 0,
+              polygonRect.height > 0 else {
+            return nil
+        }
+
+        // Local contour coordinates and the surface frame now share exactly the same
+        // origin. Never localize a Koharu polygon against an unrelated OCR bubble box.
         let local = mapped.map {
             CGPoint(
-                x: $0.x - surfaceRect.minX,
-                y: $0.y - surfaceRect.minY
+                x: $0.x - polygonRect.minX,
+                y: $0.y - polygonRect.minY
             )
         }
-        return (surfaceRect, local)
+        return (polygonRect, local)
     }
 
     private func translationDebugItems(in size: CGSize) -> [OCRTranslationDebugItem] {
@@ -6612,6 +6754,17 @@ struct LocalImageView: View {
                     to: itemBounds,
                     margin: 0
                 )
+            }
+
+            // Hard invariant: never render two translated glyph regions on top of each
+            // other. If no legal slot exists even after bubble-local relayout and font
+            // reduction, suppress the later duplicate/low-priority overlay instead of
+            // accepting visual corruption.
+            guard !overlapsOccupied(presentationRect) else {
+                MReaderLog.aiTranslation.notice(
+                    "translation overlay suppressed due to unresolved collision"
+                )
+                continue
             }
 
             occupiedRects.append(presentationRect.insetBy(dx: -4, dy: -4))
@@ -7511,7 +7664,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 4
+    static let layoutRevision = 5
 
     struct Key: Equatable {
         let scope: String
