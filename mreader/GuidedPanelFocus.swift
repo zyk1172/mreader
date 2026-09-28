@@ -13,7 +13,7 @@ nonisolated enum GuidedPanelFocusPolicy {
         case spotlight
     }
 
-    static let panelExpansionRatio: CGFloat = 0.018
+    static let panelExpansionRatio: CGFloat = 0
     static let featherBlurRadius: CGFloat = 88
     static let nearClearance: CGFloat = 38
     static let glassTintOpacity: Double = 0.24
