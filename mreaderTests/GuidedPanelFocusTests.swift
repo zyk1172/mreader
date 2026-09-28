@@ -6,18 +6,14 @@ import UIKit
 
 @Suite
 struct GuidedPanelFocusTests {
-    @Test func panelExpansionStaysInsidePage() {
-        let expanded = GuidedPanelFocusGeometry.expandedNormalizedPanel(
-            CGRect(x: 0.01, y: 0.02, width: 0.30, height: 0.20),
+    @Test func legacyExpansionArgumentCannotChangePanelGeometry() {
+        let panel = CGRect(x: 0.01, y: 0.02, width: 0.30, height: 0.20)
+        let focused = GuidedPanelFocusGeometry.expandedNormalizedPanel(
+            panel,
             expansionRatio: 0.10
         )
 
-        #expect(expanded.minX >= 0)
-        #expect(expanded.minY >= 0)
-        #expect(expanded.maxX <= 1)
-        #expect(expanded.maxY <= 1)
-        #expect(expanded.width > 0.30)
-        #expect(expanded.height > 0.20)
+        #expect(focused == panel)
     }
 
     @Test func pageFocusRectUsesAspectFitCoordinates() {
