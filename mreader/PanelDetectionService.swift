@@ -55,7 +55,7 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
     static let schemaVersion = 6
-    static let modelVersion = 6
+    static let modelVersion = 7
 
     let schemaVersion: Int
     let modelVersion: Int
