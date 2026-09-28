@@ -244,9 +244,8 @@ nonisolated enum MangaVisionKoharuDecoder {
     /// per-class precision filtering. Raising admission to the checkpoint's recommended
     /// reporting confidence (0.25) collapsed those two stages into one and starved every
     /// downstream consumer: real frames scored by this checkpoint below 0.25 — notably
-    /// large full-bleed panels — never reached `PanelPostProcessor` or its semantic
-    /// recovery. Admission stays permissive; the profile and `PanelDetectionService` decide
-    /// what is actually usable.
+    /// large full-bleed panels — never reached `PanelPostProcessor`. Admission stays
+    /// permissive; the profile and `PanelDetectionService` decide what is actually usable.
     static let scoreThreshold: Float = 0.10
     static let maximumDetections = 300
     /// Mask probability above which a prototype pixel belongs to the instance.
