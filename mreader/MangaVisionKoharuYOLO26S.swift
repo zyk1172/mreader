@@ -43,40 +43,54 @@ nonisolated struct MangaVisionKoharuLetterbox: Sendable, Equatable {
         )
     }
 
+    /// Actual raster size written into the Core ML input. The preprocessor rounds the
+    /// resized dimensions before copying pixels, so the inverse transform must use these
+    /// same integer dimensions instead of the unrounded floating-point gain.
+    var resizedSize: CGSize {
+        CGSize(
+            width: max((originalSize.width * scale).rounded(), 1),
+            height: max((originalSize.height * scale).rounded(), 1)
+        )
+    }
+
+    /// The non-padding image area in model-input coordinates.
+    var contentRect: CGRect {
+        CGRect(origin: paddingXY, size: resizedSize).intersection(
+            CGRect(origin: .zero, size: inputSize)
+        )
+    }
+
     /// Converts a rectangle in letterboxed model-input pixels back to page-normalized
-    /// coordinates, using the same `(value - padding) / gain` transform as the
-    /// ultralytics box decoder.
+    /// coordinates using the exact raster geometry that was fed to Core ML.
     func sourceNormalizedRect(fromInputRect rect: CGRect) -> CGRect {
-        let scaledWidth = max(originalSize.width * scale, 1)
-        let scaledHeight = max(originalSize.height * scale, 1)
+        let raster = resizedSize
         return MangaPageCoordinateSpace.clampedNormalizedRect(CGRect(
-            x: (rect.minX - paddingXY.x) / scaledWidth,
-            y: (rect.minY - paddingXY.y) / scaledHeight,
-            width: rect.width / scaledWidth,
-            height: rect.height / scaledHeight
+            x: (rect.minX - paddingXY.x) / raster.width,
+            y: (rect.minY - paddingXY.y) / raster.height,
+            width: rect.width / raster.width,
+            height: rect.height / raster.height
         ))
     }
 
     /// Converts a point in letterboxed model-input pixels back to page-normalized
-    /// coordinates. Contour vertices use this form so a degenerate rect never has to
-    /// survive rectangle clamping.
+    /// coordinates using the same top-left-origin raster transform as detection boxes.
     func sourceNormalizedPoint(fromInputPoint point: CGPoint) -> CGPoint {
-        let scaledWidth = max(originalSize.width * scale, 1)
-        let scaledHeight = max(originalSize.height * scale, 1)
+        let raster = resizedSize
         return MangaPageCoordinateSpace.clampedNormalizedPoint(CGPoint(
-            x: (point.x - paddingXY.x) / scaledWidth,
-            y: (point.y - paddingXY.y) / scaledHeight
+            x: (point.x - paddingXY.x) / raster.width,
+            y: (point.y - paddingXY.y) / raster.height
         ))
     }
 
     /// Maps a page-normalized rectangle into model-input pixel space. Used to bound the
     /// mask decode to the pixels that can belong to a detection.
     func inputRect(fromSourceNormalizedRect rect: CGRect) -> CGRect {
-        CGRect(
-            x: paddingXY.x + rect.minX * originalSize.width * scale,
-            y: paddingXY.y + rect.minY * originalSize.height * scale,
-            width: rect.width * originalSize.width * scale,
-            height: rect.height * originalSize.height * scale
+        let raster = resizedSize
+        return CGRect(
+            x: paddingXY.x + rect.minX * raster.width,
+            y: paddingXY.y + rect.minY * raster.height,
+            width: rect.width * raster.width,
+            height: rect.height * raster.height
         )
     }
 }
@@ -239,9 +253,6 @@ nonisolated enum MangaVisionKoharuDecoder {
     /// Strictly greater: `sigmoid(0) == 0.5` must not count as foreground, which is
     /// exactly what an all-zero coefficient/prototype pair produces.
     static let maskProbabilityThreshold: Float = 0.5
-    /// Rows sampled across a mask outline. Two vertices per row (left edge, then right
-    /// edge) keeps the finished contour at `MangaVisionContour.maximumPointCount`.
-    static let contourSampleRowCount = MangaVisionContour.maximumPointCount / 2
     private static let minimumMaskPixelCount = 12
 
     static func decode(
@@ -273,13 +284,22 @@ nonisolated enum MangaVisionKoharuDecoder {
             let y1 = CGFloat(detections.detection(row: row, channel: 1))
             let x2 = CGFloat(detections.detection(row: row, channel: 2))
             let y2 = CGFloat(detections.detection(row: row, channel: 3))
-            let inputRect = CGRect(
+            let rawInputRect = CGRect(
                 x: max(min(x1, x2), 0),
                 y: max(min(y1, y2), 0),
                 width: max(abs(x2 - x1), 0),
                 height: max(abs(y2 - y1), 0)
             ).intersection(CGRect(x: 0, y: 0, width: inputWidth, height: inputHeight))
+            guard rawInputRect.width >= 1, rawInputRect.height >= 1 else { continue }
+
+            // The gray letterbox is preprocessing padding, not manga content. A detection
+            // that lives mostly in padding must never be clamped onto the page edge and
+            // turned into a fake border/frame.
+            let inputRect = rawInputRect.intersection(letterbox.contentRect)
             guard inputRect.width >= 1, inputRect.height >= 1 else { continue }
+            let rawArea = max(rawInputRect.width * rawInputRect.height, 1)
+            let retainedContentRatio = inputRect.width * inputRect.height / rawArea
+            guard retainedContentRatio >= 0.50 else { continue }
 
             let normalized = letterbox.sourceNormalizedRect(fromInputRect: inputRect)
             guard normalized.width > 0, normalized.height > 0 else { continue }
