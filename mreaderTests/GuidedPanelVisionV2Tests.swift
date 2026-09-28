@@ -165,7 +165,8 @@ struct GuidedPanelVisionV2Tests {
         )
 
         #expect(small.maximumScale > large.maximumScale)
-        #expect(small.contextPadding >= large.contextPadding)
+        #expect(small.contextPadding == 0)
+        #expect(large.contextPadding == 0)
     }
 
     @Test func semanticViewportUsesBalloonAndTextOnlyInsideLargeSelectedPanel() throws {
