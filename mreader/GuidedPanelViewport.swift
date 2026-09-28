@@ -9,7 +9,7 @@ nonisolated struct GuidedPanelTransform: Sendable, Equatable {
 
 /// Pure geometry for focusing a normalized panel while continuing to render the full page.
 nonisolated enum GuidedPanelViewport {
-    static let defaultContextPadding: CGFloat = 0.07
+    static let defaultContextPadding: CGFloat = 0
     static let defaultMaximumScale: CGFloat = 4.8
 
     static func transform(
@@ -78,18 +78,11 @@ nonisolated enum GuidedPanelViewport {
         guard !source.isNull, source.width > 0, source.height > 0 else {
             return safeBounds
         }
-        let padding = min(max(contextPadding, 0), 0.25)
-        // Frame regressors often land a few pixels inside the printed border.
-        // Use both proportional padding and a small page-relative floor so small
-        // panels still reveal their complete edge instead of magnifying the miss.
-        //
-        // The floor only applies when expansion was actually requested: `contextPadding`
-        // of 0 has to keep meaning "no expansion", otherwise callers that deliberately ask
-        // for the raw panel rect (GuidedPanelFocusGeometry with `expansionRatio: 0`) silently
-        // get a padded one.
-        let dx = padding > 0 ? max(source.width * padding, 0.008) : 0
-        let dy = padding > 0 ? max(source.height * padding, 0.008) : 0
-        return source.insetBy(dx: -dx, dy: -dy).intersection(safeBounds)
+        // Guided Panel now consumes the model/post-processed frame exactly.
+        // `contextPadding` remains in the signature only for source compatibility with
+        // older callers; it must not alter the panel geometry.
+        _ = contextPadding
+        return source
     }
 
     static func aspectFitRect(
