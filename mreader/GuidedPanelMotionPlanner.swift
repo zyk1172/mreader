@@ -104,12 +104,12 @@ nonisolated enum GuidedPanelMotionPlanner {
         let area = max(panel.width, 0) * max(panel.height, 0)
         let shortSide = min(panel.width, panel.height)
         if area < 0.075 || shortSide < 0.18 {
-            return GuidedPanelViewportTuning(contextPadding: 0.075, maximumScale: 4.8)
+            return GuidedPanelViewportTuning(contextPadding: 0, maximumScale: 4.8)
         }
         if area > 0.34 {
-            return GuidedPanelViewportTuning(contextPadding: 0.060, maximumScale: 4.0)
+            return GuidedPanelViewportTuning(contextPadding: 0, maximumScale: 4.0)
         }
-        return GuidedPanelViewportTuning(contextPadding: 0.068, maximumScale: 4.4)
+        return GuidedPanelViewportTuning(contextPadding: 0, maximumScale: 4.4)
     }
 
     /// Retained as a pure geometry helper for compatibility with older tests/callers.
