@@ -26,12 +26,10 @@ Business code receives only normalized top-left page coordinates and optional
 mask-derived contours through `MangaPageAnalysis`; raw class indices, model-input
 coordinates, tensor layouts, and mask arithmetic stay inside `MangaVisionKoharuProvider`.
 
-For Guided Panel, `frame` is the navigation authority. text/balloon detections may
-disambiguate reading order or conservatively recover a missing hole when multiple independent
-signals agree. SFX may help reject a near-identical cross-class alias, but it never synthesizes
-a panel or moves the camera. None of the semantic classes is a direct navigation target.
-Camera framing centers the selected frame itself and adds bounded outward context so slightly
-inset frame regression does not crop the printed panel border.
+For Guided Panel, `frame` is the sole navigation source. text/balloon/SFX detections
+may reject a near-identical cross-class alias, but semantic classes never synthesize a missing
+panel and never move the camera. Camera framing uses the selected frame exactly: no percentage
+expansion, minimum padding floor, or semantic-focus crop is applied.
 
 The provider never fabricates a contour. When a mask is rejected (too few active pixels,
 degenerate outline), `MangaVisionRegion.contour` is `nil` and consumers fall back to
@@ -76,12 +74,11 @@ decoder performs no de-duplication of its own.
 | balloon | 0.20 | 0.62 | 0.90 | — |
 | onomatopoeia/onomatopoeia_text | 0.20 | 0.58 | 0.88 | — |
 
-The confidence column is an **app-level operating point**, not a reporting artefact: it is a
-hard filter read by `PanelDetectionService`. It must stay at or above the decoder's admission
-floor (0.10), and the panel value must stay at or below `PanelPostProcessor`'s relative floor
-(0.14) or that floor can never engage. Raising the panel value back to the checkpoint's
-recommended reporting confidence (0.25) is what previously made Guided Panel drop large
-full-bleed panels before any of its own logic ran.
+The confidence column is an **app-level operating point**, not a reporting artefact. It is
+the actual hard filter read by `PanelDetectionService` and must stay at or above the decoder's
+admission floor (0.10). There is no page-relative score floor layered on top of it. Raising the
+panel value back to the checkpoint's recommended reporting confidence (0.25) is what previously
+made Guided Panel drop large full-bleed panels before any of its own logic ran.
 
 The IoU/containment/size-ratio columns are **not** detector NMS parameters — the bundled head is
 end-to-end and NMS-free. They govern collapsing duplicate rows and merging a full-page pass with
