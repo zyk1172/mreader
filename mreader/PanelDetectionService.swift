@@ -654,7 +654,9 @@ actor PanelDetectionService {
             geometry: geometryCandidates,
             model: modelCandidates,
             contentBounds: contentBounds,
-            imageAspectRatio: imageAspectRatio
+            imageAspectRatio: imageAspectRatio,
+            balloonRegions: mangaAnalysis?.balloons.map(\.normalizedRect) ?? [],
+            textRegions: mangaAnalysis?.texts.map(\.normalizedRect) ?? []
         )
         let processed = resolution.panels
         let detectorIdentifier = primaryIdentifier
