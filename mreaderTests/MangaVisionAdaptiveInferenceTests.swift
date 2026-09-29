@@ -22,6 +22,85 @@ struct MangaVisionAdaptiveInferenceTests {
         #expect(plan.reason == "standard-page-full-pass-only")
     }
 
+    @Test func healthyStandardPageStillUsesOnlyOneInferencePass() async throws {
+        let manifest = MangaVisionModelManifest(
+            modelID: "adaptive-standard-healthy",
+            modelBuildID: "build-1",
+            modelFileHash: "hash-1",
+            inputSize: CGSize(width: 64, height: 64),
+            semanticClasses: [.panel, .text, .balloon],
+            outputContractRevision: "contract-v1",
+            analysisSchemaRevision: "analysis-v1",
+            postProcessRevision: "post-v1",
+            calibrationRevision: "calibration-v1"
+        )
+        let base = MangaVisionAdaptiveFakeProvider(manifest: manifest)
+        let provider = AdaptiveMangaVisionProvider(
+            base: base,
+            resourceStateOverride: MangaVisionResourceState(
+                lowPowerModeEnabled: false,
+                thermalLevel: .nominal
+            )
+        )
+        let image = makeImage(size: CGSize(width: 128, height: 192)).cgImage!
+        let identifier = MangaPageIdentifier(
+            scope: "adaptive-standard-healthy",
+            pageIndex: 0,
+            sourceFingerprint: "source"
+        )
+
+        _ = try await provider.analyzeSourceImage(
+            image: image,
+            sourceImageSize: CGSize(width: image.width, height: image.height),
+            pageIdentifier: identifier,
+            requestClass: .interactive
+        )
+
+        #expect(await base.inferenceCalls() == 1)
+    }
+
+    @Test func standardPageWithZeroFramesRunsFourLocalRescuePasses() async throws {
+        let manifest = MangaVisionModelManifest(
+            modelID: "adaptive-standard-rescue",
+            modelBuildID: "build-1",
+            modelFileHash: "hash-1",
+            inputSize: CGSize(width: 64, height: 64),
+            semanticClasses: [.panel, .text, .balloon],
+            outputContractRevision: "contract-v1",
+            analysisSchemaRevision: "analysis-v1",
+            postProcessRevision: "post-v1",
+            calibrationRevision: "calibration-v1"
+        )
+        let base = MangaVisionAdaptiveFakeProvider(
+            manifest: manifest,
+            emptyFirstPass: true
+        )
+        let provider = AdaptiveMangaVisionProvider(
+            base: base,
+            resourceStateOverride: MangaVisionResourceState(
+                lowPowerModeEnabled: false,
+                thermalLevel: .nominal
+            )
+        )
+        let image = makeImage(size: CGSize(width: 128, height: 192)).cgImage!
+        let identifier = MangaPageIdentifier(
+            scope: "adaptive-standard-rescue",
+            pageIndex: 0,
+            sourceFingerprint: "source"
+        )
+
+        let result = try await provider.analyzeSourceImage(
+            image: image,
+            sourceImageSize: CGSize(width: image.width, height: image.height),
+            pageIdentifier: identifier,
+            requestClass: .interactive
+        )
+
+        #expect(await base.inferenceCalls() == 5)
+        #expect(result.panels.count == 4)
+        #expect(result.panels.allSatisfy { $0.confidence >= 0.82 })
+    }
+
     @Test func longStripBuildsBoundedOverlappingCoverage() {
         let plan = MangaVisionInferencePlanner.plan(
             sourceSize: CGSize(width: 1_200, height: 7_200),
@@ -261,10 +340,15 @@ private actor MangaVisionSchedulerOrderRecorder {
 
 private actor MangaVisionAdaptiveFakeProvider: MangaVisionProvider, MangaVisionManifestProviding {
     private let manifest: MangaVisionModelManifest
+    private let emptyFirstPass: Bool
     private var callCount = 0
 
-    init(manifest: MangaVisionModelManifest) {
+    init(
+        manifest: MangaVisionModelManifest,
+        emptyFirstPass: Bool = false
+    ) {
         self.manifest = manifest
+        self.emptyFirstPass = emptyFirstPass
     }
 
     var descriptor: MangaVisionProviderDescriptor {
@@ -282,16 +366,22 @@ private actor MangaVisionAdaptiveFakeProvider: MangaVisionProvider, MangaVisionM
     ) async throws -> MangaPageAnalysis {
         _ = image
         callCount += 1
-        return MangaPageAnalysis(
-            pageIdentifier: pageIdentifier,
-            imageSize: sourceImageSize,
-            panels: [
+        let panels: [MangaVisionRegion]
+        if emptyFirstPass, callCount == 1 {
+            panels = []
+        } else {
+            panels = [
                 MangaVisionRegion(
                     type: .panel,
                     normalizedRect: CGRect(x: 0.10, y: 0.10, width: 0.32, height: 0.30),
                     confidence: 0.82
                 )
-            ],
+            ]
+        }
+        return MangaPageAnalysis(
+            pageIdentifier: pageIdentifier,
+            imageSize: sourceImageSize,
+            panels: panels,
             texts: [],
             balloons: [],
             onomatopoeias: [],
