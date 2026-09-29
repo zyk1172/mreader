@@ -674,12 +674,15 @@ fileprivate struct PanelGeometryAnalyzer {
 
             let balance = CGFloat(min(firstChildLength, secondChildLength))
                 / CGFloat(max(firstChildLength, secondChildLength))
-            let thicknessFraction = min(
-                CGFloat(thickness) / CGFloat(max(axisLength, 1)),
-                0.08
-            ) / 0.08
+            let rawThicknessFraction = CGFloat(thickness) / CGFloat(max(axisLength, 1))
+            // Very large blank areas are usually artwork/background, not gutters.
+            guard rawThicknessFraction <= 0.14 else { return nil }
+            let thicknessFraction = min(rawThicknessFraction, 0.08) / 0.08
 
             let bandRect: PixelRect
+            let leadingShoulder: PixelRect
+            let trailingShoulder: PixelRect
+            let shoulderThickness = 3
             switch axis {
             case .horizontal:
                 bandRect = PixelRect(
@@ -688,11 +691,35 @@ fileprivate struct PanelGeometryAnalyzer {
                     maxX: rect.maxX,
                     maxY: band.end
                 )
+                leadingShoulder = PixelRect(
+                    minX: rect.minX,
+                    minY: max(band.start - shoulderThickness, rect.minY),
+                    maxX: rect.maxX,
+                    maxY: band.start
+                )
+                trailingShoulder = PixelRect(
+                    minX: rect.minX,
+                    minY: band.end,
+                    maxX: rect.maxX,
+                    maxY: min(band.end + shoulderThickness, rect.maxY)
+                )
             case .vertical:
                 bandRect = PixelRect(
                     minX: band.start,
                     minY: rect.minY,
                     maxX: band.end,
+                    maxY: rect.maxY
+                )
+                leadingShoulder = PixelRect(
+                    minX: max(band.start - shoulderThickness, rect.minX),
+                    minY: rect.minY,
+                    maxX: band.start,
+                    maxY: rect.maxY
+                )
+                trailingShoulder = PixelRect(
+                    minX: band.end,
+                    minY: rect.minY,
+                    maxX: min(band.end + shoulderThickness, rect.maxX),
                     maxY: rect.maxY
                 )
             }
@@ -701,15 +728,38 @@ fileprivate struct PanelGeometryAnalyzer {
                 0,
                 1 - raster.inkFraction(in: bandRect) / 0.026
             )
+            let bandLuma = raster.averageLuma(in: bandRect)
             let brightness = max(
                 0,
-                min((raster.averageLuma(in: bandRect) - 225) / 30, 1)
+                min((bandLuma - 225) / 30, 1)
             )
+            let shoulderInk = max(
+                raster.inkFraction(in: leadingShoulder),
+                raster.inkFraction(in: trailingShoulder)
+            )
+            let shoulderLuma = (
+                raster.averageLuma(in: leadingShoulder)
+                    + raster.averageLuma(in: trailingShoulder)
+            ) / 2
+            let transitionContrast = max(
+                0,
+                min((bandLuma - shoulderLuma) / 55, 1)
+            )
+
+            // A blank stripe inside a single illustration can be white too. Require a
+            // local transition at one side of the stripe (panel border or real content)
+            // before promoting it into structural page geometry.
+            guard shoulderInk >= 0.035 || transitionContrast >= 0.08 else {
+                return nil
+            }
+
             let score =
-                thicknessFraction * 0.30
-                + whiteness * 0.34
-                + brightness * 0.18
-                + balance * 0.18
+                thicknessFraction * 0.22
+                + whiteness * 0.28
+                + brightness * 0.14
+                + balance * 0.14
+                + min(shoulderInk / 0.20, 1) * 0.12
+                + transitionContrast * 0.10
 
             return Separator(
                 axis: axis,
