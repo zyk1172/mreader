@@ -205,7 +205,20 @@ nonisolated enum MangaVisionInferencePlanner {
         }
 
         let panelCount = baseline.panels.count
-        let semanticCount = baseline.texts.count + baseline.balloons.count
+        let semanticRegions = baseline.texts + baseline.balloons
+        let semanticCount = semanticRegions.count
+        let uncoveredSemanticCount = semanticRegions.filter { semantic in
+            let semanticRect = semantic.normalizedRect.standardized
+            let center = CGPoint(x: semanticRect.midX, y: semanticRect.midY)
+            return !baseline.panels.contains { panel in
+                let frame = panel.normalizedRect.standardized
+                return frame.insetBy(dx: -0.004, dy: -0.004).contains(center)
+                    || MangaPageCoordinateSpace.containment(
+                        of: semanticRect,
+                        in: frame
+                    ) >= 0.55
+            }
+        }.count
         let strongestPanelArea = baseline.panels
             .map { max($0.normalizedRect.width, 0) * max($0.normalizedRect.height, 0) }
             .max() ?? 0
@@ -223,13 +236,16 @@ nonisolated enum MangaVisionInferencePlanner {
         case 1:
             // One frame plus several dialogue cues usually means the frame head missed
             // siblings. A very large or low-confidence singleton is also suspicious.
-            needsRescue = semanticCount >= 2
+            needsRescue = uncoveredSemanticCount >= 1
+                || semanticCount >= 2
                 || strongestPanelArea >= 0.52
                 || averagePanelConfidence < 0.45
-        case 2:
-            // Two confident frames are common. Only spend rescue passes when the
-            // semantic density strongly suggests a denser page and confidence is weak.
-            needsRescue = semanticCount >= 5 && averagePanelConfidence < 0.60
+        case 2...4:
+            // Multiple frames can still hide a hole. Semantics outside every detected
+            // frame are direct evidence that the page structure is incomplete, so retry
+            // locally even when the surviving frames themselves are confident.
+            needsRescue = uncoveredSemanticCount >= 2
+                || (uncoveredSemanticCount >= 1 && averagePanelConfidence < 0.55)
         default:
             needsRescue = false
         }
