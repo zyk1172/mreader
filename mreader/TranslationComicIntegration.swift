@@ -133,6 +133,49 @@ nonisolated enum TranslationRegionPolicy {
               constrained.height > 0 else { return nil }
         return constrained
     }
+
+    /// Recomputes the text-safe rectangle from the actual rendered balloon contour.
+    /// Stored OCR/VLM safe regions are only hints; when a Koharu mask exists this
+    /// contour-derived interior is authoritative, so translated glyphs cannot occupy
+    /// empty corners of the bounding box or drift past the visible balloon body.
+    static func contourSafeRegion(
+        polygon: [CGPoint],
+        detectedBubble: CGRect,
+        sourceTextRegion: CGRect,
+        pageBounds: CGRect
+    ) -> CGRect? {
+        let page = pageBounds.standardized
+        let bubble = detectedBubble.standardized.intersection(page)
+        guard polygon.count >= 3,
+              !bubble.isNull,
+              bubble.width > 0,
+              bubble.height > 0 else {
+            return nil
+        }
+
+        let finitePolygon = polygon.filter { $0.x.isFinite && $0.y.isFinite }
+        guard finitePolygon.count >= 3 else { return nil }
+
+        let preferred = CGPoint(
+            x: min(max(sourceTextRegion.midX, bubble.minX), bubble.maxX),
+            y: min(max(sourceTextRegion.midY, bubble.minY), bubble.maxY)
+        )
+        guard let interior = MangaVisionPolygonLayout.interiorSafeRect(
+            polygon: finitePolygon,
+            bounds: bubble,
+            preferredPoint: preferred
+        ) else {
+            return nil
+        }
+
+        let constrained = interior.standardized.intersection(bubble)
+        guard !constrained.isNull,
+              constrained.width > 0,
+              constrained.height > 0 else {
+            return nil
+        }
+        return constrained
+    }
 }
 
 extension TextBlock {
