@@ -407,7 +407,7 @@ nonisolated enum VirtualPanelPlanner {
     }
 }
 
-fileprivate struct PanelGeometryAnalyzer {
+fileprivate nonisolated struct PanelGeometryAnalyzer {
     private enum Axis {
         case horizontal
         case vertical
@@ -838,7 +838,7 @@ fileprivate struct PanelGeometryAnalyzer {
     }
 }
 
-fileprivate struct PanelGeometryRaster {
+fileprivate nonisolated struct PanelGeometryRaster {
     let width: Int
     let height: Int
 
