@@ -737,6 +737,10 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
                 raster.inkFraction(in: leadingShoulder),
                 raster.inkFraction(in: trailingShoulder)
             )
+            let shoulderDark = max(
+                raster.darkFraction(in: leadingShoulder),
+                raster.darkFraction(in: trailingShoulder)
+            )
             let shoulderLuma = (
                 raster.averageLuma(in: leadingShoulder)
                     + raster.averageLuma(in: trailingShoulder)
@@ -746,19 +750,23 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
                 min((bandLuma - shoulderLuma) / 55, 1)
             )
 
-            // A blank stripe inside a single illustration can be white too. Require a
-            // local transition at one side of the stripe (panel border or real content)
-            // before promoting it into structural page geometry.
-            guard shoulderInk >= 0.035 || transitionContrast >= 0.08 else {
-                return nil
-            }
+            // A blank stripe inside a single illustration can be white too. Prefer
+            // actual dark panel-boundary evidence. Borderless gutters remain eligible
+            // only when they are narrow and have a very strong local transition.
+            let hasBoundaryEvidence = shoulderDark >= 0.012
+                || (
+                    rawThicknessFraction <= 0.035
+                    && transitionContrast >= 0.45
+                    && shoulderInk >= 0.12
+                )
+            guard hasBoundaryEvidence else { return nil }
 
             let score =
-                thicknessFraction * 0.22
-                + whiteness * 0.28
-                + brightness * 0.14
+                thicknessFraction * 0.20
+                + whiteness * 0.27
+                + brightness * 0.13
                 + balance * 0.14
-                + min(shoulderInk / 0.20, 1) * 0.12
+                + min(shoulderDark / 0.10, 1) * 0.16
                 + transitionContrast * 0.10
 
             return Separator(
