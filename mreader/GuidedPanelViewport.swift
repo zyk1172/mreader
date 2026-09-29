@@ -74,7 +74,21 @@ nonisolated enum GuidedPanelViewport {
                 && requestedBounds.height > 0
             ? requestedBounds
             : unit
-        let source = rect.standardized.intersection(safeBounds)
+        let standardized = rect.standardized
+        guard standardized.width > 0, standardized.height > 0 else {
+            return safeBounds
+        }
+
+        // Preserve exact detector geometry when it is already legal. CGRect.intersection
+        // recomputes width/height by subtraction and can introduce tiny binary-float drift
+        // (for example 0.04 -> 0.03999999999999998), which then leaks into cached focus
+        // rectangles and makes exact-panel navigation nondeterministic.
+        if safeBounds.contains(standardized) {
+            _ = contextPadding
+            return standardized
+        }
+
+        let source = standardized.intersection(safeBounds)
         guard !source.isNull, source.width > 0, source.height > 0 else {
             return safeBounds
         }
