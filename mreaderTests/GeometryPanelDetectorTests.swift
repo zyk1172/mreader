@@ -38,6 +38,29 @@ struct GeometryPanelDetectorTests {
         #expect(panels[0].confidence < 0.50)
     }
 
+    @Test func broadBlankArtworkBandIsNotPromotedToAGutter() throws {
+        let size = CGSize(width: 700, height: 1_000)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            UIColor(white: 0.45, alpha: 1).setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+
+            // Simulates a large white sky/background area inside one full-bleed panel.
+            // It spans the page, but has no dark frame boundary on either shoulder.
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 420, width: size.width, height: 140))
+        }
+
+        let cgImage = try #require(image.cgImage)
+        let detector = GeometryPanelDetector(maximumDimension: 800)
+        let panels = try detector.detectPanels(in: cgImage)
+
+        #expect(panels.count == 1)
+        #expect(panels[0].confidence < 0.50)
+    }
+
     @Test func geometryLayoutBeatsOneBadFullPageModelFrame() {
         let geometry = fourGeometryPanels()
         let model = [
