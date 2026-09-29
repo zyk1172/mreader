@@ -192,19 +192,12 @@ nonisolated enum PanelPostProcessor {
             !isLikelySemanticAlias(candidate, semanticRegions: semanticRegions)
         }
 
-        // Keep real Koharu frame detections authoritative, but do not turn a single
-        // missed frame into a whole-page stop. Semantic recovery is allowed only to
-        // fill a hole in a page that already has at least one surviving frame, and its
-        // evidence rules explicitly reject "one balloon + its own text" as a panel.
-        // This restores recall without bringing back generic Vision rectangle fallback.
-        let recoveryBase = withoutSemanticAliases.filter { area($0.rect) < 0.78 }
-        let recovered = recoverSemanticHoles(
-            among: recoveryBase,
-            semanticRegions: semanticRegions,
-            contentBounds: pageBounds,
-            minimumConfidence: absoluteThreshold
-        )
-        let augmented = withoutSemanticAliases + recovered
+        // Navigation targets must remain real frame detections. Text/balloon evidence
+        // is useful for rejecting aliases and margins, but synthesizing a panel around
+        // semantic clusters is exactly how speech balloons can become fake navigation
+        // stops. Missing frames are now recovered upstream by local Koharu re-inference
+        // on overlapping rescue tiles, so semantics never manufacture frame geometry.
+        let augmented = withoutSemanticAliases
         let withoutContainers = augmented.filter { candidate in
             !isLikelyWholePageContainer(candidate, among: augmented)
         }
