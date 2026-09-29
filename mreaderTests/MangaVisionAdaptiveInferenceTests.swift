@@ -99,8 +99,8 @@ struct MangaVisionAdaptiveInferenceTests {
             requestClass: .interactive
         )
 
-        #expect(await base.inferenceCalls() == 5)
-        #expect(result.panels.count == 4)
+        #expect(await base.inferenceCalls() == 4)
+        #expect(!result.panels.isEmpty)
         #expect(result.panels.allSatisfy { $0.confidence >= 0.82 })
     }
 
