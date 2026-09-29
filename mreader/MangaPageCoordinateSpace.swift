@@ -12,7 +12,17 @@ nonisolated enum MangaPageCoordinateSpace {
               rect.height.isFinite else {
             return .zero
         }
-        let result = rect.standardized.intersection(unitRect)
+        let standardized = rect.standardized
+        guard standardized.width > 0, standardized.height > 0 else { return .zero }
+
+        // Keep exact geometry when clipping is unnecessary. CoreGraphics computes an
+        // intersection's width/height from max-min, which can turn a legal 0.30 into
+        // 0.30000000000000004 and desynchronize boxes, contours, cache keys and tests.
+        if unitRect.contains(standardized) {
+            return standardized
+        }
+
+        let result = standardized.intersection(unitRect)
         return result.isNull ? .zero : result
     }
 
