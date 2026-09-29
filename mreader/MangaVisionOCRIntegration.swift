@@ -209,8 +209,13 @@ nonisolated enum MangaVisionOCRGeometry {
             guard containment >= 0.55 || (centerInside && containment >= 0.30) else { return nil }
 
             // Keep the physical model balloon intact. Unioning an OCR text box into
-            // it makes the rendered surface drift away from the original mask.
-            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect)
+            // it makes the rendered surface drift away from the original mask. Also keep
+            // the exact model rectangle when it is already normalized: re-clamping a legal
+            // CGRect can introduce tiny width/height drift that desynchronizes box and mask.
+            let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+            let fitted = unit.contains(rect)
+                ? rect
+                : MangaPageCoordinateSpace.clampedNormalizedRect(rect)
             let fittedArea = MangaPageCoordinateSpace.area(fitted)
             guard fittedArea > 0,
                   fittedArea <= 0.55,
