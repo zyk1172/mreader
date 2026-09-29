@@ -6409,9 +6409,39 @@ struct LocalImageView: View {
         let surfaceStyle = TranslationSurfacePolicy.surfaceStyle(
             hasReliableBubble: hasReliableBubble
         )
-        let mappedSafeRegion = block.effectiveLayoutSafeRegion.map {
+        let bubbleSurface = mappedTranslationBubbleSurface(
+            for: block,
+            usableBubbleBounds: usableBubbleBounds,
+            using: transform
+        )
+
+        // Rebuild the usable text interior from the exact contour that will be drawn.
+        // This is intentionally done at render-layout time rather than trusting a cached
+        // OCR safe rectangle: segmentation/merge steps can preserve a stale box while the
+        // Koharu polygon has already been replaced. The visible surface and the glyph
+        // placement therefore share one physical geometry source.
+        let contourSafeRegion: CGRect?
+        if let bubbleSurface, let usableBubbleBounds {
+            let absolutePolygon = bubbleSurface.polygon.map {
+                CGPoint(
+                    x: bubbleSurface.rect.minX + $0.x,
+                    y: bubbleSurface.rect.minY + $0.y
+                )
+            }
+            contourSafeRegion = TranslationRegionPolicy.contourSafeRegion(
+                polygon: absolutePolygon,
+                detectedBubble: usableBubbleBounds,
+                sourceTextRegion: textRect,
+                pageBounds: imageBounds
+            )
+        } else {
+            contourSafeRegion = nil
+        }
+
+        let persistedSafeRegion = block.effectiveLayoutSafeRegion.map {
             OCRCoordinateMapper.displayRect(forNormalizedPageRect: $0, using: transform)
         }
+        let mappedSafeRegion = contourSafeRegion ?? persistedSafeRegion
         let resolvedSafeRegion = TranslationRegionPolicy.resolvedLayoutSafeRegion(
             sourceTextRegion: textRect,
             proposedSafeRegion: mappedSafeRegion,
@@ -6479,11 +6509,6 @@ struct LocalImageView: View {
                 ? .detectedBubble
                 : .measuredText,
             minimumReadableFontSize: CGFloat(comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
-        )
-        let bubbleSurface = mappedTranslationBubbleSurface(
-            for: block,
-            usableBubbleBounds: usableBubbleBounds,
-            using: transform
         )
         let surfaceRect = bubbleSurface?.rect ?? choice.layout.rect
         let surfacePolygon = bubbleSurface?.polygon ?? []
@@ -6746,15 +6771,32 @@ struct LocalImageView: View {
             }
 
             let itemBounds = item.allowedBounds.intersection(transform.imageRect)
+            let finalAllowedBounds: CGRect
             if !itemBounds.isNull, itemBounds.width > 0, itemBounds.height > 0 {
+                finalAllowedBounds = itemBounds
                 presentationRect = OCRBubbleLayoutEngine.clamped(
                     presentationRect,
                     to: itemBounds,
                     margin: 0
                 )
+            } else {
+                finalAllowedBounds = transform.imageRect
             }
 
-            // Hard invariant: never render two translated glyph regions on top of each
+            // Hard invariant #1: the final glyph frame must remain inside the exact
+            // allowed region used by layout. For contoured speech balloons this is the
+            // polygon-derived interior, so a collision move can never push text into the
+            // tail, a transparent corner, or the neighbouring panel.
+            guard finalAllowedBounds
+                .insetBy(dx: -0.5, dy: -0.5)
+                .contains(presentationRect) else {
+                MReaderLog.aiTranslation.notice(
+                    "translation overlay suppressed because final glyph rect escaped allowed bounds"
+                )
+                continue
+            }
+
+            // Hard invariant #2: never render two translated glyph regions on top of each
             // other. If no legal slot exists even after bubble-local relayout and font
             // reduction, suppress the later duplicate/low-priority overlay instead of
             // accepting visual corruption.
@@ -7683,7 +7725,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 6
+    static let layoutRevision = 7
 
     struct Key: Equatable {
         let scope: String
