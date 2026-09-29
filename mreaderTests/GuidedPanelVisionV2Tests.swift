@@ -348,7 +348,7 @@ struct GuidedPanelVisionV2Tests {
     }
 
 
-    @Test func semanticHoleRecoveryRestoresAMissedFrameFromCorroboratedKoharuEvidence() {
+    @Test func semanticEvidenceNeverManufacturesAMissedFrame() {
         let existing = DetectedPanel(
             rect: CGRect(x: 0.05, y: 0.05, width: 0.38, height: 0.32),
             confidence: 0.91,
@@ -384,13 +384,11 @@ struct GuidedPanelVisionV2Tests {
             semanticRegions: [balloon, textInsideBalloon, independentText]
         )
 
-        #expect(processed.count == 2)
-        #expect(processed.contains { $0.rect == existing.rect })
-        #expect(processed.contains {
-            $0.rect.midX > 0.50
-                && $0.rect.contains(CGPoint(x: independentText.normalizedRect.midX,
-                                           y: independentText.normalizedRect.midY))
-        })
+        // Semantics may prove that the baseline layout is suspicious upstream, which
+        // triggers local Koharu rescue tiles. They must never invent a navigation frame
+        // themselves; otherwise a balloon/text cluster becomes a fake panel.
+        #expect(processed.count == 1)
+        #expect(processed[0].rect == existing.rect)
     }
 
     @Test func semanticHoleRecoveryDoesNotTurnOneSpeechBalloonIntoAPanel() {
