@@ -248,7 +248,7 @@ nonisolated enum MangaVisionInferencePlanner {
         }
         guard needsRescue else { return [] }
 
-        return makeStandardPageRescueTiles()
+        return makeStandardPageRescueTiles(sourceSize: sourceSize)
     }
 
     static func prefetchMaximumSourceDimension(
@@ -271,10 +271,58 @@ nonisolated enum MangaVisionInferencePlanner {
         return 3
     }
 
-    private static func makeStandardPageRescueTiles() -> [MangaVisionInferenceTile] {
-        // 0.60 leaves a 20% overlap band through the page center. Ownership remains
-        // a strict 2x2 grid so every detection has one canonical tile, while detections
-        // close to a seam are still visible with generous context in both neighbours.
+    private static func makeStandardPageRescueTiles(
+        sourceSize: CGSize
+    ) -> [MangaVisionInferenceTile] {
+        let width = max(sourceSize.width, 1)
+        let height = max(sourceSize.height, 1)
+        let aspect = max(width, height) / max(min(width, height), 1)
+
+        if aspect >= 1.25 {
+            // Preserve the complete short axis so a wide row (portrait) or tall column
+            // (landscape) is never chopped into a fake partial frame. Three 56%-length
+            // strips overlap heavily and give the model a materially larger local scale.
+            let tileLength: CGFloat = 0.56
+            let starts: [CGFloat] = [0, (1 - tileLength) / 2, 1 - tileLength]
+            let isPortrait = height >= width
+            return starts.enumerated().map { index, origin in
+                let ownershipStart = CGFloat(index) / 3
+                let ownershipEnd = CGFloat(index + 1) / 3
+                if isPortrait {
+                    return MangaVisionInferenceTile(
+                        sourceRect: CGRect(
+                            x: 0,
+                            y: origin,
+                            width: 1,
+                            height: tileLength
+                        ),
+                        ownershipRect: CGRect(
+                            x: 0,
+                            y: ownershipStart,
+                            width: 1,
+                            height: ownershipEnd - ownershipStart
+                        )
+                    )
+                }
+                return MangaVisionInferenceTile(
+                    sourceRect: CGRect(
+                        x: origin,
+                        y: 0,
+                        width: tileLength,
+                        height: 1
+                    ),
+                    ownershipRect: CGRect(
+                        x: ownershipStart,
+                        y: 0,
+                        width: ownershipEnd - ownershipStart,
+                        height: 1
+                    )
+                )
+            }
+        }
+
+        // Near-square pages benefit more from zooming both axes. A 2x2 grid with a
+        // 20% center overlap keeps seam context while increasing local detail ~1.7x.
         let extent: CGFloat = 0.60
         let trailingOrigin = 1 - extent
         let sourceRects = [
