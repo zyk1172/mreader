@@ -167,7 +167,9 @@ nonisolated enum MangaVisionInferencePlanner {
         let available = min(max(sourceSize.width, sourceSize.height), maximumUseful)
         // Only a few bounded resolution tiers, never one cache entry per display pixel.
         let tier = max(1, Int(ceil(available / inputMaximum)))
-        return "tiles=\(plan.refinementTiles.count)|sourceTier=\(tier)|allowed=\(plan.allowsInference)"
+        let standardRescueAllowed = resourceState.thermalLevel < .serious
+            && !(requestClass == .prefetch && resourceState.lowPowerModeEnabled)
+        return "tiles=\(plan.refinementTiles.count)|sourceTier=\(tier)|allowed=\(plan.allowsInference)|standardRescue=\(standardRescueAllowed)"
     }
 
     static func shouldRefine(
