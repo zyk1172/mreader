@@ -34,7 +34,10 @@ struct MangaVisionAdaptiveInferenceTests {
             postProcessRevision: "post-v1",
             calibrationRevision: "calibration-v1"
         )
-        let base = MangaVisionAdaptiveFakeProvider(manifest: manifest)
+        let base = MangaVisionAdaptiveFakeProvider(
+            manifest: manifest,
+            panelCountPerPass: 3
+        )
         let provider = AdaptiveMangaVisionProvider(
             base: base,
             resourceStateOverride: MangaVisionResourceState(
@@ -368,14 +371,17 @@ private actor MangaVisionSchedulerOrderRecorder {
 private actor MangaVisionAdaptiveFakeProvider: MangaVisionProvider, MangaVisionManifestProviding {
     private let manifest: MangaVisionModelManifest
     private let emptyFirstPass: Bool
+    private let panelCountPerPass: Int
     private var callCount = 0
 
     init(
         manifest: MangaVisionModelManifest,
-        emptyFirstPass: Bool = false
+        emptyFirstPass: Bool = false,
+        panelCountPerPass: Int = 1
     ) {
         self.manifest = manifest
         self.emptyFirstPass = emptyFirstPass
+        self.panelCountPerPass = max(panelCountPerPass, 0)
     }
 
     var descriptor: MangaVisionProviderDescriptor {
@@ -397,13 +403,20 @@ private actor MangaVisionAdaptiveFakeProvider: MangaVisionProvider, MangaVisionM
         if emptyFirstPass, callCount == 1 {
             panels = []
         } else {
-            panels = [
-                MangaVisionRegion(
+            panels = (0..<panelCountPerPass).map { index in
+                let column = index % 2
+                let row = index / 2
+                return MangaVisionRegion(
                     type: .panel,
-                    normalizedRect: CGRect(x: 0.10, y: 0.10, width: 0.32, height: 0.30),
+                    normalizedRect: CGRect(
+                        x: 0.06 + CGFloat(column) * 0.46,
+                        y: 0.06 + CGFloat(row) * 0.30,
+                        width: 0.36,
+                        height: 0.24
+                    ),
                     confidence: 0.82
                 )
-            ]
+            }
         }
         return MangaPageAnalysis(
             pageIdentifier: pageIdentifier,
