@@ -50,10 +50,23 @@ nonisolated enum PanelCandidateFusion {
         geometry: [DetectedPanel],
         model: [DetectedPanel],
         contentBounds: CGRect,
-        imageAspectRatio: CGFloat
+        imageAspectRatio: CGFloat,
+        balloonRegions: [CGRect] = [],
+        textRegions: [CGRect] = []
     ) -> Resolution {
-        let geometryPanels = PanelPostProcessor.process(geometry)
-        let modelPanels = PanelPostProcessor.process(model)
+        let geometryPanels = PanelPostProcessor.process(
+            clippedToContent(geometry, contentBounds: contentBounds)
+        )
+        let modelPanels = PanelPostProcessor.process(
+            clippedToContent(model, contentBounds: contentBounds)
+                .filter {
+                    !isSemanticAlias(
+                        $0,
+                        balloons: balloonRegions,
+                        texts: textRegions
+                    )
+                }
+        )
 
         let geometryUsable = isGeometryAuthoritative(geometryPanels)
         let modelUsable = PanelLayoutQuality.isUsable(modelPanels)
@@ -113,6 +126,74 @@ nonisolated enum PanelCandidateFusion {
             usedVirtualFallback: !virtual.isEmpty,
             reason: virtual.isEmpty ? "no-layout" : "virtual-panel-fallback"
         )
+    }
+
+    /// Clip only when the detected content bounds actually remove page margin.
+    /// A candidate that would lose too much area is kept unchanged so a slightly noisy
+    /// content-bound estimate cannot amputate a legitimate full-bleed panel.
+    private static func clippedToContent(
+        _ panels: [DetectedPanel],
+        contentBounds: CGRect
+    ) -> [DetectedPanel] {
+        let bounds = contentBounds.standardized
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
+            return panels
+        }
+
+        return panels.compactMap { panel in
+            let intersection = panel.rect.standardized.intersection(bounds)
+            guard !intersection.isNull,
+                  intersection.width > 0,
+                  intersection.height > 0 else {
+                return nil
+            }
+            let retention = area(intersection) / max(area(panel.rect), 0.000_001)
+            guard retention >= 0.72 else { return panel }
+            return DetectedPanel(
+                rect: intersection,
+                confidence: panel.confidence,
+                source: panel.source,
+                contour: panel.contour
+            )
+        }
+    }
+
+    /// Learned frame predictions that are geometrically almost identical to a speech
+    /// balloon are not navigation panels. Text is intentionally only a weak secondary
+    /// signal because real panels normally contain text.
+    private static func isSemanticAlias(
+        _ panel: DetectedPanel,
+        balloons: [CGRect],
+        texts: [CGRect]
+    ) -> Bool {
+        guard panel.source == .coreML else { return false }
+        let panelArea = area(panel.rect)
+        guard panelArea > 0 else { return true }
+
+        for balloon in balloons {
+            let balloonArea = area(balloon)
+            guard balloonArea > 0 else { continue }
+            let iou = intersectionOverUnion(panel.rect, balloon)
+            let panelInsideBalloon = containment(of: panel.rect, in: balloon)
+            let balloonInsidePanel = containment(of: balloon, in: panel.rect)
+            let sizeRatio = min(panelArea, balloonArea) / max(panelArea, balloonArea)
+
+            if iou >= 0.62
+                || (panelInsideBalloon >= 0.88 && sizeRatio >= 0.58)
+                || (balloonInsidePanel >= 0.92 && sizeRatio >= 0.72) {
+                return true
+            }
+        }
+
+        guard panelArea <= 0.10 else { return false }
+        let tightlyMatchingText = texts.contains { text in
+            intersectionOverUnion(panel.rect, text) >= 0.68
+                || (
+                    containment(of: text, in: panel.rect) >= 0.90
+                    && area(text) / panelArea >= 0.60
+                )
+        }
+        return tightlyMatchingText
     }
 
     private static func isGeometryAuthoritative(_ panels: [DetectedPanel]) -> Bool {
