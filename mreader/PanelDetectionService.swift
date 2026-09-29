@@ -152,9 +152,14 @@ nonisolated enum PanelPostProcessor {
                   panel.confidence >= absoluteThreshold else {
                 return nil
             }
-            let modelRect = panel.rect.standardized.intersection(unit)
+            let standardized = panel.rect.standardized
+            let modelRect = unit.contains(standardized)
+                ? standardized
+                : standardized.intersection(unit)
             guard !modelRect.isNull, area(modelRect) > 0 else { return nil }
-            let rect = modelRect.intersection(pageBounds)
+            let rect = pageBounds.contains(modelRect)
+                ? modelRect
+                : modelRect.intersection(pageBounds)
             let retainedContentFraction = area(rect) / area(modelRect)
             guard !rect.isNull,
                   retainedContentFraction >= minimumContentRetention,
