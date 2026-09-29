@@ -199,7 +199,14 @@ struct MangaVisionRuntimeFoundationTests {
             )
         }
 
-        try await Task.sleep(nanoseconds: 15_000_000)
+        // Synchronize on the contract being tested instead of assuming the CI
+        // scheduler will start the analysis within an arbitrary 15 ms window.
+        for _ in 0..<200 {
+            if await service.inFlightConsumerCountForDiagnostics() == 1 { break }
+            await Task.yield()
+        }
+        #expect(await service.inFlightConsumerCountForDiagnostics() == 1)
+
         await service.releaseReaderSessionMemory()
         #expect(await provider.runtimeReleaseCalls() == 0)
 
