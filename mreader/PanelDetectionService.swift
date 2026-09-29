@@ -5,7 +5,9 @@ import UIKit
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
+    case pageGeometry
     case visionRectangle
+    case virtualPanel
     case fullPageFallback
 }
 
@@ -53,8 +55,8 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 5
-    static let modelVersion = 4
+    static let schemaVersion = 6
+    static let modelVersion = 5
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -337,10 +339,30 @@ nonisolated enum PanelPostProcessor {
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
-        if panels.count == 1, let panel = panels.first, panel.source == .coreML {
-            return panel.confidence >= 0.5 && panel.rect.width * panel.rect.height >= 0.22
+        if !panels.isEmpty, panels.allSatisfy({ $0.source == .virtualPanel }) {
+            return (2...4).contains(panels.count)
         }
+
+        let maximumPanelCount: Int
+        if panels.allSatisfy({ $0.source == .coreML }) {
+            maximumPanelCount = 18
+        } else if panels.allSatisfy({ $0.source == .pageGeometry }) {
+            maximumPanelCount = 24
+        } else {
+            maximumPanelCount = 18
+        }
+
+        if panels.count == 1, let panel = panels.first {
+            if panel.source == .coreML {
+                return panel.confidence >= 0.5
+                    && panel.rect.width * panel.rect.height >= 0.22
+            }
+            if panel.source == .pageGeometry {
+                return panel.confidence >= 0.56
+                    && panel.rect.width * panel.rect.height >= 0.35
+            }
+        }
+
         guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= 0.34 else { return false }
@@ -390,7 +412,7 @@ actor PanelDetectionService {
 
     init(
         visionService: MangaVisionService = .shared,
-        fallbackDetector: any PanelDetecting = VisionRectanglePanelDetector()
+        fallbackDetector: any PanelDetecting = GeometryPanelDetector()
     ) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
@@ -511,7 +533,10 @@ actor PanelDetectionService {
             image: image,
             requestClass: requestClass
         )
-        var primaryIdentifier = "manga-vision:\(expectedDependency)"
+        var primaryIdentifier = Self.hybridDetectorIdentifier(
+            geometryIdentifier: fallbackDetector.identifier,
+            modelDependency: expectedDependency
+        )
         var memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
             return cached
@@ -530,7 +555,7 @@ actor PanelDetectionService {
             return cached
         }
 
-        guard let analysisImage = Self.analysisCGImage(from: image, maximumDimension: 640) else {
+        guard let analysisImage = Self.analysisCGImage(from: image, maximumDimension: 1_024) else {
             let fallback = Self.fullPageLayout(
                 bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
                 direction: direction,
@@ -587,7 +612,10 @@ actor PanelDetectionService {
         // a layout cached under that exact dependency before recomputing it.
         let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
         if actualDependency != expectedDependency {
-            primaryIdentifier = "manga-vision:\(actualDependency)"
+            primaryIdentifier = Self.hybridDetectorIdentifier(
+                geometryIdentifier: fallbackDetector.identifier,
+                modelDependency: actualDependency
+            )
             memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
             if let cached = memoryCache[memoryKey] {
                 return cached
@@ -606,7 +634,13 @@ actor PanelDetectionService {
         }
 
         let contentBounds = Self.detectedContentBounds(analysisImage)
-        let primaryPanels = (mangaAnalysis?.panels ?? []).map {
+
+        // Geometry is the primary structural evidence. The learned frame detector is kept
+        // independent and is fused only after both sources have produced candidates.
+        // This prevents one bad model prediction from collapsing an otherwise obvious
+        // gutter-separated manga page into a single navigation stop.
+        let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
+        let modelCandidates = (mangaAnalysis?.panels ?? []).map {
             DetectedPanel(
                 rect: $0.normalizedRect,
                 confidence: $0.confidence,
@@ -614,17 +648,16 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        var processed = PanelPostProcessor.process(primaryPanels)
-        var detectorIdentifier = primaryIdentifier
-
-        if !PanelLayoutQuality.isUsable(processed) {
-            let fallbackPanels = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
-            let fallbackProcessed = PanelPostProcessor.process(fallbackPanels)
-            if PanelLayoutQuality.isUsable(fallbackProcessed) {
-                processed = fallbackProcessed
-                detectorIdentifier = fallbackDetector.identifier
-            }
-        }
+        let imageAspectRatio = CGFloat(analysisImage.width)
+            / CGFloat(max(analysisImage.height, 1))
+        let resolution = PanelCandidateFusion.resolve(
+            geometry: geometryCandidates,
+            model: modelCandidates,
+            contentBounds: contentBounds,
+            imageAspectRatio: imageAspectRatio
+        )
+        let processed = resolution.panels
+        let detectorIdentifier = primaryIdentifier
 
         var result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
@@ -638,10 +671,12 @@ actor PanelDetectionService {
                 isRightToLeft: isRightToLeft,
                 structure: structure
             )
-            let semanticFocusRects = GuidedPanelSemanticViewportPlanner.focusRects(
-                panels: readingPlan.panels.map(\.rect),
-                analysis: mangaAnalysis
-            )
+            let semanticFocusRects = resolution.usedVirtualFallback
+                ? Array<CGRect?>(repeating: nil, count: readingPlan.panels.count)
+                : GuidedPanelSemanticViewportPlanner.focusRects(
+                    panels: readingPlan.panels.map(\.rect),
+                    analysis: mangaAnalysis
+                )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
@@ -658,7 +693,7 @@ actor PanelDetectionService {
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
-                usedFallback: false,
+                usedFallback: resolution.usedVirtualFallback,
                 orderingStrategy: readingPlan.strategy
             )
         } else {
@@ -670,7 +705,7 @@ actor PanelDetectionService {
             )
         }
 
-        result.isTransient = mangaAnalysis == nil || detectorIdentifier != primaryIdentifier || result.usedFallback
+        result.isTransient = mangaAnalysis == nil || result.usedFallback
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }
@@ -723,6 +758,13 @@ actor PanelDetectionService {
         for (url, bytes, _) in files where total > 24 * 1024 * 1024 {
             if (try? fileManager.removeItem(at: url)) != nil { total -= bytes }
         }
+    }
+
+    nonisolated private static func hybridDetectorIdentifier(
+        geometryIdentifier: String,
+        modelDependency: String
+    ) -> String {
+        "geometry-first:\(PanelCandidateFusion.revision)|\(geometryIdentifier)|manga-vision:\(modelDependency)"
     }
 
     nonisolated private static func isCacheValid(
