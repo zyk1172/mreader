@@ -101,6 +101,33 @@ struct MangaVisionAdaptiveInferenceTests {
         #expect(result.panels.allSatisfy { $0.confidence >= 0.82 })
     }
 
+    @Test func standardPageCacheIdentityChangesWhenRescueAvailabilityChanges() {
+        let source = CGSize(width: 1_600, height: 2_400)
+        let input = CGSize(width: 640, height: 640)
+        let nominal = MangaVisionInferencePlanner.cacheDemandIdentity(
+            sourceSize: source,
+            inputSize: input,
+            requestClass: .interactive,
+            resourceState: MangaVisionResourceState(
+                lowPowerModeEnabled: false,
+                thermalLevel: .nominal
+            )
+        )
+        let serious = MangaVisionInferencePlanner.cacheDemandIdentity(
+            sourceSize: source,
+            inputSize: input,
+            requestClass: .interactive,
+            resourceState: MangaVisionResourceState(
+                lowPowerModeEnabled: false,
+                thermalLevel: .serious
+            )
+        )
+
+        #expect(nominal != serious)
+        #expect(nominal.contains("standardRescue=true"))
+        #expect(serious.contains("standardRescue=false"))
+    }
+
     @Test func longStripBuildsBoundedOverlappingCoverage() {
         let plan = MangaVisionInferencePlanner.plan(
             sourceSize: CGSize(width: 1_200, height: 7_200),
