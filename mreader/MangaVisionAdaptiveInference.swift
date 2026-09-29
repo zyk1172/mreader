@@ -208,7 +208,6 @@ nonisolated enum MangaVisionInferencePlanner {
 
         let panelCount = baseline.panels.count
         let semanticRegions = baseline.texts + baseline.balloons
-        let semanticCount = semanticRegions.count
         let uncoveredSemanticCount = semanticRegions.filter { semantic in
             let semanticRect = semantic.normalizedRect.standardized
             let center = CGPoint(x: semanticRect.midX, y: semanticRect.midY)
@@ -221,9 +220,6 @@ nonisolated enum MangaVisionInferencePlanner {
                     ) >= 0.55
             }
         }.count
-        let strongestPanelArea = baseline.panels
-            .map { max($0.normalizedRect.width, 0) * max($0.normalizedRect.height, 0) }
-            .max() ?? 0
         let averagePanelConfidence: Double = baseline.panels.isEmpty
             ? 0
             : baseline.panels.reduce(0.0) { $0 + Double($1.confidence) }
@@ -236,12 +232,11 @@ nonisolated enum MangaVisionInferencePlanner {
             // contains no panels. Local re-inference gets one chance to recover.
             needsRescue = true
         case 1:
-            // One frame plus several dialogue cues usually means the frame head missed
-            // siblings. A very large or low-confidence singleton is also suspicious.
-            needsRescue = uncoveredSemanticCount >= 1
-                || semanticCount >= 2
-                || strongestPanelArea >= 0.52
-                || averagePanelConfidence < 0.45
+            // A single-frame result is ambiguous: it may be a genuine splash page, but it
+            // is also the exact failure mode where a dense page collapses to one stop.
+            // Run one bounded local rescue cycle and let geometric de-duplication collapse
+            // it back to one frame when the page really is single-panel.
+            needsRescue = true
         case 2...4:
             // Multiple frames can still hide a hole. Semantics outside every detected
             // frame are direct evidence that the page structure is incomplete, so retry
