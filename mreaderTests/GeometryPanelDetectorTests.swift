@@ -1,0 +1,226 @@
+import CoreGraphics
+import Testing
+import UIKit
+@testable import mreader
+
+@Suite(.serialized)
+@MainActor
+struct GeometryPanelDetectorTests {
+    @Test func xyCutFindsFourPanelsFromTwoPageSpanningGutters() throws {
+        let image = makeGridPage()
+        let cgImage = try #require(image.cgImage)
+        let detector = GeometryPanelDetector(maximumDimension: 800)
+
+        let panels = try detector.detectPanels(in: cgImage)
+        let processed = PanelPostProcessor.process(panels)
+
+        #expect(processed.count == 4)
+        #expect(processed.allSatisfy { $0.source == .pageGeometry })
+        #expect(processed.allSatisfy { $0.confidence >= 0.50 })
+
+        let top = processed.filter { $0.rect.midY < 0.5 }
+        let bottom = processed.filter { $0.rect.midY > 0.5 }
+        #expect(top.count == 2)
+        #expect(bottom.count == 2)
+    }
+
+    @Test func interiorSpeechBalloonCannotCreateAPanelSplit() throws {
+        let image = makeSinglePanelWithSpeechBalloon()
+        let cgImage = try #require(image.cgImage)
+        let detector = GeometryPanelDetector(maximumDimension: 800)
+
+        let panels = try detector.detectPanels(in: cgImage)
+
+        #expect(panels.count == 1)
+        #expect(panels[0].source == .pageGeometry)
+        #expect(panels[0].rect.width > 0.85)
+        #expect(panels[0].rect.height > 0.85)
+        #expect(panels[0].confidence < 0.50)
+    }
+
+    @Test func geometryLayoutBeatsOneBadFullPageModelFrame() {
+        let geometry = fourGeometryPanels()
+        let model = [
+            DetectedPanel(
+                rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+                confidence: 0.91,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: model,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.reason.hasPrefix("geometry-primary"))
+        #expect(result.panels.count == 4)
+        #expect(!result.usedVirtualFallback)
+        #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
+    }
+
+    @Test func modelMaySplitOnlyAnUndersegmentedGeometryLeaf() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
+                confidence: 0.82,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
+                confidence: 0.82,
+                source: .pageGeometry
+            )
+        ]
+        let model = [
+            DetectedPanel(
+                rect: CGRect(x: 0.07, y: 0.54, width: 0.40, height: 0.38),
+                confidence: 0.78,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.53, y: 0.54, width: 0.40, height: 0.38),
+                confidence: 0.80,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: model,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.reason == "geometry-primary")
+        #expect(result.panels.count == 3)
+        #expect(result.panels.filter { $0.source == .coreML }.count == 2)
+        #expect(result.panels.filter { $0.source == .pageGeometry }.count == 1)
+    }
+
+    @Test func uncertainPageUsesExplicitVirtualPanelsInsteadOfInventedFrames() {
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: [],
+            contentBounds: CGRect(x: 0.04, y: 0.03, width: 0.92, height: 0.94),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.usedVirtualFallback)
+        #expect(result.reason == "virtual-panel-fallback")
+        #expect(result.panels.count == 4)
+        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+        #expect(PanelLayoutQuality.isUsable(result.panels))
+    }
+
+    @Test func veryTallPageFallsBackToVerticalReadingStrips() {
+        let panels = VirtualPanelPlanner.panels(
+            in: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.40
+        )
+
+        #expect(panels.count == 3)
+        #expect(panels.allSatisfy { abs($0.rect.width - 1) < 0.0001 })
+        #expect(panels[0].rect.midY < panels[1].rect.midY)
+        #expect(panels[1].rect.midY < panels[2].rect.midY)
+    }
+
+    private func fourGeometryPanels() -> [DetectedPanel] {
+        [
+            DetectedPanel(
+                rect: CGRect(x: 0.04, y: 0.04, width: 0.43, height: 0.42),
+                confidence: 0.84,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.53, y: 0.04, width: 0.43, height: 0.42),
+                confidence: 0.85,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.04, y: 0.54, width: 0.43, height: 0.42),
+                confidence: 0.83,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.53, y: 0.54, width: 0.43, height: 0.42),
+                confidence: 0.86,
+                source: .pageGeometry
+            )
+        ]
+    }
+
+    private func makeGridPage() -> UIImage {
+        let size = CGSize(width: 700, height: 1_000)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            UIColor(white: 0.42, alpha: 1).setFill()
+            let marginX: CGFloat = 28
+            let marginY: CGFloat = 36
+            let gutterX: CGFloat = 28
+            let gutterY: CGFloat = 34
+            let panelWidth = (size.width - marginX * 2 - gutterX) / 2
+            let panelHeight = (size.height - marginY * 2 - gutterY) / 2
+
+            let rects = [
+                CGRect(x: marginX, y: marginY, width: panelWidth, height: panelHeight),
+                CGRect(
+                    x: marginX + panelWidth + gutterX,
+                    y: marginY,
+                    width: panelWidth,
+                    height: panelHeight
+                ),
+                CGRect(
+                    x: marginX,
+                    y: marginY + panelHeight + gutterY,
+                    width: panelWidth,
+                    height: panelHeight
+                ),
+                CGRect(
+                    x: marginX + panelWidth + gutterX,
+                    y: marginY + panelHeight + gutterY,
+                    width: panelWidth,
+                    height: panelHeight
+                )
+            ]
+            for rect in rects {
+                context.fill(rect)
+                UIColor.black.setStroke()
+                let path = UIBezierPath(rect: rect)
+                path.lineWidth = 4
+                path.stroke()
+                UIColor(white: 0.42, alpha: 1).setFill()
+            }
+        }
+    }
+
+    private func makeSinglePanelWithSpeechBalloon() -> UIImage {
+        let size = CGSize(width: 700, height: 1_000)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            UIColor(white: 0.38, alpha: 1).setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+
+            UIColor.white.setFill()
+            UIBezierPath(
+                ovalIn: CGRect(x: 220, y: 300, width: 260, height: 180)
+            ).fill()
+
+            UIColor.black.setStroke()
+            let outline = UIBezierPath(
+                ovalIn: CGRect(x: 220, y: 300, width: 260, height: 180)
+            )
+            outline.lineWidth = 4
+            outline.stroke()
+        }
+    }
+}
