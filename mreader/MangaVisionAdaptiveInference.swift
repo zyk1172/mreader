@@ -65,7 +65,7 @@ nonisolated struct MangaVisionInferencePlan: Sendable, Equatable {
 }
 
 nonisolated enum MangaVisionInferencePlanner {
-    static let revision = "adaptive-full-plus-overlap-tiles-v1"
+    static let revision = "adaptive-full-plus-overlap-tiles-v2-standard-page-rescue"
     private static let refinementAspectThreshold: CGFloat = 1.65
     private static let forcedRefinementAspectThreshold: CGFloat = 1.90
     private static let tileOverlapFraction: CGFloat = 0.18
@@ -184,6 +184,60 @@ nonisolated enum MangaVisionInferencePlanner {
         return averagePanelConfidence < 0.55
     }
 
+    /// A normal-aspect manga page can still be badly under-detected by the full-page pass.
+    /// The old planner only prepared tiles for very long pages, so a 0/1-frame result on a
+    /// conventional page had no way to recover and Guided Panel collapsed to full-page.
+    ///
+    /// Rescue is deliberately conditional: healthy standard pages still cost one pass.
+    /// When the baseline is structurally suspicious, four overlapping quadrants give the
+    /// frame head ~1.7x more local detail in both axes without reintroducing the retired
+    /// Vision rectangle detector.
+    static func standardPageRescueTiles(
+        baseline: MangaPageAnalysis,
+        sourceSize: CGSize,
+        requestClass: MangaVisionRequestClass,
+        resourceState: MangaVisionResourceState
+    ) -> [MangaVisionInferenceTile] {
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return [] }
+        guard resourceState.thermalLevel < .serious else { return [] }
+        if requestClass == .prefetch, resourceState.lowPowerModeEnabled {
+            return []
+        }
+
+        let panelCount = baseline.panels.count
+        let semanticCount = baseline.texts.count + baseline.balloons.count
+        let strongestPanelArea = baseline.panels
+            .map { max($0.normalizedRect.width, 0) * max($0.normalizedRect.height, 0) }
+            .max() ?? 0
+        let averagePanelConfidence: Double = baseline.panels.isEmpty
+            ? 0
+            : baseline.panels.reduce(0.0) { $0 + Double($1.confidence) }
+                / Double(baseline.panels.count)
+
+        let needsRescue: Bool
+        switch panelCount {
+        case 0:
+            // A frame-free result is never accepted as evidence that a comic page
+            // contains no panels. Local re-inference gets one chance to recover.
+            needsRescue = true
+        case 1:
+            // One frame plus several dialogue cues usually means the frame head missed
+            // siblings. A very large or low-confidence singleton is also suspicious.
+            needsRescue = semanticCount >= 2
+                || strongestPanelArea >= 0.52
+                || averagePanelConfidence < 0.45
+        case 2:
+            // Two confident frames are common. Only spend rescue passes when the
+            // semantic density strongly suggests a denser page and confidence is weak.
+            needsRescue = semanticCount >= 5 && averagePanelConfidence < 0.60
+        default:
+            needsRescue = false
+        }
+        guard needsRescue else { return [] }
+
+        return makeStandardPageRescueTiles()
+    }
+
     static func prefetchMaximumSourceDimension(
         inputSize: CGSize,
         resourceState: MangaVisionResourceState
@@ -202,6 +256,29 @@ nonisolated enum MangaVisionInferencePlanner {
         if resourceState.lowPowerModeEnabled { return 1 }
         if resourceState.thermalLevel == .fair { return 2 }
         return 3
+    }
+
+    private static func makeStandardPageRescueTiles() -> [MangaVisionInferenceTile] {
+        // 0.60 leaves a 20% overlap band through the page center. Ownership remains
+        // a strict 2x2 grid so every detection has one canonical tile, while detections
+        // close to a seam are still visible with generous context in both neighbours.
+        let extent: CGFloat = 0.60
+        let trailingOrigin = 1 - extent
+        let sourceRects = [
+            CGRect(x: 0, y: 0, width: extent, height: extent),
+            CGRect(x: trailingOrigin, y: 0, width: extent, height: extent),
+            CGRect(x: 0, y: trailingOrigin, width: extent, height: extent),
+            CGRect(x: trailingOrigin, y: trailingOrigin, width: extent, height: extent)
+        ]
+        let ownershipRects = [
+            CGRect(x: 0, y: 0, width: 0.5, height: 0.5),
+            CGRect(x: 0.5, y: 0, width: 0.5, height: 0.5),
+            CGRect(x: 0, y: 0.5, width: 0.5, height: 0.5),
+            CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5)
+        ]
+        return zip(sourceRects, ownershipRects).map {
+            MangaVisionInferenceTile(sourceRect: $0.0, ownershipRect: $0.1)
+        }
     }
 
     private static func makeLongAxisTiles(
@@ -420,15 +497,27 @@ actor AdaptiveMangaVisionProvider: MangaVisionProvider, MangaVisionManifestProvi
             sourceSize: imageSize, inputSize: manifest.inputSize,
             requestClass: requestClass, resourceState: resourceState
         )
-        guard MangaVisionInferencePlanner.shouldRefine(baseline: baseline, plan: plan) else {
+
+        let refinementTiles: [MangaVisionInferenceTile]
+        if MangaVisionInferencePlanner.shouldRefine(baseline: baseline, plan: plan) {
+            refinementTiles = plan.refinementTiles
+        } else {
+            refinementTiles = MangaVisionInferencePlanner.standardPageRescueTiles(
+                baseline: baseline,
+                sourceSize: imageSize,
+                requestClass: requestClass,
+                resourceState: resourceState
+            )
+        }
+        guard !refinementTiles.isEmpty else {
             var result = baseline
             result.cacheRevision = manifest.cacheIdentity + "|" + demand
             return result
         }
 
         var refinements: [MangaPageAnalysis] = []
-        refinements.reserveCapacity(plan.refinementTiles.count)
-        for tile in plan.refinementTiles {
+        refinements.reserveCapacity(refinementTiles.count)
+        for tile in refinementTiles {
             try Task.checkCancellation()
             guard let crop = Self.croppedImage(image, normalizedRect: tile.sourceRect),
                   let tileImage = Self.scaledImage(crop, maximumDimension: maximumDimension) else {
