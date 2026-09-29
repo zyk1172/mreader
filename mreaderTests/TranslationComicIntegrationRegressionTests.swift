@@ -119,6 +119,31 @@ final class TranslationComicIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(resolved, physicalInterior)
     }
 
+    func testRenderedContourCreatesAuthoritativeInteriorSafeRegion() throws {
+        let bubble = CGRect(x: 20, y: 20, width: 100, height: 80)
+        let polygon = [
+            CGPoint(x: 50, y: 20),
+            CGPoint(x: 90, y: 20),
+            CGPoint(x: 120, y: 50),
+            CGPoint(x: 90, y: 100),
+            CGPoint(x: 50, y: 100),
+            CGPoint(x: 20, y: 50)
+        ]
+        let safe = try XCTUnwrap(
+            TranslationRegionPolicy.contourSafeRegion(
+                polygon: polygon,
+                detectedBubble: bubble,
+                sourceTextRegion: CGRect(x: 58, y: 48, width: 24, height: 18),
+                pageBounds: CGRect(x: 0, y: 0, width: 160, height: 140)
+            )
+        )
+
+        XCTAssertTrue(bubble.insetBy(dx: -0.001, dy: -0.001).contains(safe))
+        XCTAssertLessThan(safe.width * safe.height, bubble.width * bubble.height * 0.90)
+        XCTAssertGreaterThan(safe.width, 20)
+        XCTAssertGreaterThan(safe.height, 20)
+    }
+
     func testStandaloneSafeRegionDoesNotCreatePhysicalBubble() {
         let text = CGRect(x: 40, y: 40, width: 20, height: 12)
         let safe = CGRect(x: 34, y: 32, width: 42, height: 30)
