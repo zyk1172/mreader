@@ -100,6 +100,27 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.filter { $0.source == .pageGeometry }.count == 1)
     }
 
+    @Test func modelFrameThatMatchesSpeechBalloonIsRejected() {
+        let fakeFrame = DetectedPanel(
+            rect: CGRect(x: 0.34, y: 0.22, width: 0.22, height: 0.16),
+            confidence: 0.94,
+            source: .coreML
+        )
+        let balloon = CGRect(x: 0.335, y: 0.215, width: 0.23, height: 0.17)
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: [fakeFrame],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70,
+            balloonRegions: [balloon],
+            textRegions: []
+        )
+
+        #expect(result.usedVirtualFallback)
+        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+    }
+
     @Test func uncertainPageUsesExplicitVirtualPanelsInsteadOfInventedFrames() {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
