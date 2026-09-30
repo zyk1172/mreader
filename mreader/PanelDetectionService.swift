@@ -411,22 +411,35 @@ nonisolated enum PanelLayoutQuality {
 
                 let lhsPanel = panels[lhsIndex]
                 let rhsPanel = panels[rhsIndex]
-                let crossSourceInset: Bool
-                if lhsPanel.source == .coreML, rhsPanel.source == .pageGeometry {
-                    crossSourceInset = overlapOfSmaller >= 0.90
-                        && lhsArea / max(rhsArea, 0.0001) >= 0.06
-                        && lhsArea / max(rhsArea, 0.0001) <= 0.45
-                        && lhsPanel.confidence >= 0.74
-                } else if rhsPanel.source == .coreML, lhsPanel.source == .pageGeometry {
-                    crossSourceInset = overlapOfSmaller >= 0.90
-                        && rhsArea / max(lhsArea, 0.0001) >= 0.06
-                        && rhsArea / max(lhsArea, 0.0001) <= 0.45
-                        && rhsPanel.confidence >= 0.74
+                let structuredInset: Bool
+
+                if overlapOfSmaller >= 0.90 {
+                    let smallerPanel: DetectedPanel
+                    let largerPanel: DetectedPanel
+                    let sizeRatio: CGFloat
+                    if lhsArea <= rhsArea {
+                        smallerPanel = lhsPanel
+                        largerPanel = rhsPanel
+                        sizeRatio = lhsArea / max(rhsArea, 0.0001)
+                    } else {
+                        smallerPanel = rhsPanel
+                        largerPanel = lhsPanel
+                        sizeRatio = rhsArea / max(lhsArea, 0.0001)
+                    }
+
+                    let modelSuppliesInset = smallerPanel.source == .coreML
+                    let supportedParent = largerPanel.source == .coreML
+                        || largerPanel.source == .pageGeometry
+                    structuredInset = modelSuppliesInset
+                        && supportedParent
+                        && sizeRatio >= 0.06
+                        && sizeRatio <= 0.45
+                        && smallerPanel.confidence >= 0.74
                 } else {
-                    crossSourceInset = false
+                    structuredInset = false
                 }
 
-                if overlapOfSmaller > 0.45, !crossSourceInset {
+                if overlapOfSmaller > 0.45, !structuredInset {
                     excessiveOverlapPairs += 1
                 }
             }
