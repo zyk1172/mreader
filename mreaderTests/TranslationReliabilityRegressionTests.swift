@@ -32,6 +32,18 @@ final class TranslationReliabilityRegressionTests: XCTestCase {
         )
     }
 
+
+    func testUnchangedEnglishSentenceIsRejectedForChineseTarget() {
+        let source = "YOU MUST COME WITH ME, LIZZY!"
+        XCTAssertNil(
+            TranslationOutputValidator.normalizedAcceptableTranslation(
+                source,
+                sourceText: source,
+                target: .simplifiedChinese
+            )
+        )
+    }
+
     func testStrictParserRejectsWholePageWrongLatinLanguage() throws {
         let expected = [
             AIPageTranslationItem(id: "b0", sourceText: "これはテストです", order: 0),
