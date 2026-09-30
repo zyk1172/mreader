@@ -61,6 +61,105 @@ struct GeometryPanelDetectorTests {
         #expect(panels[0].confidence < 0.50)
     }
 
+    @Test func invalidOuterMarginSeparatorDoesNotHideRealInnerGutter() throws {
+        let size = CGSize(width: 700, height: 1_000)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            UIColor(white: 0.38, alpha: 1).setFill()
+            let topPanel = CGRect(x: 35, y: 120, width: 630, height: 350)
+            let bottomPanel = CGRect(x: 35, y: 510, width: 630, height: 430)
+            context.fill(topPanel)
+            context.fill(bottomPanel)
+
+            UIColor.black.setStroke()
+            for rect in [topPanel, bottomPanel] {
+                let outline = UIBezierPath(rect: rect)
+                outline.lineWidth = 4
+                outline.stroke()
+            }
+        }
+
+        let cgImage = try #require(image.cgImage)
+        let panels = try GeometryPanelDetector(maximumDimension: 1_000)
+            .detectPanels(in: cgImage)
+
+        #expect(panels.count == 2)
+        #expect(panels[0].rect.maxY < panels[1].rect.minY
+            || panels[1].rect.maxY < panels[0].rect.minY)
+    }
+
+    @Test func narrowPageCanStillSplitAlongItsLongAxis() throws {
+        let size = CGSize(width: 60, height: 400)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            UIColor(white: 0.35, alpha: 1).setFill()
+            let first = CGRect(x: 2, y: 5, width: 56, height: 175)
+            let second = CGRect(x: 2, y: 220, width: 56, height: 175)
+            context.fill(first)
+            context.fill(second)
+
+            UIColor.black.setStroke()
+            for rect in [first, second] {
+                let outline = UIBezierPath(rect: rect)
+                outline.lineWidth = 2
+                outline.stroke()
+            }
+        }
+
+        let cgImage = try #require(image.cgImage)
+        let panels = try GeometryPanelDetector(maximumDimension: 800)
+            .detectPanels(in: cgImage)
+
+        #expect(panels.count == 2)
+    }
+
+    @Test func sparseModelCornersCannotSplitACoarseGeometryLeaf() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
+                confidence: 0.84,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
+                confidence: 0.84,
+                source: .pageGeometry
+            )
+        ]
+        let sparseModel = [
+            DetectedPanel(
+                rect: CGRect(x: 0.08, y: 0.55, width: 0.12, height: 0.12),
+                confidence: 0.90,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.80, y: 0.79, width: 0.12, height: 0.12),
+                confidence: 0.90,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: sparseModel,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.count == 2)
+        #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
+    }
+
     @Test func geometryLayoutBeatsOneBadFullPageModelFrame() {
         let geometry = fourGeometryPanels()
         let model = [
