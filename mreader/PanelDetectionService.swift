@@ -404,8 +404,29 @@ nonisolated enum PanelLayoutQuality {
                 let intersection = lhs.intersection(rhs)
                 guard !intersection.isNull else { continue }
                 let intersectionArea = intersection.width * intersection.height
-                let smallerArea = min(lhs.width * lhs.height, rhs.width * rhs.height)
-                if intersectionArea / max(smallerArea, 0.0001) > 0.45 {
+                let lhsArea = lhs.width * lhs.height
+                let rhsArea = rhs.width * rhs.height
+                let smallerArea = min(lhsArea, rhsArea)
+                let overlapOfSmaller = intersectionArea / max(smallerArea, 0.0001)
+
+                let lhsPanel = panels[lhsIndex]
+                let rhsPanel = panels[rhsIndex]
+                let crossSourceInset: Bool
+                if lhsPanel.source == .coreML, rhsPanel.source == .pageGeometry {
+                    crossSourceInset = overlapOfSmaller >= 0.90
+                        && lhsArea / max(rhsArea, 0.0001) >= 0.06
+                        && lhsArea / max(rhsArea, 0.0001) <= 0.45
+                        && lhsPanel.confidence >= 0.74
+                } else if rhsPanel.source == .coreML, lhsPanel.source == .pageGeometry {
+                    crossSourceInset = overlapOfSmaller >= 0.90
+                        && rhsArea / max(lhsArea, 0.0001) >= 0.06
+                        && rhsArea / max(lhsArea, 0.0001) <= 0.45
+                        && rhsPanel.confidence >= 0.74
+                } else {
+                    crossSourceInset = false
+                }
+
+                if overlapOfSmaller > 0.45, !crossSourceInset {
                     excessiveOverlapPairs += 1
                 }
             }
