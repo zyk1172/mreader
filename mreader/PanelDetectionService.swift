@@ -7,7 +7,6 @@ nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
     case pageGeometry
     case visionRectangle
-    case virtualPanel
     case fullPageFallback
 }
 
@@ -362,10 +361,6 @@ nonisolated enum PanelPostProcessor {
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        if !panels.isEmpty, panels.allSatisfy({ $0.source == .virtualPanel }) {
-            return (2...4).contains(panels.count)
-        }
-
         let maximumPanelCount: Int
         if panels.allSatisfy({ $0.source == .coreML }) {
             maximumPanelCount = 18
@@ -704,13 +699,10 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        let imageAspectRatio = CGFloat(analysisImage.width)
-            / CGFloat(max(analysisImage.height, 1))
         let resolution = PanelCandidateFusion.resolve(
             geometry: geometryCandidates,
             model: modelCandidates,
             contentBounds: contentBounds,
-            imageAspectRatio: imageAspectRatio,
             balloonRegions: mangaAnalysis?.balloons.map(\.normalizedRect) ?? [],
             textRegions: mangaAnalysis?.texts.map(\.normalizedRect) ?? []
         )
@@ -729,12 +721,10 @@ actor PanelDetectionService {
                 isRightToLeft: isRightToLeft,
                 structure: structure
             )
-            let semanticFocusRects = resolution.usedVirtualFallback
-                ? Array<CGRect?>(repeating: nil, count: readingPlan.panels.count)
-                : GuidedPanelSemanticViewportPlanner.focusRects(
-                    panels: readingPlan.panels.map(\.rect),
-                    analysis: mangaAnalysis
-                )
+            let semanticFocusRects = GuidedPanelSemanticViewportPlanner.focusRects(
+                panels: readingPlan.panels.map(\.rect),
+                analysis: mangaAnalysis
+            )
             result = PanelPageLayout(
                 schemaVersion: PanelPageLayout.schemaVersion,
                 modelVersion: PanelPageLayout.modelVersion,
@@ -751,7 +741,7 @@ actor PanelDetectionService {
                     )
                 },
                 contentBounds: NormalizedRect(contentBounds),
-                usedFallback: resolution.usedVirtualFallback,
+                usedFallback: false,
                 orderingStrategy: readingPlan.strategy
             )
         } else {
