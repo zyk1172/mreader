@@ -470,7 +470,7 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
     }
 
     func detectPanels() -> [DetectedPanel] {
-        let root = PixelRect(
+        let root = raster.detectedContentBounds() ?? PixelRect(
             minX: 0,
             minY: 0,
             maxX: raster.width,
@@ -961,6 +961,55 @@ fileprivate nonisolated struct PanelGeometryRaster {
         inkIntegral = ink
         darkIntegral = dark
         lumaIntegral = luma
+    }
+
+    func detectedContentBounds() -> PanelGeometryAnalyzer.PixelRect? {
+        let full = PanelGeometryAnalyzer.PixelRect(
+            minX: 0,
+            minY: 0,
+            maxX: width,
+            maxY: height
+        )
+        guard width >= 8, height >= 8 else { return full }
+
+        func rowHasContent(_ y: Int) -> Bool {
+            let strip = PanelGeometryAnalyzer.PixelRect(
+                minX: 0,
+                minY: y,
+                maxX: width,
+                maxY: min(y + 1, height)
+            )
+            return inkFraction(in: strip) >= 0.012
+                || darkFraction(in: strip) >= 0.002
+        }
+
+        func columnHasContent(_ x: Int) -> Bool {
+            let strip = PanelGeometryAnalyzer.PixelRect(
+                minX: x,
+                minY: 0,
+                maxX: min(x + 1, width),
+                maxY: height
+            )
+            return inkFraction(in: strip) >= 0.012
+                || darkFraction(in: strip) >= 0.002
+        }
+
+        guard let top = (0..<height).first(where: rowHasContent),
+              let bottom = (0..<height).reversed().first(where: rowHasContent),
+              let left = (0..<width).first(where: columnHasContent),
+              let right = (0..<width).reversed().first(where: columnHasContent) else {
+            return full
+        }
+
+        let padding = max(2, Int((CGFloat(max(width, height)) * 0.006).rounded()))
+        let bounds = PanelGeometryAnalyzer.PixelRect(
+            minX: max(left - padding, 0),
+            minY: max(top - padding, 0),
+            maxX: min(right + 1 + padding, width),
+            maxY: min(bottom + 1 + padding, height)
+        )
+        guard bounds.width >= 48, bounds.height >= 48 else { return full }
+        return bounds
     }
 
     func inkFraction(in rect: PanelGeometryAnalyzer.PixelRect) -> CGFloat {
