@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v5"
+    static let revision = "geometry-first-fusion-v6"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -290,19 +290,49 @@ nonisolated enum PanelCandidateFusion {
             }
         }
 
-        // A high-confidence model frame may fill a region that geometry did not cover at
-        // all (for example an inset panel floating over a full-bleed background).
+        // A high-confidence model frame may fill a region geometry did not cover at
+        // all, or represent a genuine inset panel inside one larger background panel.
+        // Near-duplicate containers remain rejected; a single inset is admitted only
+        // with stronger model confidence and a clearly smaller footprint.
         for (index, candidate) in model.enumerated() where !consumedModelIDs.contains(index) {
+            let candidateArea = area(candidate.rect)
             guard candidate.confidence >= 0.62,
-                  area(candidate.rect) >= 0.018 else {
+                  candidateArea >= 0.018 else {
                 continue
             }
-            let conflictsWithExistingStructure = result.contains {
-                containment(of: candidate.rect, in: $0.rect) >= 0.70
-                    || containment(of: $0.rect, in: candidate.rect) >= 0.70
-                    || intersectionOverUnion(candidate.rect, $0.rect) >= 0.45
+
+            var shouldAppend = true
+            for existing in result {
+                let existingArea = max(area(existing.rect), 0.000_001)
+                let candidateInsideExisting = containment(
+                    of: candidate.rect,
+                    in: existing.rect
+                )
+                let existingInsideCandidate = containment(
+                    of: existing.rect,
+                    in: candidate.rect
+                )
+                let iou = intersectionOverUnion(candidate.rect, existing.rect)
+                let sizeRatio = candidateArea / existingArea
+
+                if candidateInsideExisting >= 0.90 {
+                    let credibleInset = candidate.confidence >= 0.74
+                        && sizeRatio >= 0.035
+                        && sizeRatio <= 0.45
+                    if credibleInset {
+                        continue
+                    }
+                    shouldAppend = false
+                    break
+                }
+
+                if existingInsideCandidate >= 0.70 || iou >= 0.45 {
+                    shouldAppend = false
+                    break
+                }
             }
-            if !conflictsWithExistingStructure {
+
+            if shouldAppend {
                 result.append(candidate)
             }
         }
@@ -322,7 +352,10 @@ nonisolated enum PanelCandidateFusion {
                 return partial + (intersection.isNull ? 0 : area(intersection))
             } / geometricArea
         )
-        guard actualCoverage >= 0.28 else { return false }
+        // Replacing a geometry leaf discards that leaf completely, so residual
+        // model frames must explain most of its visible area. A low threshold lets two
+        // small false positives erase the majority of an otherwise valid panel.
+        guard actualCoverage >= 0.52 else { return false }
 
         let centersX = candidates.map { $0.rect.midX }
         let centersY = candidates.map { $0.rect.midY }
