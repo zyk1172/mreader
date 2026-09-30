@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v2"
+    static let revision = "geometry-first-fusion-v3"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -89,20 +89,14 @@ nonisolated enum PanelCandidateFusion {
             )
         }
 
-        if modelUsable {
+        // A single learned frame is the most dangerous failure mode: on a dense
+        // page it can simply be the whole page. Never let one uncorroborated model box
+        // become Guided Panel's sole navigation target.
+        if modelPanels.count >= 2, modelUsable {
             return Resolution(
                 panels: modelPanels,
                 usedVirtualFallback: false,
                 reason: "model-residual"
-            )
-        }
-
-        let combined = PanelPostProcessor.process(geometryPanels + modelPanels)
-        if PanelLayoutQuality.isUsable(combined) {
-            return Resolution(
-                panels: combined,
-                usedVirtualFallback: false,
-                reason: "combined-recovery"
             )
         }
 
@@ -114,6 +108,15 @@ nonisolated enum PanelCandidateFusion {
                 panels: [corroboratedSingle],
                 usedVirtualFallback: false,
                 reason: "corroborated-single-panel"
+            )
+        }
+
+        let combined = PanelPostProcessor.process(geometryPanels + modelPanels)
+        if combined.count >= 2, PanelLayoutQuality.isUsable(combined) {
+            return Resolution(
+                panels: combined,
+                usedVirtualFallback: false,
+                reason: "combined-recovery"
             )
         }
 
