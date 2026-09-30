@@ -913,12 +913,23 @@ actor PanelDetectionService {
         let left = (0..<sampleWidth).first(where: columnContainsContent) ?? 0
         let right = (0..<sampleWidth).reversed().first(where: columnContainsContent) ?? (sampleWidth - 1)
         let padding: CGFloat = 0.012
-        return CGRect(
+        let candidate = CGRect(
             x: max(CGFloat(left) / CGFloat(sampleWidth) - padding, 0),
             y: max(CGFloat(top) / CGFloat(sampleHeight) - padding, 0),
             width: min(CGFloat(right - left + 1) / CGFloat(sampleWidth) + padding * 2, 1),
             height: min(CGFloat(bottom - top + 1) / CGFloat(sampleHeight) + padding * 2, 1)
         )
+
+        // Corner-colour differencing can mistake a full-bleed dark/flat illustration for
+        // a border and collapse the content bounds around a bright face or speech bubble.
+        // Cropping is only an optimization for genuine page margins; when the inferred
+        // retained region is implausibly small, keep the whole page and let geometry/model
+        // evidence decide the panels.
+        guard candidate.width >= 0.65,
+              candidate.height >= 0.65 else {
+            return CGRect(x: 0, y: 0, width: 1, height: 1)
+        }
+        return candidate
     }
 
     nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {
