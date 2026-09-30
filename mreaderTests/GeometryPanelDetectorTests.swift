@@ -400,6 +400,24 @@ struct GeometryPanelDetectorTests {
         #expect(processed[0].rect == geometric.rect)
     }
 
+    @Test func strongModelDuplicateCanReplaceWeakGeometryBoundary() {
+        let weakGeometry = DetectedPanel(
+            rect: CGRect(x: 0.08, y: 0.08, width: 0.40, height: 0.34),
+            confidence: 0.45,
+            source: .pageGeometry
+        )
+        let learned = DetectedPanel(
+            rect: CGRect(x: 0.085, y: 0.085, width: 0.395, height: 0.335),
+            confidence: 0.94,
+            source: .coreML
+        )
+
+        let processed = PanelPostProcessor.process([weakGeometry, learned])
+
+        #expect(processed.count == 1)
+        #expect(processed[0].source == .coreML)
+    }
+
     @Test func modelMaySplitOnlyAnUndersegmentedGeometryLeaf() {
         let geometry = [
             DetectedPanel(
