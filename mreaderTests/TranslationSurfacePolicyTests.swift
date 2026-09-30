@@ -131,6 +131,34 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
+
+    @Test func panelLikeBubbleFallsBackToMeasuredTextSurface() {
+        let block = Self.block(
+            text: "NONSENSE!",
+            rect: CGRect(x: 155, y: 300, width: 80, height: 36),
+            bubbleBox: CGRect(x: 85, y: 210, width: 220, height: 310)
+        )
+        let textRect = OCRCoordinateMapper.displayRect(
+            forNormalizedPageRect: block.boundingBox,
+            using: Self.transform
+        )
+
+        #expect(
+            OCRBubbleLayoutEngine.usableTranslationBubbleBounds(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) == nil
+        )
+        #expect(
+            OCRBubbleLayoutEngine.translationSurfaceStyle(
+                for: block,
+                textRect: textRect,
+                using: Self.transform
+            ) == .measuredText
+        )
+    }
+
     @Test func noBubblePathologicalTallOCRDoesNotEnlargeCard() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
         let normalSourceRect = CGRect(x: 185, y: 340, width: 30, height: 20)
