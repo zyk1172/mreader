@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v3"
+    static let revision = "geometry-first-fusion-v4"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -57,15 +57,17 @@ nonisolated enum PanelCandidateFusion {
         let geometryPanels = PanelPostProcessor.process(
             clippedToContent(geometry, contentBounds: contentBounds)
         )
-        let modelPanels = PanelPostProcessor.process(
-            clippedToContent(model, contentBounds: contentBounds)
-                .filter {
-                    !isSemanticAlias(
-                        $0,
-                        balloons: balloonRegions,
-                        texts: textRegions
-                    )
-                }
+        let modelPanels = suppressLikelyPageContainers(
+            PanelPostProcessor.process(
+                clippedToContent(model, contentBounds: contentBounds)
+                    .filter {
+                        !isSemanticAlias(
+                            $0,
+                            balloons: balloonRegions,
+                            texts: textRegions
+                        )
+                    }
+            )
         )
 
         let geometryUsable = isGeometryAuthoritative(geometryPanels)
@@ -158,6 +160,35 @@ nonisolated enum PanelCandidateFusion {
                 source: panel.source,
                 contour: panel.contour
             )
+        }
+    }
+
+    /// A near-page-sized learned frame that merely contains more specific frame
+    /// detections is usually the detector collapsing page structure into one container.
+    /// Keep genuine large panels when they stand alone; suppress only the container when
+    /// a substantially smaller child provides competing structural evidence.
+    private static func suppressLikelyPageContainers(
+        _ panels: [DetectedPanel]
+    ) -> [DetectedPanel] {
+        guard panels.count >= 2 else { return panels }
+
+        return panels.filter { candidate in
+            let candidateArea = area(candidate.rect)
+            guard candidate.source == .coreML,
+                  candidateArea >= 0.72 else {
+                return true
+            }
+
+            let containsSpecificFrame = panels.contains { other in
+                guard other != candidate else { return false }
+                let otherArea = area(other.rect)
+                guard otherArea >= 0.018,
+                      otherArea <= candidateArea * 0.58 else {
+                    return false
+                }
+                return containment(of: other.rect, in: candidate.rect) >= 0.88
+            }
+            return !containsSpecificFrame
         }
     }
 
