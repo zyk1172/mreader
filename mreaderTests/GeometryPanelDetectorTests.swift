@@ -412,6 +412,84 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.allSatisfy { $0.rect.width < 0.50 })
     }
 
+    @Test func nestedWeakGeometryAndSingleModelChildDoNotFormFakeTwoPanelLayout() {
+        let weakGeometry = DetectedPanel(
+            rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+            confidence: 0.34,
+            source: .pageGeometry
+        )
+        let learnedChild = DetectedPanel(
+            rect: CGRect(x: 0.56, y: 0.56, width: 0.24, height: 0.22),
+            confidence: 0.90,
+            source: .coreML
+        )
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [weakGeometry],
+            model: [learnedChild],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.usedVirtualFallback)
+        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+    }
+
+    @Test func widelyDispersedDialogueRejectsWholePageSingleFrameCorroboration() {
+        let geometric = DetectedPanel(
+            rect: CGRect(x: 0.03, y: 0.03, width: 0.94, height: 0.94),
+            confidence: 0.45,
+            source: .pageGeometry
+        )
+        let learned = DetectedPanel(
+            rect: CGRect(x: 0.04, y: 0.04, width: 0.92, height: 0.92),
+            confidence: 0.94,
+            source: .coreML
+        )
+        let balloons = [
+            CGRect(x: 0.12, y: 0.10, width: 0.10, height: 0.08),
+            CGRect(x: 0.72, y: 0.40, width: 0.10, height: 0.08),
+            CGRect(x: 0.18, y: 0.78, width: 0.10, height: 0.08)
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [geometric],
+            model: [learned],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70,
+            balloonRegions: balloons
+        )
+
+        #expect(result.usedVirtualFallback)
+        #expect(result.reason == "virtual-panel-fallback")
+    }
+
+    @Test func contentBoundsHintCannotTrimMoreThanTenPercentOfARealFrame() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.02, y: 0.08, width: 0.46, height: 0.38),
+                confidence: 0.82,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.52, y: 0.08, width: 0.46, height: 0.38),
+                confidence: 0.82,
+                source: .pageGeometry
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: [],
+            contentBounds: CGRect(x: 0.10, y: 0.05, width: 0.80, height: 0.90),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.count == 2)
+        #expect(result.panels.contains { abs($0.rect.minX - 0.02) < 0.0001 })
+        #expect(result.panels.contains { abs($0.rect.maxX - 0.98) < 0.0001 })
+    }
+
     @Test func uncorroboratedSingleModelFrameUsesVirtualPanels() {
         let learned = DetectedPanel(
             rect: CGRect(x: 0.03, y: 0.03, width: 0.94, height: 0.94),
