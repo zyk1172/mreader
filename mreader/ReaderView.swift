@@ -2382,7 +2382,9 @@ struct ReaderView: View {
             mangaVisionHardCaseToast = message
         }
         Task {
-            try? await Task.sleep(for: .seconds(2.2))
+            // Keep the confirmation visible long enough for VoiceOver/XCUITest
+            // accessibility snapshots to observe it after sheet dismissal.
+            try? await Task.sleep(for: .seconds(5))
             guard mangaVisionHardCaseToastToken == token else { return }
             withAnimation(.easeIn(duration: 0.16)) {
                 mangaVisionHardCaseToast = nil
