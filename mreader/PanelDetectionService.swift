@@ -571,16 +571,11 @@ actor PanelDetectionService {
 
         let contentBounds = Self.detectedContentBounds(analysisImage)
 
-        // Run page geometry first. A strong gutter/XY-cut layout is already sufficient
-        // for navigation and must not pay the Core ML inference cost merely to confirm it.
-        // If Manga Vision has already been warmed by OCR/translation/prefetch we still use
-        // that cached result as residual evidence, but a fresh model pass is requested only
-        // when geometry is structurally uncertain.
+        // Run page geometry first so it remains the structural authority. Manga Vision
+        // still runs (or reuses its cache) as independent residual evidence: accuracy is
+        // more important here than saving one inference, because a seemingly healthy
+        // geometry layout can still contain one under-segmented leaf.
         let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
-        let geometryAuthoritative = PanelCandidateFusion.isGeometryAuthoritative(
-            geometryCandidates,
-            contentBounds: contentBounds
-        )
 
         var mangaAnalysis = await visionService.cachedAnalysis(
             comicID: comicID,
@@ -598,11 +593,7 @@ actor PanelDetectionService {
                 requestClass: .prefetch
             )
         }
-
-        let modelInferenceRequired = !geometryAuthoritative
-        var modelInferenceAttempted = false
-        if mangaAnalysis == nil, modelInferenceRequired {
-            modelInferenceAttempted = true
+        if mangaAnalysis == nil {
             mangaAnalysis = try? await visionService.analysis(
                 comicID: comicID,
                 pageIndex: pageIndex,
@@ -623,16 +614,9 @@ actor PanelDetectionService {
             return temporary
         }
 
-        // Only a real analysis can change the demand identity. Intentionally skipping
-        // Core ML on a strong geometry page must keep the expected dependency identity,
-        // otherwise the stable geometry layout would be stored under an "unavailable"
-        // key and miss its own cache on the next read.
-        let actualDependency: String
-        if mangaAnalysis == nil {
-            actualDependency = expectedDependency
-        } else {
-            actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
-        }
+        // Resource state may have changed while the two independent evidence paths
+        // were being prepared. Use the dependency actually attached to the model result.
+        let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
         if actualDependency != expectedDependency {
             primaryIdentifier = Self.hybridDetectorIdentifier(
                 geometryIdentifier: fallbackDetector.identifier,
@@ -722,12 +706,9 @@ actor PanelDetectionService {
             )
         }
 
-        // A deterministic geometry or virtual-panel result is cacheable. Only a page
-        // that actually needed fresh model evidence and failed to obtain it is transient;
-        // that page should retry later instead of freezing a degraded answer on disk.
-        result.isTransient = modelInferenceRequired
-            && modelInferenceAttempted
-            && mangaAnalysis == nil
+        // Virtual panels are deterministic and may be cached once both evidence paths
+        // completed. Only a model failure/unavailability is transient and should retry.
+        result.isTransient = mangaAnalysis == nil
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }
