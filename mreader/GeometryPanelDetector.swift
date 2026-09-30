@@ -420,7 +420,14 @@ nonisolated enum PanelCandidateFusion {
         balloons: [CGRect],
         texts: [CGRect]
     ) -> Bool {
-        let evidence = balloons.isEmpty ? texts : balloons
+        let evidence: [CGRect]
+        if balloons.count >= 3 {
+            evidence = balloons
+        } else if texts.count >= 3 {
+            evidence = texts
+        } else {
+            evidence = balloons + texts
+        }
         guard evidence.count >= 3 else { return true }
 
         let centers = evidence.map { CGPoint(x: $0.midX, y: $0.midY) }
