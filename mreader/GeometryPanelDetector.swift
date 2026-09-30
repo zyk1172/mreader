@@ -9,7 +9,7 @@ import Foundation
 /// learned Manga Vision frame detector remains useful later as a residual detector for
 /// borderless/inset/irregular cases, but it is no longer the sole authority for navigation.
 nonisolated struct GeometryPanelDetector: PanelDetecting {
-    let identifier = "page-geometry-xycut-v2"
+    let identifier = "page-geometry-xycut-v3"
 
     private let maximumDimension: Int
 
@@ -527,6 +527,18 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             guard edgeSupport >= 0.50 || inkFraction >= 0.055 else {
                 return nil
             }
+
+            // A short sparse strip at the outer page margin is a common chapter-title
+            // pattern. Text strokes can touch both the first and last rows of that tiny
+            // leaf and therefore fake 0.50 boundary support; reject that specific shape
+            // instead of promoting typography to Guided Panel navigation.
+            let touchesOuterVerticalMargin = rect.minY <= 0.12 || rect.maxY >= 0.88
+            let sparseMarginArtifact = touchesOuterVerticalMargin
+                && rect.height <= 0.16
+                && inkFraction < 0.045
+                && edgeSupport <= 0.50
+            guard !sparseMarginArtifact else { return nil }
+
             return (leaf, rect, edgeSupport, inkFraction)
         }
 
@@ -952,9 +964,9 @@ fileprivate nonisolated struct PanelGeometryRaster {
                     height: targetHeight
                 )
             )
-            // Store row zero as the visual top of the comic page.
-            context.translateBy(x: 0, y: CGFloat(targetHeight))
-            context.scaleBy(x: 1, y: -1)
+            // CGImage pixel rows are already top-to-bottom in the backing store
+            // consumed below. Flipping this context mirrors the raster vertically
+            // and turns top-page panels into bottom-page panels.
             context.interpolationQuality = .medium
             context.draw(
                 image,
