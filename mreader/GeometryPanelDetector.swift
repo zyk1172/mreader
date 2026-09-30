@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v4"
+    static let revision = "geometry-first-fusion-v5"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -67,7 +67,8 @@ nonisolated enum PanelCandidateFusion {
                             texts: textRegions
                         )
                     }
-            )
+            ),
+            contentBounds: contentBounds
         )
 
         let geometryUsable = isGeometryAuthoritative(geometryPanels)
@@ -168,14 +169,16 @@ nonisolated enum PanelCandidateFusion {
     /// Keep genuine large panels when they stand alone; suppress only the container when
     /// a substantially smaller child provides competing structural evidence.
     private static func suppressLikelyPageContainers(
-        _ panels: [DetectedPanel]
+        _ panels: [DetectedPanel],
+        contentBounds: CGRect
     ) -> [DetectedPanel] {
         guard panels.count >= 2 else { return panels }
 
+        let contentArea = max(area(contentBounds.standardized), 0.25)
         return panels.filter { candidate in
             let candidateArea = area(candidate.rect)
             guard candidate.source == .coreML,
-                  candidateArea >= 0.72 else {
+                  candidateArea >= contentArea * 0.78 else {
                 return true
             }
 
