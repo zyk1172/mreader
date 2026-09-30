@@ -224,7 +224,7 @@ nonisolated enum MangaTextSegmenter {
         // can look like one paragraph. Keep them as independent measured-text
         // units rather than guessing across manga reading columns.
         guard !isVertical(previous) else { return false }
-        guard stylesAreCompatible(previous, current),
+        guard paragraphStylesAreCompatible(previous, current),
               previous.textOrientation == current.textOrientation,
               followsReadingOrder(previous, current, isRightToLeft: isRightToLeft),
               projectionsAreAligned(previous, current) else {
@@ -252,14 +252,17 @@ nonisolated enum MangaTextSegmenter {
         // slightly wider continuation window handles a third line whose
         // spacing differs from the first pair, while 1.5x remains a useful
         // guard against merging adjacent independent bubbles.
-        let maximumGap = max(smallerScale * 1.35, 0.006)
+        let maximumGap = max(smallerScale * 1.20, 0.006)
         guard lineGap <= maximumGap else { return false }
 
         let union = currentGroup.dropFirst().reduce(currentGroup[0].boundingBox) {
             $0.union($1.boundingBox)
         }.union(current.boundingBox)
-        guard union.width <= 0.82,
-              union.height <= 0.48 else {
+        // A no-bubble fallback is allowed to rebuild a sentence, not an
+        // entire panel. This is the last guard against chaining several nearby
+        // speech balloons into one page-sized Apple Translation request.
+        guard union.width <= 0.58,
+              union.height <= 0.30 else {
             return false
         }
         return true
@@ -457,6 +460,21 @@ nonisolated enum MangaTextSegmenter {
         let larger = max(fontScale(lhs), fontScale(rhs))
         guard larger / max(smaller, 0.000_1) <= 1.25 else { return false }
         return OCRCandidateResolver.colorsAreCompatible(lhs.textColorHex, rhs.textColorHex)
+    }
+
+    /// Paragraph grouping is semantic/geometry work. Source color sampling must
+    /// not split one speech balloon into separate Apple Translation requests:
+    /// antialiasing, scans and coloured lettering can produce very different RGB
+    /// samples for adjacent rows. Geometry remains conservative enough to keep
+    /// unrelated bubbles separate.
+    private static func paragraphStylesAreCompatible(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock
+    ) -> Bool {
+        guard lhs.layoutRole == rhs.layoutRole else { return false }
+        let smaller = min(fontScale(lhs), fontScale(rhs))
+        let larger = max(fontScale(lhs), fontScale(rhs))
+        return larger / max(smaller, 0.000_1) <= 1.60
     }
 
     private static func mergedBlock(

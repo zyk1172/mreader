@@ -226,6 +226,50 @@ struct MangaVisionLayerTests {
         #expect((enriched[0].layoutSafeRegion?.width ?? 0) > block.boundingBox.width)
     }
 
+
+    @Test func panelSizedBalloonFalsePositiveDoesNotBecomeTranslationGeometry() {
+        let falseBalloon = region(
+            .balloon,
+            x: 0.08,
+            y: 0.18,
+            width: 0.72,
+            height: 0.40,
+            confidence: 0.96
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "oversized-balloon-regression",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1_000, height: 1_500),
+            panels: [],
+            texts: [],
+            balloons: [falseBalloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 3
+        )
+        let line = TextBlock(
+            text: "NONSENSE!",
+            boundingBox: CGRect(x: 0.34, y: 0.30, width: 0.18, height: 0.045),
+            confidence: 0.94,
+            ocrSource: "original:en",
+            estimatedFontScale: 0.045,
+            textOrientation: .horizontal,
+            layoutRole: .dialogue
+        )
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: [line],
+            analysis: analysis
+        )
+
+        #expect(enriched.count == 1)
+        #expect(enriched[0].bubbleBox == nil)
+    }
+
     @Test func mangaBalloonGeometryDoesNotOverwriteExistingVisualBubble() {
         let visualBubble = CGRect(x: 0.12, y: 0.12, width: 0.24, height: 0.20)
         let block = TextBlock(

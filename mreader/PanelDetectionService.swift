@@ -5,6 +5,7 @@ import UIKit
 
 nonisolated enum PanelDetectionSource: String, Codable, Sendable {
     case coreML
+    case pageGeometry
     case visionRectangle
     case fullPageFallback
 }
@@ -53,8 +54,8 @@ nonisolated struct PanelLayoutPanel: Codable, Sendable, Equatable {
 }
 
 nonisolated struct PanelPageLayout: Codable, Sendable, Equatable {
-    static let schemaVersion = 5
-    static let modelVersion = 4
+    static let schemaVersion = 6
+    static let modelVersion = 5
 
     let schemaVersion: Int
     let modelVersion: Int
@@ -164,15 +165,21 @@ nonisolated enum PanelPostProcessor {
     static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let filtered = candidates.compactMap { panel -> DetectedPanel? in
-            let rect = panel.rect.standardized.intersection(unit)
+            let standardized = panel.rect.standardized
+            let rect = unit.contains(standardized)
+                ? standardized
+                : standardized.intersection(unit)
             guard !rect.isNull,
                   rect.width >= 0.055,
                   rect.height >= 0.045 else {
                 return nil
             }
             let area = rect.width * rect.height
+            let maximumArea: CGFloat = (
+                panel.source == .coreML || panel.source == .pageGeometry
+            ) ? 1.0 : 0.94
             guard area >= 0.012,
-                  area <= (panel.source == .coreML ? 1.0 : 0.94),
+                  area <= maximumArea,
                   panel.confidence >= 0.24 else {
                 return nil
             }
@@ -205,6 +212,19 @@ nonisolated enum PanelPostProcessor {
     /// confidence than the panel border. Prefer the containing box when the area difference
     /// is large, while preserving confidence-based NMS for genuinely near-identical boxes.
     private static func shouldPrefer(_ candidate: DetectedPanel, over existing: DetectedPanel) -> Bool {
+        // Once page geometry has produced a structural candidate, a near-duplicate
+        // learned box may corroborate it but must not silently replace its boundaries.
+        // This keeps fusion asymmetric even though the generic de-dup pass is sorted by
+        // confidence.
+        if candidate.source == .pageGeometry, existing.source == .coreML,
+           candidate.confidence >= 0.62 {
+            return true
+        }
+        if candidate.source == .coreML, existing.source == .pageGeometry,
+           existing.confidence >= 0.62 {
+            return false
+        }
+
         let intersection = existing.rect.intersection(candidate.rect)
         if !intersection.isNull {
             let intersectionArea = area(intersection)
@@ -243,6 +263,13 @@ nonisolated enum PanelPostProcessor {
         if lhs.source == .coreML, rhs.source == .coreML {
             // The segmentation model already separates frame from balloon. Preserve
             // real inset panels instead of treating containment alone as duplication.
+            return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
+        }
+        if (lhs.source == .coreML && rhs.source == .pageGeometry)
+            || (lhs.source == .pageGeometry && rhs.source == .coreML) {
+            // A model frame fully inside a larger geometry leaf can be a real inset
+            // panel. Treat cross-source containment as duplication only when the two
+            // boxes are also similar in size.
             return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
         }
         return iou >= 0.58 || containment >= 0.82
@@ -337,10 +364,28 @@ nonisolated enum PanelPostProcessor {
 
 nonisolated enum PanelLayoutQuality {
     static func isUsable(_ panels: [DetectedPanel]) -> Bool {
-        let maximumPanelCount = panels.allSatisfy { $0.source == .coreML } ? 18 : 12
-        if panels.count == 1, let panel = panels.first, panel.source == .coreML {
-            return panel.confidence >= 0.5 && panel.rect.width * panel.rect.height >= 0.22
+        let maximumPanelCount: Int
+        if panels.allSatisfy({ $0.source == .coreML }) {
+            maximumPanelCount = 18
+        } else if panels.allSatisfy({ $0.source == .pageGeometry }) {
+            maximumPanelCount = 24
+        } else if panels.allSatisfy({ $0.source == .visionRectangle }) {
+            maximumPanelCount = 12
+        } else {
+            maximumPanelCount = 18
         }
+
+        if panels.count == 1, let panel = panels.first {
+            if panel.source == .coreML {
+                return panel.confidence >= 0.5
+                    && panel.rect.width * panel.rect.height >= 0.22
+            }
+            if panel.source == .pageGeometry {
+                return panel.confidence >= 0.56
+                    && panel.rect.width * panel.rect.height >= 0.35
+            }
+        }
+
         guard (2...maximumPanelCount).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= 0.34 else { return false }
@@ -359,8 +404,42 @@ nonisolated enum PanelLayoutQuality {
                 let intersection = lhs.intersection(rhs)
                 guard !intersection.isNull else { continue }
                 let intersectionArea = intersection.width * intersection.height
-                let smallerArea = min(lhs.width * lhs.height, rhs.width * rhs.height)
-                if intersectionArea / max(smallerArea, 0.0001) > 0.45 {
+                let lhsArea = lhs.width * lhs.height
+                let rhsArea = rhs.width * rhs.height
+                let smallerArea = min(lhsArea, rhsArea)
+                let overlapOfSmaller = intersectionArea / max(smallerArea, 0.0001)
+
+                let lhsPanel = panels[lhsIndex]
+                let rhsPanel = panels[rhsIndex]
+                let structuredInset: Bool
+
+                if overlapOfSmaller >= 0.90 {
+                    let smallerPanel: DetectedPanel
+                    let largerPanel: DetectedPanel
+                    let sizeRatio: CGFloat
+                    if lhsArea <= rhsArea {
+                        smallerPanel = lhsPanel
+                        largerPanel = rhsPanel
+                        sizeRatio = lhsArea / max(rhsArea, 0.0001)
+                    } else {
+                        smallerPanel = rhsPanel
+                        largerPanel = lhsPanel
+                        sizeRatio = rhsArea / max(lhsArea, 0.0001)
+                    }
+
+                    let modelSuppliesInset = smallerPanel.source == .coreML
+                    let supportedParent = largerPanel.source == .coreML
+                        || largerPanel.source == .pageGeometry
+                    structuredInset = modelSuppliesInset
+                        && supportedParent
+                        && sizeRatio >= 0.06
+                        && sizeRatio <= 0.45
+                        && smallerPanel.confidence >= 0.74
+                } else {
+                    structuredInset = false
+                }
+
+                if overlapOfSmaller > 0.45, !structuredInset {
                     excessiveOverlapPairs += 1
                 }
             }
@@ -390,7 +469,7 @@ actor PanelDetectionService {
 
     init(
         visionService: MangaVisionService = .shared,
-        fallbackDetector: any PanelDetecting = VisionRectanglePanelDetector()
+        fallbackDetector: any PanelDetecting = GeometryPanelDetector()
     ) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = root.appendingPathComponent("PanelLayouts", isDirectory: true)
@@ -511,7 +590,10 @@ actor PanelDetectionService {
             image: image,
             requestClass: requestClass
         )
-        var primaryIdentifier = "manga-vision:\(expectedDependency)"
+        var primaryIdentifier = Self.hybridDetectorIdentifier(
+            geometryIdentifier: fallbackDetector.identifier,
+            modelDependency: expectedDependency
+        )
         var memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
         if let cached = memoryCache[memoryKey] {
             return cached
@@ -530,7 +612,7 @@ actor PanelDetectionService {
             return cached
         }
 
-        guard let analysisImage = Self.analysisCGImage(from: image, maximumDimension: 640) else {
+        guard let analysisImage = Self.analysisCGImage(from: image, maximumDimension: 1_024) else {
             let fallback = Self.fullPageLayout(
                 bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
                 direction: direction,
@@ -542,10 +624,14 @@ actor PanelDetectionService {
             return temporary
         }
 
-        // Reuse analysis already warmed for the same demand before starting
-        // new Core ML work. Interactive navigation may also consume a completed
-        // prefetch analysis: Guided Panel needs stable panel geometry immediately,
-        // and a later interactive analysis can still refresh richer semantic caches.
+        let contentBounds = Self.detectedContentBounds(analysisImage)
+
+        // Run page geometry first so it remains the structural authority. Manga Vision
+        // still runs (or reuses its cache) as independent residual evidence: accuracy is
+        // more important here than saving one inference, because a seemingly healthy
+        // geometry layout can still contain one under-segmented leaf.
+        let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
+
         var mangaAnalysis = await visionService.cachedAnalysis(
             comicID: comicID,
             pageIndex: pageIndex,
@@ -571,9 +657,10 @@ actor PanelDetectionService {
                 requestClass: requestClass
             )
         }
+
         guard epoch == generation, !Task.isCancelled else {
             var temporary = Self.fullPageLayout(
-                bounds: Self.detectedContentBounds(analysisImage),
+                bounds: contentBounds,
                 direction: direction,
                 sourceFingerprint: sourceFingerprint,
                 detectorIdentifier: primaryIdentifier
@@ -582,12 +669,14 @@ actor PanelDetectionService {
             return temporary
         }
 
-        // Resource state may have changed after the model-free lookup. If the
-        // actual analysis used a different demand, switch identities and honor
-        // a layout cached under that exact dependency before recomputing it.
+        // Resource state may have changed while the two independent evidence paths
+        // were being prepared. Use the dependency actually attached to the model result.
         let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
         if actualDependency != expectedDependency {
-            primaryIdentifier = "manga-vision:\(actualDependency)"
+            primaryIdentifier = Self.hybridDetectorIdentifier(
+                geometryIdentifier: fallbackDetector.identifier,
+                modelDependency: actualDependency
+            )
             memoryKey = "\(cacheIdentity.scope)|\(cacheIdentity.pageComponent)|\(direction)|\(primaryIdentifier)|\(sourceFingerprint)"
             if let cached = memoryCache[memoryKey] {
                 return cached
@@ -605,8 +694,7 @@ actor PanelDetectionService {
             }
         }
 
-        let contentBounds = Self.detectedContentBounds(analysisImage)
-        let primaryPanels = (mangaAnalysis?.panels ?? []).map {
+        let modelCandidates = (mangaAnalysis?.panels ?? []).map {
             DetectedPanel(
                 rect: $0.normalizedRect,
                 confidence: $0.confidence,
@@ -614,17 +702,15 @@ actor PanelDetectionService {
                 contour: $0.contour?.cgPoints
             )
         }
-        var processed = PanelPostProcessor.process(primaryPanels)
-        var detectorIdentifier = primaryIdentifier
-
-        if !PanelLayoutQuality.isUsable(processed) {
-            let fallbackPanels = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
-            let fallbackProcessed = PanelPostProcessor.process(fallbackPanels)
-            if PanelLayoutQuality.isUsable(fallbackProcessed) {
-                processed = fallbackProcessed
-                detectorIdentifier = fallbackDetector.identifier
-            }
-        }
+        let resolution = PanelCandidateFusion.resolve(
+            geometry: geometryCandidates,
+            model: modelCandidates,
+            contentBounds: contentBounds,
+            balloonRegions: mangaAnalysis?.balloons.map(\.normalizedRect) ?? [],
+            textRegions: mangaAnalysis?.texts.map(\.normalizedRect) ?? []
+        )
+        let processed = resolution.panels
+        let detectorIdentifier = primaryIdentifier
 
         var result: PanelPageLayout
         if PanelLayoutQuality.isUsable(processed) {
@@ -670,7 +756,9 @@ actor PanelDetectionService {
             )
         }
 
-        result.isTransient = mangaAnalysis == nil || detectorIdentifier != primaryIdentifier || result.usedFallback
+        // Whole-page fallback is deterministic once both evidence paths completed.
+        // Only a model failure/unavailability is transient and should retry.
+        result.isTransient = mangaAnalysis == nil
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }
@@ -723,6 +811,13 @@ actor PanelDetectionService {
         for (url, bytes, _) in files where total > 24 * 1024 * 1024 {
             if (try? fileManager.removeItem(at: url)) != nil { total -= bytes }
         }
+    }
+
+    nonisolated private static func hybridDetectorIdentifier(
+        geometryIdentifier: String,
+        modelDependency: String
+    ) -> String {
+        "geometry-first:\(PanelCandidateFusion.revision)|\(geometryIdentifier)|manga-vision:\(modelDependency)"
     }
 
     nonisolated private static func isCacheValid(
@@ -857,12 +952,23 @@ actor PanelDetectionService {
         let left = (0..<sampleWidth).first(where: columnContainsContent) ?? 0
         let right = (0..<sampleWidth).reversed().first(where: columnContainsContent) ?? (sampleWidth - 1)
         let padding: CGFloat = 0.012
-        return CGRect(
+        let candidate = CGRect(
             x: max(CGFloat(left) / CGFloat(sampleWidth) - padding, 0),
             y: max(CGFloat(top) / CGFloat(sampleHeight) - padding, 0),
             width: min(CGFloat(right - left + 1) / CGFloat(sampleWidth) + padding * 2, 1),
             height: min(CGFloat(bottom - top + 1) / CGFloat(sampleHeight) + padding * 2, 1)
         )
+
+        // Corner-colour differencing can mistake a full-bleed dark/flat illustration for
+        // a border and collapse the content bounds around a bright face or speech bubble.
+        // Cropping is only an optimization for genuine page margins; when the inferred
+        // retained region is implausibly small, keep the whole page and let geometry/model
+        // evidence decide the panels.
+        guard candidate.width >= 0.65,
+              candidate.height >= 0.65 else {
+            return CGRect(x: 0, y: 0, width: 1, height: 1)
+        }
+        return candidate
     }
 
     nonisolated private static func sourceFingerprint(pageURL: URL, image: UIImage) -> String {

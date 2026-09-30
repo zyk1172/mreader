@@ -72,9 +72,12 @@ nonisolated enum TranslationLayoutMetrics {
     static let verticalColumnWidthMultiplier: CGFloat = 1.10
     static let geometryFontScaleMultiplier: CGFloat = 1.25
     static let absoluteFontSizeCap: CGFloat = 72
-    static let maximumCardWidthFraction: CGFloat = 0.78
-    static let maximumCardHeightFraction: CGFloat = 0.68
-    static let maximumCardAreaFraction: CGFloat = 0.38
+    // Fallback cards are local annotations, never page-sized replacement
+    // surfaces. Reliable physical balloons use their own geometry; these caps
+    // prevent a missed/invalid balloon from turning OCR text into a giant card.
+    static let maximumCardWidthFraction: CGFloat = 0.58
+    static let maximumCardHeightFraction: CGFloat = 0.36
+    static let maximumCardAreaFraction: CGFloat = 0.16
 }
 
 nonisolated enum OCRBubbleLayoutEngine {
@@ -813,11 +816,13 @@ nonisolated enum OCRBubbleLayoutEngine {
             safeBubble.width / max(safeTextRect.width, max(toleranceX, 1)),
             safeBubble.height / max(safeTextRect.height, max(toleranceY, 1))
         )
-        // 这些是“允许自动字号”的保守上限，而不是气泡绘制上限；超过任一
-        // 条件就回退到无气泡字号，避免一个异常大框重新放大译文。
-        guard bubbleToPageAreaRatio <= 0.72,
-              bubbleToTextAreaRatio <= 48,
-              maximumAxisExpansion <= 18 else {
+        // A physical speech balloon is local page geometry. Panel/frame false
+        // positives are intentionally rejected even when they technically
+        // contain the OCR text; fallback rendering is safer than painting a
+        // large fraction of the page white.
+        guard bubbleToPageAreaRatio <= 0.20,
+              bubbleToTextAreaRatio <= 96,
+              maximumAxisExpansion <= 10 else {
             return nil
         }
 
@@ -825,7 +830,7 @@ nonisolated enum OCRBubbleLayoutEngine {
             safeBubble.midX - safeTextRect.midX,
             safeBubble.midY - safeTextRect.midY
         )
-        let maximumCenterDistance = hypot(safeBubble.width, safeBubble.height) * 0.55
+        let maximumCenterDistance = hypot(safeBubble.width, safeBubble.height) * 0.42
             + max(toleranceX, toleranceY)
         guard centerDistance <= maximumCenterDistance else { return nil }
 

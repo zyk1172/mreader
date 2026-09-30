@@ -664,4 +664,68 @@ struct VisualBubbleGroupingTests {
         #expect(base != changedRevision)
         #expect(base != changedVisualMode)
     }
+
+    // MARK: - Apple/native paragraph aggregation regressions
+
+    /// Source colour is presentation evidence, not sentence-boundary evidence.
+    /// Adjacent OCR rows from one physical bubble may sample very different RGB
+    /// values; Apple Translation must still receive one semantic paragraph.
+    @Test func measuredParagraphIgnoresTextColorSamplingDifferences() {
+        let first = Self.block(
+            text: "WELL OF COURSE",
+            boundingBox: CGRect(x: 0.56, y: 0.30, width: 0.24, height: 0.050),
+            bubbleBox: nil,
+            estimatedFontScale: 0.050,
+            textColorHex: "#101010"
+        )
+        let second = Self.block(
+            text: "YOU MUST GO ALONE!",
+            boundingBox: CGRect(x: 0.54, y: 0.365, width: 0.30, height: 0.045),
+            bubbleBox: nil,
+            estimatedFontScale: 0.036,
+            textColorHex: "#6A2FA0"
+        )
+
+        let segmentation = MangaTextSegmenter.segment([first, second], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
+        #expect(segmentation.bubbles[0].text == "WELL OF COURSE YOU MUST GO ALONE!")
+    }
+
+    /// Conservative measured-text grouping may rebuild a local paragraph, but it
+    /// must never chain rows across a large fraction of the page into one giant
+    /// translation request/surface when no reliable bubble was detected.
+    @Test func measuredParagraphCannotGrowAcrossLargePageSpan() {
+        let rows = [
+            Self.block(
+                text: "FIRST.",
+                boundingBox: CGRect(x: 0.28, y: 0.12, width: 0.24, height: 0.045),
+                bubbleBox: nil,
+                estimatedFontScale: 0.045,
+                textColorHex: nil
+            ),
+            Self.block(
+                text: "SECOND.",
+                boundingBox: CGRect(x: 0.29, y: 0.175, width: 0.23, height: 0.045),
+                bubbleBox: nil,
+                estimatedFontScale: 0.045,
+                textColorHex: nil
+            ),
+            Self.block(
+                text: "THIRD.",
+                boundingBox: CGRect(x: 0.30, y: 0.40, width: 0.22, height: 0.045),
+                bubbleBox: nil,
+                estimatedFontScale: 0.045,
+                textColorHex: nil
+            )
+        ]
+
+        let segmentation = MangaTextSegmenter.segment(rows, isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count >= 2)
+        #expect(segmentation.bubbles.allSatisfy { $0.bubbleBox == nil })
+        #expect(segmentation.bubbles.allSatisfy { $0.boundingBox.height <= 0.30 })
+    }
 }

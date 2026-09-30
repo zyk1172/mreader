@@ -2382,7 +2382,9 @@ struct ReaderView: View {
             mangaVisionHardCaseToast = message
         }
         Task {
-            try? await Task.sleep(for: .seconds(2.2))
+            // Keep the confirmation visible long enough for VoiceOver/XCUITest
+            // accessibility snapshots to observe it after sheet dismissal.
+            try? await Task.sleep(for: .seconds(5))
             guard mangaVisionHardCaseToastToken == token else { return }
             withAnimation(.easeIn(duration: 0.16)) {
                 mangaVisionHardCaseToast = nil
@@ -5687,8 +5689,19 @@ struct LocalImageView: View {
                             targetLanguage: bridgeTarget
                         ) else { return }
                         guard let index = self.textBlocks.firstIndex(where: { $0.id == id }) else { return }
-                        self.textBlocks[index].translation = text
-                        self.textBlocks[index].translationLines = [text]
+                        let target = TranslationTargetLanguage.migrateLegacyValue(bridgeTarget)
+                        guard let normalized = TranslationOutputValidator.normalizedAcceptableTranslation(
+                            text,
+                            sourceText: self.textBlocks[index].text,
+                            target: target
+                        ) else {
+                            // Apple can occasionally echo the English source unchanged.
+                            // Leave the block empty so onFinished sends it through the
+                            // existing cloud text fallback instead of rendering a leak.
+                            return
+                        }
+                        self.textBlocks[index].translation = normalized
+                        self.textBlocks[index].translationLines = [normalized]
                     },
                     onFinished: { seen in
                         guard self.isAppleBridgeCurrent(
@@ -5721,7 +5734,15 @@ struct LocalImageView: View {
                             )
                         }
                         let missing = self.appleTranslationRequests
-                            .filter { !seen.contains($0.id) }
+                            .filter { request in
+                                guard seen.contains(request.id),
+                                      let block = self.textBlocks.first(where: { $0.id == request.id }) else {
+                                    return true
+                                }
+                                return (block.translation ?? "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty
+                            }
                             .map(\.id)
                         if !missing.isEmpty {
                             self.cloudFallbackForMissing(
@@ -7448,7 +7469,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 3
+    static let layoutRevision = 4
 
     struct Key: Equatable {
         let scope: String
@@ -7586,17 +7607,10 @@ private struct TranslationSurfaceRenderer: View {
                     .fill(Color.white.opacity(0.94))
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .assistOverlay:
+                // Colourful and black-text modes share the exact same physical
+                // surface/coordinates. Only the glyph colour differs below.
                 TranslationBubbleContourShape(points: contour)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        TranslationBubbleContourShape(points: contour)
-                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                    }
-                    .overlay {
-                        TranslationBubbleContourShape(points: contour)
-                            .stroke(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-                    }
+                    .fill(Color.white.opacity(0.94))
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .annotation:
                 EmptyView()
@@ -7608,17 +7622,8 @@ private struct TranslationSurfaceRenderer: View {
                     .fill(Color.white.opacity(0.94))
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .assistOverlay:
-                RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .fill(Color.white.opacity(surfaceStyle.backgroundOpacity))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: surfaceStyle.cornerRadius, style: .continuous)
-                            .strokeBorder(Color.white.opacity(surfaceStyle.borderOpacity), lineWidth: 0.75)
-                            .shadow(color: .black.opacity(0.34), radius: 0.8, y: 0.6)
-                    }
+                RoundedRectangle(cornerRadius: max(surfaceStyle.cornerRadius * 0.55, 3), style: .continuous)
+                    .fill(Color.white.opacity(0.94))
                     .frame(width: layoutSize.width, height: layoutSize.height)
             case .annotation:
                 RoundedRectangle(cornerRadius: 5, style: .continuous)

@@ -151,9 +151,22 @@ nonisolated enum OCRCandidateResolver {
                   bubble.minY >= 0,
                   bubble.maxX <= 1.02,
                   bubble.maxY <= 1.02,
-                  bubble.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textRect),
-                  area(bubble) <= 0.55,
-                  area(bubble) / textArea <= 600 else {
+                  bubble.insetBy(dx: -toleranceX, dy: -toleranceY).contains(textRect) else {
+                return nil
+            }
+
+            let bubbleArea = area(bubble)
+            let widthExpansion = bubble.width / max(textRect.width, 0.001)
+            let heightExpansion = bubble.height / max(textRect.height, 0.001)
+            let centerDistance = hypot(
+                bubble.midX - textRect.midX,
+                bubble.midY - textRect.midY
+            )
+            let bubbleDiagonal = max(hypot(bubble.width, bubble.height), 0.001)
+            guard bubbleArea <= 0.30,
+                  bubbleArea / textArea <= 120,
+                  max(widthExpansion, heightExpansion) <= 12,
+                  centerDistance / bubbleDiagonal <= 0.48 else {
                 return nil
             }
             return (bubble, candidate.bubblePolygon)

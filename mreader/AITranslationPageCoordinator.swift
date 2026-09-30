@@ -29,7 +29,9 @@ nonisolated struct AITranslationPageRequest: @unchecked Sendable {
     /// v24：翻译缓存持久化 Manga Vision contour / layoutSafeRegion，并让所有 OCR
     /// 翻译入口共享同一准备契约。
     static let translationCacheRevision = "translation-v25-analysis-outcome"
-    static let ocrGeometryRevision = "physical-axis-v14-stable-order-quality"
+    /// v15: rejects panel-sized MangaLayout bubble/text geometry and groups
+    /// no-bubble OCR rows by semantic paragraph for Apple Translation.
+    static let ocrGeometryRevision = "physical-axis-v15-bounded-bubble-paragraph"
 
     let pageURL: URL
     let image: UIImage
