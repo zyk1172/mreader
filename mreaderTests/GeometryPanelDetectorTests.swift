@@ -295,6 +295,37 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
     }
 
+    @Test func learnedWholePageContainerIsSuppressedWhenSpecificFramesExist() {
+        let model = [
+            DetectedPanel(
+                rect: CGRect(x: 0.01, y: 0.01, width: 0.98, height: 0.98),
+                confidence: 0.96,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.08, y: 0.08, width: 0.38, height: 0.30),
+                confidence: 0.84,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.54, y: 0.08, width: 0.38, height: 0.30),
+                confidence: 0.82,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: model,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(!result.usedVirtualFallback)
+        #expect(result.panels.count == 2)
+        #expect(result.panels.allSatisfy { $0.rect.width < 0.50 })
+    }
+
     @Test func uncorroboratedSingleModelFrameUsesVirtualPanels() {
         let learned = DetectedPanel(
             rect: CGRect(x: 0.03, y: 0.03, width: 0.94, height: 0.94),
