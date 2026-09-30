@@ -607,7 +607,7 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             // a strong whitespace separator. They are content, but not panels. Require
             // either visible frame-edge support or enough visual activity to look like
             // actual artwork; sparse borderless cases are left for the model residual.
-            guard edgeSupport >= 0.25 || inkFraction >= 0.055 else {
+            guard edgeSupport >= 0.50 || inkFraction >= 0.055 else {
                 return nil
             }
             return (leaf, rect, edgeSupport, inkFraction)
