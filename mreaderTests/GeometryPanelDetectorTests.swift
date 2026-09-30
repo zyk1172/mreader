@@ -298,17 +298,17 @@ struct GeometryPanelDetectorTests {
     @Test func learnedWholePageContainerIsSuppressedWhenSpecificFramesExist() {
         let model = [
             DetectedPanel(
-                rect: CGRect(x: 0.01, y: 0.01, width: 0.98, height: 0.98),
+                rect: CGRect(x: 0.10, y: 0.10, width: 0.80, height: 0.80),
                 confidence: 0.96,
                 source: .coreML
             ),
             DetectedPanel(
-                rect: CGRect(x: 0.08, y: 0.08, width: 0.38, height: 0.30),
+                rect: CGRect(x: 0.15, y: 0.15, width: 0.30, height: 0.24),
                 confidence: 0.84,
                 source: .coreML
             ),
             DetectedPanel(
-                rect: CGRect(x: 0.54, y: 0.08, width: 0.38, height: 0.30),
+                rect: CGRect(x: 0.55, y: 0.15, width: 0.30, height: 0.24),
                 confidence: 0.82,
                 source: .coreML
             )
@@ -317,7 +317,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: model,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            contentBounds: CGRect(x: 0.10, y: 0.10, width: 0.80, height: 0.80),
             imageAspectRatio: 0.70
         )
 
