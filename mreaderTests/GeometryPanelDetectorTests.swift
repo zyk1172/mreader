@@ -303,12 +303,12 @@ struct GeometryPanelDetectorTests {
                 source: .coreML
             ),
             DetectedPanel(
-                rect: CGRect(x: 0.15, y: 0.15, width: 0.30, height: 0.24),
+                rect: CGRect(x: 0.14, y: 0.15, width: 0.34, height: 0.34),
                 confidence: 0.84,
                 source: .coreML
             ),
             DetectedPanel(
-                rect: CGRect(x: 0.55, y: 0.15, width: 0.30, height: 0.24),
+                rect: CGRect(x: 0.52, y: 0.15, width: 0.34, height: 0.34),
                 confidence: 0.82,
                 source: .coreML
             )
