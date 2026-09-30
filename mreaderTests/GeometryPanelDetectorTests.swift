@@ -156,6 +156,92 @@ struct GeometryPanelDetectorTests {
         #expect(panels.count == 2)
     }
 
+    @Test func moderateResidualCoverageCannotEraseMostOfAGeometryLeaf() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
+                confidence: 0.84,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
+                confidence: 0.84,
+                source: .pageGeometry
+            )
+        ]
+        let partialModel = [
+            DetectedPanel(
+                rect: CGRect(x: 0.08, y: 0.55, width: 0.30, height: 0.22),
+                confidence: 0.92,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.62, y: 0.55, width: 0.30, height: 0.22),
+                confidence: 0.91,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: partialModel,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.count == 2)
+        #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
+    }
+
+    @Test func singleHighConfidenceInsetSurvivesInsideGeometryParent() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.90),
+                confidence: 0.82,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.06, y: 0.06, width: 0.88, height: 0.40),
+                confidence: 0.80,
+                source: .pageGeometry
+            )
+        ]
+        let inset = DetectedPanel(
+            rect: CGRect(x: 0.62, y: 0.56, width: 0.24, height: 0.24),
+            confidence: 0.86,
+            source: .coreML
+        )
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: [inset],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.contains { $0.source == .coreML })
+        #expect(result.panels.contains { $0.rect == inset.rect })
+    }
+
+    @Test func nestedGeometryAndModelBoxesAreNotGenericDuplicatesWhenSizesDiffer() {
+        let parent = DetectedPanel(
+            rect: CGRect(x: 0.05, y: 0.05, width: 0.80, height: 0.80),
+            confidence: 0.80,
+            source: .pageGeometry
+        )
+        let inset = DetectedPanel(
+            rect: CGRect(x: 0.58, y: 0.58, width: 0.18, height: 0.18),
+            confidence: 0.92,
+            source: .coreML
+        )
+
+        let processed = PanelPostProcessor.process([parent, inset])
+
+        #expect(processed.count == 2)
+        #expect(processed.contains { $0.source == .pageGeometry })
+        #expect(processed.contains { $0.source == .coreML })
+    }
+
     @Test func sparseModelCornersCannotSplitACoarseGeometryLeaf() {
         let geometry = [
             DetectedPanel(
