@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v6"
+    static let revision = "geometry-first-fusion-v7"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -105,7 +105,9 @@ nonisolated enum PanelCandidateFusion {
 
         if let corroboratedSingle = corroboratedSinglePanel(
             geometry: geometryPanels,
-            model: modelPanels
+            model: modelPanels,
+            balloonRegions: balloonRegions,
+            textRegions: textRegions
         ) {
             return Resolution(
                 panels: [corroboratedSingle],
@@ -115,7 +117,9 @@ nonisolated enum PanelCandidateFusion {
         }
 
         let combined = PanelPostProcessor.process(geometryPanels + modelPanels)
-        if combined.count >= 2, PanelLayoutQuality.isUsable(combined) {
+        if combined.count >= 2,
+           !hasUnsupportedCrossSourceContainment(combined),
+           PanelLayoutQuality.isUsable(combined) {
             return Resolution(
                 panels: combined,
                 usedVirtualFallback: false,
@@ -154,7 +158,9 @@ nonisolated enum PanelCandidateFusion {
                 return nil
             }
             let retention = area(intersection) / max(area(panel.rect), 0.000_001)
-            guard retention >= 0.72 else { return panel }
+            // Content bounds are a margin hint, not a license to amputate a frame.
+            // Only snap a candidate when clipping removes at most 10% of its area.
+            guard retention >= 0.90 else { return panel }
             return DetectedPanel(
                 rect: intersection,
                 confidence: panel.confidence,
@@ -387,17 +393,66 @@ nonisolated enum PanelCandidateFusion {
 
     private static func corroboratedSinglePanel(
         geometry: [DetectedPanel],
-        model: [DetectedPanel]
+        model: [DetectedPanel],
+        balloonRegions: [CGRect],
+        textRegions: [CGRect]
     ) -> DetectedPanel? {
         guard geometry.count == 1, model.count == 1 else { return nil }
         let geometric = geometry[0]
         let learned = model[0]
-        guard intersectionOverUnion(geometric.rect, learned.rect) >= 0.58,
+        guard geometric.confidence >= 0.40,
+              intersectionOverUnion(geometric.rect, learned.rect) >= 0.70,
               area(geometric.rect) >= 0.30,
-              learned.confidence >= 0.48 else {
+              learned.confidence >= 0.68,
+              singlePanelSemanticsArePlausible(
+                balloons: balloonRegions,
+                texts: textRegions
+              ) else {
             return nil
         }
         return geometric.confidence >= learned.confidence ? geometric : learned
+    }
+
+    /// Dense, widely dispersed dialogue evidence makes a lone whole-page frame suspect.
+    /// This does not synthesize panels; it only prevents two weak "whole page" signals
+    /// from falsely corroborating each other on a multi-panel page.
+    private static func singlePanelSemanticsArePlausible(
+        balloons: [CGRect],
+        texts: [CGRect]
+    ) -> Bool {
+        let evidence = balloons.isEmpty ? texts : balloons
+        guard evidence.count >= 3 else { return true }
+
+        let centers = evidence.map { CGPoint(x: $0.midX, y: $0.midY) }
+        let minX = centers.map(\.x).min() ?? 0
+        let maxX = centers.map(\.x).max() ?? 0
+        let minY = centers.map(\.y).min() ?? 0
+        let maxY = centers.map(\.y).max() ?? 0
+
+        return (maxX - minX) < 0.48 && (maxY - minY) < 0.42
+    }
+
+    private static func hasUnsupportedCrossSourceContainment(
+        _ panels: [DetectedPanel]
+    ) -> Bool {
+        for lhsIndex in panels.indices {
+            for rhsIndex in panels.indices where rhsIndex > lhsIndex {
+                let lhs = panels[lhsIndex]
+                let rhs = panels[rhsIndex]
+                guard lhs.source != rhs.source,
+                      (lhs.source == .pageGeometry || rhs.source == .pageGeometry),
+                      (lhs.source == .coreML || rhs.source == .coreML) else {
+                    continue
+                }
+
+                let lhsInside = containment(of: lhs.rect, in: rhs.rect)
+                let rhsInside = containment(of: rhs.rect, in: lhs.rect)
+                if max(lhsInside, rhsInside) >= 0.82 {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private static func containment(of inner: CGRect, in outer: CGRect) -> CGFloat {
