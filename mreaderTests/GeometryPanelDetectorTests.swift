@@ -189,8 +189,13 @@ struct GeometryPanelDetectorTests {
             imageAspectRatio: 0.70
         )
 
-        #expect(result.panels.count == 2)
-        #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
+        // Failed split coverage must never delete the geometry leaf. The learned
+        // boxes may survive as explicit insets, but both original geometry panels remain.
+        #expect(result.panels.filter { $0.source == .pageGeometry }.count == 2)
+        #expect(result.panels.contains {
+            abs($0.rect.minY - 0.52) < 0.0001
+                && abs($0.rect.width - 0.90) < 0.0001
+        })
     }
 
     @Test func singleHighConfidenceInsetSurvivesInsideGeometryParent() {
