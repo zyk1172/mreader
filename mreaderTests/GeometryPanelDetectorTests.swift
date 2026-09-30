@@ -196,18 +196,18 @@ struct GeometryPanelDetectorTests {
     @Test func singleHighConfidenceInsetSurvivesInsideGeometryParent() {
         let geometry = [
             DetectedPanel(
-                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.90),
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
                 confidence: 0.82,
                 source: .pageGeometry
             ),
             DetectedPanel(
-                rect: CGRect(x: 0.06, y: 0.06, width: 0.88, height: 0.40),
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
                 confidence: 0.80,
                 source: .pageGeometry
             )
         ]
         let inset = DetectedPanel(
-            rect: CGRect(x: 0.62, y: 0.56, width: 0.24, height: 0.24),
+            rect: CGRect(x: 0.62, y: 0.62, width: 0.24, height: 0.20),
             confidence: 0.86,
             source: .coreML
         )
