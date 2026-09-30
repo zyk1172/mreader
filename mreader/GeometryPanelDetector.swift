@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v7"
+    static let revision = "geometry-first-fusion-v8"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -188,7 +188,7 @@ nonisolated enum PanelCandidateFusion {
                 return true
             }
 
-            let containsSpecificFrame = panels.contains { other in
+            let specificChildCount = panels.filter { other in
                 guard other != candidate else { return false }
                 let otherArea = area(other.rect)
                 guard otherArea >= 0.018,
@@ -196,8 +196,12 @@ nonisolated enum PanelCandidateFusion {
                     return false
                 }
                 return containment(of: other.rect, in: candidate.rect) >= 0.88
-            }
-            return !containsSpecificFrame
+            }.count
+
+            // One small child can be a legitimate inset over a full-bleed panel.
+            // Two or more specific children are much stronger evidence that the large
+            // detection is merely a page/container collapse.
+            return specificChildCount < 2
         }
     }
 
