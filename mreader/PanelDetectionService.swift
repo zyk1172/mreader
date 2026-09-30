@@ -214,10 +214,12 @@ nonisolated enum PanelPostProcessor {
         // learned box may corroborate it but must not silently replace its boundaries.
         // This keeps fusion asymmetric even though the generic de-dup pass is sorted by
         // confidence.
-        if candidate.source == .pageGeometry, existing.source == .coreML {
+        if candidate.source == .pageGeometry, existing.source == .coreML,
+           candidate.confidence >= 0.62 {
             return true
         }
-        if candidate.source == .coreML, existing.source == .pageGeometry {
+        if candidate.source == .coreML, existing.source == .pageGeometry,
+           existing.confidence >= 0.62 {
             return false
         }
 
