@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v9"
+    static let revision = "geometry-first-fusion-v10"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -183,8 +183,13 @@ nonisolated enum PanelCandidateFusion {
         let contentArea = max(area(contentBounds.standardized), 0.25)
         return panels.filter { candidate in
             let candidateArea = area(candidate.rect)
+            let coverageOfContent = containment(
+                of: contentBounds.standardized,
+                in: candidate.rect
+            )
             guard candidate.source == .coreML,
-                  candidateArea >= contentArea * 0.78 else {
+                  candidateArea >= contentArea * 0.78,
+                  coverageOfContent >= 0.82 else {
                 return true
             }
 
@@ -251,17 +256,6 @@ nonisolated enum PanelCandidateFusion {
         let average = panels.reduce(Float.zero) { $0 + $1.confidence }
             / Float(max(panels.count, 1))
         return average >= 0.62
-    }
-
-    static func isGeometryAuthoritative(
-        _ panels: [DetectedPanel],
-        contentBounds: CGRect
-    ) -> Bool {
-        isGeometryAuthoritative(
-            PanelPostProcessor.process(
-                clippedToContent(panels, contentBounds: contentBounds)
-            )
-        )
     }
 
     /// A learned detector is allowed to split one coarse geometry leaf only when several
