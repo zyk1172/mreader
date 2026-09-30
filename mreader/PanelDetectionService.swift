@@ -173,8 +173,11 @@ nonisolated enum PanelPostProcessor {
                 return nil
             }
             let area = rect.width * rect.height
+            let maximumArea: CGFloat = (
+                panel.source == .coreML || panel.source == .pageGeometry
+            ) ? 1.0 : 0.94
             guard area >= 0.012,
-                  area <= (panel.source == .coreML ? 1.0 : 0.94),
+                  area <= maximumArea,
                   panel.confidence >= 0.24 else {
                 return nil
             }
