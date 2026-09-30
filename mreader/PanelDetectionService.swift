@@ -261,6 +261,13 @@ nonisolated enum PanelPostProcessor {
             // real inset panels instead of treating containment alone as duplication.
             return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
         }
+        if (lhs.source == .coreML && rhs.source == .pageGeometry)
+            || (lhs.source == .pageGeometry && rhs.source == .coreML) {
+            // A model frame fully inside a larger geometry leaf can be a real inset
+            // panel. Treat cross-source containment as duplication only when the two
+            // boxes are also similar in size.
+            return iou >= 0.62 || (containment >= 0.90 && sizeRatio >= 0.72)
+        }
         return iou >= 0.58 || containment >= 0.82
     }
 
