@@ -753,8 +753,8 @@ actor PanelDetectionService {
             )
         }
 
-        // Virtual panels are deterministic and may be cached once both evidence paths
-        // completed. Only a model failure/unavailability is transient and should retry.
+        // Whole-page fallback is deterministic once both evidence paths completed.
+        // Only a model failure/unavailability is transient and should retry.
         result.isTransient = mangaAnalysis == nil
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
