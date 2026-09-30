@@ -487,6 +487,35 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.contains { $0.rect.width < 0.30 })
     }
 
+    @Test func largeRealPanelThatDoesNotCoverPageContentIsNotSuppressedAsContainer() {
+        let model = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.70, height: 0.80),
+                confidence: 0.93,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.10, y: 0.12, width: 0.20, height: 0.18),
+                confidence: 0.86,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.48, y: 0.56, width: 0.18, height: 0.16),
+                confidence: 0.84,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: model,
+            contentBounds: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.contains { $0.rect.width > 0.65 })
+    }
+
     @Test func learnedWholePageContainerIsSuppressedWhenSpecificFramesExist() {
         let model = [
             DetectedPanel(
