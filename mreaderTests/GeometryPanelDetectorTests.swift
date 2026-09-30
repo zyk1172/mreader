@@ -386,6 +386,33 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
     }
 
+    @Test func fullBleedModelPanelWithOneInsetIsNotMistakenForPageContainer() {
+        let model = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.90),
+                confidence: 0.92,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.64, y: 0.62, width: 0.20, height: 0.18),
+                confidence: 0.88,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: model,
+            contentBounds: CGRect(x: 0.04, y: 0.04, width: 0.92, height: 0.92),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(!result.usedVirtualFallback)
+        #expect(result.panels.count == 2)
+        #expect(result.panels.contains { $0.rect.width > 0.80 })
+        #expect(result.panels.contains { $0.rect.width < 0.30 })
+    }
+
     @Test func learnedWholePageContainerIsSuppressedWhenSpecificFramesExist() {
         let model = [
             DetectedPanel(
