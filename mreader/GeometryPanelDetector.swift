@@ -501,7 +501,7 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             output: &leaves
         )
 
-        let accepted = leaves.compactMap { leaf -> (
+        let rawAccepted = leaves.compactMap { leaf -> (
             leaf: Leaf,
             rect: CGRect,
             edgeSupport: CGFloat,
@@ -540,6 +540,30 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             guard !sparseMarginArtifact else { return nil }
 
             return (leaf, rect, edgeSupport, inkFraction)
+        }
+
+        // Remove a narrow, sparse title/credit strip at the outer vertical page
+        // margin only when several substantial comic regions exist beyond it.
+        // This prevents a chapter heading from becoming a fifth navigation panel
+        // without suppressing an ordinary top panel on sparse/splash pages.
+        let accepted = rawAccepted.filter { candidate in
+            let isTopOrBottomStrip = candidate.rect.minY <= 0.12
+                || candidate.rect.maxY >= 0.88
+            let isNarrowSparseStrip = candidate.rect.height <= 0.105
+                && candidate.inkFraction < 0.085
+            guard isTopOrBottomStrip, isNarrowSparseStrip else { return true }
+
+            let substantialPeers = rawAccepted.filter { other in
+                guard other.leaf.rect.minY != candidate.leaf.rect.minY
+                    || other.leaf.rect.maxY != candidate.leaf.rect.maxY
+                    || other.leaf.rect.minX != candidate.leaf.rect.minX
+                    || other.leaf.rect.maxX != candidate.leaf.rect.maxX else {
+                    return false
+                }
+                return other.rect.width * other.rect.height >= 0.08
+                    && other.rect.height >= 0.18
+            }
+            return substantialPeers.count < 2
         }
 
         // Confidence should describe the usable output, not discarded leaves. A false
