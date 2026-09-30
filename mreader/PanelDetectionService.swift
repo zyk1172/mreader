@@ -348,6 +348,8 @@ nonisolated enum PanelLayoutQuality {
             maximumPanelCount = 18
         } else if panels.allSatisfy({ $0.source == .pageGeometry }) {
             maximumPanelCount = 24
+        } else if panels.allSatisfy({ $0.source == .visionRectangle }) {
+            maximumPanelCount = 12
         } else {
             maximumPanelCount = 18
         }
