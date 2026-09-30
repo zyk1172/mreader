@@ -38,11 +38,10 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v12"
+    static let revision = "geometry-first-fusion-v13"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
-        let usedVirtualFallback: Bool
         let reason: String
     }
 
@@ -50,7 +49,6 @@ nonisolated enum PanelCandidateFusion {
         geometry: [DetectedPanel],
         model: [DetectedPanel],
         contentBounds: CGRect,
-        imageAspectRatio: CGFloat,
         balloonRegions: [CGRect] = [],
         textRegions: [CGRect] = []
     ) -> Resolution {
@@ -81,13 +79,11 @@ nonisolated enum PanelCandidateFusion {
             if PanelLayoutQuality.isUsable(refined) {
                 return Resolution(
                     panels: refined,
-                    usedVirtualFallback: false,
                     reason: "geometry-primary"
                 )
             }
             return Resolution(
                 panels: geometryPanels,
-                usedVirtualFallback: false,
                 reason: "geometry-primary-unrefined"
             )
         }
@@ -98,7 +94,6 @@ nonisolated enum PanelCandidateFusion {
         if modelPanels.count >= 2, modelUsable {
             return Resolution(
                 panels: modelPanels,
-                usedVirtualFallback: false,
                 reason: "model-residual"
             )
         }
@@ -111,7 +106,6 @@ nonisolated enum PanelCandidateFusion {
         ) {
             return Resolution(
                 panels: [corroboratedSingle],
-                usedVirtualFallback: false,
                 reason: "corroborated-single-panel"
             )
         }
@@ -122,19 +116,16 @@ nonisolated enum PanelCandidateFusion {
            PanelLayoutQuality.isUsable(combined) {
             return Resolution(
                 panels: combined,
-                usedVirtualFallback: false,
                 reason: "combined-recovery"
             )
         }
 
-        let virtual = VirtualPanelPlanner.panels(
-            in: contentBounds,
-            imageAspectRatio: imageAspectRatio
-        )
+        // Do not invent quarter-page or strip navigation. If neither independent
+        // detector can produce trustworthy real panels, return no panel candidates.
+        // The caller will keep the page in normal whole-page reading instead.
         return Resolution(
-            panels: virtual,
-            usedVirtualFallback: !virtual.isEmpty,
-            reason: virtual.isEmpty ? "no-layout" : "virtual-panel-fallback"
+            panels: [],
+            reason: "no-reliable-panels"
         )
     }
 
@@ -443,80 +434,6 @@ nonisolated enum PanelCandidateFusion {
 
     private static func area(_ rect: CGRect) -> CGFloat {
         max(rect.width, 0) * max(rect.height, 0)
-    }
-}
-
-/// Conservative fallback similar in spirit to commercial "virtual panel" modes.
-///
-/// A deterministic viewport is preferable to inventing a speech balloon or text box as a
-/// real frame. These regions are explicitly marked as fallback and never masquerade as
-/// detected panel geometry.
-nonisolated enum VirtualPanelPlanner {
-    static func panels(
-        in contentBounds: CGRect,
-        imageAspectRatio: CGFloat
-    ) -> [DetectedPanel] {
-        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let bounds = contentBounds.standardized.intersection(unit)
-        guard !bounds.isNull, bounds.width > 0.12, bounds.height > 0.12 else {
-            return []
-        }
-
-        let sourceRects: [CGRect]
-        if imageAspectRatio > 0, imageAspectRatio <= 0.52 {
-            sourceRects = (0..<3).map { index in
-                CGRect(
-                    x: bounds.minX,
-                    y: bounds.minY + bounds.height * CGFloat(index) / 3,
-                    width: bounds.width,
-                    height: bounds.height / 3
-                )
-            }
-        } else if imageAspectRatio >= 1.65 {
-            sourceRects = (0..<3).map { index in
-                CGRect(
-                    x: bounds.minX + bounds.width * CGFloat(index) / 3,
-                    y: bounds.minY,
-                    width: bounds.width / 3,
-                    height: bounds.height
-                )
-            }
-        } else {
-            sourceRects = [
-                CGRect(
-                    x: bounds.minX,
-                    y: bounds.minY,
-                    width: bounds.width / 2,
-                    height: bounds.height / 2
-                ),
-                CGRect(
-                    x: bounds.midX,
-                    y: bounds.minY,
-                    width: bounds.width / 2,
-                    height: bounds.height / 2
-                ),
-                CGRect(
-                    x: bounds.minX,
-                    y: bounds.midY,
-                    width: bounds.width / 2,
-                    height: bounds.height / 2
-                ),
-                CGRect(
-                    x: bounds.midX,
-                    y: bounds.midY,
-                    width: bounds.width / 2,
-                    height: bounds.height / 2
-                )
-            ]
-        }
-
-        return sourceRects.map {
-            DetectedPanel(
-                rect: $0,
-                confidence: 0.30,
-                source: .virtualPanel
-            )
-        }
     }
 }
 
