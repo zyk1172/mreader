@@ -627,9 +627,12 @@ actor PanelDetectionService {
         // Core ML on a strong geometry page must keep the expected dependency identity,
         // otherwise the stable geometry layout would be stored under an "unavailable"
         // key and miss its own cache on the next read.
-        let actualDependency = mangaAnalysis == nil
-            ? expectedDependency
-            : await visionService.dependencyIdentity(for: mangaAnalysis)
+        let actualDependency: String
+        if mangaAnalysis == nil {
+            actualDependency = expectedDependency
+        } else {
+            actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
+        }
         if actualDependency != expectedDependency {
             primaryIdentifier = Self.hybridDetectorIdentifier(
                 geometryIdentifier: fallbackDetector.identifier,
