@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v11"
+    static let revision = "geometry-first-fusion-v12"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -584,8 +584,12 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             output: &leaves
         )
 
-        let splitLayout = leaves.count >= 2
-        return leaves.compactMap { leaf in
+        let accepted = leaves.compactMap { leaf -> (
+            leaf: Leaf,
+            rect: CGRect,
+            edgeSupport: CGFloat,
+            inkFraction: CGFloat
+        )? in
             let rect = leaf.rect.normalized(
                 width: raster.width,
                 height: raster.height
@@ -597,27 +601,44 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             }
 
             let edgeSupport = boundarySupport(leaf.rect)
-            let activity = min(
-                raster.inkFraction(in: leaf.rect) / 0.20,
-                1
-            )
+            let inkFraction = raster.inkFraction(in: leaf.rect)
+
+            // Chapter headings, credits and isolated text in page margins can sit above
+            // a strong whitespace separator. They are content, but not panels. Require
+            // either visible frame-edge support or enough visual activity to look like
+            // actual artwork; sparse borderless cases are left for the model residual.
+            guard edgeSupport >= 0.25 || inkFraction >= 0.055 else {
+                return nil
+            }
+            return (leaf, rect, edgeSupport, inkFraction)
+        }
+
+        // Confidence should describe the usable output, not discarded leaves. A false
+        // split that leaves only one accepted region must not manufacture a high-confidence
+        // single panel merely because an ignored title/margin leaf existed.
+        let splitLayout = accepted.count >= 2
+        return accepted.map { item in
+            let activity = min(item.inkFraction / 0.20, 1)
             let confidence: Float
             if splitLayout {
                 confidence = Float(min(
                     0.96,
                     0.53
-                        + leaf.pathConfidence * 0.25
-                        + edgeSupport * 0.13
+                        + item.leaf.pathConfidence * 0.25
+                        + item.edgeSupport * 0.13
                         + activity * 0.05
                 ))
             } else {
-                // A page with no detected separator is evidence of "unknown/splash",
-                // not proof that the entire page is one real frame.
-                confidence = Float(min(0.48, 0.28 + edgeSupport * 0.12 + activity * 0.05))
+                // A page with no reliable multi-panel structure is evidence of
+                // "unknown/splash", not proof that the entire page is one real frame.
+                confidence = Float(min(
+                    0.48,
+                    0.28 + item.edgeSupport * 0.12 + activity * 0.05
+                ))
             }
 
             return DetectedPanel(
-                rect: rect,
+                rect: item.rect,
                 confidence: confidence,
                 source: .pageGeometry
             )
