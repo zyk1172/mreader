@@ -207,6 +207,17 @@ nonisolated enum PanelPostProcessor {
     /// confidence than the panel border. Prefer the containing box when the area difference
     /// is large, while preserving confidence-based NMS for genuinely near-identical boxes.
     private static func shouldPrefer(_ candidate: DetectedPanel, over existing: DetectedPanel) -> Bool {
+        // Once page geometry has produced a structural candidate, a near-duplicate
+        // learned box may corroborate it but must not silently replace its boundaries.
+        // This keeps fusion asymmetric even though the generic de-dup pass is sorted by
+        // confidence.
+        if candidate.source == .pageGeometry, existing.source == .coreML {
+            return true
+        }
+        if candidate.source == .coreML, existing.source == .pageGeometry {
+            return false
+        }
+
         let intersection = existing.rect.intersection(candidate.rect)
         if !intersection.isNull {
             let intersectionArea = area(intersection)
