@@ -115,7 +115,7 @@ struct MangaVisionHardCaseFeedbackSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .accessibilityIdentifier("mreader.hardCase.feedback.sheet")
     }
