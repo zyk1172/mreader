@@ -9,7 +9,7 @@ import Foundation
 /// learned Manga Vision frame detector remains useful later as a residual detector for
 /// borderless/inset/irregular cases, but it is no longer the sole authority for navigation.
 nonisolated struct GeometryPanelDetector: PanelDetecting {
-    let identifier = "page-geometry-xycut-v1"
+    let identifier = "page-geometry-xycut-v2"
 
     private let maximumDimension: Int
 
@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v1"
+    static let revision = "geometry-first-fusion-v2"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
