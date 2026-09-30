@@ -247,6 +247,80 @@ struct GeometryPanelDetectorTests {
         #expect(processed.contains { $0.source == .coreML })
     }
 
+    @Test func multipleCredibleInsetsCanCoexistInsideOneGeometryPanel() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
+                confidence: 0.84,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
+                confidence: 0.84,
+                source: .pageGeometry
+            )
+        ]
+        let insets = [
+            DetectedPanel(
+                rect: CGRect(x: 0.10, y: 0.58, width: 0.24, height: 0.18),
+                confidence: 0.88,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.66, y: 0.70, width: 0.24, height: 0.18),
+                confidence: 0.87,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: insets,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.filter { $0.source == .pageGeometry }.count == 2)
+        #expect(result.panels.filter { $0.source == .coreML }.count == 2)
+    }
+
+    @Test func tinyNestedModelBoxesAreNotPromotedToInsets() {
+        let geometry = [
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.40),
+                confidence: 0.84,
+                source: .pageGeometry
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.05, y: 0.52, width: 0.90, height: 0.42),
+                confidence: 0.84,
+                source: .pageGeometry
+            )
+        ]
+        let tiny = [
+            DetectedPanel(
+                rect: CGRect(x: 0.10, y: 0.58, width: 0.10, height: 0.10),
+                confidence: 0.95,
+                source: .coreML
+            ),
+            DetectedPanel(
+                rect: CGRect(x: 0.78, y: 0.80, width: 0.10, height: 0.10),
+                confidence: 0.95,
+                source: .coreML
+            )
+        ]
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: geometry,
+            model: tiny,
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.panels.count == 2)
+        #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
+    }
+
     @Test func sparseModelCornersCannotSplitACoarseGeometryLeaf() {
         let geometry = [
             DetectedPanel(
