@@ -295,6 +295,50 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
     }
 
+    @Test func uncorroboratedSingleModelFrameUsesVirtualPanels() {
+        let learned = DetectedPanel(
+            rect: CGRect(x: 0.03, y: 0.03, width: 0.94, height: 0.94),
+            confidence: 0.97,
+            source: .coreML
+        )
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [],
+            model: [learned],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(result.usedVirtualFallback)
+        #expect(result.reason == "virtual-panel-fallback")
+        #expect(result.panels.count == 4)
+        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+    }
+
+    @Test func independentlyCorroboratedSinglePanelIsAccepted() {
+        let geometric = DetectedPanel(
+            rect: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
+            confidence: 0.46,
+            source: .pageGeometry
+        )
+        let learned = DetectedPanel(
+            rect: CGRect(x: 0.04, y: 0.04, width: 0.92, height: 0.92),
+            confidence: 0.91,
+            source: .coreML
+        )
+
+        let result = PanelCandidateFusion.resolve(
+            geometry: [geometric],
+            model: [learned],
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            imageAspectRatio: 0.70
+        )
+
+        #expect(!result.usedVirtualFallback)
+        #expect(result.reason == "corroborated-single-panel")
+        #expect(result.panels.count == 1)
+    }
+
     @Test func uncertainPageUsesExplicitVirtualPanelsInsteadOfInventedFrames() {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
