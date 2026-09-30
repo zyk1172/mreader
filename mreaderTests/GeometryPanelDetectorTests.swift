@@ -61,6 +61,56 @@ struct GeometryPanelDetectorTests {
         #expect(panels[0].confidence < 0.50)
     }
 
+    @Test func sparseChapterHeadingAboveComicBodyIsNotANavigationPanel() throws {
+        let size = CGSize(width: 700, height: 1_000)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Sparse title/credit marks in the page margin.
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 260, y: 35, width: 180, height: 8))
+            context.fill(CGRect(x: 300, y: 58, width: 100, height: 6))
+
+            UIColor(white: 0.40, alpha: 1).setFill()
+            let gutterX: CGFloat = 26
+            let gutterY: CGFloat = 30
+            let bodyTop: CGFloat = 170
+            let marginX: CGFloat = 30
+            let panelWidth = (size.width - marginX * 2 - gutterX) / 2
+            let panelHeight = (size.height - bodyTop - 35 - gutterY) / 2
+            let rects = [
+                CGRect(x: marginX, y: bodyTop, width: panelWidth, height: panelHeight),
+                CGRect(x: marginX + panelWidth + gutterX, y: bodyTop,
+                       width: panelWidth, height: panelHeight),
+                CGRect(x: marginX, y: bodyTop + panelHeight + gutterY,
+                       width: panelWidth, height: panelHeight),
+                CGRect(x: marginX + panelWidth + gutterX,
+                       y: bodyTop + panelHeight + gutterY,
+                       width: panelWidth, height: panelHeight)
+            ]
+            for rect in rects {
+                context.fill(rect)
+                UIColor.black.setStroke()
+                let outline = UIBezierPath(rect: rect)
+                outline.lineWidth = 4
+                outline.stroke()
+                UIColor(white: 0.40, alpha: 1).setFill()
+            }
+        }
+
+        let cgImage = try #require(image.cgImage)
+        let panels = try GeometryPanelDetector(maximumDimension: 1_000)
+            .detectPanels(in: cgImage)
+        let processed = PanelPostProcessor.process(panels)
+
+        #expect(processed.count == 4)
+        #expect(processed.allSatisfy { $0.rect.minY > 0.12 })
+    }
+
     @Test func invalidOuterMarginSeparatorDoesNotHideRealInnerGutter() throws {
         let size = CGSize(width: 700, height: 1_000)
         let format = UIGraphicsImageRendererFormat()
