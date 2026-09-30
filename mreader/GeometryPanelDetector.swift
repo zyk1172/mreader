@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v10"
+    static let revision = "geometry-first-fusion-v11"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -54,19 +54,19 @@ nonisolated enum PanelCandidateFusion {
         balloonRegions: [CGRect] = [],
         textRegions: [CGRect] = []
     ) -> Resolution {
-        let geometryPanels = PanelPostProcessor.process(
-            clippedToContent(geometry, contentBounds: contentBounds)
-        )
+        // Content bounds are useful for fallback viewport planning and for deciding
+        // whether a learned box looks like a page container. They are not precise enough
+        // to rewrite real detector geometry. Preserve frame boundaries exactly here.
+        let geometryPanels = PanelPostProcessor.process(geometry)
         let modelPanels = suppressLikelyPageContainers(
             PanelPostProcessor.process(
-                clippedToContent(model, contentBounds: contentBounds)
-                    .filter {
-                        !isSemanticAlias(
-                            $0,
-                            balloons: balloonRegions,
-                            texts: textRegions
-                        )
-                    }
+                model.filter {
+                    !isSemanticAlias(
+                        $0,
+                        balloons: balloonRegions,
+                        texts: textRegions
+                    )
+                }
             ),
             contentBounds: contentBounds
         )
@@ -136,38 +136,6 @@ nonisolated enum PanelCandidateFusion {
             usedVirtualFallback: !virtual.isEmpty,
             reason: virtual.isEmpty ? "no-layout" : "virtual-panel-fallback"
         )
-    }
-
-    /// Clip only when the detected content bounds actually remove page margin.
-    /// A candidate that would lose too much area is kept unchanged so a slightly noisy
-    /// content-bound estimate cannot amputate a legitimate full-bleed panel.
-    private static func clippedToContent(
-        _ panels: [DetectedPanel],
-        contentBounds: CGRect
-    ) -> [DetectedPanel] {
-        let bounds = contentBounds.standardized
-        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
-            return panels
-        }
-
-        return panels.compactMap { panel in
-            let intersection = panel.rect.standardized.intersection(bounds)
-            guard !intersection.isNull,
-                  intersection.width > 0,
-                  intersection.height > 0 else {
-                return nil
-            }
-            let retention = area(intersection) / max(area(panel.rect), 0.000_001)
-            // Content bounds are a margin hint, not a license to amputate a frame.
-            // Only snap a candidate when clipping removes at most 10% of its area.
-            guard retention >= 0.90 else { return panel }
-            return DetectedPanel(
-                rect: intersection,
-                confidence: panel.confidence,
-                source: panel.source,
-                contour: panel.contour
-            )
-        }
     }
 
     /// A near-page-sized learned frame that merely contains more specific frame
