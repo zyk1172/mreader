@@ -13,8 +13,8 @@ nonisolated enum MangaVisionOCRGeometry {
     // MangaLayout4 geometry is useful only as local evidence. A frame-sized
     // false positive must never become a translation bubble and absorb several
     // independent speech balloons into one request/surface.
-    private static let minimumBalloonConfidence = 0.30
-    private static let minimumTextConfidence = 0.35
+    private static let minimumBalloonConfidence: Float = 0.30
+    private static let minimumTextConfidence: Float = 0.35
     private static let maximumBalloonPageArea: CGFloat = 0.20
     private static let maximumTextSafeRegionPageArea: CGFloat = 0.16
     private static let maximumBalloonToTextAreaRatio: CGFloat = 96
