@@ -649,7 +649,7 @@ struct GeometryPanelDetectorTests {
         #expect(result.reason == "no-reliable-panels")
     }
 
-    @Test func contentBoundsHintCannotTrimMoreThanTenPercentOfARealFrame() {
+    @Test func contentBoundsHintNeverRewritesRealFrameGeometry() {
         let geometry = [
             DetectedPanel(
                 rect: CGRect(x: 0.02, y: 0.08, width: 0.46, height: 0.38),
