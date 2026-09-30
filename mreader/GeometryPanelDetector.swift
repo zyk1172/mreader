@@ -196,14 +196,25 @@ nonisolated enum PanelCandidateFusion {
         return tightlyMatchingText
     }
 
-    private static func isGeometryAuthoritative(_ panels: [DetectedPanel]) -> Bool {
+    static func isGeometryAuthoritative(_ panels: [DetectedPanel]) -> Bool {
         guard panels.count >= 2,
               PanelLayoutQuality.isUsable(panels) else {
             return false
         }
         let average = panels.reduce(Float.zero) { $0 + $1.confidence }
             / Float(max(panels.count, 1))
-        return average >= 0.50
+        return average >= 0.62
+    }
+
+    static func isGeometryAuthoritative(
+        _ panels: [DetectedPanel],
+        contentBounds: CGRect
+    ) -> Bool {
+        isGeometryAuthoritative(
+            PanelPostProcessor.process(
+                clippedToContent(panels, contentBounds: contentBounds)
+            )
+        )
     }
 
     /// A learned detector is allowed to split one coarse geometry leaf only when several
@@ -249,11 +260,12 @@ nonisolated enum PanelCandidateFusion {
                   area(candidate.rect) >= 0.018 else {
                 continue
             }
-            let covered = result.contains {
+            let conflictsWithExistingStructure = result.contains {
                 containment(of: candidate.rect, in: $0.rect) >= 0.70
+                    || containment(of: $0.rect, in: candidate.rect) >= 0.70
                     || intersectionOverUnion(candidate.rect, $0.rect) >= 0.45
             }
-            if !covered {
+            if !conflictsWithExistingStructure {
                 result.append(candidate)
             }
         }
@@ -266,11 +278,14 @@ nonisolated enum PanelCandidateFusion {
         into candidates: [DetectedPanel]
     ) -> Bool {
         let geometricArea = max(area(geometric.rect), 0.000_001)
-        let union = candidates.dropFirst().reduce(candidates[0].rect) {
-            $0.union($1.rect)
-        }
-        let unionCoverage = area(union.intersection(geometric.rect)) / geometricArea
-        guard unionCoverage >= 0.34 else { return false }
+        let actualCoverage = min(
+            1,
+            candidates.reduce(CGFloat.zero) { partial, candidate in
+                let intersection = candidate.rect.intersection(geometric.rect)
+                return partial + (intersection.isNull ? 0 : area(intersection))
+            } / geometricArea
+        )
+        guard actualCoverage >= 0.28 else { return false }
 
         let centersX = candidates.map { $0.rect.midX }
         let centersY = candidates.map { $0.rect.midY }
@@ -517,9 +532,7 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
         pathConfidence: CGFloat,
         output: inout [Leaf]
     ) {
-        guard depth < 7,
-              rect.width >= minimumChildWidth * 2,
-              rect.height >= minimumChildHeight * 2 else {
+        guard depth < 7 else {
             output.append(Leaf(rect: rect, pathConfidence: pathConfidence, depth: depth))
             return
         }
@@ -531,14 +544,14 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
 
         guard let separator = separators.max(by: { $0.score < $1.score }),
               separator.score >= 0.46,
-              let children = children(of: rect, splitBy: separator),
-              raster.inkFraction(in: children.0) >= 0.007,
-              raster.inkFraction(in: children.1) >= 0.007 else {
+              let children = children(of: rect, splitBy: separator) else {
             output.append(Leaf(rect: rect, pathConfidence: pathConfidence, depth: depth))
             return
         }
 
-        let nextConfidence = max(pathConfidence, separator.score)
+        let nextConfidence = depth == 0
+            ? separator.score
+            : min(pathConfidence, separator.score)
         split(
             children.0,
             depth: depth + 1,
@@ -615,9 +628,11 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
         switch axis {
         case .horizontal:
             minimumChild = minimumChildHeight
+            guard rect.height >= minimumChild * 2 else { return nil }
             range = (rect.minY + minimumChild)..<(rect.maxY - minimumChild)
         case .vertical:
             minimumChild = minimumChildWidth
+            guard rect.width >= minimumChild * 2 else { return nil }
             range = (rect.minX + minimumChild)..<(rect.maxX - minimumChild)
         }
         guard !range.isEmpty else { return nil }
@@ -769,12 +784,18 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
                 + min(shoulderDark / 0.10, 1) * 0.16
                 + transitionContrast * 0.10
 
-            return Separator(
+            let candidate = Separator(
                 axis: axis,
                 start: band.start,
                 end: band.end,
                 score: score
             )
+            guard let candidateChildren = children(of: rect, splitBy: candidate),
+                  raster.inkFraction(in: candidateChildren.0) >= 0.007,
+                  raster.inkFraction(in: candidateChildren.1) >= 0.007 else {
+                return nil
+            }
+            return candidate
         }.max(by: { $0.score < $1.score })
     }
 
@@ -801,9 +822,9 @@ fileprivate nonisolated struct PanelGeometryAnalyzer {
             )
         }
 
-        return raster.inkFraction(in: strip) <= 0.026
-            && raster.darkFraction(in: strip) <= 0.006
-            && raster.averageLuma(in: strip) >= 238
+        return raster.inkFraction(in: strip) <= 0.075
+            && raster.darkFraction(in: strip) <= 0.018
+            && raster.averageLuma(in: strip) >= 230
     }
 
     private func boundarySupport(_ rect: PixelRect) -> CGFloat {
