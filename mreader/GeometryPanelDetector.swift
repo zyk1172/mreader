@@ -36,7 +36,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 1. page geometry owns conventional gutter-separated layouts;
 /// 2. model frames may split an under-segmented geometric leaf or fill a real hole;
 /// 3. the model owns the page only when geometry has no credible structure;
-/// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
+/// 4. if neither source is credible, Guided Panel yields no synthetic sub-panels and the caller keeps whole-page reading.
 nonisolated enum PanelCandidateFusion {
     static let revision = "geometry-first-fusion-v13"
 
