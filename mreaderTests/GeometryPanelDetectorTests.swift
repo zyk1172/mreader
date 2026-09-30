@@ -235,8 +235,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: partialModel,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         // Failed split coverage must never delete the geometry leaf. The learned
@@ -270,8 +269,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: [inset],
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.panels.contains { $0.source == .coreML })
@@ -326,8 +324,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: insets,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.panels.filter { $0.source == .pageGeometry }.count == 2)
@@ -363,8 +360,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: tiny,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.panels.count == 2)
@@ -400,8 +396,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: sparseModel,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.panels.count == 2)
@@ -421,13 +416,11 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: model,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.reason.hasPrefix("geometry-primary"))
         #expect(result.panels.count == 4)
-        #expect(!result.usedVirtualFallback)
         #expect(result.panels.allSatisfy { $0.source == .pageGeometry })
     }
 
@@ -497,8 +490,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: model,
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
         #expect(result.reason == "geometry-primary")
@@ -519,13 +511,12 @@ struct GeometryPanelDetectorTests {
             geometry: [],
             model: [fakeFrame],
             contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70,
             balloonRegions: [balloon],
             textRegions: []
         )
 
-        #expect(result.usedVirtualFallback)
-        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+        #expect(result.panels.isEmpty)
+        #expect(result.reason == "no-reliable-panels")
     }
 
     @Test func fullBleedModelPanelWithOneInsetIsNotMistakenForPageContainer() {
@@ -545,11 +536,8 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: model,
-            contentBounds: CGRect(x: 0.04, y: 0.04, width: 0.92, height: 0.92),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0.04, y: 0.04, width: 0.92, height: 0.92)
         )
-
-        #expect(!result.usedVirtualFallback)
         #expect(result.panels.count == 2)
         #expect(result.panels.contains { $0.rect.width > 0.80 })
         #expect(result.panels.contains { $0.rect.width < 0.30 })
@@ -577,8 +565,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: model,
-            contentBounds: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0.02, y: 0.02, width: 0.96, height: 0.96)
         )
 
         #expect(result.panels.contains { $0.rect.width > 0.65 })
@@ -606,11 +593,8 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: model,
-            contentBounds: CGRect(x: 0.10, y: 0.10, width: 0.80, height: 0.80),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0.10, y: 0.10, width: 0.80, height: 0.80)
         )
-
-        #expect(!result.usedVirtualFallback)
         #expect(result.panels.count == 2)
         #expect(result.panels.allSatisfy { $0.rect.width < 0.50 })
     }
@@ -630,12 +614,11 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [weakGeometry],
             model: [learnedChild],
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
-        #expect(result.usedVirtualFallback)
-        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+        #expect(result.panels.isEmpty)
+        #expect(result.reason == "no-reliable-panels")
     }
 
     @Test func widelyDispersedDialogueRejectsWholePageSingleFrameCorroboration() {
@@ -659,12 +642,11 @@ struct GeometryPanelDetectorTests {
             geometry: [geometric],
             model: [learned],
             contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70,
             balloonRegions: balloons
         )
 
-        #expect(result.usedVirtualFallback)
-        #expect(result.reason == "virtual-panel-fallback")
+        #expect(result.panels.isEmpty)
+        #expect(result.reason == "no-reliable-panels")
     }
 
     @Test func contentBoundsHintCannotTrimMoreThanTenPercentOfARealFrame() {
@@ -684,8 +666,7 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: geometry,
             model: [],
-            contentBounds: CGRect(x: 0.10, y: 0.05, width: 0.80, height: 0.90),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0.10, y: 0.05, width: 0.80, height: 0.90)
         )
 
         #expect(result.panels.count == 2)
@@ -693,7 +674,7 @@ struct GeometryPanelDetectorTests {
         #expect(result.panels.contains { abs($0.rect.maxX - 0.98) < 0.0001 })
     }
 
-    @Test func uncorroboratedSingleModelFrameUsesVirtualPanels() {
+    @Test func uncorroboratedSingleModelFrameProducesNoGuidedPanels() {
         let learned = DetectedPanel(
             rect: CGRect(x: 0.03, y: 0.03, width: 0.94, height: 0.94),
             confidence: 0.97,
@@ -703,14 +684,11 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: [learned],
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
 
-        #expect(result.usedVirtualFallback)
-        #expect(result.reason == "virtual-panel-fallback")
-        #expect(result.panels.count == 4)
-        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
+        #expect(result.panels.isEmpty)
+        #expect(result.reason == "no-reliable-panels")
     }
 
     @Test func independentlyCorroboratedSinglePanelIsAccepted() {
@@ -728,40 +706,21 @@ struct GeometryPanelDetectorTests {
         let result = PanelCandidateFusion.resolve(
             geometry: [geometric],
             model: [learned],
-            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
         )
-
-        #expect(!result.usedVirtualFallback)
         #expect(result.reason == "corroborated-single-panel")
         #expect(result.panels.count == 1)
     }
 
-    @Test func uncertainPageUsesExplicitVirtualPanelsInsteadOfInventedFrames() {
+    @Test func uncertainPageProducesNoSyntheticGuidedPanels() {
         let result = PanelCandidateFusion.resolve(
             geometry: [],
             model: [],
-            contentBounds: CGRect(x: 0.04, y: 0.03, width: 0.92, height: 0.94),
-            imageAspectRatio: 0.70
+            contentBounds: CGRect(x: 0.04, y: 0.03, width: 0.92, height: 0.94)
         )
 
-        #expect(result.usedVirtualFallback)
-        #expect(result.reason == "virtual-panel-fallback")
-        #expect(result.panels.count == 4)
-        #expect(result.panels.allSatisfy { $0.source == .virtualPanel })
-        #expect(PanelLayoutQuality.isUsable(result.panels))
-    }
-
-    @Test func veryTallPageFallsBackToVerticalReadingStrips() {
-        let panels = VirtualPanelPlanner.panels(
-            in: CGRect(x: 0, y: 0, width: 1, height: 1),
-            imageAspectRatio: 0.40
-        )
-
-        #expect(panels.count == 3)
-        #expect(panels.allSatisfy { abs($0.rect.width - 1) < 0.0001 })
-        #expect(panels[0].rect.midY < panels[1].rect.midY)
-        #expect(panels[1].rect.midY < panels[2].rect.midY)
+        #expect(result.panels.isEmpty)
+        #expect(result.reason == "no-reliable-panels")
     }
 
     private func fourGeometryPanels() -> [DetectedPanel] {
