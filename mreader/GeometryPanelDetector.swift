@@ -38,7 +38,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, deterministic virtual panels replace speculative boxes.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v8"
+    static let revision = "geometry-first-fusion-v9"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -327,7 +327,7 @@ nonisolated enum PanelCandidateFusion {
 
                 if candidateInsideExisting >= 0.90 {
                     let credibleInset = candidate.confidence >= 0.74
-                        && sizeRatio >= 0.035
+                        && sizeRatio >= 0.06
                         && sizeRatio <= 0.45
                     if credibleInset {
                         continue
