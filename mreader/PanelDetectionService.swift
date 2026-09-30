@@ -165,7 +165,10 @@ nonisolated enum PanelPostProcessor {
     static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let filtered = candidates.compactMap { panel -> DetectedPanel? in
-            let rect = panel.rect.standardized.intersection(unit)
+            let standardized = panel.rect.standardized
+            let rect = unit.contains(standardized)
+                ? standardized
+                : standardized.intersection(unit)
             guard !rect.isNull,
                   rect.width >= 0.055,
                   rect.height >= 0.045 else {
