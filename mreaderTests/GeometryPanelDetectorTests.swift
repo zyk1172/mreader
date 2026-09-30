@@ -93,6 +93,39 @@ struct GeometryPanelDetectorTests {
             || panels[1].rect.maxY < panels[0].rect.minY)
     }
 
+    @Test func rasterCoordinatesRemainTopLeftOrigin() throws {
+        let size = CGSize(width: 500, height: 800)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            UIColor(white: 0.32, alpha: 1).setFill()
+            let shortTop = CGRect(x: 25, y: 30, width: 450, height: 180)
+            let tallBottom = CGRect(x: 25, y: 255, width: 450, height: 510)
+            context.fill(shortTop)
+            context.fill(tallBottom)
+
+            UIColor.black.setStroke()
+            for rect in [shortTop, tallBottom] {
+                let outline = UIBezierPath(rect: rect)
+                outline.lineWidth = 4
+                outline.stroke()
+            }
+        }
+
+        let cgImage = try #require(image.cgImage)
+        let panels = try GeometryPanelDetector(maximumDimension: 800)
+            .detectPanels(in: cgImage)
+        #expect(panels.count == 2)
+
+        let shortPanel = try #require(panels.min(by: { $0.rect.height < $1.rect.height }))
+        let tallPanel = try #require(panels.max(by: { $0.rect.height < $1.rect.height }))
+        #expect(shortPanel.rect.midY < tallPanel.rect.midY)
+    }
+
     @Test func narrowPageCanStillSplitAlongItsLongAxis() throws {
         let size = CGSize(width: 60, height: 400)
         let format = UIGraphicsImageRendererFormat()
