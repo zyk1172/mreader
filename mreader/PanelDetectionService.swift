@@ -569,10 +569,19 @@ actor PanelDetectionService {
             return temporary
         }
 
-        // Reuse analysis already warmed for the same demand before starting
-        // new Core ML work. Interactive navigation may also consume a completed
-        // prefetch analysis: Guided Panel needs stable panel geometry immediately,
-        // and a later interactive analysis can still refresh richer semantic caches.
+        let contentBounds = Self.detectedContentBounds(analysisImage)
+
+        // Run page geometry first. A strong gutter/XY-cut layout is already sufficient
+        // for navigation and must not pay the Core ML inference cost merely to confirm it.
+        // If Manga Vision has already been warmed by OCR/translation/prefetch we still use
+        // that cached result as residual evidence, but a fresh model pass is requested only
+        // when geometry is structurally uncertain.
+        let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
+        let geometryAuthoritative = PanelCandidateFusion.isGeometryAuthoritative(
+            geometryCandidates,
+            contentBounds: contentBounds
+        )
+
         var mangaAnalysis = await visionService.cachedAnalysis(
             comicID: comicID,
             pageIndex: pageIndex,
@@ -589,7 +598,11 @@ actor PanelDetectionService {
                 requestClass: .prefetch
             )
         }
-        if mangaAnalysis == nil {
+
+        let modelInferenceRequired = !geometryAuthoritative
+        var modelInferenceAttempted = false
+        if mangaAnalysis == nil, modelInferenceRequired {
+            modelInferenceAttempted = true
             mangaAnalysis = try? await visionService.analysis(
                 comicID: comicID,
                 pageIndex: pageIndex,
@@ -598,9 +611,10 @@ actor PanelDetectionService {
                 requestClass: requestClass
             )
         }
+
         guard epoch == generation, !Task.isCancelled else {
             var temporary = Self.fullPageLayout(
-                bounds: Self.detectedContentBounds(analysisImage),
+                bounds: contentBounds,
                 direction: direction,
                 sourceFingerprint: sourceFingerprint,
                 detectorIdentifier: primaryIdentifier
@@ -609,10 +623,13 @@ actor PanelDetectionService {
             return temporary
         }
 
-        // Resource state may have changed after the model-free lookup. If the
-        // actual analysis used a different demand, switch identities and honor
-        // a layout cached under that exact dependency before recomputing it.
-        let actualDependency = await visionService.dependencyIdentity(for: mangaAnalysis)
+        // Only a real analysis can change the demand identity. Intentionally skipping
+        // Core ML on a strong geometry page must keep the expected dependency identity,
+        // otherwise the stable geometry layout would be stored under an "unavailable"
+        // key and miss its own cache on the next read.
+        let actualDependency = mangaAnalysis == nil
+            ? expectedDependency
+            : await visionService.dependencyIdentity(for: mangaAnalysis)
         if actualDependency != expectedDependency {
             primaryIdentifier = Self.hybridDetectorIdentifier(
                 geometryIdentifier: fallbackDetector.identifier,
@@ -635,13 +652,6 @@ actor PanelDetectionService {
             }
         }
 
-        let contentBounds = Self.detectedContentBounds(analysisImage)
-
-        // Geometry is the primary structural evidence. The learned frame detector is kept
-        // independent and is fused only after both sources have produced candidates.
-        // This prevents one bad model prediction from collapsing an otherwise obvious
-        // gutter-separated manga page into a single navigation stop.
-        let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
         let modelCandidates = (mangaAnalysis?.panels ?? []).map {
             DetectedPanel(
                 rect: $0.normalizedRect,
@@ -709,7 +719,12 @@ actor PanelDetectionService {
             )
         }
 
-        result.isTransient = mangaAnalysis == nil || result.usedFallback
+        // A deterministic geometry or virtual-panel result is cacheable. Only a page
+        // that actually needed fresh model evidence and failed to obtain it is transient;
+        // that page should retry later instead of freezing a degraded answer on disk.
+        result.isTransient = modelInferenceRequired
+            && modelInferenceAttempted
+            && mangaAnalysis == nil
         if !result.isTransient, !Task.isCancelled, generation == epoch {
             store(result, memoryKey: memoryKey, diskURL: diskURL)
         }
