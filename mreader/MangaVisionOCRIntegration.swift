@@ -10,6 +10,16 @@ nonisolated enum MangaVisionOCRGeometry {
         let polygon: [CGPoint]
     }
 
+    // MangaLayout4 geometry is useful only as local evidence. A frame-sized
+    // false positive must never become a translation bubble and absorb several
+    // independent speech balloons into one request/surface.
+    private static let minimumBalloonConfidence = 0.30
+    private static let minimumTextConfidence = 0.35
+    private static let maximumBalloonPageArea: CGFloat = 0.20
+    private static let maximumTextSafeRegionPageArea: CGFloat = 0.16
+    private static let maximumBalloonToTextAreaRatio: CGFloat = 96
+    private static let maximumBalloonAxisExpansion: CGFloat = 8
+
     /// Enrich local OCR with two different kinds of model geometry:
     /// - a physical `balloon` may become `bubbleBox` and therefore a canonical
     ///   translation-unit boundary;
@@ -145,13 +155,22 @@ nonisolated enum MangaVisionOCRGeometry {
             // validatedBubbleGeometry contract can safely require containment.
             let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect.union(textRect))
             let fittedArea = MangaPageCoordinateSpace.area(fitted)
+            let widthExpansion = fitted.width / max(textRect.width, 0.001)
+            let heightExpansion = fitted.height / max(textRect.height, 0.001)
             guard fittedArea > 0,
-                  fittedArea <= 0.55,
-                  fittedArea / textArea <= 600 else { return nil }
+                  fittedArea <= maximumBalloonPageArea,
+                  fittedArea / textArea <= maximumBalloonToTextAreaRatio,
+                  max(widthExpansion, heightExpansion) <= maximumBalloonAxisExpansion else {
+                return nil
+            }
 
             let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
             let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
             let normalizedDistance = distance / diagonal
+            // Real dialogue is normally local to the balloon centre. A large
+            // panel/frame false positive can contain a line geometrically, but
+            // its centre is far away; reject it before it becomes grouping evidence.
+            guard normalizedDistance <= 0.42 else { return nil }
             // Prefer the bubble that contains most of the OCR text, then the
             // smaller/closer region. Confidence is deliberately a weak tie-breaker.
             let score = containment * 4.0
@@ -220,7 +239,7 @@ nonisolated enum MangaVisionOCRGeometry {
             let padded = MangaPageCoordinateSpace.paddedNormalizedRect(rect, fraction: 0.28)
             let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(padded.union(textRect))
             let area = MangaPageCoordinateSpace.area(fitted)
-            guard area > 0, area <= 0.30 else { return nil }
+            guard area > 0, area <= maximumTextSafeRegionPageArea else { return nil }
             let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
             let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
             let score = containment * 3.0
@@ -233,23 +252,23 @@ nonisolated enum MangaVisionOCRGeometry {
     }
 
     private static func isUsableBalloon(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .balloon, region.confidence >= 0.20 else { return false }
+        guard region.type == .balloon, region.confidence >= minimumBalloonConfidence else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.004
             && rect.height >= 0.004
             && area >= 0.000_04
-            && area <= 0.55
+            && area <= maximumBalloonPageArea
     }
 
     private static func isUsableTextRegion(_ region: MangaVisionRegion) -> Bool {
-        guard region.type == .text, region.confidence >= 0.18 else { return false }
+        guard region.type == .text, region.confidence >= minimumTextConfidence else { return false }
         let rect = region.normalizedRect
         let area = MangaPageCoordinateSpace.area(rect)
         return rect.width >= 0.002
             && rect.height >= 0.002
             && area >= 0.000_02
-            && area <= 0.30
+            && area <= maximumTextSafeRegionPageArea
     }
 }
 
