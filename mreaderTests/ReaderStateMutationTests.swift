@@ -119,6 +119,63 @@ final class ReaderStateMutationTests: XCTestCase {
         )
     }
 
+    func testFitWidthPreloadUsesNeighbourGeometryBeforeMaximumUnknownFallback() {
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.preloadMaxPixelSize(
+                sourceSize: nil,
+                inferredAspectRatio: 4,
+                viewportWidthPoints: 390,
+                displayScale: 3,
+                unknownPixelSize: ReaderFitWidthDecodePolicy.maximumPixelSize
+            ),
+            6_144
+        )
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.preloadMaxPixelSize(
+                sourceSize: nil,
+                inferredAspectRatio: 10,
+                viewportWidthPoints: 390,
+                displayScale: 3,
+                unknownPixelSize: ReaderFitWidthDecodePolicy.maximumPixelSize
+            ),
+            8_192
+        )
+        XCTAssertEqual(
+            ReaderFitWidthDecodePolicy.preloadMaxPixelSize(
+                sourceSize: nil,
+                inferredAspectRatio: nil,
+                viewportWidthPoints: 390,
+                displayScale: 3,
+                unknownPixelSize: ReaderFitWidthDecodePolicy.maximumPixelSize
+            ),
+            8_192
+        )
+    }
+
+    func testContinuousDecodedImagePreloadStartsBeforeOldSixTenthsDelay() {
+        XCTAssertLessThanOrEqual(ReaderPrefetchPolicy.continuousDecodedImagePreloadDelay, 0.25)
+        XCTAssertLessThan(
+            ReaderPrefetchPolicy.continuousDecodedImagePreloadDelay,
+            0.60
+        )
+    }
+
+    func testReaderPermitPoolCancellationDoesNotConsumeCapacity() async {
+        let pool = ReaderAsyncPermitPool(maximumConcurrentPermits: 1)
+        XCTAssertTrue(await pool.acquire())
+
+        let cancelledWaiter = Task {
+            await pool.acquire()
+        }
+        await Task.yield()
+        cancelledWaiter.cancel()
+        XCTAssertFalse(await cancelledWaiter.value)
+
+        await pool.release()
+        XCTAssertTrue(await pool.acquire())
+        await pool.release()
+    }
+
     func testRemotePageGeometryReadsPixelSizeWithoutFullDecode() throws {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
