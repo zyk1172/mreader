@@ -573,6 +573,25 @@ struct mreaderTests {
         )
         #expect(finalBody["response_format"] == nil)
 
+        // The prompt-only capability must be cached for this provider/model so
+        // later pages do not pay the same two HTTP 400 round trips again.
+        AITransportRecordingURLProtocol.configure(responseData: valid)
+        _ = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.deepseek.example/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(AITransportRecordingURLProtocol.requestCount() == 1)
+        let cachedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let cachedBody = try #require(
+            JSONSerialization.jsonObject(with: try #require(cachedRequest.httpBody)) as? [String: Any]
+        )
+        #expect(cachedBody["response_format"] == nil)
+
         let error = AITranslationRequestError.server(
             model: model,
             statusCode: 400,
