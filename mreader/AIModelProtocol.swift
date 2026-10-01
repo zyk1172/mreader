@@ -18,6 +18,38 @@ nonisolated enum AIAPIProtocol: String, Codable, CaseIterable, Sendable {
     }
 }
 
+nonisolated enum AIProviderInterfaceType: String, Codable, CaseIterable, Sendable {
+    case compatible
+    case native
+
+    var displayName: String {
+        switch self {
+        case .compatible:
+            return "兼容接口"
+        case .native:
+            return "原生接口"
+        }
+    }
+
+    var detailText: String {
+        switch self {
+        case .compatible:
+            return "按 OpenAI Chat Completions 兼容协议请求，适合中转、聚合和大多数第三方接口。"
+        case .native:
+            return "按每个模型配置的原生 API 协议请求，可使用 Chat Completions、Responses 或 Anthropic Messages。"
+        }
+    }
+
+    func effectiveProtocol(for configuredProtocol: AIAPIProtocol) -> AIAPIProtocol {
+        switch self {
+        case .compatible:
+            return .openAIChatCompletions
+        case .native:
+            return configuredProtocol
+        }
+    }
+}
+
 nonisolated struct AIModelDescriptor: Codable, Hashable, Sendable {
     let id: String
     var apiProtocol: AIAPIProtocol
@@ -88,6 +120,37 @@ nonisolated enum AIModelProtocolCatalog {
 nonisolated enum AITransportResponseFormat: Sendable, Equatable {
     case jsonObject
     case jsonSchema(name: String, schema: Data)
+}
+
+/// Some OpenAI-compatible gateways return 400 for structured-output parameters
+/// even when the endpoint itself is otherwise usable. Keep the classification
+/// centralized so page translation, vision translation, and error reporting
+/// agree on when it is safe to retry without response_format.
+nonisolated enum AIResponseFormatCompatibility {
+    static func isUnsupportedMessage(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        let mentionsFormat = normalized.contains("response_format")
+            || normalized.contains("text.format")
+            || normalized.contains("json_schema")
+            || normalized.contains("json schema")
+            || normalized.contains("structured output")
+        let unsupported = normalized.contains("unsupported")
+            || normalized.contains("not support")
+            || normalized.contains("not allowed")
+            || normalized.contains("unknown parameter")
+            || normalized.contains("invalid parameter")
+            || normalized.contains("invalid schema")
+            || normalized.contains("schema validation")
+            || normalized.contains("invalid response format")
+            || normalized.contains("unavailable")
+            || normalized.contains("not available")
+            || normalized.contains("temporarily unavailable")
+        return mentionsFormat && unsupported
+    }
+
+    static func isUnsupported(_ error: Error) -> Bool {
+        isUnsupportedMessage(error.localizedDescription)
+    }
 }
 
 /// Identifies the user-visible operation for timeout/retry policy and
