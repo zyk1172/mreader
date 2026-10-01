@@ -436,11 +436,14 @@ nonisolated enum OCRBubbleLayoutEngine {
         imageBounds: CGRect
     ) -> CGRect {
         if let reliableBubbleBounds {
-            let candidate = (resolvedSafeRegion ?? reliableBubbleBounds)
-                .standardized
-                .intersection(imageBounds.standardized)
-            if !candidate.isNull, candidate.width > 0, candidate.height > 0 {
-                return candidate
+            if let resolvedSafeRegion {
+                let safe = resolvedSafeRegion.standardized.intersection(imageBounds.standardized)
+                if !safe.isNull,
+                   safe.width > 0,
+                   safe.height > 0,
+                   safe.insetBy(dx: -1, dy: -1).contains(sourceRect.standardized) {
+                    return safe
+                }
             }
             let clippedBubble = reliableBubbleBounds.standardized.intersection(imageBounds.standardized)
             if !clippedBubble.isNull, clippedBubble.width > 0, clippedBubble.height > 0 {
