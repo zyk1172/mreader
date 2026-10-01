@@ -203,14 +203,58 @@ nonisolated enum ReaderFitWidthDecodePolicy {
     ) -> CGFloat {
         guard let sourceSize,
               sourceSize.width > 1,
-              sourceSize.height > 1,
+              sourceSize.height > 1 else {
+            return defaultUnknownPixelSize
+        }
+        return maxPixelSize(
+            aspectRatio: sourceSize.height / sourceSize.width,
+            viewportWidthPoints: viewportWidthPoints,
+            displayScale: displayScale
+        )
+    }
+
+    static func maxPixelSize(
+        aspectRatio: CGFloat,
+        viewportWidthPoints: CGFloat,
+        displayScale: CGFloat
+    ) -> CGFloat {
+        guard aspectRatio > 0,
               viewportWidthPoints > 1,
               displayScale > 0 else {
             return defaultUnknownPixelSize
         }
-        let aspect = sourceSize.height / sourceSize.width
-        let requiredLongSide = max(4096, viewportWidthPoints * displayScale * max(aspect, 1))
+        let requiredLongSide = max(4096, viewportWidthPoints * displayScale * max(aspectRatio, 1))
         return tiers.first(where: { $0 >= requiredLongSide }) ?? maximumPixelSize
+    }
+
+    /// Continuous-scroll preload runs before every page has its own geometry. Reuse a
+    /// neighbouring strip ratio when possible; if no geometry exists yet, callers can
+    /// deliberately choose the maximum tier so the warm decode cannot become a useless
+    /// 6144px entry that must be decoded again at 8192px when the page reaches the viewport.
+    static func preloadMaxPixelSize(
+        sourceSize: CGSize?,
+        inferredAspectRatio: CGFloat?,
+        viewportWidthPoints: CGFloat,
+        displayScale: CGFloat,
+        unknownPixelSize: CGFloat
+    ) -> CGFloat {
+        if let sourceSize,
+           sourceSize.width > 1,
+           sourceSize.height > 1 {
+            return maxPixelSize(
+                sourceSize: sourceSize,
+                viewportWidthPoints: viewportWidthPoints,
+                displayScale: displayScale
+            )
+        }
+        if let inferredAspectRatio, inferredAspectRatio > 0 {
+            return maxPixelSize(
+                aspectRatio: inferredAspectRatio,
+                viewportWidthPoints: viewportWidthPoints,
+                displayScale: displayScale
+            )
+        }
+        return tiers.first(where: { $0 >= unknownPixelSize }) ?? maximumPixelSize
     }
 }
 
@@ -720,17 +764,28 @@ private final class ReaderImageCache {
         let maxPixelSize: CGFloat
     }
 
+    private struct PendingPreloadRequest {
+        let urls: [URL]
+        let maxPixelSize: CGFloat
+        let maximumConcurrent: Int
+        let adaptiveFitWidthSizing: Bool
+        let inferredAspectRatios: [URL: CGFloat]
+        let unknownAdaptiveMaxPixelSize: CGFloat?
+    }
+
     private let cache = NSCache<NSString, UIImage>()
     private var inFlightLoads: [String: Task<UIImage?, Never>] = [:]
     private var loadingCosts: [String: Int] = [:]
     private var scheduledPreload: Task<Void, Never>?
+    private var pendingPreloadRequest: PendingPreloadRequest?
     private var preloadQueue: [PreloadCandidate] = []
     private var activePreloadCount = 0
     private var maximumConcurrentPreloads = 2
     private var preloadKeys: Set<String> = []
-    /// Foreground readers that joined a preload task protect that task from a
-    /// subsequent preload-window refresh cancelling the shared decode.
-    private var foregroundLoadKeys: Set<String> = []
+    private var desiredPreloadKeys: Set<String> = []
+    /// A Set cannot represent two LocalImageViews joining the same decode. Track consumers
+    /// individually so one cancelled waiter never drops protection for another active waiter.
+    private var foregroundConsumers: [String: Set<UUID>] = [:]
     /// Reader 关闭时推进代际。旧解码即使 ImageIO 已经无法中断，也禁止在关闭后回填缓存。
     private var generation = UUID()
     private var preloadBudgetBytes: Int {
@@ -781,7 +836,9 @@ private final class ReaderImageCache {
     func fitWidthDecodeMaxPixelSize(
         for url: URL,
         viewportWidthPoints: CGFloat? = nil,
-        displayScale: CGFloat? = nil
+        displayScale: CGFloat? = nil,
+        inferredAspectRatio: CGFloat? = nil,
+        unknownMaxPixelSize: CGFloat? = nil
     ) -> CGFloat {
         if let viewportWidthPoints, viewportWidthPoints > 1 {
             lastKnownViewportWidthPoints = viewportWidthPoints
@@ -789,10 +846,12 @@ private final class ReaderImageCache {
         if let displayScale, displayScale > 0 {
             lastKnownDisplayScale = displayScale
         }
-        return ReaderFitWidthDecodePolicy.maxPixelSize(
+        return ReaderFitWidthDecodePolicy.preloadMaxPixelSize(
             sourceSize: PageGeometryStore.shared.size(for: url),
+            inferredAspectRatio: inferredAspectRatio,
             viewportWidthPoints: lastKnownViewportWidthPoints,
-            displayScale: lastKnownDisplayScale
+            displayScale: lastKnownDisplayScale,
+            unknownPixelSize: unknownMaxPixelSize ?? ReaderFitWidthDecodePolicy.defaultUnknownPixelSize
         )
     }
 
@@ -816,6 +875,75 @@ private final class ReaderImageCache {
         return nil
     }
 
+    private func hasForegroundConsumer(for key: String) -> Bool {
+        !(foregroundConsumers[key]?.isEmpty ?? true)
+    }
+
+    private var hasAnyForegroundConsumers: Bool {
+        foregroundConsumers.values.contains { !$0.isEmpty }
+    }
+
+    private func registerForegroundConsumer(for key: String) -> UUID {
+        let token = UUID()
+        foregroundConsumers[key, default: []].insert(token)
+        return token
+    }
+
+    private func finishForegroundConsumer(
+        key: String,
+        token: UUID,
+        epoch: UUID,
+        cancelIfUnneeded: Bool
+    ) {
+        guard epoch == generation,
+              var consumers = foregroundConsumers[key] else { return }
+        consumers.remove(token)
+        if consumers.isEmpty {
+            foregroundConsumers[key] = nil
+            if cancelIfUnneeded {
+                if preloadKeys.contains(key) {
+                    if !desiredPreloadKeys.contains(key) {
+                        inFlightLoads[key]?.cancel()
+                    }
+                } else {
+                    inFlightLoads[key]?.cancel()
+                }
+            }
+        } else {
+            foregroundConsumers[key] = consumers
+        }
+        drainPreloadQueue()
+    }
+
+    private func awaitForegroundTask(
+        _ task: Task<UIImage?, Never>,
+        key: String,
+        epoch: UUID
+    ) async -> UIImage? {
+        let token = registerForegroundConsumer(for: key)
+        defer {
+            finishForegroundConsumer(
+                key: key,
+                token: token,
+                epoch: epoch,
+                cancelIfUnneeded: false
+            )
+        }
+        let image = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            Task { @MainActor in
+                ReaderImageCache.shared.finishForegroundConsumer(
+                    key: key,
+                    token: token,
+                    epoch: epoch,
+                    cancelIfUnneeded: true
+                )
+            }
+        }
+        return epoch == generation && !Task.isCancelled ? image : nil
+    }
+
     func loadImage(for url: URL, maxPixelSize: CGFloat = 4096) async -> UIImage? {
         // 跨分辨率复用：已有更高分辨率缓存（如 8192）时，低分辨率请求（如 4096）直接复用（项11）
         if let cached = cachedImage(for: url, maxPixelSize: maxPixelSize) {
@@ -824,26 +952,12 @@ private final class ReaderImageCache {
         let epoch = generation
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
-            foregroundLoadKeys.insert(key)
-            defer {
-                if epoch == generation {
-                    foregroundLoadKeys.remove(key)
-                }
-            }
-            let image = await existingTask.value
-            return epoch == generation && !Task.isCancelled ? image : nil
+            return await awaitForegroundTask(existingTask, key: key, epoch: epoch)
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
-            foregroundLoadKeys.insert(higherKey)
-            defer {
-                if epoch == generation {
-                    foregroundLoadKeys.remove(higherKey)
-                }
-            }
-            let image = await existingTask.value
-            return epoch == generation && !Task.isCancelled ? image : nil
+            return await awaitForegroundTask(existingTask, key: higherKey, epoch: epoch)
         }
 
         let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
@@ -853,15 +967,14 @@ private final class ReaderImageCache {
         }
         inFlightLoads[key] = task
         loadingCosts[key] = estimatedCost
-        foregroundLoadKeys.insert(key)
-        let image = await task.value
+        let image = await awaitForegroundTask(task, key: key, epoch: epoch)
         if epoch == generation {
-            // Cleanup must happen even when the caller was cancelled while awaiting the
-            // detached decode. Otherwise completed Tasks/UIImage results and their costs
-            // remain retained until the whole Reader closes and can permanently stall preload.
-            foregroundLoadKeys.remove(key)
+            // The owner still cleans the shared entry only after the detached task has
+            // actually completed. Cancellation now reaches tasks that are merely queued
+            // for a permit, while synchronous ImageIO already in progress finishes safely.
             inFlightLoads[key] = nil
             loadingCosts[key] = nil
+            preloadKeys.remove(key)
             drainPreloadQueue()
         }
 
@@ -879,42 +992,63 @@ private final class ReaderImageCache {
         maxPixelSize: CGFloat = 4096,
         maximumConcurrent: Int = 2,
         delay: TimeInterval = 0.25,
-        adaptiveFitWidthSizing: Bool = false
+        adaptiveFitWidthSizing: Bool = false,
+        inferredAspectRatios: [URL: CGFloat] = [:],
+        unknownAdaptiveMaxPixelSize: CGFloat? = nil
     ) {
-        scheduledPreload?.cancel()
-        let epoch = generation
         var seenURLs = Set<URL>()
         let uniqueURLs = urls.filter { seenURLs.insert($0).inserted }
+        pendingPreloadRequest = PendingPreloadRequest(
+            urls: uniqueURLs,
+            maxPixelSize: maxPixelSize,
+            maximumConcurrent: maximumConcurrent,
+            adaptiveFitWidthSizing: adaptiveFitWidthSizing,
+            inferredAspectRatios: inferredAspectRatios,
+            unknownAdaptiveMaxPixelSize: unknownAdaptiveMaxPixelSize
+        )
+
+        // Leading-edge debounce: while the timer is pending, page changes replace only the
+        // requested window. They do not restart the timer, so sustained fast scrolling cannot
+        // postpone preload forever.
+        guard scheduledPreload == nil else { return }
+
+        let epoch = generation
         scheduledPreload = Task { @MainActor [weak self] in
             if delay > 0 {
-                try? await Task.sleep(for: .seconds(delay))
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    return
+                }
             }
             guard !Task.isCancelled, let self, self.generation == epoch else { return }
-            self.startPreloading(
-                uniqueURLs,
-                maxPixelSize: maxPixelSize,
-                maximumConcurrent: maximumConcurrent,
-                adaptiveFitWidthSizing: adaptiveFitWidthSizing
-            )
+            let request = self.pendingPreloadRequest
+            self.pendingPreloadRequest = nil
+            self.scheduledPreload = nil
+            guard let request else { return }
+            self.startPreloading(request)
         }
     }
 
-    private func startPreloading(
-        _ urls: [URL],
-        maxPixelSize: CGFloat,
-        maximumConcurrent: Int,
-        adaptiveFitWidthSizing: Bool
-    ) {
+    private func startPreloading(_ request: PendingPreloadRequest) {
         func requestedSize(for url: URL) -> CGFloat {
-            adaptiveFitWidthSizing ? fitWidthDecodeMaxPixelSize(for: url) : maxPixelSize
+            guard request.adaptiveFitWidthSizing else { return request.maxPixelSize }
+            return fitWidthDecodeMaxPixelSize(
+                for: url,
+                inferredAspectRatio: request.inferredAspectRatios[url],
+                unknownMaxPixelSize: request.unknownAdaptiveMaxPixelSize
+            )
         }
-        let desiredKeys = Set(urls.map { cacheKey(for: $0, maxPixelSize: requestedSize(for: $0)) })
+        let desiredKeys = Set(request.urls.map {
+            cacheKey(for: $0, maxPixelSize: requestedSize(for: $0))
+        })
+        desiredPreloadKeys = desiredKeys
         for staleKey in preloadKeys.subtracting(desiredKeys) {
-            guard !foregroundLoadKeys.contains(staleKey) else { continue }
+            guard !hasForegroundConsumer(for: staleKey) else { continue }
             inFlightLoads[staleKey]?.cancel()
         }
 
-        let candidates = urls
+        let candidates = request.urls
             .map { url in
                 let requestedMaxPixelSize = requestedSize(for: url)
                 return PreloadCandidate(
@@ -930,7 +1064,7 @@ private final class ReaderImageCache {
             }
 
         preloadQueue = candidates
-        maximumConcurrentPreloads = max(1, maximumConcurrent)
+        maximumConcurrentPreloads = max(1, request.maximumConcurrent)
         let queuedBytes = candidates.reduce(0) { $0 + $1.cost }
         MReaderLog.reader.debug(
             "decoded image preload budget=\(self.preloadBudgetBytes, privacy: .public) queuedBytes=\(queuedBytes, privacy: .public) queued=\(candidates.count, privacy: .public)"
@@ -939,10 +1073,13 @@ private final class ReaderImageCache {
     }
 
     private func drainPreloadQueue() {
-        // 当前页是用户可见工作的最高优先级；不要让邻页预解码和 foreground ImageIO
-        // 同时争夺内存带宽。foreground 完成时 loadImage() 会再次 drain。
-        guard foregroundLoadKeys.isEmpty else { return }
+        // Continuous scroll uses one preload at a time. When foreground consumers exist,
+        // still allow one neighbour decode so the pipeline keeps moving, but never start
+        // a second preload that could occupy both ImageIO permits and block the visible page.
         while activePreloadCount < maximumConcurrentPreloads, !preloadQueue.isEmpty {
+            if hasAnyForegroundConsumers, activePreloadCount >= 1 {
+                return
+            }
             let candidate = preloadQueue[0]
             guard cache.object(forKey: candidate.key as NSString) == nil,
                   inFlightLoads[candidate.key] == nil else {
@@ -991,6 +1128,7 @@ private final class ReaderImageCache {
         generation = UUID()
         scheduledPreload?.cancel()
         scheduledPreload = nil
+        pendingPreloadRequest = nil
         preloadQueue.removeAll()
         for task in inFlightLoads.values {
             task.cancel()
@@ -998,7 +1136,8 @@ private final class ReaderImageCache {
         inFlightLoads.removeAll()
         loadingCosts.removeAll()
         preloadKeys.removeAll()
-        foregroundLoadKeys.removeAll()
+        desiredPreloadKeys.removeAll()
+        foregroundConsumers.removeAll()
         activePreloadCount = 0
         cache.removeAllObjects()
         ReaderImageSourceMetadataStore.shared.clear()
@@ -2757,15 +2896,37 @@ struct ReaderView: View {
             guard manager.pages.indices.contains(pageIndex) else { return nil }
             return manager.pages[pageIndex].url
         }
+        var inferredAspectRatios: [URL: CGFloat] = [:]
+        if isContinuous {
+            for pageIndex in preferredIndices where manager.pages.indices.contains(pageIndex) {
+                let pageURL = manager.pages[pageIndex].url
+                guard PageGeometryStore.shared.size(for: pageURL) == nil,
+                      let ratio = PageGeometryStore.shared.neighbouringAspectRatio(
+                        forPageIndex: pageIndex,
+                        among: manager.pages
+                      ) else {
+                    continue
+                }
+                inferredAspectRatios[pageURL] = ratio
+            }
+        }
         ReaderImageCache.shared.preload(
             urls,
-            // Preserve fit-width detail, but defer neighbour work and serialize long-strip decodes.
+            // A long-strip warm decode must be reusable when the page reaches the viewport.
+            // Infer the tier from neighbouring geometry; with no geometry at all, prefer 8192
+            // over a speculative 6144 decode that can force the same page to be decoded twice.
             maxPixelSize: isContinuous
                 ? ReaderImageCache.fitWidthMaxPixelSize
                 : ReaderImageCache.fitScreenMaxPixelSize,
             maximumConcurrent: isContinuous ? 1 : 2,
-            delay: isContinuous ? 0.60 : 0.15,
-            adaptiveFitWidthSizing: isContinuous
+            delay: isContinuous
+                ? ReaderPrefetchPolicy.continuousDecodedImagePreloadDelay
+                : ReaderPrefetchPolicy.pagedDecodedImagePreloadDelay,
+            adaptiveFitWidthSizing: isContinuous,
+            inferredAspectRatios: inferredAspectRatios,
+            unknownAdaptiveMaxPixelSize: isContinuous
+                ? ReaderFitWidthDecodePolicy.maximumPixelSize
+                : nil
         )
 
         mangaVisionPreanalysisTask?.cancel()
