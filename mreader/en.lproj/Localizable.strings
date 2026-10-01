@@ -115,7 +115,10 @@
 "ocr.appleTranslation" = "Apple 原生翻译";
 "error.libraryLoad" = "Library Data Issue";
 "ocr.appleTranslationFooter" = "Use Apple on-device low-latency translation for ordinary dialogue. Falls back to cloud AI when unavailable or incomplete.";
-"ocr.borderProgress" = "AI Translation Border Progress";
+"ocr.borderProgress" = "Show Translation Progress Effect";
+"ocr.translationProgressEffect" = "Progress Effect";
+"ocr.translationProgressEffect.bubblePulse" = "Breathing Bubble Outline";
+"ocr.translationProgressEffect.marquee" = "Classic Marquee Border";
 "ocr.colorStyle" = "Translation Text Color";
 "ocr.colorStyle.contrast" = "High Contrast";
 "ocr.colorStyle.coolWarm" = "Cool & Warm";
