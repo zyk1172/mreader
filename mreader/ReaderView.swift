@@ -8000,7 +8000,10 @@ private struct AppleIntelligenceGlowBorder: View {
     let colors: [Color]
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { context in
+        // Restore the original layered marquee appearance that existed before
+        // ff1c87a4. The later three-stroke approximation was cheaper, but its
+        // thicker bands changed the visual character substantially.
+        TimelineView(.animation) { context in
             let duration = max(animationDuration, 0.1)
             let phase = context.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: duration) / duration
@@ -8008,45 +8011,45 @@ private struct AppleIntelligenceGlowBorder: View {
                 let bandWidth = max(lineWidth, 1)
                 let screenCornerRadius = adaptiveScreenCornerRadius(for: proxy.size)
                 let outerCornerRadius = (screenCornerRadius > 0 ? screenCornerRadius : cornerRadius) + 5
-                let outwardExpansion = max(bandWidth * 0.55, 3)
-                let shape = RoundedRectangle(cornerRadius: outerCornerRadius, style: .continuous)
-                let gradient = flowingGradient(phase: phase)
-
-                ZStack {
-                    shape
-                        .inset(by: outwardExpansion)
-                        .strokeBorder(
-                            gradient,
-                            lineWidth: max(bandWidth * 0.72, 4),
-                            antialiased: true
-                        )
-                        .opacity(0.24)
-                        .blur(radius: max(blurRadius, bandWidth * 0.16))
-
-                    shape
-                        .inset(by: outwardExpansion + bandWidth * 0.20)
-                        .strokeBorder(
-                            gradient,
-                            lineWidth: max(bandWidth * 0.30, 2.2),
-                            antialiased: true
-                        )
-                        .opacity(0.78)
-
-                    shape
-                        .inset(by: outwardExpansion + bandWidth * 0.36)
-                        .strokeBorder(
-                            gradient,
-                            lineWidth: max(bandWidth * 0.09, 1.1),
-                            antialiased: true
-                        )
-                        .brightness(0.14)
-                }
-                .frame(
+                let layerCount = 36
+                let layerWidth = bandWidth / CGFloat(layerCount)
+                let outwardExpansion = max(layerWidth * 1.5, 1)
+                let drawingSize = CGSize(
                     width: proxy.size.width + outwardExpansion * 2,
                     height: proxy.size.height + outwardExpansion * 2
                 )
+
+                ZStack {
+                    ForEach(0..<layerCount, id: \.self) { index in
+                        let progress = CGFloat(index) / CGFloat(max(layerCount - 1, 1))
+                        let opacity = 1.0 - Double(progress) * 0.94
+                        RoundedRectangle(
+                            cornerRadius: max(outerCornerRadius - CGFloat(index) * layerWidth, 0),
+                            style: .continuous
+                        )
+                        .inset(by: outwardExpansion + CGFloat(index) * layerWidth)
+                        .strokeBorder(
+                            flowingGradient(phase: phase + Double(index) * 0.004),
+                            lineWidth: max(layerWidth + 0.12, 0.55),
+                            antialiased: true
+                        )
+                        .opacity(opacity)
+                    }
+
+                    RoundedRectangle(cornerRadius: outerCornerRadius, style: .continuous)
+                        .inset(by: outwardExpansion)
+                        .strokeBorder(
+                            flowingGradient(phase: phase),
+                            lineWidth: max(layerWidth * 2.2, 1.2),
+                            antialiased: true
+                        )
+                        .opacity(1)
+                        .brightness(0.16)
+                }
+                .frame(width: drawingSize.width, height: drawingSize.height)
                 .offset(x: -outwardExpansion, y: -outwardExpansion)
             }
+            .drawingGroup()
         }
     }
 
