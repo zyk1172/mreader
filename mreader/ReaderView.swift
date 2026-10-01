@@ -950,7 +950,10 @@ private final class ReaderImageCache {
                 )
             }
         }
-        return epoch == generation && !Task.isCancelled ? image : nil
+        // Do not discard a completed shared decode merely because this one waiter was
+        // cancelled. The task owner may still need to cache the result for another active
+        // waiter. Individual callers apply their own cancellation check before returning.
+        return epoch == generation ? image : nil
     }
 
     func loadImage(for url: URL, maxPixelSize: CGFloat = 4096) async -> UIImage? {
@@ -961,12 +964,14 @@ private final class ReaderImageCache {
         let epoch = generation
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
         if let existingTask = inFlightLoads[key] {
-            return await awaitForegroundTask(existingTask, key: key, epoch: epoch)
+            let image = await awaitForegroundTask(existingTask, key: key, epoch: epoch)
+            return epoch == generation && !Task.isCancelled ? image : nil
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
            let existingTask = inFlightLoads[higherKey] {
-            return await awaitForegroundTask(existingTask, key: higherKey, epoch: epoch)
+            let image = await awaitForegroundTask(existingTask, key: higherKey, epoch: epoch)
+            return epoch == generation && !Task.isCancelled ? image : nil
         }
 
         let estimatedCost = estimatedDecodedCost(for: url, maxPixelSize: maxPixelSize)
@@ -989,11 +994,15 @@ private final class ReaderImageCache {
 
         // clearMemoryCache() may have advanced generation and a new Reader may already own
         // the same key. Old completions must not touch that new session or repopulate cache.
-        guard epoch == generation, !Task.isCancelled else { return nil }
+        guard epoch == generation else { return nil }
         if let image {
+            // Cache a successful shared decode even if the task that originally created it
+            // has since been cancelled. Another LocalImageView may still have been waiting
+            // on the same work; tying cache insertion to the creator's lifetime would force
+            // an immediate duplicate decode on the next page update.
             cache.setObject(image, forKey: key as NSString, cost: image.cacheCost)
         }
-        return image
+        return Task.isCancelled ? nil : image
     }
 
     func preload(
