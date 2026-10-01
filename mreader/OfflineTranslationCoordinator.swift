@@ -1631,8 +1631,8 @@ final class OfflineTranslationCoordinator: ObservableObject {
             throw OfflineTranslationConfigurationError.missingVisionModel
         }
         let visionModel = requestedVisionModel.isEmpty ? textModel : requestedVisionModel
-        let textDescriptor = profile.descriptor(for: textModel)
-        let visionDescriptor = profile.descriptor(for: visionModel)
+        let textDescriptor = profile.requestDescriptor(for: textModel)
+        let visionDescriptor = profile.requestDescriptor(for: visionModel)
         guard AIEndpointResolver.endpointURL(for: textDescriptor.apiProtocol, from: baseURL) != nil,
               (!requiresVision || AIEndpointResolver.endpointURL(for: visionDescriptor.apiProtocol, from: baseURL) != nil) else {
             throw OfflineTranslationConfigurationError.invalidBaseURL
@@ -1644,6 +1644,7 @@ final class OfflineTranslationCoordinator: ObservableObject {
             profileID: profile.id,
             profileName: profile.name,
             baseURL: baseURL,
+            interfaceType: profile.interfaceType,
             apiKey: apiKey,
             textModel: textModel,
             visionModel: visionModel,
