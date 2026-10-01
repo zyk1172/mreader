@@ -112,7 +112,10 @@
 "ocr.appleTranslation" = "Apple 原生翻译";
 "error.libraryLoad" = "ライブラリデータの不具合";
 "ocr.appleTranslationFooter" = "普通の会話は Apple の端末内・低遅延翻訳を使います。利用できない場合や未翻訳のまま残る場合はクラウド AI に自動フォールバックします。";
-"ocr.borderProgress" = "AI 翻訳ボーダー進捗";
+"ocr.borderProgress" = "翻訳中エフェクトを表示";
+"ocr.translationProgressEffect" = "進行エフェクト";
+"ocr.translationProgressEffect.bubblePulse" = "吹き出し呼吸アウトライン";
+"ocr.translationProgressEffect.marquee" = "クラシック走査ボーダー";
 "ocr.colorStyle" = "翻訳テキスト配色";
 "ocr.colorStyle.contrast" = "ハイコントラスト";
 "ocr.colorStyle.coolWarm" = "クール・ウォーム";
