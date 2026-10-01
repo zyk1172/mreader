@@ -568,8 +568,9 @@ struct mreaderTests {
         #expect(result.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 3)
         let finalRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let finalData = try #require(finalRequest.httpBody)
         let finalBody = try #require(
-            JSONSerialization.jsonObject(with: try #require(finalRequest.httpBody)) as? [String: Any]
+            JSONSerialization.jsonObject(with: finalData) as? [String: Any]
         )
         #expect(finalBody["response_format"] == nil)
 
@@ -587,8 +588,9 @@ struct mreaderTests {
         )
         #expect(AITransportRecordingURLProtocol.requestCount() == 1)
         let cachedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let cachedData = try #require(cachedRequest.httpBody)
         let cachedBody = try #require(
-            JSONSerialization.jsonObject(with: try #require(cachedRequest.httpBody)) as? [String: Any]
+            JSONSerialization.jsonObject(with: cachedData) as? [String: Any]
         )
         #expect(cachedBody["response_format"] == nil)
 
