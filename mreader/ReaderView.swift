@@ -135,6 +135,22 @@ nonisolated enum ImageFitMode: String, CaseIterable {
     case original
 }
 
+nonisolated enum TranslationProgressEffect: String, CaseIterable, Sendable {
+    static let defaultsKey = "ai_translation_progress_effect"
+
+    case bubblePulse
+    case marquee
+
+    var localizedTitle: String {
+        switch self {
+        case .bubblePulse:
+            return "ocr.translationProgressEffect.bubblePulse".localized
+        case .marquee:
+            return "ocr.translationProgressEffect.marquee".localized
+        }
+    }
+}
+
 /// 缩放 / 平移的纯几何计算，独立于视图以便直接测试。
 ///
 /// 关键点：图片**不一定**铺满 viewport。`fitScreen` / `fitHeight` 会留下上下或左右留白，
@@ -1309,6 +1325,7 @@ struct ReaderView: View {
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
+    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.bubblePulse.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @AppStorage(MangaVisionHardCaseFeature.shortcutDefaultsKey) private var showMangaVisionFeedbackShortcut = false
@@ -1566,7 +1583,9 @@ struct ReaderView: View {
                 .ignoresSafeArea()
             }
 
-            if isAITranslationInProgress && aiTranslationBorderProgressEnabled {
+            if isAITranslationInProgress,
+               aiTranslationBorderProgressEnabled,
+               TranslationProgressEffect(rawValue: aiTranslationProgressEffectRaw) == .marquee {
                 AppleIntelligenceGlowBorder(
                     cornerRadius: 36,
                     lineWidth: 18,
@@ -1575,8 +1594,8 @@ struct ReaderView: View {
                     colors: TranslationTextRenderer.palette
                 )
                 .ignoresSafeArea()
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+                .allowsHitTesting(false)
+                .transition(.opacity)
             }
 
             TwoFingerSwipeDownDismissView(
@@ -2251,6 +2270,14 @@ struct ReaderView: View {
 
                     Toggle("ocr.borderProgress".localized, isOn: $aiTranslationBorderProgressEnabled)
                         .disabled(!comic.isAITranslationEnabled)
+
+                    Picker("ocr.translationProgressEffect".localized, selection: $aiTranslationProgressEffectRaw) {
+                        ForEach(TranslationProgressEffect.allCases, id: \.rawValue) { effect in
+                            Text(effect.localizedTitle).tag(effect.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!comic.isAITranslationEnabled || !aiTranslationBorderProgressEnabled)
 
                     Picker("ocr.colorStyle".localized, selection: $translationColorStyleRaw) {
                         ForEach(TranslationColorStyle.allCases, id: \.rawValue) { style in
