@@ -180,6 +180,18 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
+    @Test func reliableBubbleRectWinsEvenWithoutContourGeometry() {
+        let bubble = CGRect(x: 92, y: 180, width: 180, height: 130)
+        let measuredTextRect = CGRect(x: 130, y: 220, width: 90, height: 48)
+
+        let surface = OCRBubbleLayoutEngine.translationSurfaceRect(
+            reliableBubbleBounds: bubble,
+            measuredLayoutRect: measuredTextRect
+        )
+
+        #expect(surface == bubble)
+    }
+
     @Test func measuredCardSurfaceMovesWithCollisionAdjustedText() {
         let originalText = CGRect(x: 100, y: 200, width: 80, height: 44)
         let originalSurface = CGRect(x: 96, y: 196, width: 88, height: 52)
