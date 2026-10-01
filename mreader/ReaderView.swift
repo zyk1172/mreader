@@ -6017,30 +6017,7 @@ struct LocalImageView: View {
             }
         }
         .task(id: imageLoadTaskID) {
-            guard retainsDecodedImage else {
-                cancelLiveTranslationForPage()
-                offlineTranslationTask?.cancel()
-                offlineTranslationTask = nil
-                ocrMagnificationTask?.cancel()
-                ocrMagnificationTask = nil
-                uiImage = nil
-                loadedPageURL = nil
-                isLoadingImage = false
-                return
-            }
-            // 视图身份可能被复用：分镜跨页要靠同一个视图身份才能让相机在
-            // scaleEffect/offset 上插值（否则整页就是硬切）。所以不能只看
-            // uiImage 是否为空，必须比对已经加载的是不是当前这一页。
-            guard loadedPageURL != url || uiImage == nil else { return }
-            if imageLoadDelay > 0 {
-                do {
-                    try await Task.sleep(for: .seconds(imageLoadDelay))
-                } catch {
-                    return
-                }
-            }
-            guard !Task.isCancelled else { return }
-            await loadImage()
+            await performImageLoadTask()
         }
         .onDisappear {
             cancelLiveTranslationForPage()
@@ -6082,38 +6059,13 @@ struct LocalImageView: View {
             }
         }
         .onChange(of: reportsTranslationActivity) { _, isActivePage in
-            if !isActivePage {
-                cancelLiveTranslationForPage()
-            } else if isTranslating, let image = uiImage {
-                startTranslationProgressGeometryPreparation(
-                    image: image,
-                    pageURL: url,
-                    generation: translationGeneration
-                )
-            }
+            handleTranslationActivityEligibilityChange(isActivePage)
         }
         .onChange(of: aiTranslationProgressEffectRaw) { _, _ in
-            guard isTranslating, let image = uiImage else { return }
-            startTranslationProgressGeometryPreparation(
-                image: image,
-                pageURL: url,
-                generation: translationGeneration
-            )
+            refreshTranslationProgressEffectIfNeeded()
         }
         .onChange(of: aiTranslationBorderProgressEnabled) { _, _ in
-            guard isTranslating, let image = uiImage else {
-                if !aiTranslationBorderProgressEnabled {
-                    translationProgressGeometryTask?.cancel()
-                    translationProgressGeometryTask = nil
-                    translationProgressRegions.removeAll()
-                }
-                return
-            }
-            startTranslationProgressGeometryPreparation(
-                image: image,
-                pageURL: url,
-                generation: translationGeneration
-            )
+            refreshTranslationProgressEffectIfNeeded()
         }
         .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
             offlineTranslationTask?.cancel()
@@ -6192,6 +6144,56 @@ struct LocalImageView: View {
                 startOCRMagnification()
             }
         }
+    }
+
+    private func performImageLoadTask() async {
+        guard retainsDecodedImage else {
+            cancelLiveTranslationForPage()
+            offlineTranslationTask?.cancel()
+            offlineTranslationTask = nil
+            ocrMagnificationTask?.cancel()
+            ocrMagnificationTask = nil
+            uiImage = nil
+            loadedPageURL = nil
+            isLoadingImage = false
+            return
+        }
+
+        // The same LocalImageView identity may be reused across guided-panel page
+        // transitions, so verify the loaded URL rather than only checking uiImage.
+        guard loadedPageURL != url || uiImage == nil else { return }
+        if imageLoadDelay > 0 {
+            do {
+                try await Task.sleep(for: .seconds(imageLoadDelay))
+            } catch {
+                return
+            }
+        }
+        guard !Task.isCancelled else { return }
+        await loadImage()
+    }
+
+    private func handleTranslationActivityEligibilityChange(_ isActivePage: Bool) {
+        if !isActivePage {
+            cancelLiveTranslationForPage()
+            return
+        }
+        refreshTranslationProgressEffectIfNeeded()
+    }
+
+    private func refreshTranslationProgressEffectIfNeeded() {
+        guard aiTranslationBorderProgressEnabled else {
+            translationProgressGeometryTask?.cancel()
+            translationProgressGeometryTask = nil
+            translationProgressRegions.removeAll()
+            return
+        }
+        guard isTranslating, let image = uiImage else { return }
+        startTranslationProgressGeometryPreparation(
+            image: image,
+            pageURL: url,
+            generation: translationGeneration
+        )
     }
 
     @ViewBuilder
