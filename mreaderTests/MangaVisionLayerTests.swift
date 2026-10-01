@@ -62,6 +62,74 @@ struct MangaVisionLayerTests {
         #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
     }
 
+    @Test func groupedTinyOCRRowsKeepOnePhysicalBalloon() {
+        let balloon = region(
+            .balloon,
+            x: 0.20,
+            y: 0.20,
+            width: 0.50,
+            height: 0.24,
+            confidence: 0.93
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "grouped-tiny-rows",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [],
+            balloons: [balloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 4
+        )
+        let rows = [
+            TextBlock(
+                text: "MY",
+                boundingBox: CGRect(x: 0.39, y: 0.235, width: 0.055, height: 0.025),
+                confidence: 0.96,
+                ocrSource: "original:en",
+                estimatedFontScale: 0.025,
+                textOrientation: .horizontal
+            ),
+            TextBlock(
+                text: "DEAR",
+                boundingBox: CGRect(x: 0.36, y: 0.315, width: 0.090, height: 0.025),
+                confidence: 0.95,
+                ocrSource: "original:en",
+                estimatedFontScale: 0.025,
+                textOrientation: .horizontal
+            ),
+            TextBlock(
+                text: "MOTHER",
+                boundingBox: CGRect(x: 0.35, y: 0.395, width: 0.120, height: 0.025),
+                confidence: 0.95,
+                ocrSource: "original:en",
+                estimatedFontScale: 0.025,
+                textOrientation: .horizontal
+            )
+        ]
+
+        // Every row is much narrower than the balloon. The former per-row
+        // expansion guard rejected this geometry before segmentation.
+        #expect(balloon.normalizedRect.width / rows[0].boundingBox.width > 8)
+
+        let enriched = MangaVisionOCRGeometry.applyingDetectedGeometry(
+            to: rows,
+            analysis: analysis
+        )
+        #expect(enriched.allSatisfy { $0.bubbleBox == balloon.normalizedRect })
+
+        let segmentation = MangaTextSegmenter.segment(enriched, isRightToLeft: false)
+        #expect(segmentation.lines.count == 3)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].sourceLineCount == 3)
+        #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
+    }
+
     @Test func mangaBalloonContourFlowsIntoTranslationUnitAndSafeRegion() {
         let contourPoints = [
             CGPoint(x: 0.50, y: 0.18),
