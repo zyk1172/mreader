@@ -8096,10 +8096,12 @@ private struct TranslationProgressPulseStroke: View {
     let contour: [CGPoint]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private let progressColor = Color(red: 0.12, green: 0.58, blue: 1.0)
+
     var body: some View {
         Group {
             if reduceMotion {
-                stroke(opacity: 0.24, lineWidth: 1.1)
+                stroke(opacity: 0.56, lineWidth: 1.35)
             } else {
                 TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { context in
                     let duration: TimeInterval = 1.9
@@ -8107,8 +8109,8 @@ private struct TranslationProgressPulseStroke: View {
                         .truncatingRemainder(dividingBy: duration) / duration
                     let pulse = phase <= 0.5 ? phase * 2 : (1 - phase) * 2
                     stroke(
-                        opacity: 0.16 + pulse * 0.18,
-                        lineWidth: 1.0 + CGFloat(pulse) * 0.25
+                        opacity: 0.38 + pulse * 0.32,
+                        lineWidth: 1.25 + CGFloat(pulse) * 0.40
                     )
                 }
             }
@@ -8121,12 +8123,16 @@ private struct TranslationProgressPulseStroke: View {
         if contour.count >= 3 {
             TranslationBubbleContourShape(points: contour)
                 .stroke(
-                    Color.secondary.opacity(opacity),
+                    progressColor.opacity(opacity),
                     style: StrokeStyle(
                         lineWidth: lineWidth,
                         lineCap: .round,
                         lineJoin: .round
                     )
+                )
+                .shadow(
+                    color: progressColor.opacity(opacity * 0.32),
+                    radius: 1.8
                 )
         } else {
             RoundedRectangle(
@@ -8134,8 +8140,12 @@ private struct TranslationProgressPulseStroke: View {
                 style: .continuous
             )
             .stroke(
-                Color.secondary.opacity(opacity),
+                progressColor.opacity(opacity),
                 lineWidth: lineWidth
+            )
+            .shadow(
+                color: progressColor.opacity(opacity * 0.32),
+                radius: 1.8
             )
         }
     }
