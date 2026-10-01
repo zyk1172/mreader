@@ -5856,33 +5856,26 @@ struct LocalImageView: View {
     }
 
     var body: some View {
+        secondaryLifecycleContent
+    }
+
+    private var renderedPageContent: some View {
         ZStack(alignment: .bottomTrailing) {
-            if let uiImage = uiImage {
-                // 1. 底图与翻译文本覆盖层
+            if let uiImage {
                 fittedImage(uiImage)
-                    // 核心逻辑：直接在图片上层按比例渲染文本气泡
-                    .overlay(
+                    .overlay {
                         GeometryReader { geo in
-                            ZStack {
-                                translationOverlay(in: geo.size)
-                                translationProgressOverlay(in: geo.size)
-                                ocrMagnificationOverlay(in: geo.size)
-                                ocrDebugOverlay(in: geo.size)
-#if DEBUG
-                                mangaVisionDebugOverlay(in: geo.size)
-#endif
-                            }
-                            .onAppear { zoomContentSize = geo.size }
-                            .onChange(of: geo.size) { _, newValue in zoomContentSize = newValue }
+                            imageOverlayContent(in: geo.size)
+                                .onAppear { zoomContentSize = geo.size }
+                                .onChange(of: geo.size) { _, newValue in
+                                    zoomContentSize = newValue
+                                }
                         }
-                    )
+                    }
                     .scaleEffect(scale)
                     .offset(offset)
-                    // 放大后把图片裁剪在自身布局框内，避免溢出到相邻页面与翻页过渡叠加。
                     .clipped()
                     .gesture(zoomGesture)
-                    // 只有分页阅读器才安装高优先级单指 pan。连续滚动完全不安装该 recognizer，
-                    // 让 UIScrollView 的 panGesture 独占单指拖动。
                     .modifier(
                         ReaderOptionalPanGestureModifier(
                             isEnabled: isSingleFingerPanEnabled,
@@ -5892,257 +5885,367 @@ struct LocalImageView: View {
                     .simultaneousGesture(tapPageGesture)
                     .simultaneousGesture(longPressTranslationGesture)
                     .frame(height: displayHeight(for: uiImage))
-
             } else if isLoadingImage {
                 if showsLoadingIndicator {
-                    ProgressView().tint(.white).controlSize(.regular)
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.regular)
                 } else {
                     Color.clear
                 }
             } else if loadFailed {
-                ContentUnavailableView("reader.imageLoadFailed".localized, systemImage: "exclamationmark.triangle", description: Text(url.lastPathComponent))
-                    .foregroundStyle(.white)
+                ContentUnavailableView(
+                    "reader.imageLoadFailed".localized,
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(url.lastPathComponent)
+                )
+                .foregroundStyle(.white)
             }
         }
         .overlay(alignment: .bottom) {
-            if let translationErrorMessage {
-                Text(translationErrorMessage)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.62), in: Capsule())
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-            }
+            translationErrorOverlay
         }
         .background {
-            if useAppleLowLatency, aiTranslationMode == .ocr, !appleTranslationRequests.isEmpty,
-               let sourceCode = appleSourceLanguageCode {
-                let bridgeGeneration = appleTranslationGeneration
-                let bridgeTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage).rawValue
-                AppleTranslationBridge(
-                    sourceLanguage: Locale.Language(identifier: sourceCode),
-                    targetLanguage: Locale.Language(identifier: bridgeTarget),
-                    requests: appleTranslationRequests,
-                    onResult: { id, text in
-                        guard self.isAppleBridgeCurrent(
-                            generation: bridgeGeneration,
-                            pageURL: self.url,
-                            targetLanguage: bridgeTarget
-                        ) else { return }
-                        guard let index = self.textBlocks.firstIndex(where: { $0.id == id }) else { return }
-                        let target = TranslationTargetLanguage.migrateLegacyValue(bridgeTarget)
-                        guard let normalized = TranslationOutputValidator.normalizedAcceptableTranslation(
-                            text,
-                            sourceText: self.textBlocks[index].text,
-                            target: target
-                        ) else {
-                            // Apple can occasionally echo the English source unchanged.
-                            // Leave the block empty so onFinished sends it through the
-                            // existing cloud text fallback instead of rendering a leak.
-                            return
+            appleTranslationBridgeBackground
+        }
+    }
+
+    @ViewBuilder
+    private func imageOverlayContent(in size: CGSize) -> some View {
+        ZStack {
+            translationOverlay(in: size)
+            translationProgressOverlay(in: size)
+            ocrMagnificationOverlay(in: size)
+            ocrDebugOverlay(in: size)
+#if DEBUG
+            mangaVisionDebugOverlay(in: size)
+#endif
+        }
+    }
+
+    @ViewBuilder
+    private var translationErrorOverlay: some View {
+        if let translationErrorMessage {
+            Text(translationErrorMessage)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.62), in: Capsule())
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+        }
+    }
+
+    @ViewBuilder
+    private var appleTranslationBridgeBackground: some View {
+        if useAppleLowLatency,
+           aiTranslationMode == .ocr,
+           !appleTranslationRequests.isEmpty,
+           let sourceCode = appleSourceLanguageCode {
+            let bridgeGeneration = appleTranslationGeneration
+            let bridgeTarget = TranslationTargetLanguage.migrateLegacyValue(targetLanguage).rawValue
+            AppleTranslationBridge(
+                sourceLanguage: Locale.Language(identifier: sourceCode),
+                targetLanguage: Locale.Language(identifier: bridgeTarget),
+                requests: appleTranslationRequests,
+                onResult: { id, text in
+                    handleAppleTranslationResult(
+                        id: id,
+                        text: text,
+                        generation: bridgeGeneration,
+                        targetLanguage: bridgeTarget
+                    )
+                },
+                onFinished: { seen in
+                    handleAppleTranslationFinished(
+                        seen: seen,
+                        sourceCode: sourceCode,
+                        generation: bridgeGeneration,
+                        targetLanguage: bridgeTarget
+                    )
+                }
+            )
+            .id(appleTranslationGeneration)
+        }
+    }
+
+    private var sizedPageContent: some View {
+        renderedPageContent
+            .frame(height: reservedDisplayHeight)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: imageFitMode == .fitWidth ? nil : 0,
+                maxHeight: imageFitMode == .fitWidth ? nil : .infinity
+            )
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear {
+                            viewportWidth = proxy.size.width
+                            viewportSize = proxy.size
                         }
-                        self.textBlocks[index].translation = normalized
-                        self.textBlocks[index].translationLines = [normalized]
-                    },
-                    onFinished: { seen in
-                        guard self.isAppleBridgeCurrent(
-                            generation: bridgeGeneration,
-                            pageURL: self.url,
-                            targetLanguage: bridgeTarget
-                        ) else { return }
-                        // 把整页（含增量结果）写入 Apple 页缓存，翻回旧页不再重复翻译
-                        let cacheKey = AppleTranslationPageCache.key(
-                            pageURL: self.url,
-                            sourceLanguage: sourceCode,
-                            targetLanguage: bridgeTarget,
-                            segmentationRevision: AITranslationPageRequest.ocrGeometryRevision,
-                            ocrRecognitionMode: OCRRecognitionMode(rawValue: self.ocrRecognitionModeRaw) ?? .adaptive,
-                            usesVisualOCRVerification: self.ocrVisualVerificationEnabled,
-                            isRightToLeft: self.isRightToLeftReading,
-                            minimumTextHeight: self.ocrMinimumTextHeight,
-                            safeAreaInset: self.ocrSafeAreaInset
-                        )
-                        Task {
-                            await AppleTranslationPageCache.shared.store(self.textBlocks, key: cacheKey)
-                            let target = TranslationTargetLanguage.migrateLegacyValue(bridgeTarget)
-                            await TranslationContextRegistry.shared.record(
-                                scopeID: TranslationContextBuilder.scopeID(
-                                    comicID: self.comicID,
-                                    target: target
-                                ),
-                                pageIndex: self.pageIndex,
-                                blocks: self.textBlocks
-                            )
+                        .onChange(of: proxy.size) { _, newValue in
+                            viewportWidth = newValue.width
+                            viewportSize = newValue
                         }
-                        let missing = self.appleTranslationRequests
-                            .filter { request in
-                                guard seen.contains(request.id),
-                                      let block = self.textBlocks.first(where: { $0.id == request.id }) else {
-                                    return true
-                                }
-                                return (block.translation ?? "")
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                                    .isEmpty
-                            }
-                            .map(\.id)
-                        if !missing.isEmpty {
-                            self.cloudFallbackForMissing(
-                                missing,
-                                generation: bridgeGeneration,
-                                pageURL: self.url,
-                                targetLanguage: bridgeTarget
-                            )
-                        }
-                    }
-                )
-                .id(appleTranslationGeneration)
+                }
             }
-        }
-        .frame(height: reservedDisplayHeight)
-        .frame(maxWidth: .infinity, minHeight: imageFitMode == .fitWidth ? nil : 0, maxHeight: imageFitMode == .fitWidth ? nil : .infinity)
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear {
-                        viewportWidth = proxy.size.width
-                        viewportSize = proxy.size
-                    }
-                    .onChange(of: proxy.size) { _, newValue in
-                        viewportWidth = newValue.width
-                        viewportSize = newValue
-                    }
+    }
+
+    private var primaryLifecycleContent: some View {
+        sizedPageContent
+            .task(id: imageLoadTaskID) {
+                await performImageLoadTask()
             }
-        }
-        .task(id: imageLoadTaskID) {
-            await performImageLoadTask()
-        }
-        .onDisappear {
-            cancelLiveTranslationForPage()
-            offlineTranslationTask?.cancel()
-            offlineTranslationTask = nil
-            ocrMagnificationTask?.cancel()
-            ocrMagnificationTask = nil
-            if isZoomedIn {
-                onZoomChange(false)
+            .onDisappear {
+                handleLocalImageDisappear()
             }
-        }
-        .onChange(of: isZoomedIn) { _, zoomed in
-            if !zoomed {
-                // 回到 1x：清空平移残留，避免下次放大沿用旧位移。
-                offset = .zero
-                lastOffset = .zero
-                lastScale = 1
+            .onChange(of: isZoomedIn) { _, zoomed in
+                handleZoomStateChange(zoomed)
             }
-            onZoomChange(zoomed)
+            .onChange(of: translateRequestID) { _, _ in
+                startTranslation(force: true)
+            }
+            .onChange(of: ocrMagnifyRequestID) { _, _ in
+                startOCRMagnification()
+            }
+            .onChange(of: isOCRMagnificationVisible) { _, newValue in
+                handleOCRMagnificationVisibilityChange(newValue)
+            }
+            .onChange(of: isAutoTranslationEnabled) { _, newValue in
+                handleAutoTranslationChange(newValue)
+            }
+            .onChange(of: reportsTranslationActivity) { _, isActivePage in
+                handleTranslationActivityEligibilityChange(isActivePage)
+            }
+    }
+
+    private var secondaryLifecycleContent: some View {
+        primaryLifecycleContent
+            .onChange(of: aiTranslationProgressEffectRaw) { _, _ in
+                refreshTranslationProgressEffectIfNeeded()
+            }
+            .onChange(of: aiTranslationBorderProgressEnabled) { _, _ in
+                refreshTranslationProgressEffectIfNeeded()
+            }
+            .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
+                handleOfflineTranslationVisibilityChange(newValue)
+            }
+            .onChange(of: isOCREnabled) { _, newValue in
+                if !newValue {
+                    ocrTextBlocks.removeAll()
+                }
+            }
+            .onChange(of: canTranslate) { _, newValue in
+                if !newValue, !isOfflineTranslationDisplayed {
+                    textBlocks.removeAll()
+                }
+            }
+            .onChange(of: targetLanguage) { _, _ in
+                handleTargetLanguageChange()
+            }
+            .onChange(of: translationSourceLanguageRaw) { _, _ in
+                handleSourceLanguageChange()
+            }
+            .onChange(of: aiTranslationModeRaw) { _, _ in
+                handleTranslationModeChange()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .offlineTranslationPageDidUpdate)) { notification in
+                handleOfflineTranslationPageUpdate(notification)
+            }
+            .onChange(of: ocrRecognitionModeRaw) { _, _ in
+                handleOCRRecognitionModeChange()
+            }
+    }
+
+    private func handleAppleTranslationResult(
+        id: UUID,
+        text: String,
+        generation: UUID,
+        targetLanguage: String
+    ) {
+        guard isAppleBridgeCurrent(
+            generation: generation,
+            pageURL: url,
+            targetLanguage: targetLanguage
+        ) else { return }
+        guard let index = textBlocks.firstIndex(where: { $0.id == id }) else { return }
+        let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        guard let normalized = TranslationOutputValidator.normalizedAcceptableTranslation(
+            text,
+            sourceText: textBlocks[index].text,
+            target: target
+        ) else {
+            return
         }
-        .onChange(of: translateRequestID) { _, _ in
-            startTranslation(force: true)
+        textBlocks[index].translation = normalized
+        textBlocks[index].translationLines = [normalized]
+    }
+
+    private func handleAppleTranslationFinished(
+        seen: Set<UUID>,
+        sourceCode: String,
+        generation: UUID,
+        targetLanguage: String
+    ) {
+        guard isAppleBridgeCurrent(
+            generation: generation,
+            pageURL: url,
+            targetLanguage: targetLanguage
+        ) else { return }
+
+        let cacheKey = AppleTranslationPageCache.key(
+            pageURL: url,
+            sourceLanguage: sourceCode,
+            targetLanguage: targetLanguage,
+            segmentationRevision: AITranslationPageRequest.ocrGeometryRevision,
+            ocrRecognitionMode: OCRRecognitionMode(rawValue: ocrRecognitionModeRaw) ?? .adaptive,
+            usesVisualOCRVerification: ocrVisualVerificationEnabled,
+            isRightToLeft: isRightToLeftReading,
+            minimumTextHeight: ocrMinimumTextHeight,
+            safeAreaInset: ocrSafeAreaInset
+        )
+        let blocksSnapshot = textBlocks
+        let target = TranslationTargetLanguage.migrateLegacyValue(targetLanguage)
+        Task {
+            await AppleTranslationPageCache.shared.store(blocksSnapshot, key: cacheKey)
+            await TranslationContextRegistry.shared.record(
+                scopeID: TranslationContextBuilder.scopeID(
+                    comicID: comicID,
+                    target: target
+                ),
+                pageIndex: pageIndex,
+                blocks: blocksSnapshot
+            )
         }
-        .onChange(of: ocrMagnifyRequestID) { _, _ in
+
+        let missing = appleTranslationRequests
+            .filter { request in
+                guard seen.contains(request.id),
+                      let block = textBlocks.first(where: { $0.id == request.id }) else {
+                    return true
+                }
+                return (block.translation ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+            }
+            .map(\.id)
+        if !missing.isEmpty {
+            cloudFallbackForMissing(
+                missing,
+                generation: generation,
+                pageURL: url,
+                targetLanguage: targetLanguage
+            )
+        }
+    }
+
+    private func handleLocalImageDisappear() {
+        cancelLiveTranslationForPage()
+        offlineTranslationTask?.cancel()
+        offlineTranslationTask = nil
+        ocrMagnificationTask?.cancel()
+        ocrMagnificationTask = nil
+        if isZoomedIn {
+            onZoomChange(false)
+        }
+    }
+
+    private func handleZoomStateChange(_ zoomed: Bool) {
+        if !zoomed {
+            offset = .zero
+            lastOffset = .zero
+            lastScale = 1
+        }
+        onZoomChange(zoomed)
+    }
+
+    private func handleOCRMagnificationVisibilityChange(_ isVisible: Bool) {
+        if isVisible {
             startOCRMagnification()
-        }
-        .onChange(of: isOCRMagnificationVisible) { _, newValue in
-            if newValue {
-                startOCRMagnification()
-            } else {
-                ocrTextBlocks.removeAll()
-            }
-        }
-        .onChange(of: isAutoTranslationEnabled) { _, newValue in
-            if newValue {
-                startTranslation()
-            } else {
-                cancelLiveTranslationForPage()
-            }
-        }
-        .onChange(of: reportsTranslationActivity) { _, isActivePage in
-            handleTranslationActivityEligibilityChange(isActivePage)
-        }
-        .onChange(of: aiTranslationProgressEffectRaw) { _, _ in
-            refreshTranslationProgressEffectIfNeeded()
-        }
-        .onChange(of: aiTranslationBorderProgressEnabled) { _, _ in
-            refreshTranslationProgressEffectIfNeeded()
-        }
-        .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
-            offlineTranslationTask?.cancel()
-            if isOfflineTranslationDisplayed {
-                isOfflineTranslationDisplayed = false
-                textBlocks.removeAll()
-            }
-            guard newValue else {
-                return
-            }
-            Task {
-                let loaded = await loadOfflineTranslationIfAvailable()
-                if !loaded, isAutoTranslationEnabled {
-                    startTranslation()
-                }
-            }
-        }
-        .onChange(of: isOCREnabled) { _, newValue in
-            if !newValue {
-                ocrTextBlocks.removeAll()
-            }
-        }
-        .onChange(of: canTranslate) { _, newValue in
-            if !newValue, !isOfflineTranslationDisplayed {
-                textBlocks.removeAll()
-            }
-        }
-        .onChange(of: targetLanguage) { _, _ in
-            textBlocks.removeAll()
-            isOfflineTranslationDisplayed = false
-            if isAutoTranslationEnabled {
-                Task {
-                    let loaded = await loadOfflineTranslationIfAvailable()
-                    if !loaded { startTranslation() }
-                }
-            }
-        }
-        .onChange(of: translationSourceLanguageRaw) { _, _ in
-            // 修改原文语言后，当前翻译与 Apple 请求一并失效并重译（审查 #4）；
-            // 同时清掉之前自动识别的 stable language，避免旧语言继续污染（审查 #9）
-            textBlocks.removeAll()
-            isOfflineTranslationDisplayed = false
-            appleTranslationRequests.removeAll()
-            clearStableSourceLanguage()
-            if isAutoTranslationEnabled {
-                Task {
-                    let loaded = await loadOfflineTranslationIfAvailable()
-                    if !loaded { startTranslation() }
-                }
-            }
-        }
-        .onChange(of: aiTranslationModeRaw) { _, _ in
-            textBlocks.removeAll()
-            if isAutoTranslationEnabled {
-                startTranslation()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .offlineTranslationPageDidUpdate)) { notification in
-            guard shouldDisplayOfflineTranslation,
-                  let comicID = notification.userInfo?[OfflineTranslationNotificationKey.comicID] as? UUID,
-                  comicID == comic?.id,
-                  let updatedPageIndex = notification.userInfo?[OfflineTranslationNotificationKey.pageIndex] as? Int,
-                  updatedPageIndex == pageIndex else {
-                return
-            }
-            Task {
-                _ = await loadOfflineTranslationIfAvailable()
-            }
-        }
-        .onChange(of: ocrRecognitionModeRaw) { _, _ in
-            recognizedPipelineCacheKey = nil
-            recognizedPipelineCache = nil
+        } else {
             ocrTextBlocks.removeAll()
+        }
+    }
+
+    private func handleAutoTranslationChange(_ enabled: Bool) {
+        if enabled {
+            startTranslation()
+        } else {
+            cancelLiveTranslationForPage()
+        }
+    }
+
+    private func handleOfflineTranslationVisibilityChange(_ isVisible: Bool) {
+        offlineTranslationTask?.cancel()
+        if isOfflineTranslationDisplayed {
+            isOfflineTranslationDisplayed = false
             textBlocks.removeAll()
-            if isOCRMagnificationVisible {
-                startOCRMagnification()
+        }
+        guard isVisible else { return }
+        Task {
+            let loaded = await loadOfflineTranslationIfAvailable()
+            if !loaded, isAutoTranslationEnabled {
+                startTranslation()
             }
+        }
+    }
+
+    private func handleTargetLanguageChange() {
+        textBlocks.removeAll()
+        isOfflineTranslationDisplayed = false
+        guard isAutoTranslationEnabled else { return }
+        Task {
+            let loaded = await loadOfflineTranslationIfAvailable()
+            if !loaded {
+                startTranslation()
+            }
+        }
+    }
+
+    private func handleSourceLanguageChange() {
+        textBlocks.removeAll()
+        isOfflineTranslationDisplayed = false
+        appleTranslationRequests.removeAll()
+        clearStableSourceLanguage()
+        guard isAutoTranslationEnabled else { return }
+        Task {
+            let loaded = await loadOfflineTranslationIfAvailable()
+            if !loaded {
+                startTranslation()
+            }
+        }
+    }
+
+    private func handleTranslationModeChange() {
+        textBlocks.removeAll()
+        if isAutoTranslationEnabled {
+            startTranslation()
+        }
+    }
+
+    private func handleOfflineTranslationPageUpdate(_ notification: Notification) {
+        guard shouldDisplayOfflineTranslation,
+              let comicID = notification.userInfo?[OfflineTranslationNotificationKey.comicID] as? UUID,
+              comicID == comic?.id,
+              let updatedPageIndex = notification.userInfo?[OfflineTranslationNotificationKey.pageIndex] as? Int,
+              updatedPageIndex == pageIndex else {
+            return
+        }
+        Task {
+            _ = await loadOfflineTranslationIfAvailable()
+        }
+    }
+
+    private func handleOCRRecognitionModeChange() {
+        recognizedPipelineCacheKey = nil
+        recognizedPipelineCache = nil
+        ocrTextBlocks.removeAll()
+        textBlocks.removeAll()
+        if isOCRMagnificationVisible {
+            startOCRMagnification()
         }
     }
 
