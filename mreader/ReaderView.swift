@@ -6554,7 +6554,10 @@ struct LocalImageView: View {
             usableBubbleBounds: usableBubbleBounds,
             using: transform
         )
-        let surfaceRect = bubbleSurface?.rect ?? choice.layout.rect
+        let surfaceRect = OCRBubbleLayoutEngine.translationSurfaceRect(
+            reliableBubbleBounds: usableBubbleBounds,
+            measuredLayoutRect: bubbleSurface?.rect ?? choice.layout.rect
+        )
         let surfacePolygon = bubbleSurface?.polygon ?? []
 
         #if DEBUG
