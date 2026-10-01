@@ -684,7 +684,18 @@ nonisolated enum MangaTextSegmenter {
         from blocks: [TextBlock],
         containing textBounds: CGRect
     ) -> (box: CGRect, polygon: [CGPoint])? {
-        OCRCandidateResolver.validatedBubbleGeometry(
+        // Preserve a bubble collectively established by multiple OCR fragments
+        // on the same source line. Otherwise line merging can erase the shared
+        // physical identity before canonical bubble grouping gets a chance to
+        // combine rows.
+        let shared = sharedReliableBubbleRegions(from: blocks)
+        if shared.regions.count == 1,
+           shared.assignedLineIDs.count == blocks.count,
+           let region = shared.regions.first {
+            return (region.rect, region.polygon)
+        }
+
+        return OCRCandidateResolver.validatedBubbleGeometry(
             for: textBounds,
             candidates: blocks
         )
