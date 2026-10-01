@@ -6249,6 +6249,47 @@ struct LocalImageView: View {
         }
     }
 
+    @ViewBuilder
+    private func translationProgressOverlay(in size: CGSize) -> some View {
+        if isTranslating,
+           reportsTranslationActivity,
+           aiTranslationBorderProgressEnabled,
+           TranslationProgressEffect(rawValue: aiTranslationProgressEffectRaw) == .bubblePulse,
+           !translationProgressRegions.isEmpty {
+            let transform = ocrDisplayTransform(in: size)
+            ZStack {
+                ForEach(translationProgressRegions) { region in
+                    let surfaceRect = OCRCoordinateMapper.displayRect(
+                        forNormalizedPageRect: region.normalizedRect,
+                        using: transform
+                    )
+                    let mappedContour = (region.contour?.cgPoints ?? []).map {
+                        OCRCoordinateMapper.displayPoint(
+                            forNormalizedPagePoint: $0,
+                            using: transform
+                        )
+                    }
+                    .filter { $0.x.isFinite && $0.y.isFinite }
+                    .map {
+                        CGPoint(
+                            x: $0.x - surfaceRect.minX,
+                            y: $0.y - surfaceRect.minY
+                        )
+                    }
+
+                    TranslationProgressPulseStroke(
+                        layoutSize: surfaceRect.size,
+                        contour: mappedContour
+                    )
+                    .position(x: surfaceRect.midX, y: surfaceRect.midY)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .transition(.opacity)
+        }
+    }
+
     private var visibleTranslationBlocks: [TextBlock] {
         let candidates = textBlocks.filter {
             ($0.translation ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -7285,6 +7326,85 @@ struct LocalImageView: View {
         }
     }
     
+    private func startTranslationProgressGeometryPreparation(
+        image: UIImage,
+        pageURL: URL,
+        generation: UUID
+    ) {
+        translationProgressGeometryTask?.cancel()
+        translationProgressGeometryTask = nil
+        translationProgressRegions.removeAll()
+
+        guard reportsTranslationActivity,
+              aiTranslationBorderProgressEnabled,
+              TranslationProgressEffect(rawValue: aiTranslationProgressEffectRaw) == .bubblePulse else {
+            return
+        }
+
+        translationProgressGeometryTask = Task {
+            let analysisImage = await OCRPreprocessor.highResolutionImage(
+                from: pageURL,
+                fallback: image
+            ) ?? image
+            guard !Task.isCancelled else { return }
+
+            let analysis = try? await MangaVisionService.shared.analysis(
+                comicID: comicID,
+                pageIndex: pageIndex,
+                pageURL: pageURL,
+                image: analysisImage
+            )
+            guard !Task.isCancelled else { return }
+
+            let regions: [MangaVisionRegion]
+            if let analysis {
+                let balloons = MangaVisionRegionPostProcessor.deduplicated(
+                    analysis.balloons.filter { region in
+                        let area = MangaPageCoordinateSpace.area(region.normalizedRect)
+                        return region.confidence >= 0.30
+                            && area > 0
+                            && area <= 0.20
+                    },
+                    iouThreshold: 0.58,
+                    containmentThreshold: 0.90
+                )
+                if !balloons.isEmpty {
+                    regions = Array(balloons.prefix(24))
+                } else {
+                    // A text-region outline is only a fallback when no physical
+                    // balloon is available. It remains a stroke-only indicator
+                    // and never paints over the source artwork.
+                    let textRegions = MangaVisionRegionPostProcessor.deduplicated(
+                        analysis.texts.filter { region in
+                            let area = MangaPageCoordinateSpace.area(region.normalizedRect)
+                            return region.confidence >= 0.35
+                                && area > 0
+                                && area <= 0.16
+                        },
+                        iouThreshold: 0.58,
+                        containmentThreshold: 0.88
+                    )
+                    regions = Array(textRegions.prefix(24))
+                }
+            } else {
+                regions = []
+            }
+
+            await MainActor.run {
+                guard self.translationGeneration == generation,
+                      self.url == pageURL,
+                      self.isTranslating,
+                      self.reportsTranslationActivity,
+                      self.aiTranslationBorderProgressEnabled,
+                      TranslationProgressEffect(rawValue: self.aiTranslationProgressEffectRaw) == .bubblePulse else {
+                    return
+                }
+                self.translationProgressRegions = regions
+                self.translationProgressGeometryTask = nil
+            }
+        }
+    }
+
     private func beginTranslationActivityIfNeeded() {
         guard reportsTranslationActivity, !didReportTranslationActivity else { return }
         didReportTranslationActivity = true
