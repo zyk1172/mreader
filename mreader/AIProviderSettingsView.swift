@@ -131,9 +131,14 @@ struct AIProviderSettingsView: View {
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(profile.name)
                                             .foregroundStyle(.primary)
-                                        Text(profile.selectedTextModel)
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
+                                        HStack(spacing: 5) {
+                                            Text(profile.interfaceType.displayName)
+                                            Text("·")
+                                            Text(profile.selectedTextModel)
+                                                .fontDesign(.monospaced)
+                                        }
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                         Text(profile.baseURL)
                                             .font(.caption2)
                                             .foregroundStyle(.tertiary)
