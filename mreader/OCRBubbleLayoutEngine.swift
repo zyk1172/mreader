@@ -455,6 +455,16 @@ nonisolated enum OCRBubbleLayoutEngine {
         )
     }
 
+    /// A reliable physical bubble owns the visible surface rectangle even when
+    /// no contour polygon is available. Polygon availability changes only the
+    /// renderer shape, never the surface extent.
+    static func translationSurfaceRect(
+        reliableBubbleBounds: CGRect?,
+        measuredLayoutRect: CGRect
+    ) -> CGRect {
+        reliableBubbleBounds ?? measuredLayoutRect
+    }
+
     /// Collision avoidance may relocate measured-text cards. Their background
     /// must follow the glyph rectangle by exactly the same delta. A detected
     /// physical balloon, however, is page geometry and must stay anchored.
