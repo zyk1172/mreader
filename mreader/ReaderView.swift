@@ -1359,8 +1359,6 @@ struct ReaderView: View {
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
-    @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
-    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.defaultEffect.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @AppStorage(MangaVisionHardCaseFeature.shortcutDefaultsKey) private var showMangaVisionFeedbackShortcut = false
@@ -5825,6 +5823,8 @@ struct LocalImageView: View {
     @State private var appleSourceLanguageCode: String? = nil
     @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
+    @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
+    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.defaultEffect.rawValue
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_debug_stage") private var ocrDebugStageRaw = OCRDebugStage.raw.rawValue
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
@@ -7391,7 +7391,9 @@ struct LocalImageView: View {
 
             // A physical balloon is preferred. Text regions are a stroke-only
             // fallback when the model cannot provide balloon geometry.
-            let regions = analysis.map(TranslationProgressRegionPolicy.regions(from:)) ?? []
+            let regions = analysis.map {
+                TranslationProgressRegionPolicy.regions(from: $0)
+            } ?? []
 
             await MainActor.run {
                 guard self.translationGeneration == generation,
