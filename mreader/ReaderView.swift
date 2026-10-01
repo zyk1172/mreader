@@ -898,21 +898,30 @@ private final class ReaderImageCache {
         guard epoch == generation,
               var consumers = foregroundConsumers[key] else { return }
         consumers.remove(token)
+        var cancelledInFlightTask = false
         if consumers.isEmpty {
             foregroundConsumers[key] = nil
             if cancelIfUnneeded {
                 if preloadKeys.contains(key) {
                     if !desiredPreloadKeys.contains(key) {
                         inFlightLoads[key]?.cancel()
+                        cancelledInFlightTask = true
                     }
                 } else {
                     inFlightLoads[key]?.cancel()
+                    cancelledInFlightTask = true
                 }
             }
         } else {
             foregroundConsumers[key] = consumers
         }
-        drainPreloadQueue()
+
+        // A cancelled task may already be inside synchronous ImageIO and still own a decode
+        // permit until that call returns. Do not fill the second permit with neighbour work
+        // here; the task owner/preload completion drains the queue after capacity is real.
+        if !cancelledInFlightTask {
+            drainPreloadQueue()
+        }
     }
 
     private func awaitForegroundTask(
