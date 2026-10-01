@@ -1321,6 +1321,8 @@ struct ReaderView: View {
     @AppStorage("translation_target_language") private var translationTargetLanguage = TranslationTargetLanguage.simplifiedChinese.rawValue
     @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
+    @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
+    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.bubblePulse.rawValue
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
@@ -5776,6 +5778,8 @@ struct LocalImageView: View {
     @State private var isRecognizingOCR = false
     @State private var translationErrorMessage: String?
     @State private var translationTask: Task<Void, Never>?
+    @State private var translationProgressGeometryTask: Task<Void, Never>?
+    @State private var translationProgressRegions: [MangaVisionRegion] = []
     @State private var offlineTranslationTask: Task<OfflineTranslationOverlayResult, Never>?
     @State private var isOfflineTranslationDisplayed = false
     @State private var translationGeneration = UUID()
@@ -5828,6 +5832,7 @@ struct LocalImageView: View {
                         GeometryReader { geo in
                             ZStack {
                                 translationOverlay(in: geo.size)
+                                translationProgressOverlay(in: geo.size)
                                 ocrMagnificationOverlay(in: geo.size)
                                 ocrDebugOverlay(in: geo.size)
 #if DEBUG
@@ -6046,7 +6051,36 @@ struct LocalImageView: View {
         .onChange(of: reportsTranslationActivity) { _, isActivePage in
             if !isActivePage {
                 cancelLiveTranslationForPage()
+            } else if isTranslating, let image = uiImage {
+                startTranslationProgressGeometryPreparation(
+                    image: image,
+                    pageURL: url,
+                    generation: translationGeneration
+                )
             }
+        }
+        .onChange(of: aiTranslationProgressEffectRaw) { _, _ in
+            guard isTranslating, let image = uiImage else { return }
+            startTranslationProgressGeometryPreparation(
+                image: image,
+                pageURL: url,
+                generation: translationGeneration
+            )
+        }
+        .onChange(of: aiTranslationBorderProgressEnabled) { _, _ in
+            guard isTranslating, let image = uiImage else {
+                if !aiTranslationBorderProgressEnabled {
+                    translationProgressGeometryTask?.cancel()
+                    translationProgressGeometryTask = nil
+                    translationProgressRegions.removeAll()
+                }
+                return
+            }
+            startTranslationProgressGeometryPreparation(
+                image: image,
+                pageURL: url,
+                generation: translationGeneration
+            )
         }
         .onChange(of: shouldDisplayOfflineTranslation) { _, newValue in
             offlineTranslationTask?.cancel()
@@ -7271,6 +7305,9 @@ struct LocalImageView: View {
     private func cancelLiveTranslationForPage() {
         translationTask?.cancel()
         translationTask = nil
+        translationProgressGeometryTask?.cancel()
+        translationProgressGeometryTask = nil
+        translationProgressRegions.removeAll()
         translationGeneration = UUID()
 
         appleTranslationGeneration = UUID()
@@ -7310,6 +7347,11 @@ struct LocalImageView: View {
             isTranslating = true
         }
         beginTranslationActivityIfNeeded()
+        startTranslationProgressGeometryPreparation(
+            image: image,
+            pageURL: pageURL,
+            generation: generation
+        )
 
         translationTask = Task {
             do {
@@ -7354,6 +7396,9 @@ struct LocalImageView: View {
                 if self.isTranslating {
                     self.isTranslating = false
                 }
+                self.translationProgressGeometryTask?.cancel()
+                self.translationProgressGeometryTask = nil
+                self.translationProgressRegions.removeAll()
                 self.endTranslationActivityIfNeeded()
                 self.translationTask = nil
             }
