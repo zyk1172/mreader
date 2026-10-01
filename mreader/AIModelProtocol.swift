@@ -18,7 +18,7 @@ nonisolated enum AIAPIProtocol: String, Codable, CaseIterable, Sendable {
     }
 }
 
-nonisolated enum AIProviderInterfaceType: String, Codable, CaseIterable, Sendable {
+nonisolated enum AIProviderInterfaceType: String, Codable, CaseIterable, Hashable, Sendable {
     case compatible
     case native
 
