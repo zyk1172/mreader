@@ -6,6 +6,12 @@ nonisolated enum ReaderPrefetchPolicy {
     static let cacheForwardCount = 4
     static let cacheBackwardCount = 1
 
+    /// Continuous scrolling updates the visible page much more frequently than paged modes.
+    /// Keep a short leading-edge debounce so rapid page changes coalesce, but do not delay
+    /// neighbour decode long enough for the user to reach the next strip first.
+    static let continuousDecodedImagePreloadDelay: TimeInterval = 0.18
+    static let pagedDecodedImagePreloadDelay: TimeInterval = 0.15
+
     static func pageIndices(
         currentPageIndex: Int,
         pageCount: Int,
