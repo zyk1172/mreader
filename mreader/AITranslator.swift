@@ -299,21 +299,7 @@ nonisolated enum AITranslationRequestError: LocalizedError, Sendable {
             return true
         case .server(_, _, let message),
              .serverWithRetryAfter(_, _, let message, _):
-            let normalized = message.lowercased()
-            let mentionsFormat = normalized.contains("response_format")
-                || normalized.contains("text.format")
-                || normalized.contains("json_schema")
-                || normalized.contains("json schema")
-                || normalized.contains("structured output")
-            let unsupported = normalized.contains("unsupported")
-                || normalized.contains("not support")
-                || normalized.contains("not allowed")
-                || normalized.contains("unknown parameter")
-                || normalized.contains("invalid parameter")
-                || normalized.contains("invalid schema")
-                || normalized.contains("schema validation")
-                || normalized.contains("invalid response format")
-            return mentionsFormat && unsupported
+            return AIResponseFormatCompatibility.isUnsupportedMessage(message)
         default: return false
         }
     }
@@ -2537,20 +2523,7 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
     }
 
     private static func isUnsupportedResponseFormat(_ error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
-        let mentionsFormat = message.contains("response_format")
-            || message.contains("json_schema")
-            || message.contains("json schema")
-            || message.contains("structured output")
-        let unsupported = message.contains("unsupported")
-            || message.contains("not support")
-            || message.contains("not allowed")
-            || message.contains("unknown parameter")
-            || message.contains("invalid parameter")
-            || message.contains("invalid schema")
-            || message.contains("schema validation")
-            || message.contains("invalid response format")
-        return mentionsFormat && unsupported
+        AIResponseFormatCompatibility.isUnsupported(error)
     }
 
     private static func transportResponseFormat(
