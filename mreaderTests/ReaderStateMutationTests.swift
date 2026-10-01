@@ -162,17 +162,20 @@ final class ReaderStateMutationTests: XCTestCase {
 
     func testReaderPermitPoolCancellationDoesNotConsumeCapacity() async {
         let pool = ReaderAsyncPermitPool(maximumConcurrentPermits: 1)
-        XCTAssertTrue(await pool.acquire())
+        let firstPermit = await pool.acquire()
+        XCTAssertTrue(firstPermit)
 
         let cancelledWaiter = Task {
             await pool.acquire()
         }
         await Task.yield()
         cancelledWaiter.cancel()
-        XCTAssertFalse(await cancelledWaiter.value)
+        let cancelledResult = await cancelledWaiter.value
+        XCTAssertFalse(cancelledResult)
 
         await pool.release()
-        XCTAssertTrue(await pool.acquire())
+        let nextPermit = await pool.acquire()
+        XCTAssertTrue(nextPermit)
         await pool.release()
     }
 
