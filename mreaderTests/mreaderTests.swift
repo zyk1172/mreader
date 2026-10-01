@@ -3131,6 +3131,7 @@ struct mreaderTests {
         #expect(decoded.isICloudMetadataSyncEnabled == true)
         #expect(decoded.activeAIProviderID == profile.id)
         #expect(provider.profile.id == profile.id)
+        #expect(provider.profile.interfaceType == .compatible)
         #expect(provider.profile.models == ["ocr-model", "vision-model", "shared-model"])
         #expect(provider.profile.selectedTextModel == "ocr-model")
         #expect(provider.profile.selectedVisionModel == "vision-model")
