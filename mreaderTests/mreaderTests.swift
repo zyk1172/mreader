@@ -558,7 +558,7 @@ struct mreaderTests {
         let result = try await AITranslator.translatePage(
             blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
             apiKey: "secret",
-            baseURL: "https://api.deepseek.example/v1",
+            baseURL: "https://api.example.test/v1",
             model: model,
             target: .simplifiedChinese,
             session: aiTransportRecordingSession(),
@@ -580,7 +580,7 @@ struct mreaderTests {
         _ = try await AITranslator.translatePage(
             blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
             apiKey: "secret",
-            baseURL: "https://api.deepseek.example/v1",
+            baseURL: "https://api.example.test/v1",
             model: model,
             target: .simplifiedChinese,
             session: aiTransportRecordingSession(),
