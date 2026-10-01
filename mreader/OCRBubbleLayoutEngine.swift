@@ -423,6 +423,54 @@ nonisolated enum OCRBubbleLayoutEngine {
             : clamped(capped, to: safeAllowed, margin: 0)
     }
 
+    /// Resolve the final text layout bounds without applying fallback-card caps
+    /// to a physical balloon that has already passed reliability validation.
+    ///
+    /// Reliable balloons may use a contour-aware safe region for typography, but
+    /// they must never be shrunk again by the generic measured-card limits.
+    static func resolvedTranslationLayoutBounds(
+        sourceRect: CGRect,
+        resolvedSafeRegion: CGRect?,
+        reliableBubbleBounds: CGRect?,
+        fallbackBounds: CGRect,
+        imageBounds: CGRect
+    ) -> CGRect {
+        if let reliableBubbleBounds {
+            let candidate = (resolvedSafeRegion ?? reliableBubbleBounds)
+                .standardized
+                .intersection(imageBounds.standardized)
+            if !candidate.isNull, candidate.width > 0, candidate.height > 0 {
+                return candidate
+            }
+            let clippedBubble = reliableBubbleBounds.standardized.intersection(imageBounds.standardized)
+            if !clippedBubble.isNull, clippedBubble.width > 0, clippedBubble.height > 0 {
+                return clippedBubble
+            }
+        }
+
+        return boundedTranslationBounds(
+            around: sourceRect,
+            within: fallbackBounds,
+            imageBounds: imageBounds
+        )
+    }
+
+    /// Collision avoidance may relocate measured-text cards. Their background
+    /// must follow the glyph rectangle by exactly the same delta. A detected
+    /// physical balloon, however, is page geometry and must stay anchored.
+    static func presentationSurfaceRect(
+        surfaceStyle: TranslationSurfaceStyle,
+        originalSurfaceRect: CGRect,
+        originalTextRect: CGRect,
+        presentationTextRect: CGRect
+    ) -> CGRect {
+        guard surfaceStyle == .measuredText else { return originalSurfaceRect }
+        return originalSurfaceRect.offsetBy(
+            dx: presentationTextRect.minX - originalTextRect.minX,
+            dy: presentationTextRect.minY - originalTextRect.minY
+        )
+    }
+
     /// Standalone translations may grow only by a small, finite padding around
     /// the original textBox. A long translation therefore causes the layout
     /// engine to reduce the font size instead of creating a large card over the
