@@ -916,7 +916,7 @@ private final class ReaderImageCache {
     }
 
     private func awaitForegroundTask(
-        _ task: Task<UIImage?, Never>,
+        _ imageTask: Task<UIImage?, Never>,
         key: String,
         epoch: UUID
     ) async -> UIImage? {
@@ -930,7 +930,7 @@ private final class ReaderImageCache {
             )
         }
         let image = await withTaskCancellationHandler {
-            await task.value
+            await imageTask.value
         } onCancel: {
             Task { @MainActor in
                 ReaderImageCache.shared.finishForegroundConsumer(
