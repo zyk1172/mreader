@@ -7375,17 +7375,15 @@ struct LocalImageView: View {
         }
 
         translationProgressGeometryTask = Task {
-            let analysisImage = await OCRPreprocessor.highResolutionImage(
-                from: pageURL,
-                fallback: image
-            ) ?? image
+            // The indicator is decorative geometry, not OCR input. Reuse the
+            // already-decoded reader image instead of triggering a second
+            // high-resolution decode just to draw a thin progress outline.
             guard !Task.isCancelled else { return }
-
             let analysis = try? await MangaVisionService.shared.analysis(
                 comicID: comicID,
                 pageIndex: pageIndex,
                 pageURL: pageURL,
-                image: analysisImage
+                image: image
             )
             guard !Task.isCancelled else { return }
 
