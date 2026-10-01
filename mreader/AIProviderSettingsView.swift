@@ -291,6 +291,7 @@ private struct AIProviderEditorView: View {
     @State private var createdAt: Date
     @State private var name: String
     @State private var baseURL: String
+    @State private var interfaceType: AIProviderInterfaceType
     @State private var apiKey: String
     @State private var modelsText: String
     @State private var modelDescriptors: [String: AIModelDescriptor]
@@ -318,6 +319,7 @@ private struct AIProviderEditorView: View {
         _createdAt = State(initialValue: profile?.createdAt ?? Date())
         _name = State(initialValue: profile?.name ?? "")
         _baseURL = State(initialValue: profile?.baseURL ?? "https://api.openai.com/v1")
+        _interfaceType = State(initialValue: profile?.interfaceType ?? .compatible)
         _apiKey = State(initialValue: profile.map { AIProviderStore.shared.apiKey(for: $0.id) } ?? "")
         _modelsText = State(initialValue: profile?.models.joined(separator: "\n") ?? "gpt-4o-mini")
         _modelDescriptors = State(
@@ -343,6 +345,14 @@ private struct AIProviderEditorView: View {
         Form {
             Section("aiProvider.connection".localized) {
                 TextField("aiProvider.name".localized, text: $name)
+                Picker("接口类型", selection: $interfaceType) {
+                    ForEach(AIProviderInterfaceType.allCases, id: \.self) { type in
+                        Text(type.displayName).tag(type)
+                    }
+                }
+                Text(interfaceType.detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 TextField("settings.baseUrl".localized, text: $baseURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
@@ -449,6 +459,7 @@ private struct AIProviderEditorView: View {
             NavigationStack {
                 AIModelDescriptorEditorView(
                     modelID: item.id,
+                    interfaceType: interfaceType,
                     descriptor: descriptor(for: item.id)
                 ) { updatedDescriptor in
                     let repairedVisionModel = AIProviderModelSelectionPolicy.repairedVisionModel(
@@ -482,6 +493,7 @@ private struct AIProviderEditorView: View {
             id: profileID,
             name: name,
             baseURL: baseURL,
+            interfaceType: interfaceType,
             modelsText: modelsText,
             selectedTextModel: selectedTextModel,
             selectedVisionModel: selectedVisionModel,
@@ -523,8 +535,9 @@ private struct AIProviderEditorView: View {
             ? (normalizedModels.contains(selectedTextModel) ? selectedTextModel : (normalizedModels.first ?? ""))
             : (visionModels.contains(selectedVisionModel) ? selectedVisionModel : (visionModels.first ?? ""))
         guard !model.isEmpty else { return }
-        let modelDescriptor = descriptor(for: model)
-        guard kind != .vision || modelDescriptor.supportsVision != false else {
+        let configuredDescriptor = descriptor(for: model)
+        let modelDescriptor = transportDescriptor(for: model)
+        guard kind != .vision || configuredDescriptor.supportsVision != false else {
             testFailed = true
             testMessage = "当前模型明确不支持视觉输入。"
             return
@@ -587,10 +600,10 @@ private struct AIProviderEditorView: View {
                 let passed: Bool
                 if kind == .vision {
                     passed = AIVisionConnectionProbe.response(content, contains: challenge)
-                    if passed, modelDescriptor.supportsVision != true {
+                    if passed, configuredDescriptor.supportsVision != true {
                         modelDescriptors[model] = AIModelDescriptor(
-                            id: modelDescriptor.id,
-                            apiProtocol: modelDescriptor.apiProtocol,
+                            id: configuredDescriptor.id,
+                            apiProtocol: configuredDescriptor.apiProtocol,
                             supportsVision: true
                         )
                     }
@@ -649,6 +662,15 @@ private struct AIProviderEditorView: View {
         modelDescriptors[model] ?? AIModelProtocolCatalog.descriptor(for: model)
     }
 
+    private func transportDescriptor(for model: String) -> AIModelDescriptor {
+        let configured = descriptor(for: model)
+        return AIModelDescriptor(
+            id: configured.id,
+            apiProtocol: interfaceType.effectiveProtocol(for: configured.apiProtocol),
+            supportsVision: configured.supportsVision
+        )
+    }
+
     @ViewBuilder
     private func modelSummaryRow(for model: String) -> some View {
         let modelDescriptor = descriptor(for: model)
@@ -659,7 +681,9 @@ private struct AIProviderEditorView: View {
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    Text(modelDescriptor.apiProtocol.displayName)
+                    Text(interfaceType == .compatible
+                         ? "兼容 · Chat Completions"
+                         : "原生 · \(modelDescriptor.apiProtocol.displayName)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -698,6 +722,7 @@ private struct AIModelDescriptorEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     let modelID: String
+    let interfaceType: AIProviderInterfaceType
     let onSave: (AIModelDescriptor) -> Void
 
     @State private var apiProtocol: AIAPIProtocol
@@ -705,10 +730,12 @@ private struct AIModelDescriptorEditorView: View {
 
     init(
         modelID: String,
+        interfaceType: AIProviderInterfaceType,
         descriptor: AIModelDescriptor,
         onSave: @escaping (AIModelDescriptor) -> Void
     ) {
         self.modelID = modelID
+        self.interfaceType = interfaceType
         self.onSave = onSave
         _apiProtocol = State(initialValue: descriptor.apiProtocol)
         _visionCapability = State(initialValue: AIModelVisionCapability(
@@ -719,10 +746,17 @@ private struct AIModelDescriptorEditorView: View {
     var body: some View {
         Form {
             Section {
-                Picker("API 协议", selection: $apiProtocol) {
-                    ForEach(AIAPIProtocol.allCases, id: \.self) { value in
-                        Text(value.displayName).tag(value)
+                if interfaceType == .native {
+                    Picker("API 协议", selection: $apiProtocol) {
+                        ForEach(AIAPIProtocol.allCases, id: \.self) { value in
+                            Text(value.displayName).tag(value)
+                        }
                     }
+                } else {
+                    LabeledContent("API 协议", value: "Chat Completions")
+                    Text("兼容接口固定使用 OpenAI Chat Completions 协议；切换回原生接口时，会恢复这里保存的原生协议设置。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             } header: {
                 Text("API 协议")
