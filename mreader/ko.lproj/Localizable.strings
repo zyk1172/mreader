@@ -112,7 +112,10 @@
 "ocr.appleTranslation" = "Apple 原生翻译";
 "error.libraryLoad" = "라이브러리 데이터 문제";
 "ocr.appleTranslationFooter" = "일반 대사는 Apple 기기 내 저지연 번역을 사용합니다. 사용할 수 없거나 미번역 항목이 남으면 클라우드 AI로 자동 폴백합니다.";
-"ocr.borderProgress" = "AI 번역 테두리 진행률";
+"ocr.borderProgress" = "번역 진행 효과 표시";
+"ocr.translationProgressEffect" = "진행 효과";
+"ocr.translationProgressEffect.bubblePulse" = "말풍선 호흡 윤곽선";
+"ocr.translationProgressEffect.marquee" = "클래식 마키 테두리";
 "ocr.colorStyle" = "번역 텍스트 색상";
 "ocr.colorStyle.contrast" = "고대비";
 "ocr.colorStyle.coolWarm" = "쿨·웜";
