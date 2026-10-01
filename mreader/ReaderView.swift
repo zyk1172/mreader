@@ -7983,6 +7983,56 @@ nonisolated private struct TranslationBubbleContourShape: Shape {
     }
 }
 
+private struct TranslationProgressPulseStroke: View {
+    let layoutSize: CGSize
+    let contour: [CGPoint]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                stroke(opacity: 0.24, lineWidth: 1.1)
+            } else {
+                TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { context in
+                    let duration: TimeInterval = 1.9
+                    let phase = context.date.timeIntervalSinceReferenceDate
+                        .truncatingRemainder(dividingBy: duration) / duration
+                    let pulse = phase <= 0.5 ? phase * 2 : (1 - phase) * 2
+                    stroke(
+                        opacity: 0.16 + pulse * 0.18,
+                        lineWidth: 1.0 + CGFloat(pulse) * 0.25
+                    )
+                }
+            }
+        }
+        .frame(width: layoutSize.width, height: layoutSize.height)
+    }
+
+    @ViewBuilder
+    private func stroke(opacity: Double, lineWidth: CGFloat) -> some View {
+        if contour.count >= 3 {
+            TranslationBubbleContourShape(points: contour)
+                .stroke(
+                    Color.secondary.opacity(opacity),
+                    style: StrokeStyle(
+                        lineWidth: lineWidth,
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+        } else {
+            RoundedRectangle(
+                cornerRadius: max(min(layoutSize.width, layoutSize.height) * 0.12, 4),
+                style: .continuous
+            )
+            .stroke(
+                Color.secondary.opacity(opacity),
+                lineWidth: lineWidth
+            )
+        }
+    }
+}
+
 private struct TranslationSurfaceRenderer: View {
     let layoutSize: CGSize
     let contour: [CGPoint]
