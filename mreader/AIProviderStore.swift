@@ -5,6 +5,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
     var id: UUID
     var name: String
     var baseURL: String
+    var interfaceType: AIProviderInterfaceType
     var models: [String]
     var modelDescriptors: [AIModelDescriptor]
     /// 纯文本翻译模型：OCR 识别后的整页文字翻译、Apple 翻译云端兜底。
@@ -18,6 +19,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         case id
         case name
         case baseURL
+        case interfaceType
         case models
         case modelDescriptors
         case selectedModel
@@ -31,6 +33,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         id: UUID,
         name: String,
         baseURL: String,
+        interfaceType: AIProviderInterfaceType = .compatible,
         models: [String],
         selectedTextModel: String,
         selectedVisionModel: String,
@@ -41,6 +44,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         self.id = id
         self.name = name
         self.baseURL = baseURL
+        self.interfaceType = interfaceType
         self.models = models
         self.modelDescriptors = AIModelProtocolCatalog.descriptors(
             for: models,
@@ -58,6 +62,13 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         baseURL = try container.decode(String.self, forKey: .baseURL)
+        // Profiles saved before interfaceType existed may already contain
+        // Responses/Anthropic model descriptors. Preserve that behavior by
+        // treating them as native instead of silently forcing Chat Completions.
+        interfaceType = try container.decodeIfPresent(
+            AIProviderInterfaceType.self,
+            forKey: .interfaceType
+        ) ?? .native
         models = try container.decode([String].self, forKey: .models)
         if let storedDescriptors = try container.decodeIfPresent(
             [AIModelDescriptor].self,
@@ -85,6 +96,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
         try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(interfaceType, forKey: .interfaceType)
         try container.encode(models, forKey: .models)
         try container.encode(modelDescriptors, forKey: .modelDescriptors)
         try container.encode(selectedTextModel, forKey: .selectedTextModel)
@@ -97,6 +109,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         id: UUID = UUID(),
         name: String,
         baseURL: String,
+        interfaceType: AIProviderInterfaceType = .compatible,
         modelsText: String,
         selectedTextModel: String,
         selectedVisionModel: String,
@@ -115,6 +128,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
                 ? "默认接口"
                 : name.trimmingCharacters(in: .whitespacesAndNewlines),
             baseURL: normalizedBaseURL(baseURL),
+            interfaceType: interfaceType,
             models: models,
             selectedTextModel: pick(selectedTextModel),
             selectedVisionModel: pick(selectedVisionModel),
@@ -127,6 +141,19 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
     func descriptor(for modelID: String) -> AIModelDescriptor {
         modelDescriptors.first(where: { $0.id == modelID })
             ?? AIModelProtocolCatalog.descriptor(for: modelID)
+    }
+
+    /// Descriptor actually used on the wire. Compatible providers deliberately
+    /// speak OpenAI Chat Completions even when a model name happens to match a
+    /// native-protocol catalog entry; native providers keep the configured
+    /// per-model protocol.
+    func requestDescriptor(for modelID: String) -> AIModelDescriptor {
+        let configured = descriptor(for: modelID)
+        return AIModelDescriptor(
+            id: configured.id,
+            apiProtocol: interfaceType.effectiveProtocol(for: configured.apiProtocol),
+            supportsVision: configured.supportsVision
+        )
     }
 
     static func fromLegacySettings(
@@ -143,6 +170,7 @@ nonisolated struct AIProviderProfile: Identifiable, Codable, Hashable, Sendable 
         return normalized(
             name: apiDisplayName,
             baseURL: baseURL,
+            interfaceType: .compatible,
             modelsText: combined,
             selectedTextModel: primary,
             selectedVisionModel: primary,
@@ -171,6 +199,7 @@ nonisolated struct AIActiveConfiguration: Sendable, Equatable {
     let profileID: UUID
     let profileName: String
     let baseURL: String
+    let interfaceType: AIProviderInterfaceType
     let apiKey: String
     /// 文本翻译模型（OCR 后文字翻译 / Apple 云端兜底）。
     let textModel: String
@@ -183,6 +212,7 @@ nonisolated struct AIActiveConfiguration: Sendable, Equatable {
         profileID: UUID,
         profileName: String,
         baseURL: String,
+        interfaceType: AIProviderInterfaceType = .native,
         apiKey: String,
         textModel: String,
         visionModel: String,
@@ -192,6 +222,7 @@ nonisolated struct AIActiveConfiguration: Sendable, Equatable {
         self.profileID = profileID
         self.profileName = profileName
         self.baseURL = baseURL
+        self.interfaceType = interfaceType
         self.apiKey = apiKey
         self.textModel = textModel
         self.visionModel = visionModel
@@ -334,11 +365,12 @@ final class AIProviderStore {
             profileID: profile.id,
             profileName: profile.name,
             baseURL: profile.baseURL,
+            interfaceType: profile.interfaceType,
             apiKey: apiKey,
             textModel: textModel,
             visionModel: visionModel,
-            textModelDescriptor: profile.descriptor(for: textModel),
-            visionModelDescriptor: profile.descriptor(for: visionModel)
+            textModelDescriptor: profile.requestDescriptor(for: textModel),
+            visionModelDescriptor: profile.requestDescriptor(for: visionModel)
         )
     }
 

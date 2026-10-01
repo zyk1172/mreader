@@ -74,6 +74,58 @@ struct mreaderTests {
         #expect(roundTripped.modelDescriptors.first?.supportsVision == true)
     }
 
+    @Test func aiProviderInterfaceTypeSeparatesCompatibleAndNativeProtocols() {
+        let descriptor = AIModelDescriptor(
+            id: "minimax-m3",
+            apiProtocol: .anthropicMessages,
+            supportsVision: true
+        )
+        let compatible = AIProviderProfile.normalized(
+            name: "兼容中转",
+            baseURL: "https://relay.example/v1",
+            interfaceType: .compatible,
+            modelsText: "minimax-m3",
+            selectedTextModel: "minimax-m3",
+            selectedVisionModel: "minimax-m3",
+            modelDescriptors: [descriptor]
+        )
+        let native = AIProviderProfile.normalized(
+            name: "原生接口",
+            baseURL: "https://native.example/v1",
+            interfaceType: .native,
+            modelsText: "minimax-m3",
+            selectedTextModel: "minimax-m3",
+            selectedVisionModel: "minimax-m3",
+            modelDescriptors: [descriptor]
+        )
+
+        #expect(compatible.interfaceType == .compatible)
+        #expect(compatible.requestDescriptor(for: "minimax-m3").apiProtocol == .openAIChatCompletions)
+        #expect(native.requestDescriptor(for: "minimax-m3").apiProtocol == .anthropicMessages)
+    }
+
+    @Test func aiProviderProfileWithoutInterfaceTypePreservesLegacyNativeProtocol() throws {
+        let profile = AIProviderProfile.normalized(
+            name: "旧配置",
+            baseURL: "https://api.example/v1",
+            interfaceType: .native,
+            modelsText: "native-model",
+            selectedTextModel: "native-model",
+            selectedVisionModel: "native-model",
+            modelDescriptors: [
+                AIModelDescriptor(id: "native-model", apiProtocol: .openAIResponses)
+            ]
+        )
+        let encoded = try JSONEncoder().encode(profile)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "interfaceType")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(AIProviderProfile.self, from: legacyData)
+        #expect(decoded.interfaceType == .native)
+        #expect(decoded.requestDescriptor(for: "native-model").apiProtocol == .openAIResponses)
+    }
+
     @Test func aiEndpointResolverReplacesEveryKnownEndpointFamily() {
         let base = "https://api.example.test/v1"
         #expect(AIEndpointResolver.endpointURL(for: .openAIChatCompletions, from: base)?.absoluteString == "https://api.example.test/v1/chat/completions")
@@ -491,6 +543,63 @@ struct mreaderTests {
         )
         #expect(result.translation(for: "b0")?.translation == "事故")
         #expect(AITransportRecordingURLProtocol.requestCount() == 2)
+    }
+
+    @Test func pageTranslationFallsBackWhenDeepSeekSaysResponseFormatUnavailable() async throws {
+        let model = "deepseek-unavailable-\(UUID().uuidString)"
+        let unavailable = Data(#"{"error":{"message":"This response_format type is unavailable now"}}"#.utf8)
+        let valid = Data(#"{"output_text":"{\"items\":[{\"id\":\"b0\",\"translation\":\"事故\",\"translationLines\":[] }] }"}"#.utf8)
+        AITransportRecordingURLProtocol.configure(sequence: [
+            (400, unavailable),
+            (400, unavailable),
+            (200, valid)
+        ])
+
+        let result = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+
+        #expect(result.translation(for: "b0")?.translation == "事故")
+        #expect(AITransportRecordingURLProtocol.requestCount() == 3)
+        let finalRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let finalData = try #require(finalRequest.httpBody)
+        let finalBody = try #require(
+            JSONSerialization.jsonObject(with: finalData) as? [String: Any]
+        )
+        #expect(finalBody["response_format"] == nil)
+
+        // The prompt-only capability must be cached for this provider/model so
+        // later pages do not pay the same two HTTP 400 round trips again.
+        AITransportRecordingURLProtocol.configure(responseData: valid)
+        _ = try await AITranslator.translatePage(
+            blocks: [TextBlock(text: "じこ", boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1))],
+            apiKey: "secret",
+            baseURL: "https://api.example.test/v1",
+            model: model,
+            target: .simplifiedChinese,
+            session: aiTransportRecordingSession(),
+            requestObserver: AITransportRecordingURLProtocol.captureRequest
+        )
+        #expect(AITransportRecordingURLProtocol.requestCount() == 1)
+        let cachedRequest = try #require(AITransportRecordingURLProtocol.lastRequest())
+        let cachedData = try #require(cachedRequest.httpBody)
+        let cachedBody = try #require(
+            JSONSerialization.jsonObject(with: cachedData) as? [String: Any]
+        )
+        #expect(cachedBody["response_format"] == nil)
+
+        let error = AITranslationRequestError.server(
+            model: model,
+            statusCode: 400,
+            message: "This response_format type is unavailable now"
+        )
+        #expect(error.isFormatFailure)
     }
 
     @Test func pageHTTP200ProseDowngradesSchemaAndCachesJSONObjectMode() async throws {
@@ -3024,6 +3133,7 @@ struct mreaderTests {
         #expect(decoded.isICloudMetadataSyncEnabled == true)
         #expect(decoded.activeAIProviderID == profile.id)
         #expect(provider.profile.id == profile.id)
+        #expect(provider.profile.interfaceType == .compatible)
         #expect(provider.profile.models == ["ocr-model", "vision-model", "shared-model"])
         #expect(provider.profile.selectedTextModel == "ocr-model")
         #expect(provider.profile.selectedVisionModel == "vision-model")
