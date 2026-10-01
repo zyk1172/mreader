@@ -159,6 +159,69 @@ struct TranslationSurfacePolicyTests {
         )
     }
 
+    @Test func reliableBubbleLayoutBoundsAreNotShrunkByFallbackCardCaps() {
+        let sourceRect = CGRect(x: 155, y: 300, width: 50, height: 30)
+        let bubble = CGRect(x: 95, y: 210, width: 200, height: 260)
+        let fallback = CGRect(x: 125, y: 270, width: 110, height: 90)
+
+        let resolved = OCRBubbleLayoutEngine.resolvedTranslationLayoutBounds(
+            sourceRect: sourceRect,
+            resolvedSafeRegion: nil,
+            reliableBubbleBounds: bubble,
+            fallbackBounds: fallback,
+            imageBounds: Self.imageBounds
+        )
+
+        #expect(resolved == bubble)
+        #expect(
+            resolved.width * resolved.height
+                > Self.imageBounds.width * Self.imageBounds.height
+                    * TranslationLayoutMetrics.maximumCardAreaFraction
+        )
+    }
+
+    @Test func reliableBubbleRectWinsEvenWithoutContourGeometry() {
+        let bubble = CGRect(x: 92, y: 180, width: 180, height: 130)
+        let measuredTextRect = CGRect(x: 130, y: 220, width: 90, height: 48)
+
+        let surface = OCRBubbleLayoutEngine.translationSurfaceRect(
+            reliableBubbleBounds: bubble,
+            measuredLayoutRect: measuredTextRect
+        )
+
+        #expect(surface == bubble)
+    }
+
+    @Test func measuredCardSurfaceMovesWithCollisionAdjustedText() {
+        let originalText = CGRect(x: 100, y: 200, width: 80, height: 44)
+        let originalSurface = CGRect(x: 96, y: 196, width: 88, height: 52)
+        let movedText = originalText.offsetBy(dx: 34, dy: -27)
+
+        let movedSurface = OCRBubbleLayoutEngine.presentationSurfaceRect(
+            surfaceStyle: .measuredText,
+            originalSurfaceRect: originalSurface,
+            originalTextRect: originalText,
+            presentationTextRect: movedText
+        )
+
+        #expect(movedSurface == originalSurface.offsetBy(dx: 34, dy: -27))
+    }
+
+    @Test func physicalBubbleSurfaceNeverMovesWithCollisionAdjustedText() {
+        let originalText = CGRect(x: 100, y: 200, width: 80, height: 44)
+        let bubble = CGRect(x: 70, y: 160, width: 150, height: 120)
+        let movedText = originalText.offsetBy(dx: 45, dy: 60)
+
+        let surface = OCRBubbleLayoutEngine.presentationSurfaceRect(
+            surfaceStyle: .detectedBubble,
+            originalSurfaceRect: bubble,
+            originalTextRect: originalText,
+            presentationTextRect: movedText
+        )
+
+        #expect(surface == bubble)
+    }
+
     @Test func noBubblePathologicalTallOCRDoesNotEnlargeCard() {
         let sourceRect = CGRect(x: 150, y: 200, width: 90, height: 300)
         let normalSourceRect = CGRect(x: 185, y: 340, width: 30, height: 20)

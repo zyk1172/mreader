@@ -45,6 +45,15 @@ nonisolated enum MangaVisionOCRGeometry {
         )
         guard !balloons.isEmpty || !textRegions.isEmpty else { return blocks }
 
+        // Validate balloon geometry against the union of all OCR rows provisionally
+        // assigned to the same model balloon. Comparing a full speech balloon with
+        // one tiny word/row is what caused legitimate balloons to be rejected as
+        // "too large" and split into many translation cards.
+        let groupedBalloonAssignments = groupedBalloonAssignments(
+            for: blocks,
+            balloons: balloons
+        )
+
         return blocks.map { block in
             var enriched = block
 
@@ -87,7 +96,8 @@ nonisolated enum MangaVisionOCRGeometry {
             }
 
             if enriched.layoutRole == .dialogue,
-               let balloon = bestBalloon(for: enriched.boundingBox, balloons: balloons) {
+               let balloon = groupedBalloonAssignments[enriched.id]
+                    ?? bestBalloon(for: enriched.boundingBox, balloons: balloons) {
                 enriched.bubbleBox = balloon.rect
                 if enriched.bubblePolygon.isEmpty {
                     enriched.bubblePolygon = balloon.polygon
@@ -129,6 +139,140 @@ nonisolated enum MangaVisionOCRGeometry {
         balloons: [MangaVisionRegion]
     ) -> CGRect? {
         bestBalloon(for: textRect, balloons: balloons)?.rect
+    }
+
+    private struct ProvisionalBalloonMatch {
+        let region: MangaVisionRegion
+        let score: CGFloat
+    }
+
+    /// Two-stage assignment for multi-row speech balloons:
+    /// 1. provisionally assign each dialogue row using containment/centre evidence only;
+    /// 2. validate the physical balloon against the union of all rows assigned to it.
+    ///
+    /// This preserves the frame/panel rejection limits while avoiding a pathological
+    /// comparison between a complete balloon and a single very short OCR fragment.
+    private static func groupedBalloonAssignments(
+        for blocks: [TextBlock],
+        balloons: [MangaVisionRegion]
+    ) -> [UUID: RegionCandidate] {
+        guard !balloons.isEmpty else { return [:] }
+
+        var provisional: [UUID: ProvisionalBalloonMatch] = [:]
+        for block in blocks where block.layoutRole == .dialogue && block.bubbleBox == nil {
+            if let match = provisionalBalloonMatch(
+                for: block.boundingBox,
+                balloons: balloons
+            ) {
+                provisional[block.id] = match
+            }
+        }
+        guard !provisional.isEmpty else { return [:] }
+
+        let blockByID = Dictionary(uniqueKeysWithValues: blocks.map { ($0.id, $0) })
+        var idsByBalloon: [UUID: [UUID]] = [:]
+        for (blockID, match) in provisional {
+            idsByBalloon[match.region.id, default: []].append(blockID)
+        }
+
+        var result: [UUID: RegionCandidate] = [:]
+        for balloon in balloons {
+            guard let blockIDs = idsByBalloon[balloon.id], !blockIDs.isEmpty else { continue }
+            let assignedBlocks = blockIDs.compactMap { blockByID[$0] }
+            guard let first = assignedBlocks.first else { continue }
+            let textUnion = assignedBlocks.dropFirst().reduce(first.boundingBox) {
+                $0.union($1.boundingBox)
+            }
+            guard let candidate = validatedBalloonCandidate(
+                balloon,
+                forTextUnion: textUnion
+            ) else {
+                continue
+            }
+            for blockID in blockIDs {
+                result[blockID] = candidate
+            }
+        }
+        return result
+    }
+
+    private static func provisionalBalloonMatch(
+        for rawTextRect: CGRect,
+        balloons: [MangaVisionRegion]
+    ) -> ProvisionalBalloonMatch? {
+        let textRect = MangaPageCoordinateSpace.clampedNormalizedRect(rawTextRect.standardized)
+        guard textRect.width > 0, textRect.height > 0 else { return nil }
+        let toleranceX = max(0.004, textRect.width * 0.10)
+        let toleranceY = max(0.004, textRect.height * 0.10)
+        let center = CGPoint(x: textRect.midX, y: textRect.midY)
+
+        let matches = balloons.compactMap { balloon -> ProvisionalBalloonMatch? in
+            let rect = balloon.normalizedRect.standardized
+            guard rect.width > 0, rect.height > 0 else { return nil }
+            let containment = MangaPageCoordinateSpace.containment(of: textRect, in: rect)
+            let centerInside = rect.insetBy(dx: -toleranceX, dy: -toleranceY).contains(center)
+            guard containment >= 0.55 || (centerInside && containment >= 0.30) else { return nil }
+
+            let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(rect.union(textRect))
+            let distance = hypot(fitted.midX - textRect.midX, fitted.midY - textRect.midY)
+            let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
+            let normalizedDistance = distance / diagonal
+            guard normalizedDistance <= 0.42 else { return nil }
+
+            let score = containment * 4.0
+                - normalizedDistance * 0.9
+                - MangaPageCoordinateSpace.area(fitted) * 0.8
+                + CGFloat(balloon.confidence) * 0.35
+            return ProvisionalBalloonMatch(region: balloon, score: score)
+        }.sorted { lhs, rhs in
+            if abs(lhs.score - rhs.score) > 0.000_1 { return lhs.score > rhs.score }
+            return MangaPageCoordinateSpace.area(lhs.region.normalizedRect)
+                < MangaPageCoordinateSpace.area(rhs.region.normalizedRect)
+        }
+
+        guard let best = matches.first else { return nil }
+        if matches.count > 1 {
+            let second = matches[1]
+            let overlap = MangaPageCoordinateSpace.intersectionOverUnion(
+                best.region.normalizedRect,
+                second.region.normalizedRect
+            )
+            if best.score - second.score < 0.08, overlap < 0.25 {
+                return nil
+            }
+        }
+        return best
+    }
+
+    private static func validatedBalloonCandidate(
+        _ balloon: MangaVisionRegion,
+        forTextUnion rawTextUnion: CGRect
+    ) -> RegionCandidate? {
+        let textUnion = MangaPageCoordinateSpace.clampedNormalizedRect(rawTextUnion.standardized)
+        guard textUnion.width > 0, textUnion.height > 0 else { return nil }
+        let textArea = max(MangaPageCoordinateSpace.area(textUnion), 0.000_001)
+        let fitted = MangaPageCoordinateSpace.clampedNormalizedRect(
+            balloon.normalizedRect.standardized.union(textUnion)
+        )
+        let fittedArea = MangaPageCoordinateSpace.area(fitted)
+        let widthExpansion = fitted.width / max(textUnion.width, 0.001)
+        let heightExpansion = fitted.height / max(textUnion.height, 0.001)
+        guard fittedArea > 0,
+              fittedArea <= maximumBalloonPageArea,
+              fittedArea / textArea <= maximumBalloonToTextAreaRatio,
+              max(widthExpansion, heightExpansion) <= maximumBalloonAxisExpansion else {
+            return nil
+        }
+
+        let distance = hypot(fitted.midX - textUnion.midX, fitted.midY - textUnion.midY)
+        let diagonal = max(hypot(fitted.width, fitted.height), 0.001)
+        guard distance / diagonal <= 0.42 else { return nil }
+
+        return RegionCandidate(
+            rect: fitted,
+            score: CGFloat(balloon.confidence),
+            polygon: balloon.contour?.cgPoints ?? []
+        )
     }
 
     private static func bestBalloon(

@@ -76,6 +76,31 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].bubbleBox != nil)
     }
 
+    @Test func sameLineTinyFragmentsPreserveCollectiveBubbleIdentity() {
+        let bubble = CGRect(x: 0.20, y: 0.20, width: 0.50, height: 0.20)
+        let first = Self.block(
+            text: "MY",
+            boundingBox: CGRect(x: 0.35, y: 0.25, width: 0.05, height: 0.03),
+            bubbleBox: bubble,
+            estimatedFontScale: 0.03
+        )
+        let second = Self.block(
+            text: "DEAR",
+            boundingBox: CGRect(x: 0.41, y: 0.25, width: 0.06, height: 0.03),
+            bubbleBox: bubble,
+            estimatedFontScale: 0.03
+        )
+
+        #expect(bubble.width / first.boundingBox.width > 8)
+
+        let segmentation = MangaTextSegmenter.segment([first, second], isRightToLeft: false)
+
+        #expect(segmentation.lines.count == 1)
+        #expect(segmentation.lines[0].bubbleBox == bubble)
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == bubble)
+    }
+
     // MARK: - 测试 2：三行同气泡（A-B 相邻、B-C 相邻、A-C 距离远）
 
     /// complete-link 要求新成员与组内所有成员配对满足关系；A↔C 的纯 OCR 几何
@@ -692,6 +717,40 @@ struct VisualBubbleGroupingTests {
         #expect(segmentation.bubbles[0].bubbleBox == nil)
         #expect(segmentation.bubbles[0].sourceLineCount == 2)
         #expect(segmentation.bubbles[0].text == "WELL OF COURSE YOU MUST GO ALONE!")
+    }
+
+    @Test func overlappingSafeRegionsAllowMeasuredParagraphAcrossSlightlyWiderGap() {
+        let safeRegion = CGRect(x: 0.20, y: 0.16, width: 0.50, height: 0.24)
+        let first = TextBlock(
+            text: "FIRST PART",
+            boundingBox: CGRect(x: 0.30, y: 0.20, width: 0.26, height: 0.04),
+            confidence: 0.9,
+            ocrSource: "vision",
+            estimatedFontScale: 0.04,
+            layoutSafeRegion: safeRegion,
+            textOrientation: .horizontal,
+            layoutRole: .dialogue
+        )
+        let second = TextBlock(
+            text: "SECOND PART",
+            boundingBox: CGRect(x: 0.31, y: 0.30, width: 0.25, height: 0.04),
+            confidence: 0.9,
+            ocrSource: "vision",
+            estimatedFontScale: 0.04,
+            layoutSafeRegion: safeRegion,
+            textOrientation: .horizontal,
+            layoutRole: .dialogue
+        )
+
+        let gap = second.boundingBox.minY - first.boundingBox.maxY
+        #expect(gap > first.estimatedFontScale * 1.20)
+        #expect(gap < first.estimatedFontScale * 1.65)
+
+        let segmentation = MangaTextSegmenter.segment([first, second], isRightToLeft: false)
+
+        #expect(segmentation.bubbles.count == 1)
+        #expect(segmentation.bubbles[0].bubbleBox == nil)
+        #expect(segmentation.bubbles[0].sourceLineCount == 2)
     }
 
     /// Conservative measured-text grouping may rebuild a local paragraph, but it

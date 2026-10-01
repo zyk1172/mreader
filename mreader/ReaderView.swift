@@ -6508,9 +6508,11 @@ struct LocalImageView: View {
             )
         }
         let allowedBounds = resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
-        let layoutBounds = OCRBubbleLayoutEngine.boundedTranslationBounds(
-            around: textRect,
-            within: allowedBounds,
+        let layoutBounds = OCRBubbleLayoutEngine.resolvedTranslationLayoutBounds(
+            sourceRect: textRect,
+            resolvedSafeRegion: resolvedSafeRegion,
+            reliableBubbleBounds: usableBubbleBounds,
+            fallbackBounds: fallbackBounds,
             imageBounds: imageBounds
         )
         // Geometry and presentation are independent. Both paths normally start from the
@@ -6552,7 +6554,10 @@ struct LocalImageView: View {
             usableBubbleBounds: usableBubbleBounds,
             using: transform
         )
-        let surfaceRect = bubbleSurface?.rect ?? choice.layout.rect
+        let surfaceRect = OCRBubbleLayoutEngine.translationSurfaceRect(
+            reliableBubbleBounds: usableBubbleBounds,
+            measuredLayoutRect: bubbleSurface?.rect ?? choice.layout.rect
+        )
         let surfacePolygon = bubbleSurface?.polygon ?? []
 
         #if DEBUG
@@ -6590,17 +6595,23 @@ struct LocalImageView: View {
         usableBubbleBounds: CGRect?,
         using transform: OCRDisplayTransform
     ) -> (rect: CGRect, polygon: [CGPoint])? {
-        guard let surfaceRect = usableBubbleBounds,
-              block.bubblePolygon.count >= 3 else {
+        guard let surfaceRect = usableBubbleBounds else {
             return nil
         }
+
+        // bubbleBox and bubblePolygon are independent evidence. A validated
+        // physical bubble must keep its real rectangle even when contour points
+        // are absent or unusable; the renderer then falls back to a rounded
+        // rectangle instead of collapsing the surface to the translated text box.
         let mapped = block.bubblePolygon.map {
             OCRCoordinateMapper.displayPoint(
                 forNormalizedPagePoint: $0,
                 using: transform
             )
         }.filter { $0.x.isFinite && $0.y.isFinite }
-        guard mapped.count >= 3 else { return nil }
+        guard mapped.count >= 3 else {
+            return (surfaceRect, [])
+        }
 
         let local = mapped.map {
             CGPoint(
@@ -6736,26 +6747,42 @@ struct LocalImageView: View {
             let movementBounds = boundedMovement.isNull || boundedMovement.width <= 0 || boundedMovement.height <= 0
                 ? transform.imageRect
                 : boundedMovement
-            let rect = OCRBubbleLayoutEngine.nonOverlappingRect(
-                original,
-                anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
-                occupiedRects: occupiedRects,
-                // Reliable bubbles are now a hard movement boundary. Measured
-                // text keeps its local fallback region as the anchor boundary.
-                bounds: movementBounds,
-                margin: 0
+
+            // A detected physical bubble is the placement boundary itself: moving
+            // its text to another "free" slot detaches the translation from the
+            // balloon. Only measured-text cards participate in global collision
+            // avoidance.
+            let presentationRect: CGRect
+            if item.surfaceStyle == .detectedBubble {
+                presentationRect = original
+            } else {
+                presentationRect = OCRBubbleLayoutEngine.nonOverlappingRect(
+                    original,
+                    anchor: CGPoint(x: mappedSourceRect.midX, y: mappedSourceRect.midY),
+                    occupiedRects: occupiedRects,
+                    bounds: movementBounds,
+                    margin: 0
+                )
+            }
+            let presentationSurfaceRect = OCRBubbleLayoutEngine.presentationSurfaceRect(
+                surfaceStyle: item.surfaceStyle,
+                originalSurfaceRect: item.surfaceRect,
+                originalTextRect: original,
+                presentationTextRect: presentationRect
             )
-            // The expansion UI was removed. Collision handling must therefore
-            // never collapse a fitted translation into the old compact preview:
-            // that preview becomes an opaque material card with clipped/no text.
-            let presentationRect = rect
             let layoutStatus = item.layoutStatus
 
-            occupiedRects.append(presentationRect.insetBy(dx: -4, dy: -4))
+            // Measured cards occupy their translated card. Physical balloons
+            // occupy their actual surface so later fallback cards do not get
+            // packed on top of an already translated speech balloon.
+            let occupied = item.surfaceStyle == .detectedBubble
+                ? presentationSurfaceRect
+                : presentationRect
+            occupiedRects.append(occupied.insetBy(dx: -4, dy: -4))
             items.append(TranslationLayoutItem(
                 blocks: item.blocks,
                 rect: presentationRect,
-                surfaceRect: item.surfaceRect,
+                surfaceRect: presentationSurfaceRect,
                 surfacePolygon: item.surfacePolygon,
                 allowedBounds: item.allowedBounds,
                 fontSize: item.fontSize,
@@ -7648,7 +7675,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 4
+    static let layoutRevision = 5
 
     struct Key: Equatable {
         let scope: String

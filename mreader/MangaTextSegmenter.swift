@@ -86,10 +86,14 @@ nonisolated enum MangaTextSegmenter {
         from lines: [TextBlock],
         isRightToLeft: Bool
     ) -> [TextBlock] {
-        var regions: [DetectedBubbleRegion] = []
+        // First recover a physical balloon collectively when several OCR rows
+        // carry the same visual bubble geometry. Per-row validation is deliberately
+        // stricter and can reject a real balloon when one row is only a short word.
+        let sharedSeed = sharedReliableBubbleRegions(from: lines)
+        var regions = sharedSeed.regions
         var unassignedLines: [TextBlock] = []
 
-        for line in lines {
+        for line in lines where !sharedSeed.assignedLineIDs.contains(line.id) {
             guard let geometry = reliableBubbleGeometry(for: line) else {
                 unassignedLines.append(line)
                 continue
@@ -226,8 +230,12 @@ nonisolated enum MangaTextSegmenter {
         guard !isVertical(previous) else { return false }
         guard paragraphStylesAreCompatible(previous, current),
               previous.textOrientation == current.textOrientation,
-              followsReadingOrder(previous, current, isRightToLeft: isRightToLeft),
-              projectionsAreAligned(previous, current) else {
+              followsReadingOrder(previous, current, isRightToLeft: isRightToLeft) else {
+            return false
+        }
+
+        let sharesSafeRegion = measuredSafeRegionsRepresentSameParagraph(previous, current)
+        guard sharesSafeRegion || projectionsAreAligned(previous, current) else {
             return false
         }
 
@@ -252,7 +260,9 @@ nonisolated enum MangaTextSegmenter {
         // slightly wider continuation window handles a third line whose
         // spacing differs from the first pair, while 1.5x remains a useful
         // guard against merging adjacent independent bubbles.
-        let maximumGap = max(smallerScale * 1.20, 0.006)
+        let maximumGap = sharesSafeRegion
+            ? max(smallerScale * 1.65, 0.010)
+            : max(smallerScale * 1.20, 0.006)
         guard lineGap <= maximumGap else { return false }
 
         let union = currentGroup.dropFirst().reduce(currentGroup[0].boundingBox) {
@@ -324,6 +334,129 @@ nonisolated enum MangaTextSegmenter {
             for: block.boundingBox,
             candidates: [block]
         )
+    }
+
+    private static func sharedReliableBubbleRegions(
+        from lines: [TextBlock]
+    ) -> (regions: [DetectedBubbleRegion], assignedLineIDs: Set<UUID>) {
+        var clusters: [DetectedBubbleRegion] = []
+        for line in lines {
+            guard let bubble = line.bubbleBox,
+                  bubble.width > 0,
+                  bubble.height > 0 else {
+                continue
+            }
+            if let index = clusters.firstIndex(where: {
+                canonicalBubbleBoxesRepresentSame($0.rect, bubble)
+            }) {
+                clusters[index].lines.append(line)
+                if clusters[index].rect != bubble {
+                    clusters[index].rect = clusters[index].rect.union(bubble)
+                }
+                if clusters[index].polygon.isEmpty, !line.bubblePolygon.isEmpty {
+                    clusters[index].polygon = line.bubblePolygon
+                }
+            } else {
+                clusters.append(
+                    DetectedBubbleRegion(
+                        id: line.id,
+                        rect: bubble,
+                        polygon: line.bubblePolygon,
+                        lines: [line]
+                    )
+                )
+            }
+        }
+
+        let reliable = clusters.filter {
+            $0.lines.count >= 2 && collectivelyReliableBubbleGeometry(
+                $0.rect,
+                lines: $0.lines
+            )
+        }
+        return (
+            reliable,
+            Set(reliable.flatMap { $0.lines.map(\.id) })
+        )
+    }
+
+    /// Same geometric limits as the line-level validator, but evaluated against
+    /// the union of all rows that claim the same physical balloon. This is the
+    /// key distinction for short words/rows: the balloon is not compared with a
+    /// single tiny OCR fragment.
+    private static func collectivelyReliableBubbleGeometry(
+        _ rawBubble: CGRect,
+        lines: [TextBlock]
+    ) -> Bool {
+        guard let first = lines.first else { return false }
+        let bubble = rawBubble.standardized
+        let textUnion = lines.dropFirst().reduce(first.boundingBox.standardized) {
+            $0.union($1.boundingBox.standardized)
+        }
+        guard bubble.width > 0,
+              bubble.height > 0,
+              bubble.minX >= 0,
+              bubble.minY >= 0,
+              bubble.maxX <= 1.02,
+              bubble.maxY <= 1.02,
+              textUnion.width > 0,
+              textUnion.height > 0 else {
+            return false
+        }
+
+        let toleranceX = max(0.004, textUnion.width * 0.10)
+        let toleranceY = max(0.004, textUnion.height * 0.10)
+        guard lines.allSatisfy({
+            bubble.insetBy(dx: -toleranceX, dy: -toleranceY)
+                .contains($0.boundingBox.standardized)
+        }) else {
+            return false
+        }
+
+        let bubbleArea = rectArea(bubble)
+        let textArea = max(rectArea(textUnion), 0.000_001)
+        let widthExpansion = bubble.width / max(textUnion.width, 0.001)
+        let heightExpansion = bubble.height / max(textUnion.height, 0.001)
+        let centerDistance = hypot(
+            bubble.midX - textUnion.midX,
+            bubble.midY - textUnion.midY
+        )
+        let bubbleDiagonal = max(hypot(bubble.width, bubble.height), 0.001)
+        return bubbleArea <= 0.30
+            && bubbleArea / textArea <= 120
+            && max(widthExpansion, heightExpansion) <= 12
+            && centerDistance / bubbleDiagonal <= 0.48
+    }
+
+    private static func measuredSafeRegionsRepresentSameParagraph(
+        _ lhs: TextBlock,
+        _ rhs: TextBlock
+    ) -> Bool {
+        guard let left = lhs.layoutSafeRegion?.standardized,
+              let right = rhs.layoutSafeRegion?.standardized,
+              left.width > 0,
+              left.height > 0,
+              right.width > 0,
+              right.height > 0 else {
+            return false
+        }
+
+        let intersection = left.intersection(right)
+        guard !intersection.isNull,
+              intersection.width > 0,
+              intersection.height > 0 else {
+            return false
+        }
+        let intersectionArea = rectArea(intersection)
+        let smallerArea = max(min(rectArea(left), rectArea(right)), 0.000_001)
+        guard intersectionArea / smallerArea >= 0.50 else { return false }
+
+        let centerDistance = hypot(left.midX - right.midX, left.midY - right.midY)
+        let smallerDiagonal = max(
+            min(hypot(left.width, left.height), hypot(right.width, right.height)),
+            0.001
+        )
+        return centerDistance / smallerDiagonal <= 0.65
     }
 
     /// Same-region matching is deliberately more tolerant than line-level
@@ -551,7 +684,18 @@ nonisolated enum MangaTextSegmenter {
         from blocks: [TextBlock],
         containing textBounds: CGRect
     ) -> (box: CGRect, polygon: [CGPoint])? {
-        OCRCandidateResolver.validatedBubbleGeometry(
+        // Preserve a bubble collectively established by multiple OCR fragments
+        // on the same source line. Otherwise line merging can erase the shared
+        // physical identity before canonical bubble grouping gets a chance to
+        // combine rows.
+        let shared = sharedReliableBubbleRegions(from: blocks)
+        if shared.regions.count == 1,
+           shared.assignedLineIDs.count == blocks.count,
+           let region = shared.regions.first {
+            return (region.rect, region.polygon)
+        }
+
+        return OCRCandidateResolver.validatedBubbleGeometry(
             for: textBounds,
             candidates: blocks
         )
