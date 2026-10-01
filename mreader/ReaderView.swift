@@ -137,6 +137,7 @@ nonisolated enum ImageFitMode: String, CaseIterable {
 
 nonisolated enum TranslationProgressEffect: String, CaseIterable, Sendable {
     static let defaultsKey = "ai_translation_progress_effect"
+    static let defaultEffect: Self = .bubblePulse
 
     case bubblePulse
     case marquee
@@ -148,6 +149,38 @@ nonisolated enum TranslationProgressEffect: String, CaseIterable, Sendable {
         case .marquee:
             return "ocr.translationProgressEffect.marquee".localized
         }
+    }
+}
+
+nonisolated enum TranslationProgressRegionPolicy {
+    static let maximumRegionCount = 24
+
+    static func regions(from analysis: MangaPageAnalysis) -> [MangaVisionRegion] {
+        let balloons = MangaVisionRegionPostProcessor.deduplicated(
+            analysis.balloons.filter { region in
+                let area = MangaPageCoordinateSpace.area(region.normalizedRect)
+                return region.confidence >= 0.30
+                    && area > 0
+                    && area <= 0.20
+            },
+            iouThreshold: 0.58,
+            containmentThreshold: 0.90
+        )
+        if !balloons.isEmpty {
+            return Array(balloons.prefix(maximumRegionCount))
+        }
+
+        let textRegions = MangaVisionRegionPostProcessor.deduplicated(
+            analysis.texts.filter { region in
+                let area = MangaPageCoordinateSpace.area(region.normalizedRect)
+                return region.confidence >= 0.35
+                    && area > 0
+                    && area <= 0.16
+            },
+            iouThreshold: 0.58,
+            containmentThreshold: 0.88
+        )
+        return Array(textRegions.prefix(maximumRegionCount))
     }
 }
 
@@ -1322,12 +1355,12 @@ struct ReaderView: View {
     @AppStorage("translation_style_instructions") private var translationStyleInstructions = AITranslator.defaultTranslationStyleInstructions
     @AppStorage("vision_translation_prompt_template") private var visionTranslationPromptTemplate = AITranslator.defaultVisionTranslationPromptTemplate
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
-    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.bubblePulse.rawValue
+    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.defaultEffect.rawValue
     @AppStorage("ocr_show_debug_boxes") private var ocrShowDebugBoxes = false
     @AppStorage("ocr_visual_verification_enabled") private var ocrVisualVerificationEnabled = false
     @AppStorage("ocr_local_recognition_mode") private var ocrRecognitionModeRaw = OCRRecognitionMode.adaptive.rawValue
     @AppStorage("ai_translation_border_progress_enabled") private var aiTranslationBorderProgressEnabled = true
-    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.bubblePulse.rawValue
+    @AppStorage(TranslationProgressEffect.defaultsKey) private var aiTranslationProgressEffectRaw = TranslationProgressEffect.defaultEffect.rawValue
     @AppStorage("translation_color_style") private var translationColorStyleRaw = TranslationColorStyle.contrast.rawValue
     @AppStorage("translation_use_apple_low_latency") private var useAppleLowLatency = false
     @AppStorage(MangaVisionHardCaseFeature.shortcutDefaultsKey) private var showMangaVisionFeedbackShortcut = false
@@ -7356,39 +7389,9 @@ struct LocalImageView: View {
             )
             guard !Task.isCancelled else { return }
 
-            let regions: [MangaVisionRegion]
-            if let analysis {
-                let balloons = MangaVisionRegionPostProcessor.deduplicated(
-                    analysis.balloons.filter { region in
-                        let area = MangaPageCoordinateSpace.area(region.normalizedRect)
-                        return region.confidence >= 0.30
-                            && area > 0
-                            && area <= 0.20
-                    },
-                    iouThreshold: 0.58,
-                    containmentThreshold: 0.90
-                )
-                if !balloons.isEmpty {
-                    regions = Array(balloons.prefix(24))
-                } else {
-                    // A text-region outline is only a fallback when no physical
-                    // balloon is available. It remains a stroke-only indicator
-                    // and never paints over the source artwork.
-                    let textRegions = MangaVisionRegionPostProcessor.deduplicated(
-                        analysis.texts.filter { region in
-                            let area = MangaPageCoordinateSpace.area(region.normalizedRect)
-                            return region.confidence >= 0.35
-                                && area > 0
-                                && area <= 0.16
-                        },
-                        iouThreshold: 0.58,
-                        containmentThreshold: 0.88
-                    )
-                    regions = Array(textRegions.prefix(24))
-                }
-            } else {
-                regions = []
-            }
+            // A physical balloon is preferred. Text regions are a stroke-only
+            // fallback when the model cannot provide balloon geometry.
+            let regions = analysis.map(TranslationProgressRegionPolicy.regions(from:)) ?? []
 
             await MainActor.run {
                 guard self.translationGeneration == generation,
