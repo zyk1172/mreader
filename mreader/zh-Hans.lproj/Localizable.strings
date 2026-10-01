@@ -115,7 +115,10 @@
 "ocr.appleTranslation" = "Apple 原生翻译";
 "error.libraryLoad" = "书架数据异常";
 "ocr.appleTranslationFooter" = "普通对白使用 Apple 端侧低延迟翻译；不可用或未覆盖时自动回退云端 AI。";
-"ocr.borderProgress" = "AI 翻译边框进度";
+"ocr.borderProgress" = "显示翻译进度特效";
+"ocr.translationProgressEffect" = "翻译中特效";
+"ocr.translationProgressEffect.bubblePulse" = "气泡呼吸描边";
+"ocr.translationProgressEffect.marquee" = "经典跑马灯";
 "ocr.colorStyle" = "翻译文字配色";
 "ocr.colorStyle.contrast" = "高对比";
 "ocr.colorStyle.coolWarm" = "冷暖分明";

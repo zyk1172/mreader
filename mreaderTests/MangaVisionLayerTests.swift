@@ -130,6 +130,91 @@ struct MangaVisionLayerTests {
         #expect(segmentation.bubbles[0].bubbleBox == balloon.normalizedRect)
     }
 
+    @Test func translationProgressDefaultsToSubtleBubblePulse() {
+        #expect(TranslationProgressEffect.defaultEffect == .bubblePulse)
+        #expect(TranslationProgressEffect.allCases.map(\.rawValue) == ["bubblePulse", "marquee"])
+    }
+
+    @Test func translationProgressPrefersPhysicalBalloonsOverTextFallback() {
+        let balloon = region(
+            .balloon,
+            x: 0.20,
+            y: 0.20,
+            width: 0.34,
+            height: 0.18,
+            confidence: 0.92
+        )
+        let text = region(
+            .text,
+            x: 0.26,
+            y: 0.25,
+            width: 0.16,
+            height: 0.06,
+            confidence: 0.94
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "translation-progress-balloon",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [text],
+            balloons: [balloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 4
+        )
+
+        let regions = TranslationProgressRegionPolicy.regions(from: analysis)
+
+        #expect(regions.count == 1)
+        #expect(regions[0].id == balloon.id)
+        #expect(regions[0].type == .balloon)
+    }
+
+    @Test func translationProgressRejectsPanelSizedBalloonAndFallsBackToText() {
+        let oversizedBalloon = region(
+            .balloon,
+            x: 0.08,
+            y: 0.10,
+            width: 0.76,
+            height: 0.42,
+            confidence: 0.98
+        )
+        let text = region(
+            .text,
+            x: 0.30,
+            y: 0.24,
+            width: 0.20,
+            height: 0.07,
+            confidence: 0.90
+        )
+        let analysis = MangaPageAnalysis(
+            pageIdentifier: MangaPageIdentifier(
+                scope: "translation-progress-text-fallback",
+                pageIndex: 0,
+                sourceFingerprint: "fixture"
+            ),
+            imageSize: CGSize(width: 1200, height: 1800),
+            panels: [],
+            texts: [text],
+            balloons: [oversizedBalloon],
+            faces: [],
+            bodies: [],
+            modelIdentifier: "fixture",
+            modelVersion: 4
+        )
+
+        let regions = TranslationProgressRegionPolicy.regions(from: analysis)
+
+        #expect(regions.count == 1)
+        #expect(regions[0].id == text.id)
+        #expect(regions[0].type == .text)
+    }
+
     @Test func mangaBalloonContourFlowsIntoTranslationUnitAndSafeRegion() {
         let contourPoints = [
             CGPoint(x: 0.50, y: 0.18),
