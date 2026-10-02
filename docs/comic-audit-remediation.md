@@ -23,7 +23,7 @@
 | F15 质量证据不足 | 增加原生反例和真实 Reader 长页合成 UI 场景，记录 rapid reverse scroll 的内存/hitch telemetry | 合成图不是人工真实页面标注，不替代 Python/Swift 实图 parity、人工 gold、真机门禁，不能填入假通过结果 |
 | F16 AI 响应上限 | 使用已有 chunk-based 有界 HTTP reader，JSON 响应上限 8 MiB，保留可注入 session configuration 和现有错误/重试策略 | 未改变各模型原生/兼容协议 |
 
-另外，条漫 fitWidth 使用 CATiledLayer 的按需 compositor tiles，避免将整条图作为一个巨大显示纹理；**解码源仍是已有分档、有界整页图像**，不是磁盘区域解码引擎。内存余量较小时不再由固定缓存 floor 强行申请超过余量的预算。私有权重 materialize 使用当前实际权重的 SHA-256 进行校验，不能只凭文件大小接受不匹配权重。
+另外，条漫 fitWidth 使用 CATiledLayer 的按需 compositor tiles，避免将整条图作为一个巨大显示纹理；**解码源仍是已有分档、有界整页图像**，不是磁盘区域解码引擎。内存余量较小时不再由固定缓存 floor 维持高于余量的缓存预算。私有权重 materialize 使用当前实际权重的 SHA-256 进行校验，不能只凭文件大小接受不匹配权重。
 
 ## 本地可执行检查
 

@@ -117,12 +117,14 @@ struct ComicAuditFixTests {
         }
         let balloon = CGRect(x: 0.15, y: 0.15, width: 0.70, height: 0.65)
         let text = CGRect(x: 115/300.0, y: 145/400.0, width: 60/300.0, height: 10/400.0)
-        let contour = try #require(LocalBubbleContour.recover(in: #require(image.cgImage), balloon: balloon, textRegions: [text]))
+        let cgImage = try #require(image.cgImage)
+        let contour = try #require(LocalBubbleContour.recover(in: cgImage, balloon: balloon, textRegions: [text]))
         #expect(contour.count >= 8)
         #expect(contour.map(\.y).min()! < 0.20)
         #expect(contour.map(\.y).max()! < 0.75)
         let blank = render(size: size) { context in UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: size)) }
-        #expect(LocalBubbleContour.recover(in: #require(blank.cgImage), balloon: balloon, textRegions: [text]) == nil)
+        let blankCGImage = try #require(blank.cgImage)
+        #expect(LocalBubbleContour.recover(in: blankCGImage, balloon: balloon, textRegions: [text]) == nil)
     }
 
     @Test func cancelledImageEntryCannotBeJoinedAndReplacementHasOwnIdentity() async {
