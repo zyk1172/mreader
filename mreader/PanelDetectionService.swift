@@ -163,8 +163,9 @@ nonisolated enum PanelPostProcessor {
     private static let pageEdgeTolerance: CGFloat = 0.075
 
     static func process(_ candidates: [DetectedPanel], pageSize: CGSize = CGSize(width: 1, height: 1)) -> [DetectedPanel] {
-        let xScale = min(1, pageSize.height / max(pageSize.width, 1))
-        let yScale = min(1, pageSize.width / max(pageSize.height, 1))
+        let aspect = max(pageSize.width, pageSize.height) / max(min(pageSize.width, pageSize.height), 1)
+        let xScale = aspect >= 3 ? min(1, pageSize.height / max(pageSize.width, 1)) : 1
+        let yScale = aspect >= 3 ? min(1, pageSize.width / max(pageSize.height, 1)) : 1
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let filtered = candidates.compactMap { panel -> DetectedPanel? in
             let standardized = panel.rect.standardized

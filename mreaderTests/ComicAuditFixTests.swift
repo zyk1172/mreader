@@ -47,6 +47,18 @@ struct ComicAuditFixTests {
         for pair in zip(windows, windows.dropFirst()) { #expect(pair.0.maxY > pair.1.minY) }
     }
 
+    @Test func ordinaryPageKeepsOriginalMinimumPanelThresholds() {
+        let small = DetectedPanel(rect: CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.04), confidence: 0.9, source: .coreML)
+        #expect(PanelPostProcessor.process([small], pageSize: CGSize(width: 800, height: 1200)).isEmpty)
+    }
+
+    @Test func longPageOCRFilterUsesLocalScale() {
+        let block = TextBlock(text: "HELLO", boundingBox: CGRect(x: 0.4, y: 0.3, width: 0.2, height: 20/20000.0))
+        let annotated = AITranslator.annotatedMangaTextBlocks([block], safeAreaInset: 0,
+            minimumTextHeight: 0.006, isRightToLeft: false, pageSize: CGSize(width: 800, height: 20_000))
+        #expect(annotated[0].isFiltered == false)
+    }
+
     @Test func geometryFindsRealPanelsInTwentyThousandPixelStrip() throws {
         let size = CGSize(width: 800, height: 20_000)
         let image = render(size: size) { context in

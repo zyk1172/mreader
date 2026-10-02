@@ -171,8 +171,7 @@ struct OCRPreprocessor {
                        width: r.width * actual.width, height: r.height * actual.height)
             }
             blocks.append(contentsOf: (candidate.blocks + vertical).map { block in
-                var mapped = block
-                mapped.boundingBox = rect(block.boundingBox)
+                var mapped = block.replacingBoundingBox(rect(block.boundingBox))
                 mapped.bubbleBox = block.bubbleBox.map(rect)
                 mapped.layoutSafeRegion = block.layoutSafeRegion.map(rect)
                 mapped.polygon = block.polygon.map(point)

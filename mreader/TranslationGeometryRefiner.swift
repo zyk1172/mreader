@@ -32,8 +32,7 @@ nonisolated enum TranslationGeometryRefiner {
                 vision.layoutRole == .standalone || locals.contains(where: {
                     $0.layoutRole == .standalone
                 }) ? .standalone : .dialogue
-            var refined = vision
-            refined.boundingBox = localBounds
+            var refined = vision.replacingBoundingBox(localBounds)
             refined.confidence = max(vision.confidence, locals.map(\.confidence).max() ?? 0)
             refined.ocrSource = "\(vision.ocrSource)+local-geometry"
             refined.estimatedFontScale = weightedMedianFontScale(locals)

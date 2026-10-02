@@ -6876,7 +6876,8 @@ struct LocalImageView: View {
                 using: transform
             )
         }.filter { $0.x.isFinite && $0.y.isFinite }
-        guard mapped.count >= 3 else {
+        guard mapped.count >= 3,
+              BubbleContourGeometry.safeRectangle(polygon: mapped, bounds: surfaceRect) != nil else {
             return (surfaceRect, [])
         }
 
@@ -7179,6 +7180,7 @@ struct LocalImageView: View {
             }
             guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
             let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+            guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
             if isAutoTranslationEnabled, !hasOfflineTranslation {
                 await MainActor.run { startTranslation() }
             }
@@ -7223,6 +7225,7 @@ struct LocalImageView: View {
         }
         guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
         let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+        guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
         if isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
