@@ -29,6 +29,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
             try Task.checkCancellation()
             let pixelRect = CGRect(x: window.minX * size.width, y: window.minY * size.height,
                                    width: window.width * size.width, height: window.height * size.height).integral
+                .intersection(CGRect(origin: .zero, size: size))
             guard let crop = image.cropping(to: pixelRect),
                   let raster = PanelGeometryRaster(image: crop, maximumDimension: maximumDimension) else { continue }
             for panel in PanelGeometryAnalyzer(raster: raster).detectPanels() {
