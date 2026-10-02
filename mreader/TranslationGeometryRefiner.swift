@@ -32,25 +32,16 @@ nonisolated enum TranslationGeometryRefiner {
                 vision.layoutRole == .standalone || locals.contains(where: {
                     $0.layoutRole == .standalone
                 }) ? .standalone : .dialogue
-            return TextBlock(
-                id: vision.id,
-                text: vision.text,
-                boundingBox: localBounds,
-                translation: vision.translation,
-                confidence: max(vision.confidence, locals.map(\.confidence).max() ?? 0),
-                ocrSource: "\(vision.ocrSource)+local-geometry",
-                isFiltered: vision.isFiltered,
-                filterReason: vision.filterReason,
-                estimatedFontScale: weightedMedianFontScale(locals),
-                textColorHex: locals.compactMap(\.textColorHex).first ?? vision.textColorHex,
-                bubbleBox: vision.bubbleBox,
-                polygon: locals.flatMap(\.polygon).isEmpty ? vision.polygon : locals.flatMap(\.polygon),
-                bubblePolygon: vision.bubblePolygon,
-                translationLines: vision.translationLines,
-                textOrientation: majorityOrientation(locals),
-                layoutRole: inheritedLayoutRole,
-                sourceLineCount: max(vision.sourceLineCount, sourceLineCount)
-            )
+            var refined = vision.replacingBoundingBox(localBounds)
+            refined.confidence = max(vision.confidence, locals.map(\.confidence).max() ?? 0)
+            refined.ocrSource = "\(vision.ocrSource)+local-geometry"
+            refined.estimatedFontScale = weightedMedianFontScale(locals)
+            refined.textColorHex = locals.compactMap(\.textColorHex).first ?? vision.textColorHex
+            refined.polygon = locals.flatMap(\.polygon).isEmpty ? vision.polygon : locals.flatMap(\.polygon)
+            refined.textOrientation = majorityOrientation(locals)
+            refined.layoutRole = inheritedLayoutRole
+            refined.sourceLineCount = max(vision.sourceLineCount, sourceLineCount)
+            return refined
         }
     }
 

@@ -572,9 +572,9 @@
 "offlineTranslation.errorDetails" = "エラーの詳細を表示";
 "nav.close" = "閉じる";
 
-"ocr.minimumReadableTranslationFontSize" = "翻訳の最小可読サイズ";
-"ocr.minimumReadableTranslationFontSizeValue" = "可読下限：%d pt";
-"ocr.minimumReadableTranslationFontSizeDescription" = "このサイズより小さくせず、収まらない場合は展開表示で全文を読みます。";
+"ocr.minimumReadableTranslationFontSize" = "翻訳の優先可読サイズ";
+"ocr.minimumReadableTranslationFontSizeValue" = "優先サイズ：%d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "吹き出しに収めるためさらに縮小する場合があります。全文はアクセシビリティで読み上げます。";
 "ocr.translationNeedsExpansion" = "翻訳を展開して読む必要があります";
 "ocr.inPlaceTranslation" = "インプレース翻訳";
 "ocr.inPlaceTranslationDescription" = "信頼できる吹き出しだけを可逆なインプレース表示にし、効果音の原画は保持します。";

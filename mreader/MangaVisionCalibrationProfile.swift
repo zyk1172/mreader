@@ -7,7 +7,8 @@ nonisolated struct MangaVisionClassCalibration: Sendable, Equatable {
     let containmentThreshold: CGFloat
 }
 
-/// One revisioned source of truth for detector filtering and same-class deduplication.
+/// Revisioned cross-pass merge calibration. V2B5's raw decoder owns its own
+/// confidence/NMS thresholds; the confidence fields here are legacy metadata.
 /// Any production threshold change must bump `revision`; the manifest includes this
 /// value in cache identity so cached analyses cannot outlive their calibration.
 nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
@@ -15,7 +16,7 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
     let byRegionType: [MangaRegionType: MangaVisionClassCalibration]
 
     static let bundled = MangaVisionCalibrationProfile(
-        revision: "manga109-yolo26s-seg-calibration-2026-09-17-v1",
+        revision: "v2b5-cross-pass-merge-2026-10-02-v2",
         byRegionType: [
             .panel: MangaVisionClassCalibration(
                 confidenceThreshold: 0.24,
@@ -32,8 +33,7 @@ nonisolated struct MangaVisionCalibrationProfile: Sendable, Equatable {
                 nmsIOUThreshold: 0.58,
                 containmentThreshold: 0.90
             ),
-            // Kept explicit for forward-compatible checkpoints even though the
-            // currently bundled checkpoint exports only frame/text/balloon.
+            // The bundled V2B5 checkpoint exports all five classes.
             .face: MangaVisionClassCalibration(
                 confidenceThreshold: 0.20,
                 nmsIOUThreshold: 0.45,

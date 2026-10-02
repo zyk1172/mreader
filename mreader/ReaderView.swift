@@ -87,7 +87,7 @@ struct ReaderContainerView: View {
                     // 宽高比，所以在首屏出现前用有限预算登记前若干页，避免长条漫画
                     // 先按兜底比例布局、图片落地后再整体重排（审查 #17）。
                     if comic.sourceType == .local {
-                        await PageGeometryStore.shared.preloadSizes(for: result.pages)
+                        await PageGeometryStore.shared.preloadSizes(for: result.pages, around: comic.currentPageIndex)
                     }
                     // Present the reader before any 8192px warm-up.
                     manager.applyLoadedPages(result)
@@ -518,7 +518,7 @@ nonisolated private enum InitialReadingPresetDetector {
             guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
             return imagePixelSize(from: data)
         }
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             return await Task.detached(priority: .utility) {
                 // 轻量尺寸读取，避免为了读宽高而完整解压图片（审查 #18）
                 ComicManager.imagePixelSizeForArchivePageURL(url)
@@ -611,10 +611,12 @@ final class PageGeometryStore {
     /// `budgetNanoseconds` 限制总耗时，避免为了预登记而拖慢首屏。
     func preloadSizes(
         for pages: [ComicPage],
+        around pageIndex: Int = 0,
         limit: Int = 12,
         budgetNanoseconds: UInt64 = 150_000_000
     ) async {
-        let candidates = pages.prefix(max(0, limit)).filter { size(for: $0.url) == nil }
+        let candidates = pages.sorted { abs($0.index - pageIndex) < abs($1.index - pageIndex) }
+            .prefix(max(0, limit)).filter { size(for: $0.url) == nil }
         guard !candidates.isEmpty else { return }
         let started = DispatchTime.now().uptimeNanoseconds
 
@@ -623,7 +625,7 @@ final class PageGeometryStore {
             if Task.isCancelled { return }
             let url = page.url
             let size = await Task.detached(priority: .userInitiated) { () -> CGSize? in
-                if ComicManager.isArchivePageURL(url) {
+                if ComicManager.isLocalPageURL(url) {
                     return ComicManager.imagePixelSizeForArchivePageURL(url)
                 }
                 guard url.isFileURL else { return nil }
@@ -648,7 +650,7 @@ private final class ReaderImageSourceMetadataStore {
     private var insertionOrder: [String] = []
 
     func entry(for url: URL) -> Entry {
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             let sourceKey = ComicManager.archivePageCacheKey(for: url) ?? url.absoluteString
             return Entry(cacheIdentity: sourceKey, fileSize: 0)
         }
@@ -823,8 +825,8 @@ private final class ReaderImageCache {
     }
 
     private let cache = NSCache<NSString, UIImage>()
-    private var inFlightLoads: [String: Task<UIImage?, Never>] = [:]
-    private var loadingCosts: [String: Int] = [:]
+    private var inFlightLoads: [String: ReaderImageLoadEntry] = [:]
+    private var loadingCosts: [UUID: Int] = [:]
     private var scheduledPreload: Task<Void, Never>?
     private var pendingPreloadRequest: PendingPreloadRequest?
     private var preloadQueue: [PreloadCandidate] = []
@@ -917,7 +919,7 @@ private final class ReaderImageCache {
     private func inFlightKeySatisfying(url: URL, maxPixelSize: CGFloat) -> String? {
         for tier in resolutionTiers where tier >= maxPixelSize {
             let key = cacheKey(for: url, maxPixelSize: tier)
-            if inFlightLoads[key] != nil {
+            if inFlightLoads[key]?.canJoin == true {
                 return key
             }
         }
@@ -942,6 +944,7 @@ private final class ReaderImageCache {
         key: String,
         token: UUID,
         epoch: UUID,
+        requestID: UUID,
         cancelIfUnneeded: Bool
     ) {
         guard epoch == generation,
@@ -950,14 +953,14 @@ private final class ReaderImageCache {
         var cancelledInFlightTask = false
         if consumers.isEmpty {
             foregroundConsumers[key] = nil
-            if cancelIfUnneeded {
+            if cancelIfUnneeded, inFlightLoads[key]?.id == requestID {
                 if preloadKeys.contains(key) {
                     if !desiredPreloadKeys.contains(key) {
-                        inFlightLoads[key]?.cancel()
+                        inFlightLoads[key]?.task.cancel()
                         cancelledInFlightTask = true
                     }
                 } else {
-                    inFlightLoads[key]?.cancel()
+                    inFlightLoads[key]?.task.cancel()
                     cancelledInFlightTask = true
                 }
             }
@@ -974,7 +977,7 @@ private final class ReaderImageCache {
     }
 
     private func awaitForegroundTask(
-        _ imageTask: Task<UIImage?, Never>,
+        _ entry: ReaderImageLoadEntry,
         key: String,
         epoch: UUID
     ) async -> UIImage? {
@@ -984,17 +987,19 @@ private final class ReaderImageCache {
                 key: key,
                 token: token,
                 epoch: epoch,
+                requestID: entry.id,
                 cancelIfUnneeded: false
             )
         }
         let image = await withTaskCancellationHandler {
-            await imageTask.value
+            await entry.task.value
         } onCancel: {
             Task { @MainActor in
                 ReaderImageCache.shared.finishForegroundConsumer(
                     key: key,
                     token: token,
                     epoch: epoch,
+                    requestID: entry.id,
                     cancelIfUnneeded: true
                 )
             }
@@ -1012,13 +1017,13 @@ private final class ReaderImageCache {
         }
         let epoch = generation
         let key = cacheKey(for: url, maxPixelSize: maxPixelSize)
-        if let existingTask = inFlightLoads[key] {
+        if let existingTask = inFlightLoads[key], existingTask.canJoin {
             let image = await awaitForegroundTask(existingTask, key: key, epoch: epoch)
             return epoch == generation && !Task.isCancelled ? image : nil
         }
         // 加入更高分辨率的在途解码任务，避免同时双解码
         if let higherKey = inFlightKeySatisfying(url: url, maxPixelSize: maxPixelSize),
-           let existingTask = inFlightLoads[higherKey] {
+           let existingTask = inFlightLoads[higherKey], existingTask.canJoin {
             let image = await awaitForegroundTask(existingTask, key: higherKey, epoch: epoch)
             return epoch == generation && !Task.isCancelled ? image : nil
         }
@@ -1028,23 +1033,26 @@ private final class ReaderImageCache {
         let task = Task.detached(priority: .userInitiated) {
             await loadForegroundReaderImage(from: url, maxPixelSize: maxPixelSize)
         }
-        inFlightLoads[key] = task
-        loadingCosts[key] = estimatedCost
-        let image = await awaitForegroundTask(task, key: key, epoch: epoch)
+        let entry = ReaderImageLoadEntry(task: task)
+        inFlightLoads[key] = entry
+        loadingCosts[entry.id] = estimatedCost
+        let image = await awaitForegroundTask(entry, key: key, epoch: epoch)
         if epoch == generation {
             // The owner still cleans the shared entry only after the detached task has
             // actually completed. Cancellation now reaches tasks that are merely queued
             // for a permit, while synchronous ImageIO already in progress finishes safely.
-            inFlightLoads[key] = nil
-            loadingCosts[key] = nil
-            preloadKeys.remove(key)
+            loadingCosts[entry.id] = nil
+            if inFlightLoads[key]?.id == entry.id {
+                inFlightLoads[key] = nil
+                preloadKeys.remove(key)
+            }
             drainPreloadQueue()
         }
 
         // clearMemoryCache() may have advanced generation and a new Reader may already own
         // the same key. Old completions must not touch that new session or repopulate cache.
         guard epoch == generation else { return nil }
-        if let image {
+        if let image, !task.isCancelled {
             // Cache a successful shared decode even if the task that originally created it
             // has since been cancelled. Another LocalImageView may still have been waiting
             // on the same work; tying cache insertion to the creator's lifetime would force
@@ -1112,7 +1120,7 @@ private final class ReaderImageCache {
         desiredPreloadKeys = desiredKeys
         for staleKey in preloadKeys.subtracting(desiredKeys) {
             guard !hasForegroundConsumer(for: staleKey) else { continue }
-            inFlightLoads[staleKey]?.cancel()
+            inFlightLoads[staleKey]?.task.cancel()
         }
 
         let candidates = request.urls
@@ -1149,7 +1157,7 @@ private final class ReaderImageCache {
             }
             let candidate = preloadQueue[0]
             guard cache.object(forKey: candidate.key as NSString) == nil,
-                  inFlightLoads[candidate.key] == nil else {
+                  inFlightLoads[candidate.key]?.canJoin != true else {
                 preloadQueue.removeFirst()
                 continue
             }
@@ -1161,22 +1169,26 @@ private final class ReaderImageCache {
 
             activePreloadCount += 1
             preloadKeys.insert(candidate.key)
-            loadingCosts[candidate.key] = candidate.cost
             let task: Task<UIImage?, Never> = Task.detached(priority: .utility) {
                 guard !Task.isCancelled else { return nil }
                 let image = await decodeReaderImage(from: candidate.url, maxPixelSize: candidate.maxPixelSize)
                 return Task.isCancelled ? nil : image
             }
-            inFlightLoads[candidate.key] = task
+            let entry = ReaderImageLoadEntry(task: task)
+            loadingCosts[entry.id] = candidate.cost
+            inFlightLoads[candidate.key] = entry
             let epoch = generation
             Task { @MainActor [weak self] in
                 let image = await task.value
                 guard let self, self.generation == epoch else { return }
-                self.inFlightLoads[candidate.key] = nil
-                self.loadingCosts[candidate.key] = nil
-                self.preloadKeys.remove(candidate.key)
+                self.loadingCosts[entry.id] = nil
+                let isCurrent = self.inFlightLoads[candidate.key]?.id == entry.id
+                if isCurrent {
+                    self.inFlightLoads[candidate.key] = nil
+                    self.preloadKeys.remove(candidate.key)
+                }
                 self.activePreloadCount = max(0, self.activePreloadCount - 1)
-                if let image, !Task.isCancelled {
+                if let image, isCurrent, !task.isCancelled {
                     self.cache.setObject(image, forKey: candidate.key as NSString, cost: image.cacheCost)
                 }
                 self.drainPreloadQueue()
@@ -1197,8 +1209,8 @@ private final class ReaderImageCache {
         scheduledPreload = nil
         pendingPreloadRequest = nil
         preloadQueue.removeAll()
-        for task in inFlightLoads.values {
-            task.cancel()
+        for entry in inFlightLoads.values {
+            entry.task.cancel()
         }
         inFlightLoads.removeAll()
         loadingCosts.removeAll()
@@ -1231,7 +1243,7 @@ private final class ReaderImageCache {
             let scale = min(1, maxPixelSize / max(pixelSize.width, pixelSize.height))
             return max(1, Int(pixelSize.width * scale * pixelSize.height * scale * 4))
         }
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             // 估算阶段不能再次解压 CBZ；优先使用已经登记的几何信息，未知时采用保守预算。
             if let pixelSize = PageGeometryStore.shared.size(for: url),
                pixelSize.width > 0,
@@ -1283,7 +1295,7 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
     }
     let image = autoreleasepool { () -> UIImage? in
         let source: CGImageSource?
-        if ComicManager.isArchivePageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
+        if ComicManager.isLocalPageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
             source = CGImageSourceCreateWithData(data as CFData, nil)
         } else if let remoteData {
             source = CGImageSourceCreateWithData(remoteData as CFData, nil)
@@ -1301,7 +1313,7 @@ nonisolated private func decodeReaderImage(from url: URL, maxPixelSize: CGFloat)
         if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return UIImage(cgImage: cgImage)
         }
-        return UIImage(contentsOfFile: url.path)
+        return nil
     }
     if Task.isCancelled {
         await readerImageDecodeLimiter.release()
@@ -2740,7 +2752,7 @@ struct ReaderView: View {
             guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
             return imagePixelSize(from: data)
         }
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             return await Task.detached(priority: .utility) {
                 guard let data = ComicManager.imageData(forArchivePageURL: url) else { return nil }
                 return imagePixelSize(from: data)
@@ -5765,6 +5777,7 @@ struct LocalImageView: View {
     let onShowControls: () -> Void
     let onHideControls: () -> Void
     @State private var uiImage: UIImage? = nil
+    @State private var imageLoadID = UUID()
     /// 已经加载进 `uiImage` 的页面。分镜跨页会复用同一个视图身份，靠它判断是否需要重新加载。
     @State private var loadedPageURL: URL?
 #if DEBUG
@@ -6250,6 +6263,7 @@ struct LocalImageView: View {
     }
 
     private func performImageLoadTask() async {
+        imageLoadID = UUID()
         guard retainsDecodedImage else {
             cancelLiveTranslationForPage()
             offlineTranslationTask?.cancel()
@@ -6307,10 +6321,15 @@ struct LocalImageView: View {
                 .resizable()
                 .scaledToFit()
         case .fitWidth:
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity)
+            if let cgImage = image.cgImage, image.size.height / max(image.size.width, 1) >= 3 {
+                ReaderStripTiles(image: cgImage)
+                    .frame(width: max(viewportWidth, 1), height: displayHeight(for: image))
+            } else {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+            }
         case .fitHeight:
             Image(uiImage: image)
                 .resizable()
@@ -6747,8 +6766,16 @@ struct LocalImageView: View {
                 within: imageBounds
             )
         }
-        let allowedBounds = resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
-        let layoutBounds = OCRBubbleLayoutEngine.resolvedTranslationLayoutBounds(
+        // Compute from the physical contour at display time as well: cloud and
+        // offline blocks may not have passed through the local OCR enrichment.
+        let mappedContour = block.bubblePolygon.map {
+            OCRCoordinateMapper.displayPoint(forNormalizedPagePoint: $0, using: transform)
+        }
+        let contourSafe = usableBubbleBounds.flatMap {
+            BubbleContourGeometry.safeRectangle(polygon: mappedContour, bounds: $0)
+        }
+        let allowedBounds = contourSafe ?? resolvedSafeRegion ?? usableBubbleBounds ?? fallbackBounds
+        let layoutBounds = contourSafe ?? OCRBubbleLayoutEngine.resolvedTranslationLayoutBounds(
             sourceRect: textRect,
             resolvedSafeRegion: resolvedSafeRegion,
             reliableBubbleBounds: usableBubbleBounds,
@@ -6849,7 +6876,8 @@ struct LocalImageView: View {
                 using: transform
             )
         }.filter { $0.x.isFinite && $0.y.isFinite }
-        guard mapped.count >= 3 else {
+        guard mapped.count >= 3,
+              BubbleContourGeometry.safeRectangle(polygon: mapped, bounds: surfaceRect) != nil else {
             return (surfaceRect, [])
         }
 
@@ -6960,7 +6988,8 @@ struct LocalImageView: View {
             String(format: "%.5f", ocrMinimumTextHeight),
             String(format: "%.4f", normalizedOCRScale),
             String(format: "%.4f", uniformOCRFontSize),
-            String(format: "%.2f", measuredTextTranslationFontSize)
+            String(format: "%.2f", measuredTextTranslationFontSize),
+            String(format: "%.2f", comic?.minimumReadableTranslationFontSize ?? ComicBook.defaultMinimumReadableTranslationFontSize)
         ].joined(separator: "|")
     }
 
@@ -7110,6 +7139,8 @@ struct LocalImageView: View {
     }
 
     private func loadImage() async {
+        let loadID = UUID()
+        imageLoadID = loadID
         let pageURL = url
         await MainActor.run {
             cancelLiveTranslationForPage()
@@ -7122,7 +7153,7 @@ struct LocalImageView: View {
         let maxPixelSize = preferredDecodeMaxPixelSize
         if let cachedImage = ReaderImageCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
             await MainActor.run {
-                guard self.url == pageURL else { return }
+                guard self.url == pageURL, self.imageLoadID == loadID, self.retainsDecodedImage, !Task.isCancelled else { return }
                 isLoadingImage = false
                 loadFailed = false
                 uiImage = cachedImage
@@ -7147,7 +7178,9 @@ struct LocalImageView: View {
                 pendingSingleTapWorkItem?.cancel()
                 pendingSingleTapWorkItem = nil
             }
+            guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
             let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+            guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
             if isAutoTranslationEnabled, !hasOfflineTranslation {
                 await MainActor.run { startTranslation() }
             }
@@ -7184,13 +7217,15 @@ struct LocalImageView: View {
 
         let loadedImage = await ReaderImageCache.shared.loadImage(for: url, maxPixelSize: maxPixelSize)
         await MainActor.run {
-            guard self.url == pageURL else { return }
+            guard self.url == pageURL, self.imageLoadID == loadID, self.retainsDecodedImage, !Task.isCancelled else { return }
             self.uiImage = loadedImage
             self.loadedPageURL = loadedImage == nil ? nil : pageURL
             self.loadFailed = loadedImage == nil
             self.isLoadingImage = false
         }
+        guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
         let hasOfflineTranslation = await loadOfflineTranslationIfAvailable()
+        guard imageLoadID == loadID, !Task.isCancelled, retainsDecodedImage else { return }
         if isAutoTranslationEnabled, !hasOfflineTranslation {
             await MainActor.run { startTranslation() }
         }
@@ -7975,7 +8010,7 @@ private struct TranslationLayoutItem: Identifiable {
 /// 字体与布局样式。命中缓存时直接复用上一次的结果。
 private final class TranslationLayoutStore {
     /// 排版算法版本。算法语义变化时必须 +1，避免旧布局被复用。
-    static let layoutRevision = 5
+    static let layoutRevision = 6
 
     struct Key: Equatable {
         let scope: String
@@ -8230,6 +8265,16 @@ private struct TranslationTextRenderer: View {
         .padding(contentPadding)
         .frame(width: layoutSize.width, height: layoutSize.height)
         .clipped()
+        .overlay(alignment: .bottomTrailing) {
+            if layoutStatus == .needsExpansion {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(2)
+                    .background(.white.opacity(0.9), in: Capsule())
+                    .accessibilityHidden(true)
+            }
+        }
         .allowsHitTesting(false)
     }
 
@@ -8263,6 +8308,9 @@ private struct CoreTextTranslationView: UIViewRepresentable {
 
     func updateUIView(_ uiView: TranslationTextUIView, context: Context) {
         var needsRedraw = false
+        uiView.isAccessibilityElement = true
+        uiView.accessibilityLabel = text
+        uiView.accessibilityTraits = .staticText
         if uiView.text != text {
             uiView.text = text
             needsRedraw = true

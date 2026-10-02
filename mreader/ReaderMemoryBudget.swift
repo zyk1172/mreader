@@ -70,21 +70,22 @@ nonisolated enum ReaderMemoryBudgetPlanner {
         // Keep each reader subsystem to a conservative share instead of pretending
         // the physical-RAM tier is a process-wide hard allocation budget.
         let availableMB = max(1, Int(availableMemoryBytes / (1024 * 1024)))
-        func clamped(_ value: Int, fraction: Double, floor: Int) -> Int {
-            min(value, max(floor, Int(Double(availableMB) * fraction)))
+        func clamped(_ value: Int, fraction: Double) -> Int {
+            // A fixed floor must not exceed the process' remaining headroom.
+            min(value, max(1, Int(Double(availableMB) * fraction)))
         }
 
-        let decoded = clamped(baseline.decodedImageCacheMB, fraction: 0.32, floor: 96)
+        let decoded = clamped(baseline.decodedImageCacheMB, fraction: 0.32)
         let preload = min(
-            clamped(baseline.decodedImagePreloadMB, fraction: 0.18, floor: 64),
-            max(64, decoded * 2 / 3)
+            clamped(baseline.decodedImagePreloadMB, fraction: 0.18),
+            max(1, decoded * 2 / 3)
         )
         return ReaderMemoryBudget(
             decodedImageCacheMB: decoded,
             decodedImagePreloadMB: preload,
-            remotePageDataCacheMB: clamped(baseline.remotePageDataCacheMB, fraction: 0.10, floor: 48),
+            remotePageDataCacheMB: clamped(baseline.remotePageDataCacheMB, fraction: 0.10),
             remotePageDataDiskMB: baseline.remotePageDataDiskMB,
-            remotePrefetchMB: clamped(baseline.remotePrefetchMB, fraction: 0.18, floor: 64)
+            remotePrefetchMB: clamped(baseline.remotePrefetchMB, fraction: 0.18)
         )
     }
 

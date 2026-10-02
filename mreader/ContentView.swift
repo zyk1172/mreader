@@ -3878,7 +3878,7 @@ struct CoverImageView: View {
         if let remoteURL = URL(string: path), OPDSProvider.isCoverReference(remoteURL) {
             guard let data = await RemoteSourceRuntimeService.coverData(for: remoteURL) else { return nil }
             source = CGImageSourceCreateWithData(data as CFData, nil)
-        } else if let archiveURL = URL(string: path), ComicManager.isArchivePageURL(archiveURL) {
+        } else if let archiveURL = URL(string: path), ComicManager.isLocalPageURL(archiveURL) {
             guard let data = ComicManager.imageData(forArchivePageURL: archiveURL) else { return nil }
             source = CGImageSourceCreateWithData(data as CFData, nil)
         } else {

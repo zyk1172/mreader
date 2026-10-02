@@ -9,7 +9,7 @@ import Foundation
 /// learned Manga Vision frame detector remains useful later as a residual detector for
 /// borderless/inset/irregular cases, but it is no longer the sole authority for navigation.
 nonisolated struct GeometryPanelDetector: PanelDetecting {
-    let identifier = "page-geometry-xycut-v3"
+    let identifier = "page-geometry-xycut-overview-local-windows-v5"
 
     private let maximumDimension: Int
 
@@ -18,16 +18,42 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
     }
 
     func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
-        guard let raster = PanelGeometryRaster(
-            image: image,
-            maximumDimension: maximumDimension
-        ) else {
-            return []
+        let size = CGSize(width: image.width, height: image.height)
+        let localWindows = LongPageGeometry.windows(sourceSize: size, maximumAspect: 2.5, overlap: 0.5)
+        // Large frames can span more than one local window. Keep the original
+        // whole-page pass as independent evidence, alongside local fine detail.
+        let windows = localWindows.count > 1
+            ? [CGRect(x: 0, y: 0, width: 1, height: 1)] + localWindows : localWindows
+        var candidates: [DetectedPanel] = []
+        for window in windows {
+            try Task.checkCancellation()
+            let pixelRect = CGRect(x: window.minX * size.width, y: window.minY * size.height,
+                                   width: window.width * size.width, height: window.height * size.height).integral
+                .intersection(CGRect(origin: .zero, size: size))
+            guard let crop = image.cropping(to: pixelRect),
+                  let raster = PanelGeometryRaster(image: crop, maximumDimension: maximumDimension) else { continue }
+            for panel in PanelGeometryAnalyzer(raster: raster).detectPanels() {
+                // A cut at the crop edge is not evidence of a panel boundary. An
+                // overlapping window may see the complete panel; otherwise use model evidence.
+                if windows.count > 1 {
+                    let r = panel.rect
+                    if (window.minY > 0 && r.minY < 0.008) || (window.maxY < 1 && r.maxY > 0.992)
+                        || (window.minX > 0 && r.minX < 0.008) || (window.maxX < 1 && r.maxX > 0.992) { continue }
+                }
+                let actual = CGRect(x: pixelRect.minX / size.width, y: pixelRect.minY / size.height,
+                                    width: pixelRect.width / size.width, height: pixelRect.height / size.height)
+                let rect = CGRect(x: actual.minX + panel.rect.minX * actual.width,
+                                  y: actual.minY + panel.rect.minY * actual.height,
+                                  width: panel.rect.width * actual.width, height: panel.rect.height * actual.height)
+                let contour = panel.contour?.map { CGPoint(x: actual.minX + $0.x * actual.width,
+                                                           y: actual.minY + $0.y * actual.height) }
+                candidates.append(DetectedPanel(rect: rect, confidence: panel.confidence,
+                                                source: panel.source, contour: contour))
+            }
         }
-
-        let analyzer = PanelGeometryAnalyzer(raster: raster)
-        return analyzer.detectPanels()
+        return PanelPostProcessor.process(candidates, pageSize: size)
     }
+
 }
 
 /// Chooses navigation geometry from two independent evidence sources.
@@ -38,7 +64,7 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 /// 3. the model owns the page only when geometry has no credible structure;
 /// 4. if neither source is credible, Guided Panel yields no synthetic sub-panels and the caller keeps whole-page reading.
 nonisolated enum PanelCandidateFusion {
-    static let revision = "geometry-first-fusion-v13"
+    static let revision = "geometry-first-fusion-scaled-v14"
 
     struct Resolution: Sendable {
         let panels: [DetectedPanel]
@@ -50,12 +76,13 @@ nonisolated enum PanelCandidateFusion {
         model: [DetectedPanel],
         contentBounds: CGRect,
         balloonRegions: [CGRect] = [],
-        textRegions: [CGRect] = []
+        textRegions: [CGRect] = [],
+        pageSize: CGSize = CGSize(width: 1, height: 1)
     ) -> Resolution {
         // Content bounds are useful for fallback viewport planning and for deciding
         // whether a learned box looks like a page container. They are not precise enough
         // to rewrite real detector geometry. Preserve frame boundaries exactly here.
-        let geometryPanels = PanelPostProcessor.process(geometry)
+        let geometryPanels = PanelPostProcessor.process(geometry, pageSize: pageSize)
         let modelPanels = suppressLikelyPageContainers(
             PanelPostProcessor.process(
                 model.filter {
@@ -64,19 +91,19 @@ nonisolated enum PanelCandidateFusion {
                         balloons: balloonRegions,
                         texts: textRegions
                     )
-                }
+                }, pageSize: pageSize
             ),
             contentBounds: contentBounds
         )
 
-        let geometryUsable = isGeometryAuthoritative(geometryPanels)
-        let modelUsable = PanelLayoutQuality.isUsable(modelPanels)
+        let geometryUsable = isGeometryAuthoritative(geometryPanels, pageSize: pageSize)
+        let modelUsable = PanelLayoutQuality.isUsable(modelPanels, pageSize: pageSize)
 
         if geometryUsable {
             let refined = PanelPostProcessor.process(
-                refineGeometryLeaves(geometryPanels, with: modelPanels)
+                refineGeometryLeaves(geometryPanels, with: modelPanels), pageSize: pageSize
             )
-            if PanelLayoutQuality.isUsable(refined) {
+            if PanelLayoutQuality.isUsable(refined, pageSize: pageSize) {
                 return Resolution(
                     panels: refined,
                     reason: "geometry-primary"
@@ -110,10 +137,10 @@ nonisolated enum PanelCandidateFusion {
             )
         }
 
-        let combined = PanelPostProcessor.process(geometryPanels + modelPanels)
+        let combined = PanelPostProcessor.process(geometryPanels + modelPanels, pageSize: pageSize)
         if combined.count >= 2,
            !hasUnsupportedCrossSourceContainment(combined),
-           PanelLayoutQuality.isUsable(combined) {
+           PanelLayoutQuality.isUsable(combined, pageSize: pageSize) {
             return Resolution(
                 panels: combined,
                 reason: "combined-recovery"
@@ -207,9 +234,9 @@ nonisolated enum PanelCandidateFusion {
         return tightlyMatchingText
     }
 
-    static func isGeometryAuthoritative(_ panels: [DetectedPanel]) -> Bool {
+    static func isGeometryAuthoritative(_ panels: [DetectedPanel], pageSize: CGSize = CGSize(width: 1, height: 1)) -> Bool {
         guard panels.count >= 2,
-              PanelLayoutQuality.isUsable(panels) else {
+              PanelLayoutQuality.isUsable(panels, pageSize: pageSize) else {
             return false
         }
         let average = panels.reduce(Float.zero) { $0 + $1.confidence }

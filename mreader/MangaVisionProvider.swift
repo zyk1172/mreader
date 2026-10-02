@@ -85,6 +85,13 @@ nonisolated enum MangaVisionRegionPostProcessor {
         for candidate in regions.sorted(by: { $0.confidence > $1.confidence }) {
             let duplicate = kept.contains { existing in
                 guard existing.type == candidate.type else { return false }
+                // Containment alone cannot distinguish a page container from a real
+                // child/inset frame. Only similarly sized panels are duplicates.
+                if candidate.type == .panel {
+                    let a = MangaPageCoordinateSpace.area(existing.normalizedRect)
+                    let b = MangaPageCoordinateSpace.area(candidate.normalizedRect)
+                    guard min(a, b) / max(max(a, b), 0.000_001) >= 0.72 else { return false }
+                }
                 return MangaPageCoordinateSpace.intersectionOverUnion(
                     existing.normalizedRect,
                     candidate.normalizedRect

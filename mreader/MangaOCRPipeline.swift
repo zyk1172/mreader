@@ -337,20 +337,22 @@ nonisolated enum MangaOCRPipeline {
     static func recognize(
         in image: UIImage,
         options: OCRPreprocessor.Options,
-        mangaAnalysis: MangaPageAnalysis? = nil
+        mangaAnalysis: MangaPageAnalysis? = nil,
+        sourceURL: URL? = nil
     ) async throws -> OCRPipelineResult {
-        let candidateResult = try await OCRROICoverageRecognizer.recognizeCandidatesWithReference(
-            in: image,
-            options: options,
-            visionTextRegions: mangaAnalysis?.texts ?? []
-        )
+        let sourceCandidates: OCRCandidateRecognitionResult?
+        if let sourceURL { sourceCandidates = try await OCRPreprocessor.originalLongPageCandidates(from: sourceURL, options: options) }
+        else { sourceCandidates = nil }
+        let candidateResult: OCRCandidateRecognitionResult
+        if let sourceCandidates { candidateResult = sourceCandidates }
+        else {
+            candidateResult = try await OCRROICoverageRecognizer.recognizeCandidatesWithReference(
+                in: image, options: options, visionTextRegions: mangaAnalysis?.texts ?? [])
+        }
         let visionBlocks = candidateResult.blocks
-        let verticalBlocks = await JapaneseVerticalOCRService.recognizeIfNeeded(
-            in: image,
-            existingBlocks: visionBlocks,
-            options: options,
-            visionKitReference: candidateResult.visionKitReference
-        )
+        let verticalBlocks = sourceCandidates == nil ? await JapaneseVerticalOCRService.recognizeIfNeeded(
+            in: image, existingBlocks: visionBlocks, options: options,
+            visionKitReference: candidateResult.visionKitReference) : []
         let rawBlocks = visionBlocks + verticalBlocks
         let result = resolveForDiagnostics(
             rawBlocks,
@@ -359,8 +361,34 @@ nonisolated enum MangaOCRPipeline {
             visionKitReference: candidateResult.visionKitReference
         )
         guard let mangaAnalysis else { return result }
+        let attached = MangaVisionOCRGeometry.applyingDetectedGeometry(to: result.resolvedBlocks, analysis: mangaAnalysis)
+        var polygons: [(rect: CGRect, points: [CGPoint])] = []
+        if let cgImage = image.cgImage {
+            var seen: [CGRect] = []
+            for bubble in attached.compactMap(\.bubbleBox) where !seen.contains(bubble) {
+                seen.append(bubble)
+                try Task.checkCancellation()
+                if let contour = LocalBubbleContour.recover(in: cgImage, balloon: bubble,
+                    textRegions: attached.filter { $0.bubbleBox == bubble }.map(\.boundingBox)) {
+                    polygons.append((bubble, contour))
+                }
+            }
+        }
+        func enrich(_ blocks: [TextBlock]) -> [TextBlock] {
+            MangaVisionOCRGeometry.applyingDetectedGeometry(to: blocks, analysis: mangaAnalysis).map { block in
+                var block = block
+                if block.bubblePolygon.isEmpty, let bubble = block.bubbleBox, let polygon = polygons.first(where: { $0.rect == bubble })?.points {
+                    block.bubblePolygon = polygon
+                    block.layoutSafeRegion = BubbleContourGeometry.safeRectangle(polygon: polygon, bounds: bubble)
+                }
+                return block
+            }
+        }
+        let contoured = OCRPipelineResult(rawBlocks: enrich(result.rawBlocks), resolvedBlocks: enrich(result.resolvedBlocks),
+            lineBlocks: enrich(result.lineBlocks), bubbleBlocks: enrich(result.bubbleBlocks), rejectedBlocks: result.rejectedBlocks,
+            detectedLanguage: result.detectedLanguage, quality: result.quality)
         return MangaVisionOCROrdering.applyingReadingOrder(
-            to: result,
+            to: contoured,
             analysis: mangaAnalysis,
             isRightToLeft: options.isRightToLeft
         )

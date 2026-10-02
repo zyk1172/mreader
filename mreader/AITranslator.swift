@@ -151,7 +151,7 @@ nonisolated enum TranslationLayoutRole: String, Codable, Sendable {
 nonisolated struct TextBlock: Identifiable, Codable, Sendable {
     let id: UUID
     let text: String
-    let boundingBox: CGRect // 原图中的相对坐标 (0.0 ~ 1.0)
+    private(set) var boundingBox: CGRect // 原图中的相对坐标 (0.0 ~ 1.0)
     var translation: String?
     var confidence: Double
     var ocrSource: String
@@ -205,6 +205,14 @@ nonisolated struct TextBlock: Identifiable, Codable, Sendable {
             polygon: polygon,
             textOrientation: resolvedOrientation
         )
+    }
+
+    /// Geometry replacements copy the complete value, preserving independent
+    /// bubble/layout evidence and any fields subsequently added to this type.
+    nonisolated func replacingBoundingBox(_ rect: CGRect) -> TextBlock {
+        var copy = self
+        copy.boundingBox = rect
+        return copy
     }
 
     /// OCR 字号尺度始终取原文短边：横排文字对应 textBox 高度，竖排文字对应宽度。
@@ -3896,11 +3904,15 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         rect.maxY <= 1.02
     }
 
-    nonisolated static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
+    nonisolated static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool, pageSize: CGSize? = nil) -> [TextBlock] {
+        let longPage = pageSize.map { max($0.width, $0.height) / max(min($0.width, $0.height), 1) >= 3 } ?? false
+        let xScale = longPage ? (pageSize.map { min(1, $0.height / max($0.width, 1)) } ?? 1) : 1
+        let yScale = longPage ? (pageSize.map { min(1, $0.width / max($0.height, 1)) } ?? 1) : 1
         let inset = min(max(CGFloat(safeAreaInset), 0), 0.3)
-        let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.002), 0.05)
-        let minimumArea = minimumHeight * 0.0048
-        let safeRect = CGRect(x: inset, y: inset, width: max(0, 1 - inset * 2), height: max(0, 1 - inset * 2))
+        let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.002), 0.05) * yScale
+        let minimumArea = minimumHeight * 0.0048 * xScale
+        let safeRect = CGRect(x: inset * xScale, y: inset * yScale,
+                              width: max(0, 1 - inset * xScale * 2), height: max(0, 1 - inset * yScale * 2))
 
         return sortedTextBlocks(blocks.map { block in
             var annotated = block

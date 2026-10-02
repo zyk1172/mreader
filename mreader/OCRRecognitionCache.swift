@@ -11,14 +11,15 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     var pageIndex: Int? = nil
 
     var analysisIdentity: String = "unprepared"
+    var sourceIdentityOverride: String? = nil
 
     var cacheKey: String {
-        let sourceIdentity = PageContentIdentityResolver.identity(for: pageURL).fingerprint
+        let sourceIdentity = sourceIdentityOverride ?? PageContentIdentityResolver.identity(for: pageURL).fingerprint
         let rawValue = [
             // v11 keeps Manga Vision text ROI discovery and adds first-class
             // balloon/layout geometry. Do not reuse pages written before that
             // translation-unit contract existed.
-            "local-ocr-v12-lossless-quality-snapshot",
+            "local-ocr-v13-contours-width-preserving",
             MangaVisionService.analysisRevision,
             analysisIdentity,
             JapaneseVerticalOCRService.revision,
@@ -50,7 +51,12 @@ actor OCRRecognitionCache {
     private let diskByteLimit: Int64 = 30 * 1024 * 1024
     private var memoryCache: [String: OCRPipelineResult] = [:]
     private var memoryOrder: [String] = []
-    private let workPool = SharedPageTaskPool<OCRPipelineResult>()
+    private struct PreparedResult: Sendable {
+        let result: OCRPipelineResult
+        let identity: String
+        let isPersistent: Bool
+    }
+    private let workPool = SharedPageTaskPool<PreparedResult>()
     private var generation = UUID()
     private var activeReaderSessionID: UUID?
 
@@ -62,45 +68,48 @@ actor OCRRecognitionCache {
 
     func result(for request: OCRRecognitionCacheRequest) async throws -> OCRPipelineResult {
         let epoch = generation
-        let image = await OCRPreprocessor.highResolutionImage(
-            from: request.pageURL, fallback: request.fallbackImage
-        ) ?? request.fallbackImage
+        let sourceSize = await OCRPreprocessor.sourcePixelSize(from: request.pageURL, fallback: request.fallbackImage)
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
-
-        // Loading the already-decoded/high-resolution source is cheap compared with
-        // Manga Vision + OCR. Use its dimensions to derive the expected visual
-        // dependency and check the OCR cache before starting model work.
         var preparedRequest = request
+        let contentIdentity = PageContentIdentityResolver.identity(for: request.pageURL)
+        let sourceIdentity = contentIdentity.fingerprint
+        preparedRequest.sourceIdentityOverride = sourceIdentity
         preparedRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
-            image: image
+            sourceSize: OCRPreprocessor.preparedPixelSize(sourceSize: sourceSize)
         )
-        var key = preparedRequest.cacheKey
+        guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+            throw CancellationError()
+        }
+        let key = preparedRequest.cacheKey
         if let cached = cachedResult(forKey: key) { return cached }
-
-        let analysis = try? await MangaVisionService.shared.analysis(
-            comicID: request.comicID, pageIndex: request.pageIndex,
-            pageURL: request.pageURL, image: image
-        )
-        try Task.checkCancellation()
-        guard epoch == generation else { throw CancellationError() }
-
-        let actualIdentity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
-        if actualIdentity != preparedRequest.analysisIdentity {
-            preparedRequest.analysisIdentity = actualIdentity
-            key = preparedRequest.cacheKey
-            if let cached = cachedResult(forKey: key) { return cached }
-        }
-
-        let options = request.options
-        let result = try await workPool.value(forKey: key) {
-            try await MangaOCRPipeline.recognize(in: image, options: options, mangaAnalysis: analysis)
+        // Coalesce preparation as well as OCR. Concurrent consumers must not each
+        // decode the high-resolution source before discovering the shared work.
+        let prepared = try await workPool.value(forKey: key) {
+            let image = await OCRPreprocessor.highResolutionImage(from: request.pageURL, fallback: request.fallbackImage)
+                ?? request.fallbackImage
+            try Task.checkCancellation()
+            guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+                throw CancellationError()
+            }
+            let analysis = try? await MangaVisionService.shared.analysis(comicID: request.comicID,
+                pageIndex: request.pageIndex, pageURL: request.pageURL, image: image,
+                contentIdentity: contentIdentity)
+            try Task.checkCancellation()
+            let identity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
+            let result = try await MangaOCRPipeline.recognize(in: image, options: request.options, mangaAnalysis: analysis, sourceURL: request.pageURL)
+            return PreparedResult(result: result, identity: identity, isPersistent: analysis != nil)
         }
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
-        // A temporary model failure must not become a persistent OCR decision.
-        if analysis != nil { store(result, forKey: key) }
-        return result
+        // Source reads span suspension points. Never return or persist a mixture
+        // of revisions, or label an old result with the file's new cache key.
+        guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+            throw CancellationError()
+        }
+        preparedRequest.analysisIdentity = prepared.identity
+        if prepared.isPersistent { store(prepared.result, forKey: preparedRequest.cacheKey) }
+        return prepared.result
     }
 
     func beginReaderSession(sessionID: UUID) async {
@@ -193,4 +202,3 @@ actor OCRRecognitionCache {
         }
     }
 }
-

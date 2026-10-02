@@ -247,11 +247,7 @@ class ComicManager {
             }
             if url.pathExtension.lowercased() == "pdf" {
                 // PDF 章节：原 PDF 文件保留，仅把页面按需渲染到临时缓存后读取，绝不改写或删除原文件。
-                guard let extractedURL = extractImagesFromPDFSynchronously(url) else { return nil }
-                let sortedURLs = getAllImages(from: extractedURL)
-                    .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-                let pages = sortedURLs.enumerated().map { ComicPage(index: $0, url: $1) }
-                logMemory("load-pages-end \(url.lastPathComponent) count=\(pages.count)")
+                let pages = pdfPages(from: url)
                 return pages.isEmpty ? nil : LoadResult(url: url, accessToken: accessToken, pages: pages)
             }
             guard let pageSourceURL = pageSourceURL(for: url) else {
@@ -293,11 +289,8 @@ class ComicManager {
 
     nonisolated static func loadDownloadedRemotePages(from sourceURL: URL) async -> LoadResult? {
         if sourceURL.pathExtension.lowercased() == "pdf" {
-            guard let pageSourceURL = await extractImagesFromPDF(sourceURL) else { return nil }
-            let sortedURLs = getAllImages(from: pageSourceURL)
-                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            let pages = sortedURLs.enumerated().map { ComicPage(index: $0, url: $1) }
-            return pages.isEmpty ? nil : LoadResult(url: pageSourceURL, accessToken: nil, pages: pages)
+            let pages = pdfPages(from: sourceURL)
+            return pages.isEmpty ? nil : LoadResult(url: sourceURL, accessToken: nil, pages: pages)
         }
         if supportedImageExtensions.contains(sourceURL.pathExtension.lowercased()) {
             return LoadResult(
@@ -713,7 +706,10 @@ class ComicManager {
               document.pageCount > 0,
               let page = document.page(at: pageIndex) else { return nil }
         let pageRect = page.bounds(for: .mediaBox)
-        let size = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+        let requested = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+        guard requested.width.isFinite, requested.height.isFinite, requested.width > 0, requested.height > 0 else { return nil }
+        let boundedScale = min(scale, sqrt(12_000_000 / max(pageRect.width * pageRect.height, 1)))
+        let size = CGSize(width: pageRect.width * boundedScale, height: pageRect.height * boundedScale)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
@@ -721,7 +717,7 @@ class ComicManager {
             UIColor.white.set()
             ctx.fill(CGRect(origin: .zero, size: size))
             ctx.cgContext.translateBy(x: 0.0, y: size.height)
-            ctx.cgContext.scaleBy(x: scale, y: -scale)
+            ctx.cgContext.scaleBy(x: boundedScale, y: -boundedScale)
             page.draw(with: .mediaBox, to: ctx.cgContext)
         }
         return image.jpegData(compressionQuality: 0.85)
@@ -1311,11 +1307,58 @@ class ComicManager {
         return sourceURL
     }
 
+    nonisolated static func isLocalPageURL(_ url: URL) -> Bool {
+        isArchivePageURL(url) || url.scheme == "mreader-pdf"
+    }
+
+    nonisolated static func pdfPages(from pdfURL: URL) -> [ComicPage] {
+        guard let document = PDFDocument(url: pdfURL), document.pageCount > 0 else { return [] }
+        return (0..<document.pageCount).compactMap { index in
+            var components = URLComponents()
+            components.scheme = "mreader-pdf"
+            components.host = "page"
+            components.queryItems = [URLQueryItem(name: "source", value: pdfURL.path),
+                                     URLQueryItem(name: "index", value: String(index))]
+            return components.url.map { ComicPage(index: index, url: $0) }
+        }
+    }
+
+    nonisolated private static func pdfPageComponents(_ url: URL) -> (URL, Int)? {
+        guard url.scheme == "mreader-pdf", let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let path = items.first(where: { $0.name == "source" })?.value,
+              let rawIndex = items.first(where: { $0.name == "index" })?.value,
+              let index = Int(rawIndex), index >= 0 else { return nil }
+        return (URL(fileURLWithPath: path), index)
+    }
+
+    nonisolated static func pdfPageCacheKey(for url: URL) -> String? {
+        guard let (source, index) = pdfPageComponents(url) else { return nil }
+        let values = try? source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        return "pdf-v1|\(source.path)|\(index)|\(values?.fileSize ?? 0)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+    }
+
+    nonisolated private static func pdfPageData(for url: URL) -> Data? {
+        guard let (source, index) = pdfPageComponents(url), !Task.isCancelled else { return nil }
+        let read = { renderPDFPageJPEGData(from: source, pageIndex: index, scale: 3) }
+        return withSelectedLibraryRoot { _ in read() } ?? read()
+    }
+
+    nonisolated private static func pdfPagePixelSize(for url: URL) -> CGSize? {
+        guard let (source, index) = pdfPageComponents(url) else { return nil }
+        let read = { () -> CGSize? in
+            guard let page = PDFDocument(url: source)?.page(at: index) else { return nil }
+            let size = page.bounds(for: .mediaBox).size
+            return CGSize(width: size.width * 3, height: size.height * 3)
+        }
+        return withSelectedLibraryRoot { _ in read() } ?? read()
+    }
+
     nonisolated static func isArchivePageURL(_ url: URL) -> Bool {
         url.scheme == archivePageScheme
     }
 
     nonisolated static func archivePageCacheKey(for url: URL) -> String? {
+        if let pdfKey = pdfPageCacheKey(for: url) { return pdfKey }
         guard let (archiveURL, entryPath, _, _) = archivePageComponents(from: url),
               let values = try? archiveURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
             return nil
@@ -1329,6 +1372,7 @@ class ComicManager {
         forArchivePageURL url: URL,
         securityScopedAccessHeld: Bool = false
     ) -> Data? {
+        if url.scheme == "mreader-pdf" { return pdfPageData(for: url) }
         guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url) else {
             logger.error("archive-page-url-invalid url=\(url.absoluteString, privacy: .public)")
             return nil
@@ -1364,9 +1408,10 @@ class ComicManager {
     }
 
     /// 只读取归档页图片的尺寸，不整张解码像素（审查 #18）。
-    /// 用增量 ImageIO 边解压边尝试读宽高；ZIPFoundation 暂不支持提前中断解压，
-    /// 但一旦拿到尺寸就不再做后续工作，也无需构造完整 Data。
+    /// Incremental ImageIO probes at most 1 MiB. A throwing ZIP consumer stops
+    /// extraction as soon as dimensions are available; full page reads still check CRC.
     nonisolated static func imagePixelSizeForArchivePageURL(_ url: URL) -> CGSize? {
+        if url.scheme == "mreader-pdf" { return pdfPagePixelSize(for: url) }
         guard let (archiveURL, entryPath, encodingRawValue, format) = archivePageComponents(from: url),
               format == .zip else {
             return nil
@@ -1383,22 +1428,22 @@ class ComicManager {
             }
             let source = CGImageSourceCreateIncremental(nil)
             var accumulated = Data()
-            var result: CGSize?
-            _ = try archive.extract(entry, skipCRC32: false) { chunk in
-                guard result == nil else { return }
-                guard UInt64(accumulated.count) + UInt64(chunk.count) <= maxArchiveImageBytes else {
-                    throw ArchiveReadError.memoryLimit
+            enum ProbeStop: Error { case found(CGSize); case prefixLimit }
+            do {
+                _ = try archive.extract(entry, skipCRC32: true) { chunk in
+                    try Task.checkCancellation()
+                    guard accumulated.count + chunk.count <= 1_024 * 1_024 else { throw ProbeStop.prefixLimit }
+                    accumulated.append(chunk)
+                    CGImageSourceUpdateData(source, accumulated as CFData, false)
+                    if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                       let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+                       let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+                       width > 0, height > 0 {
+                        throw ProbeStop.found(CGSize(width: width, height: height))
+                    }
                 }
-                accumulated.append(chunk)
-                CGImageSourceUpdateData(source, accumulated as CFData, false)
-                if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-                   let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
-                   let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
-                   width > 0, height > 0 {
-                    result = CGSize(width: width, height: height)
-                }
-            }
-            return result
+            } catch ProbeStop.found(let size) { return size }
+            return nil
         }
         do {
             if let size = try withSelectedLibraryRoot({ _ in try readSize() }) {
