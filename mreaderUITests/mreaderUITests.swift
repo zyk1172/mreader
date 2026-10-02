@@ -228,6 +228,29 @@ final class mreaderUITests: XCTestCase {
     }
 
     @MainActor
+    func testLongStripRapidReverseScrollMemoryAndHitchMetrics() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-mreader-ui-testing", "-mreader-ui-testing-long-strip"]
+        app.launch()
+        let openReader = element("mreader.shelf.uiTestingFixture", in: app)
+        XCTAssertTrue(openReader.waitForExistence(timeout: timeout))
+        openReader.tap()
+        let reader = element("mreader.reader.root", in: app)
+        XCTAssertTrue(reader.waitForExistence(timeout: timeout))
+        let options = XCTMeasureOptions()
+        options.iterationCount = 1
+        options.invocationOptions = .manuallyStop
+        measure(metrics: [XCTMemoryMetric(application: app), XCTHitchMetric(application: app)], options: options) {
+            // Exercise page boundaries as well as scrolling inside a single strip.
+            for _ in 0..<25 { reader.swipeUp(velocity: .fast) }
+            for _ in 0..<25 { reader.swipeDown(velocity: .fast) }
+            stopMeasuring()
+            XCTAssertTrue(reader.exists)
+            XCTAssertFalse(app.staticTexts["图片加载失败"].exists)
+        }
+    }
+
+    @MainActor
     func testV2B5ProviderReaderGuidedPanelAndOCRControls() throws {
         let app = launchV2B5ReaderFixture()
         let openReader = element("mreader.shelf.uiTestingFixture", in: app)

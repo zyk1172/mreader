@@ -181,6 +181,19 @@ struct mreaderTests {
         #expect(AIChatResponseDecoder.decode(anthropic).finishReason == "end_turn")
     }
 
+    @Test func aiTranslationClientRejectsOversizedResponseWithoutContentLength() async throws {
+        AITransportRecordingURLProtocol.configure(responseData: Data(repeating: 0x41, count: 8 * 1024 * 1024 + 1))
+        let client = AITranslationClient(apiKey: "secret", baseURL: "https://api.example.test/v1",
+            session: aiTransportRecordingSession())
+        var rejected = false
+        do {
+            _ = try await client.send(AITransportRequest(
+                model: AIModelDescriptor(id: "test", apiProtocol: .openAIChatCompletions),
+                systemPrompt: "system", userPrompt: "hello", maxTokens: 32))
+        } catch BoundedHTTPResponseError.tooLarge { rejected = true }
+        #expect(rejected)
+    }
+
     @Test func aiTranslationClientBuildsChatCompletionsRequest() async throws {
         AITransportRecordingURLProtocol.configure(responseData: Data(#"{"output_text":"ok"}"#.utf8))
         let client = AITranslationClient(

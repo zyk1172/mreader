@@ -572,9 +572,9 @@
 "offlineTranslation.errorDetails" = "오류 세부 정보 보기";
 "nav.close" = "닫기";
 
-"ocr.minimumReadableTranslationFontSize" = "번역 최소 가독 글자 크기";
-"ocr.minimumReadableTranslationFontSizeValue" = "가독 하한: %d pt";
-"ocr.minimumReadableTranslationFontSizeDescription" = "이 크기보다 더 줄이지 않고, 공간이 부족하면 펼쳐서 전체 번역을 읽습니다.";
+"ocr.minimumReadableTranslationFontSize" = "번역 선호 가독 글자 크기";
+"ocr.minimumReadableTranslationFontSizeValue" = "선호 크기: %d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "말풍선에 맞추기 위해 더 작아질 수 있습니다. 접근성 기능으로 전체 번역을 읽을 수 있습니다。";
 "ocr.translationNeedsExpansion" = "번역을 펼쳐서 읽어야 합니다";
 "ocr.inPlaceTranslation" = "원위치 번역";
 "ocr.inPlaceTranslationDescription" = "신뢰할 수 있는 대사 말풍선만 되돌릴 수 있는 원위치 표시를 사용하고 효과음 원화는 유지합니다.";

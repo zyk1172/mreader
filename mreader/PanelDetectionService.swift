@@ -162,7 +162,9 @@ nonisolated enum PanelPostProcessor {
     private static let structuralAlignmentTolerance: CGFloat = 0.035
     private static let pageEdgeTolerance: CGFloat = 0.075
 
-    static func process(_ candidates: [DetectedPanel]) -> [DetectedPanel] {
+    static func process(_ candidates: [DetectedPanel], pageSize: CGSize = CGSize(width: 1, height: 1)) -> [DetectedPanel] {
+        let xScale = min(1, pageSize.height / max(pageSize.width, 1))
+        let yScale = min(1, pageSize.width / max(pageSize.height, 1))
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let filtered = candidates.compactMap { panel -> DetectedPanel? in
             let standardized = panel.rect.standardized
@@ -170,15 +172,15 @@ nonisolated enum PanelPostProcessor {
                 ? standardized
                 : standardized.intersection(unit)
             guard !rect.isNull,
-                  rect.width >= 0.055,
-                  rect.height >= 0.045 else {
+                  rect.width >= 0.055 * xScale,
+                  rect.height >= 0.045 * yScale else {
                 return nil
             }
             let area = rect.width * rect.height
             let maximumArea: CGFloat = (
                 panel.source == .coreML || panel.source == .pageGeometry
             ) ? 1.0 : 0.94
-            guard area >= 0.012,
+            guard area >= 0.012 * xScale * yScale,
                   area <= maximumArea,
                   panel.confidence >= 0.24 else {
                 return nil
@@ -363,7 +365,7 @@ nonisolated enum PanelPostProcessor {
 }
 
 nonisolated enum PanelLayoutQuality {
-    static func isUsable(_ panels: [DetectedPanel]) -> Bool {
+    static func isUsable(_ panels: [DetectedPanel], pageSize: CGSize = CGSize(width: 1, height: 1)) -> Bool {
         let maximumPanelCount: Int
         if panels.allSatisfy({ $0.source == .coreML }) {
             maximumPanelCount = 18
@@ -386,7 +388,9 @@ nonisolated enum PanelLayoutQuality {
             }
         }
 
-        guard (2...maximumPanelCount).contains(panels.count) else { return false }
+        let aspect = max(pageSize.width, pageSize.height) / max(min(pageSize.width, pageSize.height), 1)
+        let scaledMaximum = min(256, maximumPanelCount * max(1, Int(ceil(aspect / 2.5))))
+        guard (2...scaledMaximum).contains(panels.count) else { return false }
         let averageConfidence = panels.reduce(Float.zero) { $0 + $1.confidence } / Float(panels.count)
         guard averageConfidence >= 0.34 else { return false }
         guard PanelPostProcessor.hasVisionPanelStructure(panels) else { return false }
@@ -630,7 +634,9 @@ actor PanelDetectionService {
         // still runs (or reuses its cache) as independent residual evidence: accuracy is
         // more important here than saving one inference, because a seemingly healthy
         // geometry layout can still contain one under-segmented leaf.
-        let geometryCandidates = (try? fallbackDetector.detectPanels(in: analysisImage)) ?? []
+        // Tiling must precede the geometry raster's longest-edge reduction.
+        let geometrySource = image.cgImage ?? analysisImage
+        let geometryCandidates = (try? fallbackDetector.detectPanels(in: geometrySource)) ?? []
 
         var mangaAnalysis = await visionService.cachedAnalysis(
             comicID: comicID,
@@ -707,13 +713,14 @@ actor PanelDetectionService {
             model: modelCandidates,
             contentBounds: contentBounds,
             balloonRegions: mangaAnalysis?.balloons.map(\.normalizedRect) ?? [],
-            textRegions: mangaAnalysis?.texts.map(\.normalizedRect) ?? []
+            textRegions: mangaAnalysis?.texts.map(\.normalizedRect) ?? [],
+            pageSize: CGSize(width: geometrySource.width, height: geometrySource.height)
         )
         let processed = resolution.panels
         let detectorIdentifier = primaryIdentifier
 
         var result: PanelPageLayout
-        if PanelLayoutQuality.isUsable(processed) {
+        if PanelLayoutQuality.isUsable(processed, pageSize: CGSize(width: geometrySource.width, height: geometrySource.height)) {
             let structure = MangaPageStructureGraph(
                 panels: processed,
                 analysis: mangaAnalysis,

@@ -4,6 +4,8 @@ import Combine
 
 private enum HTTPRequestReceiveError: Error {
     case headerTooLarge
+    case forbidden
+    case payloadTooLarge
 }
 
 private enum LocalWebServerFileError: LocalizedError {
@@ -25,6 +27,10 @@ private enum LocalWebServerFileError: LocalizedError {
 /// callbacks to retain the state while that queue provides the synchronization.
 nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
     private static let maxHeaderBytes = 64 * 1024
+    private let authorizeHeader: ((String) throws -> Void)?
+    init(authorizeHeader: ((String) throws -> Void)? = nil) {
+        self.authorizeHeader = authorizeHeader
+    }
     private var headerBuffer = Data()
     private var bodyHandle: FileHandle?
     private var didFinish = false
@@ -69,6 +75,9 @@ nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
             contentLength = method == "POST"
                 ? Self.contentLength(from: header ?? "") ?? -1
                 : 0
+            // Validate headers before creating a body file or accepting the body
+            // bytes that may have arrived in the same Network.framework chunk.
+            try authorizeHeader?(header ?? "")
             if contentLength > 0 {
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MReaderWebUpload-\(UUID().uuidString).body")
@@ -136,7 +145,7 @@ nonisolated final class HTTPRequestReceiveState: @unchecked Sendable {
         receivedBodyBytes += chunk.count
     }
 
-    private static func contentLength(from header: String) -> Int? {
+    static func contentLength(from header: String) -> Int? {
         header
             .components(separatedBy: "\r\n")
             .first { $0.lowercased().hasPrefix("content-length:") }
@@ -361,7 +370,16 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
             return
         }
 
-        let state = HTTPRequestReceiveState()
+        let expectedPath = "/\(token)/upload"
+        let maximumBytes = maxUploadSize
+        let state = HTTPRequestReceiveState { header in
+            if let request = Self.requestLine(from: header), request.method == "POST" {
+                guard request.path == expectedPath else { throw HTTPRequestReceiveError.forbidden }
+                if let length = HTTPRequestReceiveState.contentLength(from: header), length > maximumBytes {
+                    throw HTTPRequestReceiveError.payloadTooLarge
+                }
+            }
+        }
         activeConnections[ObjectIdentifier(connection)] = ActiveConnection(
             connection: connection,
             state: state
@@ -404,6 +422,10 @@ nonisolated private final class LocalWebServerWorker: @unchecked Sendable {
                         contentType: "text/plain; charset=utf-8",
                         body: "请求头过大"
                     )
+                } else if case HTTPRequestReceiveError.forbidden = receiveError {
+                    response = httpResponse(status: "403 Forbidden", contentType: "text/plain; charset=utf-8", body: "禁止访问")
+                } else if case HTTPRequestReceiveError.payloadTooLarge = receiveError {
+                    response = httpResponse(status: "413 Payload Too Large", contentType: "text/plain; charset=utf-8", body: "上传文件过大")
                 } else {
                     response = httpResponse(
                         status: "500 Internal Server Error",

@@ -414,9 +414,9 @@
 "offlineTranslation.errorDetails" = "View error details";
 "nav.close" = "Close";
 
-"ocr.minimumReadableTranslationFontSize" = "最小可读译文字号";
-"ocr.minimumReadableTranslationFontSizeValue" = "可读下限：%d pt";
-"ocr.minimumReadableTranslationFontSizeDescription" = "低于此字号时不再继续缩小，而改为可展开阅读。";
+"ocr.minimumReadableTranslationFontSize" = "偏好可读译文字号";
+"ocr.minimumReadableTranslationFontSizeValue" = "偏好字号：%d pt";
+"ocr.minimumReadableTranslationFontSizeDescription" = "气泡空间不足时仍会缩小以适配；完整译文可通过辅助功能朗读。";
 "ocr.translationNeedsExpansion" = "译文需要展开阅读";
 "ocr.inPlaceTranslation" = "In-place translation";
 "ocr.inPlaceTranslationDescription" = "Use reversible in-place coverage only for reliable dialogue bubbles; sound effects keep their original artwork and use annotations.";

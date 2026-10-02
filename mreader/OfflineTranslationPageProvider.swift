@@ -281,7 +281,7 @@ nonisolated enum OfflineTranslationPageProvider {
                 ? await RemotePageLoader.imageData(forRemotePageURL: page.url)
                 : try? Data(contentsOf: page.url)
         case .opds:
-            data = ComicManager.isArchivePageURL(page.url)
+            data = ComicManager.isLocalPageURL(page.url)
                 ? ComicManager.imageData(forArchivePageURL: page.url)
                 : try? Data(contentsOf: page.url)
         }
@@ -316,7 +316,7 @@ nonisolated enum OfflineTranslationPageProvider {
             defer {
                 if fallbackStarted { fallbackURL?.stopAccessingSecurityScopedResource() }
             }
-            if ComicManager.isArchivePageURL(pageURL) {
+            if ComicManager.isLocalPageURL(pageURL) {
                 return ComicManager.imageData(
                     forArchivePageURL: pageURL,
                     securityScopedAccessHeld: session?.hasActiveSecurityScope == true

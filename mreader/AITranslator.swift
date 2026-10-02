@@ -3896,11 +3896,14 @@ static func visualReviewedBlockForDiagnostics(original: TextBlock, review: Visio
         rect.maxY <= 1.02
     }
 
-    nonisolated static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool) -> [TextBlock] {
+    nonisolated static func annotatedMangaTextBlocks(_ blocks: [TextBlock], safeAreaInset: Double, minimumTextHeight: Double, isRightToLeft: Bool, pageSize: CGSize? = nil) -> [TextBlock] {
+        let xScale = pageSize.map { min(1, $0.height / max($0.width, 1)) } ?? 1
+        let yScale = pageSize.map { min(1, $0.width / max($0.height, 1)) } ?? 1
         let inset = min(max(CGFloat(safeAreaInset), 0), 0.3)
-        let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.002), 0.05)
-        let minimumArea = minimumHeight * 0.0048
-        let safeRect = CGRect(x: inset, y: inset, width: max(0, 1 - inset * 2), height: max(0, 1 - inset * 2))
+        let minimumHeight = min(max(CGFloat(minimumTextHeight), 0.002), 0.05) * yScale
+        let minimumArea = minimumHeight * 0.0048 * xScale
+        let safeRect = CGRect(x: inset * xScale, y: inset * yScale,
+                              width: max(0, 1 - inset * xScale * 2), height: max(0, 1 - inset * yScale * 2))
 
         return sortedTextBlocks(blocks.map { block in
             var annotated = block

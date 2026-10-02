@@ -253,7 +253,9 @@ nonisolated final class AITranslationClient: AITransporting, @unchecked Sendable
             try Task.checkCancellation()
             let startedAt = Date()
             do {
-                let (data, response) = try await session.data(for: urlRequest)
+                let (data, response) = try await BoundedHTTPResponseReader.data(
+                    for: urlRequest, maximumBytes: 8 * 1024 * 1024, using: session
+                )
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw AITranslationRequestError.invalidConfiguration("响应无效")
                 }

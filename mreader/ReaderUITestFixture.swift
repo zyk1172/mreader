@@ -17,8 +17,9 @@ enum ReaderUITestFixture {
     static func makeComic(force: Bool = false) -> ComicBook? {
         guard force || isEnabled else { return nil }
 
+        let longStrip = ProcessInfo.processInfo.arguments.contains("-mreader-ui-testing-long-strip")
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MReaderUITestReader", isDirectory: true)
+            .appendingPathComponent(longStrip ? "MReaderUITestLongStrip" : "MReaderUITestReader", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let colors: [UIColor] = [
@@ -31,7 +32,7 @@ enum ReaderUITestFixture {
             for (index, color) in colors.enumerated() {
                 let pageURL = root.appendingPathComponent(String(format: "%02d.png", index + 1))
                 if !FileManager.default.fileExists(atPath: pageURL.path) {
-                    try pageData(color: color).write(to: pageURL, options: .atomic)
+                    try (longStrip ? longStripData(index: index) : pageData(color: color)).write(to: pageURL, options: .atomic)
                 }
             }
             let bookmarkData = try root.bookmarkData(
@@ -42,7 +43,7 @@ enum ReaderUITestFixture {
             let firstPage = root.appendingPathComponent("01.png")
             return ComicBook(
                 id: UUID(uuidString: "A0D0C0DE-7E57-4D2C-9B2A-7D6F2C2B9E01")!,
-                title: "UI Test Reader",
+                title: longStrip ? "UI Test Long Strip" : "UI Test Reader",
                 bookmarkData: bookmarkData,
                 totalPages: colors.count,
                 coverImagePath: firstPage.path,
@@ -60,12 +61,30 @@ enum ReaderUITestFixture {
                 isOCREnabled: true,
                 isAITranslationEnabled: true,
                 hasInitializedReadingPreset: true,
-                readingModeRaw: ReadingMode.horizontalPage.rawValue,
+                readingModeRaw: longStrip ? ReadingMode.continuousScroll.rawValue : ReadingMode.horizontalPage.rawValue,
                 pageTurnAnimationRaw: PageTurnAnimation.slide.rawValue,
-                imageFitModeRaw: ImageFitMode.fitScreen.rawValue
+                imageFitModeRaw: longStrip ? ImageFitMode.fitWidth.rawValue : ImageFitMode.fitScreen.rawValue
             )
         } catch {
             return nil
+        }
+    }
+
+    private static func longStripData(index: Int) -> Data {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+        return UIGraphicsImageRenderer(size: CGSize(width: 800, height: 20_000), format: format).pngData { context in
+            UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 800, height: 20_000))
+            for (panel, y) in stride(from: 80, to: 19_400, by: 900).enumerated() {
+                UIColor(hue: CGFloat((index + panel) % 10)/10, saturation: 0.5, brightness: 0.65, alpha: 1).setFill()
+                context.fill(CGRect(x: 30, y: y, width: 740, height: 720))
+                UIColor.black.setStroke(); context.cgContext.setLineWidth(4)
+                context.cgContext.stroke(CGRect(x: 30, y: y, width: 740, height: 720))
+                let bubble = UIBezierPath(ovalIn: CGRect(x: 170, y: y+90, width: 460, height: 280))
+                UIColor.white.setFill(); bubble.fill(); bubble.lineWidth = 4; bubble.stroke()
+                ("PAGE \(index+1) PANEL \(panel+1)" as NSString).draw(
+                    in: CGRect(x: 240, y: y+170, width: 320, height: 100),
+                    withAttributes: [.font: UIFont.boldSystemFont(ofSize: 28), .foregroundColor: UIColor.black])
+            }
         }
     }
 

@@ -773,7 +773,7 @@ nonisolated enum MangaVisionHardCasePageDataLoader {
         if RemotePageLoader.isRemotePageURL(url) {
             return await RemotePageLoader.imageData(forRemotePageURL: url)
         }
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             return await Task.detached(priority: .utility) {
                 ComicManager.imageData(forArchivePageURL: url)
             }.value

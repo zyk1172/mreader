@@ -24,6 +24,13 @@ is_real_weight() {
   if head -n 1 "$path" 2>/dev/null | grep -q '^version https://git-lfs.github.com/spec/v1$'; then
     return 1
   fi
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 "$path" | awk '{print $1}')"
+  else
+    digest="$(sha256sum "$path" | awk '{print $1}')"
+  fi
+  [[ "$digest" == "$PUBLIC_MODEL_WEIGHT_SHA256" ]] || return 1
   return 0
 }
 

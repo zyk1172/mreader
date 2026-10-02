@@ -151,6 +151,9 @@ nonisolated struct PageContentIdentity: Sendable, Equatable, Hashable {
 /// identity directly; existing callers still get content-aware local/Komga identities.
 nonisolated enum PageContentIdentityResolver {
     static func identity(for pageURL: URL) -> PageContentIdentity {
+        if let revision = ComicManager.pdfPageCacheKey(for: pageURL) {
+            return .remote(provider: "local-pdf", resource: pageURL.absoluteString, revision: revision)
+        }
         if let request = RemotePageLoader.RemotePageRequest(url: pageURL) {
             let resource = "\(request.sourceID.uuidString.lowercased())/\(request.bookID)/\(request.pageIndex)"
             return .remote(

@@ -374,12 +374,18 @@ actor MangaVisionService {
         image: UIImage,
         requestClass: MangaVisionRequestClass = .currentTask
     ) async -> String {
+        let size = image.cgImage.map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        return await expectedDependencyIdentity(sourceSize: size, requestClass: requestClass)
+    }
+
+    func expectedDependencyIdentity(sourceSize: CGSize,
+        requestClass: MangaVisionRequestClass = .currentTask) async -> String {
         let manifest = await modelManifest()
-        return manifest.cacheIdentity + "|" + analysisDemandIdentity(
-            image: image,
-            manifest: manifest,
-            requestClass: requestClass
-        )
+        let demand = provider is any MangaVisionSourceImageAnalyzing
+            ? MangaVisionInferencePlanner.cacheDemandIdentity(sourceSize: sourceSize, inputSize: manifest.inputSize,
+                requestClass: requestClass, resourceState: .current) : "single-pass"
+        return manifest.cacheIdentity + "|" + demand
     }
 
     private func analysisDemandIdentity(
@@ -857,7 +863,7 @@ actor MangaVisionService {
             guard let data = await RemotePageLoader.imageData(forRemotePageURL: url) else { return nil }
             return thumbnail(data: data, maximumDimension: maximumDimension)
         }
-        if ComicManager.isArchivePageURL(url) {
+        if ComicManager.isLocalPageURL(url) {
             guard let data = ComicManager.imageData(forArchivePageURL: url) else { return nil }
             return thumbnail(data: data, maximumDimension: maximumDimension)
         }

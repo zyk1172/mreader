@@ -68,6 +68,42 @@ struct OCRPreprocessor {
         }
     }
 
+    nonisolated static func sourcePixelSize(from url: URL, fallback: UIImage) async -> CGSize {
+        if ComicManager.isLocalPageURL(url),
+           let size = await Task.detached(priority: .userInitiated, operation: {
+               ComicManager.imagePixelSizeForArchivePageURL(url)
+           }).value { return size }
+        let size = await Task.detached(priority: .userInitiated) { () -> CGSize? in
+            let source: CGImageSource?
+            if RemotePageLoader.isRemotePageURL(url), let data = await RemotePageLoader.imageData(forRemotePageURL: url) {
+                source = CGImageSourceCreateWithData(data as CFData, nil)
+            } else { source = CGImageSourceCreateWithURL(url as CFURL, nil) }
+            guard let source else { return nil }
+            return sourceSize(source)
+        }.value
+        return size ?? pixelSize(for: fallback)
+    }
+
+    nonisolated private static func sourceSize(_ source: CGImageSource) -> CGSize? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let height = properties[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    nonisolated static func preparedPixelSize(sourceSize: CGSize) -> CGSize {
+        let maximum = sourceMaximumPixelSize(sourceSize: sourceSize)
+        let scale = min(1, maximum / max(max(sourceSize.width, sourceSize.height), 1))
+        return CGSize(width: max(1, (sourceSize.width * scale).rounded()),
+                      height: max(1, (sourceSize.height * scale).rounded()))
+    }
+
+    nonisolated private static func sourceMaximumPixelSize(sourceSize: CGSize) -> CGFloat {
+        let ordinary = OCRMemoryPolicy.currentHighResolutionMaxPixelSize()
+        return LongPageGeometry.maximumPixelSize(sourceSize: sourceSize, ordinaryMaximum: ordinary,
+            shortAxisTarget: 1_280, maximumPixels: ordinary <= 2_800 ? 6_000_000 : 12_000_000)
+    }
+
     nonisolated static func highResolutionImage(from url: URL, fallback: UIImage?) async -> UIImage? {
         await Task.detached(priority: .userInitiated) {
             let maxPixelSize = OCRMemoryPolicy.currentHighResolutionMaxPixelSize()
@@ -76,7 +112,7 @@ struct OCRPreprocessor {
                let image = imageFromData(data, maxPixelSize: maxPixelSize) {
                 return image
             }
-            if ComicManager.isArchivePageURL(url),
+            if ComicManager.isLocalPageURL(url),
                let data = ComicManager.imageData(forArchivePageURL: url),
                let image = imageFromData(data, maxPixelSize: maxPixelSize) {
                 return image
@@ -87,6 +123,75 @@ struct OCRPreprocessor {
             }
             return fallback
         }.value
+    }
+
+    /// Crop original source pixels before preparing each OCR input. ImageIO may
+    /// decode the source backing store when a crop is drawn, so admit only pages
+    /// whose full backing store fits the explicit headroom budget.
+    nonisolated static func originalLongPageCandidates(from url: URL, options: Options) async throws -> OCRCandidateRecognitionResult? {
+        let sourceTask = Task.detached(priority: .userInitiated) { () async throws -> CGImage? in
+            try Task.checkCancellation()
+            let source: CGImageSource?
+            if ComicManager.isLocalPageURL(url), let data = ComicManager.imageData(forArchivePageURL: url) {
+                source = CGImageSourceCreateWithData(data as CFData, nil)
+            } else if RemotePageLoader.isRemotePageURL(url), let data = await RemotePageLoader.imageData(forRemotePageURL: url) {
+                source = CGImageSourceCreateWithData(data as CFData, nil)
+            } else { source = CGImageSourceCreateWithURL(url as CFURL, nil) }
+            guard let source, let size = sourceSize(source),
+                  max(size.width, size.height) / max(min(size.width, size.height), 1) >= 3 else { return nil }
+            let available = CGFloat(os_proc_available_memory())
+            let maximumSourcePixels = min(64_000_000, available > 0 ? available / 16 : 12_000_000)
+            guard size.width * size.height <= maximumSourcePixels else { return nil }
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            let orientation: Int = (properties?[kCGImagePropertyOrientation] as? Int) ?? 1
+            guard orientation == 1 else { return nil }
+            try Task.checkCancellation()
+            return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
+        }
+        let original = try await withTaskCancellationHandler { try await sourceTask.value } onCancel: { sourceTask.cancel() }
+        guard let original else { return nil }
+        let size = CGSize(width: original.width, height: original.height)
+        var blocks: [TextBlock] = []
+        for window in LongPageGeometry.windows(sourceSize: size, maximumAspect: 2.5) {
+            try Task.checkCancellation()
+            let pixels = CGRect(x: window.minX * size.width, y: window.minY * size.height,
+                                width: window.width * size.width, height: window.height * size.height).integral
+                .intersection(CGRect(origin: .zero, size: size))
+            guard let crop = original.cropping(to: pixels) else { continue }
+            let tile = downsampledImage(UIImage(cgImage: crop), maxDimension: 3_600) ?? UIImage(cgImage: crop)
+            let tileOptions = options
+            let candidate = try await recognizeCandidatesWithReference(in: tile, options: tileOptions)
+            let vertical = await JapaneseVerticalOCRService.recognizeIfNeeded(in: tile, existingBlocks: candidate.blocks,
+                options: tileOptions, visionKitReference: candidate.visionKitReference)
+            let actual = CGRect(x: pixels.minX / size.width, y: pixels.minY / size.height,
+                                width: pixels.width / size.width, height: pixels.height / size.height)
+            func point(_ p: CGPoint) -> CGPoint { CGPoint(x: actual.minX + p.x * actual.width, y: actual.minY + p.y * actual.height) }
+            func rect(_ r: CGRect) -> CGRect {
+                CGRect(x: actual.minX + r.minX * actual.width, y: actual.minY + r.minY * actual.height,
+                       width: r.width * actual.width, height: r.height * actual.height)
+            }
+            blocks.append(contentsOf: (candidate.blocks + vertical).map { block in
+                var mapped = block
+                mapped.boundingBox = rect(block.boundingBox)
+                mapped.bubbleBox = block.bubbleBox.map(rect)
+                mapped.layoutSafeRegion = block.layoutSafeRegion.map(rect)
+                mapped.polygon = block.polygon.map(point)
+                mapped.bubblePolygon = block.bubblePolygon.map(point)
+                mapped.estimatedFontScale *= Double(block.textOrientation == .vertical ? actual.width : actual.height)
+                return mapped
+            })
+        }
+        // Overlap is intentional. The existing segmenter resolves duplicate rows
+        // while retaining independent neighbouring bubbles and complete geometry.
+        var kept: [TextBlock] = []
+        for block in blocks.sorted(by: { $0.confidence > $1.confidence }) {
+            let duplicate = kept.contains {
+                $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    && MangaPageCoordinateSpace.intersectionOverUnion($0.boundingBox, block.boundingBox) >= 0.55
+            }
+            if !duplicate { kept.append(block) }
+        }
+        return OCRCandidateRecognitionResult(blocks: kept, visionKitReference: nil)
     }
 
     nonisolated static func recognizeText(in image: UIImage, options: Options) async throws -> [TextBlock] {
@@ -660,11 +765,12 @@ struct OCRPreprocessor {
     }
 
     nonisolated private static func imageFromSource(_ source: CGImageSource, maxPixelSize: CGFloat) -> UIImage? {
+        let maximum = sourceSize(source).map { sourceMaximumPixelSize(sourceSize: $0) } ?? maxPixelSize
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            kCGImageSourceThumbnailMaxPixelSize: maximum
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         return UIImage(cgImage: cgImage)
