@@ -72,7 +72,8 @@ actor OCRRecognitionCache {
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
         var preparedRequest = request
-        let sourceIdentity = PageContentIdentityResolver.identity(for: request.pageURL).fingerprint
+        let contentIdentity = PageContentIdentityResolver.identity(for: request.pageURL)
+        let sourceIdentity = contentIdentity.fingerprint
         preparedRequest.sourceIdentityOverride = sourceIdentity
         preparedRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
             sourceSize: OCRPreprocessor.preparedPixelSize(sourceSize: sourceSize)
@@ -88,8 +89,12 @@ actor OCRRecognitionCache {
             let image = await OCRPreprocessor.highResolutionImage(from: request.pageURL, fallback: request.fallbackImage)
                 ?? request.fallbackImage
             try Task.checkCancellation()
+            guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+                throw CancellationError()
+            }
             let analysis = try? await MangaVisionService.shared.analysis(comicID: request.comicID,
-                pageIndex: request.pageIndex, pageURL: request.pageURL, image: image)
+                pageIndex: request.pageIndex, pageURL: request.pageURL, image: image,
+                contentIdentity: contentIdentity)
             try Task.checkCancellation()
             let identity = await MangaVisionService.shared.dependencyIdentity(for: analysis)
             let result = try await MangaOCRPipeline.recognize(in: image, options: request.options, mangaAnalysis: analysis, sourceURL: request.pageURL)

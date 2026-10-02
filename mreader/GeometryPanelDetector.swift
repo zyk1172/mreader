@@ -9,7 +9,7 @@ import Foundation
 /// learned Manga Vision frame detector remains useful later as a residual detector for
 /// borderless/inset/irregular cases, but it is no longer the sole authority for navigation.
 nonisolated struct GeometryPanelDetector: PanelDetecting {
-    let identifier = "page-geometry-xycut-local-windows-v4"
+    let identifier = "page-geometry-xycut-overview-local-windows-v5"
 
     private let maximumDimension: Int
 
@@ -19,7 +19,11 @@ nonisolated struct GeometryPanelDetector: PanelDetecting {
 
     func detectPanels(in image: CGImage) throws -> [DetectedPanel] {
         let size = CGSize(width: image.width, height: image.height)
-        let windows = LongPageGeometry.windows(sourceSize: size, maximumAspect: 2.5)
+        let localWindows = LongPageGeometry.windows(sourceSize: size, maximumAspect: 2.5, overlap: 0.5)
+        // Large frames can span more than one local window. Keep the original
+        // whole-page pass as independent evidence, alongside local fine detail.
+        let windows = localWindows.count > 1
+            ? [CGRect(x: 0, y: 0, width: 1, height: 1)] + localWindows : localWindows
         var candidates: [DetectedPanel] = []
         for window in windows {
             try Task.checkCancellation()
