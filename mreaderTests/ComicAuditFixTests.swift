@@ -194,6 +194,28 @@ struct ComicAuditFixTests {
         #expect(budget.remotePrefetchMB < 32)
     }
 
+    @Test func replacingArchiveInvalidatesVirtualPageIdentity() throws {
+        let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".cbz")
+        defer { try? FileManager.default.removeItem(at: archive) }
+        try Data([1]).write(to: archive)
+        func encode(_ value: String) -> String {
+            Data(value.utf8).base64EncodedString().replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
+        var components = URLComponents()
+        components.scheme = "mreader-zip-page"
+        components.host = "page"
+        components.queryItems = [URLQueryItem(name: "archive", value: encode(archive.path)),
+                                 URLQueryItem(name: "entry", value: encode("page.png")),
+                                 URLQueryItem(name: "format", value: "zip"),
+                                 URLQueryItem(name: "index", value: "0")]
+        let page = try #require(components.url)
+        let original = PageContentIdentityResolver.identity(for: page).fingerprint
+        try Data([1, 2]).write(to: archive, options: .atomic)
+        let replacement = PageContentIdentityResolver.identity(for: page).fingerprint
+        #expect(original != replacement)
+    }
+
     private func region(_ rect: CGRect, confidence: Float) -> MangaVisionRegion {
         MangaVisionRegion(type: .panel, normalizedRect: rect, confidence: confidence)
     }

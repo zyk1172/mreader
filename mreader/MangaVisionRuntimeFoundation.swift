@@ -154,6 +154,10 @@ nonisolated enum PageContentIdentityResolver {
         if let revision = ComicManager.pdfPageCacheKey(for: pageURL) {
             return .remote(provider: "local-pdf", resource: pageURL.absoluteString, revision: revision)
         }
+        if ComicManager.isArchivePageURL(pageURL),
+           let revision = ComicManager.archivePageCacheKey(for: pageURL) {
+            return .remote(provider: "local-archive", resource: pageURL.absoluteString, revision: revision)
+        }
         if let request = RemotePageLoader.RemotePageRequest(url: pageURL) {
             let resource = "\(request.sourceID.uuidString.lowercased())/\(request.bookID)/\(request.pageIndex)"
             return .remote(
@@ -175,7 +179,7 @@ nonisolated enum PageContentIdentityResolver {
             )
         }
 
-        // Archive/OPDS/custom source layers can replace this compatibility identity by
+        // OPDS/custom source layers can replace this compatibility identity by
         // passing PageContentIdentity explicitly to MangaVisionService.analysis().
         return .remote(
             provider: pageURL.scheme ?? "remote",

@@ -11,9 +11,10 @@ nonisolated struct OCRRecognitionCacheRequest: @unchecked Sendable {
     var pageIndex: Int? = nil
 
     var analysisIdentity: String = "unprepared"
+    var sourceIdentityOverride: String? = nil
 
     var cacheKey: String {
-        let sourceIdentity = PageContentIdentityResolver.identity(for: pageURL).fingerprint
+        let sourceIdentity = sourceIdentityOverride ?? PageContentIdentityResolver.identity(for: pageURL).fingerprint
         let rawValue = [
             // v11 keeps Manga Vision text ROI discovery and adds first-class
             // balloon/layout geometry. Do not reuse pages written before that
@@ -71,9 +72,14 @@ actor OCRRecognitionCache {
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
         var preparedRequest = request
+        let sourceIdentity = PageContentIdentityResolver.identity(for: request.pageURL).fingerprint
+        preparedRequest.sourceIdentityOverride = sourceIdentity
         preparedRequest.analysisIdentity = await MangaVisionService.shared.expectedDependencyIdentity(
             sourceSize: OCRPreprocessor.preparedPixelSize(sourceSize: sourceSize)
         )
+        guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+            throw CancellationError()
+        }
         let key = preparedRequest.cacheKey
         if let cached = cachedResult(forKey: key) { return cached }
         // Coalesce preparation as well as OCR. Concurrent consumers must not each
@@ -91,6 +97,11 @@ actor OCRRecognitionCache {
         }
         try Task.checkCancellation()
         guard epoch == generation else { throw CancellationError() }
+        // Source reads span suspension points. Never return or persist a mixture
+        // of revisions, or label an old result with the file's new cache key.
+        guard PageContentIdentityResolver.identity(for: request.pageURL).fingerprint == sourceIdentity else {
+            throw CancellationError()
+        }
         preparedRequest.analysisIdentity = prepared.identity
         if prepared.isPersistent { store(prepared.result, forKey: preparedRequest.cacheKey) }
         return prepared.result
@@ -186,4 +197,3 @@ actor OCRRecognitionCache {
         }
     }
 }
-
